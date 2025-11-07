@@ -78,6 +78,7 @@ pub(crate) async fn emit_exec_command_begin(
                 cwd: cwd.to_path_buf(),
                 parsed_cmd: parsed_cmd.to_vec(),
                 source,
+                is_user_shell_command: matches!(source, ExecCommandSource::UserShell),
                 interaction_input,
             }),
         )

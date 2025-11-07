@@ -34,26 +34,30 @@ Optional and experimental capabilities are toggled via the `[features]` table in
 ```toml
 [features]
 web_search_request = true        # allow the model to request web searches
+# subagent_tools = true          # expose built-in subagent tools (spawn/fork/list/await/logs/prune/watchdog/cancel)
 # view_image_tool defaults to true; omit to keep defaults
 ```
 
 Supported features:
 
-| Key                                   | Default | Stage        | Description                                           |
-| ------------------------------------- | :-----: | ------------ | ----------------------------------------------------- |
-| `unified_exec`                        |  false  | Experimental | Use the unified PTY-backed exec tool                  |
-| `rmcp_client`                         |  false  | Experimental | Enable oauth support for streamable HTTP MCP servers  |
-| `apply_patch_freeform`                |  false  | Beta         | Include the freeform `apply_patch` tool               |
-| `view_image_tool`                     |  true   | Stable       | Include the `view_image` tool                         |
-| `web_search_request`                  |  false  | Stable       | Allow the model to issue web searches                 |
-| `ghost_commit`                        |  false  | Experimental | Create a ghost commit each turn                       |
-| `enable_experimental_windows_sandbox` |  false  | Experimental | Use the Windows restricted-token sandbox              |
-| `tui2`                                |  false  | Experimental | Use the experimental TUI v2 (viewport) implementation |
+| Key                                       | Default | Stage        | Description                                          |
+| ----------------------------------------- | :-----: | ------------ | ---------------------------------------------------- |
+| `unified_exec`                            |  false  | Experimental | Use the unified PTY-backed exec tool                 |
+| `rmcp_client`                             |  false  | Experimental | Enable oauth support for streamable HTTP MCP servers |
+| `apply_patch_freeform`                    |  false  | Beta         | Include the freeform `apply_patch` tool              |
+| `view_image_tool`                         |  true   | Stable       | Include the `view_image` tool                        |
+| `web_search_request`                      |  false  | Stable       | Allow the model to issue web searches                |
+| `subagent_tools`                          |  false  | Experimental | Enable built-in subagent tools (`subagent_spawn`, `subagent_fork`, `subagent_list`, `subagent_await`, `subagent_logs`, `subagent_prune`, `subagent_watchdog`, `subagent_cancel`) for multi-agent workflows |
+| `experimental_sandbox_command_assessment` |  false  | Experimental | Enable model-based sandbox risk assessment           |
+| `ghost_commit`                            |  false  | Experimental | Create a ghost commit each turn                      |
+| `enable_experimental_windows_sandbox`     |  false  | Experimental | Use the Windows restricted-token sandbox             |
+| `tui2`                                    |  false  | Experimental | Use the experimental TUI v2 (viewport) implementation |
 
 Notes:
 
 - Omit a key to accept its default.
 - Legacy booleans such as `experimental_use_exec_command_tool`, `experimental_use_unified_exec_tool`, `include_apply_patch_tool`, and similar `experimental_use_*` keys are deprecated; setting the corresponding `[features].<key>` avoids repeated warnings.
+- Use `subagent_tools` only when you need the builtin orchestration surface (`spawn`, `fork`, `send_message`, `list`, `await`, `watchdog`, `logs`, `prune`, `cancel`); keep it disabled otherwise. Watchdogs are timers that auto-fork a helper subagent when the target tree goes idle or a worker runs longer than the interval; the `message` field is the prompt given to that helper.
 
 ## Model selection
 
@@ -347,6 +351,86 @@ sandbox_mode = "danger-full-access"
 This is reasonable to use if Codex is running in an environment that provides its own sandboxing (such as a Docker container) such that further sandboxing is unnecessary.
 
 Though using this option may also be necessary if you try to use Codex in environments where its native sandboxing mechanisms are unsupported, such as older Linux kernels or on Windows.
+
+### max_active_subagents
+
+Controls how many subagents (spawned or forked conversations) may run concurrently within a single Codex session. Each child keeps one slot until it is pruned or fully shut down, so this setting bounds concurrency as well as memory use. In practice, this acts as a safety valve so a single session cannot spin up an unbounded number of helpers.
+
+```toml
+# allow at most eight active subagents (default)
+max_active_subagents = 8
+```
+
+Valid values run from `1` to `64`: values below `1` are rejected and values above `64` are clamped to `64` to prevent runaway resource use. When the limit is reached, additional `spawn`/`fork` tool calls immediately fail with an instruction to prune or await existing children before launching more work.
+
+Typical values are small; most users will be well‑served by the default range of `4–16` concurrent subagents depending on hardware and workload:
+
+- If subagents often run heavy commands (builds, large test suites, or long‑running scripts), prefer a lower value to avoid oversaturating your machine.
+- If subagents mostly perform light, CPU-cheap work (documentation edits, code review, or planning), you can safely raise the limit to keep more parallel conversations alive.
+- As a rule of thumb, start with the default of `8` and adjust gradually if you either regularly hit the limit or notice your machine is becoming overloaded.
+### root_agent_uses_user_messages
+
+Controls how the root agent’s messages to a subagent are represented in the subagent’s own history.
+
+- When `true` (default), root‑to‑subagent messages are injected as `user` turns in the child, so from the subagent’s perspective they look like normal user prompts.
+- When `false`, every cross‑agent message arrives only via `subagent_await` tool results, so the child must explicitly read the tool output to see root instructions.
+
+For example, if the root writes “Scan the repo and summarize open TODOs” to a worker subagent:
+
+- With `root_agent_uses_user_messages = true`, the worker sees a `user` message with that text at the end of its transcript.
+- With `root_agent_uses_user_messages = false`, the worker sees the same text only inside the synthetic `subagent_await` output and must read that tool result before acting.
+
+### subagent_root_inbox_autosubmit
+
+Controls whether the root agent automatically drains its inbox (and any child
+messages destined for agent `0`) at safe stopping points between model turns,
+and whether it may auto-start a follow-up turn based on those messages (default `true`).
+
+When `true`:
+
+- At the end of each model turn for the root, Codex drains the root inbox and
+  injects synthetic `subagent_await` call/output pairs—complete with
+  `completion_status`—directly into the root transcript in timestamp order.
+- If a model turn finished without any tool calls and the inbox drain produced
+  entries, Codex immediately launches another Responses turn so the root can
+  react without waiting for fresh user input.
+- When the root session is otherwise idle, the drain still records a lightweight
+  autosubmitted turn containing the pending `subagent_await` items. This keeps
+  the conversation history current even before the next user‑initiated turn.
+
+When `false`, the root must call `subagent_await` explicitly to see inbox
+messages during a turn, and no autosubmitted turns are emitted while idle.
+
+In effect, `subagent_root_inbox_autosubmit = true` makes the root feel more
+“event‑driven”: if a worker finishes while the root is idle, Codex records a
+synthetic `subagent_await` and immediately starts a new turn so the root can
+summarize or react. With `false`, the root only learns about completions when
+it explicitly calls `subagent_await` (or the user provides new input and the
+prompt asks the model to inspect pending inbox entries).
+
+Concretely, imagine the root spawns a worker to run tests and then goes idle. With `subagent_root_inbox_autosubmit = true`, Codex injects a synthetic `subagent_await` into the root transcript as soon as the worker finishes and immediately starts a new turn so the root can summarize or follow up. With `false`, the root does not see that completion until it explicitly issues a `subagent_await` call (or the user provides new input that causes the prompt to ask for pending inbox entries).
+Keep this enabled unless you need to poll the inbox manually; the autosubmitted turns keep the transcript current even while the root is idle.
+
+### subagent_inbox_inject_before_tools
+
+Controls where synthetic `subagent_await` tool calls and outputs derived from
+inbox delivery are injected relative to real tool outputs inside a turn.
+
+- When `false` (default), Codex records the model’s tool call and tool
+  output(s) for a turn first, and only then appends synthetic `subagent_await`
+  calls/outputs derived from inbox messages. This is closer to training‑time
+  patterns where the model generally sees its own tool call and result before
+  additional context.
+- When `true`, Codex records synthetic `subagent_await` calls/outputs first
+  and then appends tool outputs, which is closer to strict chronological
+  ordering when inbox messages arrive while tools are running.
+Use `false` unless you need strict chronological ordering; `true` simply reorders
+the synthetic await entries ahead of the tool outputs.
+
+This flag only affects how Codex orders conversation items in history; it
+never splices synthetic items into the middle of an in-flight streaming turn.
+Unless you have a specific need for strictly chronological transcripts, leave
+this at the default (`false`) for behavior that best matches training data.
 
 ### tools.\*
 
@@ -871,16 +955,13 @@ Options that are specific to the TUI.
 
 ```toml
 [tui]
-# Send desktop notifications when approvals are required or a turn completes.
-# Defaults to true.
+# Send desktop notifications when approvals are required or a turn completes (default: true).
 notifications = true
 
-# You can optionally filter to specific notification types.
-# Available types are "agent-turn-complete" and "approval-requested".
+# Filter notifications to specific types when needed (agent-turn-complete or approval-requested).
 notifications = [ "agent-turn-complete", "approval-requested" ]
 
-# Disable terminal animations (welcome screen, status shimmer, spinner).
-# Defaults to true.
+# Disable terminal animations (welcome screen, status shimmer, spinner); defaults to true.
 animations = false
 ```
 

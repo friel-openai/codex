@@ -21,6 +21,8 @@ use crate::parse_turn_item;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
+use crate::subagents::SubagentManager;
+use crate::subagents::SubagentRegistry;
 use crate::terminal;
 use crate::truncate::TruncationPolicy;
 use crate::user_notification::UserNotifier;
@@ -55,6 +57,7 @@ use mcp_types::ReadResourceResult;
 use mcp_types::RequestId;
 use serde_json;
 use serde_json::Value;
+use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
@@ -149,12 +152,45 @@ use codex_protocol::user_input::UserInput;
 use codex_utils_readiness::Readiness;
 use codex_utils_readiness::ReadinessFlag;
 
+// Built-in prompts for orchestrating and running subagents. These can be
+// overridden via files in `$CODEX_HOME` (see `load_root_agent_prompt`,
+// `load_subagent_prompt`, and `load_watchdog_prompt`).
+const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../root_agent_prompt.md");
+const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../subagent_prompt.md");
+const WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../watchdog_agent_prompt.md");
+
+async fn load_agent_prompt_fallback(fallback: &str, override_filename: &str) -> String {
+    if let Ok(home) = crate::config::find_codex_home() {
+        let path = home.join(override_filename);
+        if let Ok(contents) = fs::read_to_string(&path).await {
+            let trimmed = contents.trim();
+            if !trimmed.is_empty() {
+                return contents;
+            }
+        }
+    }
+    fallback.to_string()
+}
+
+async fn load_root_agent_prompt() -> String {
+    load_agent_prompt_fallback(ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
+}
+
+async fn load_subagent_prompt() -> String {
+    load_agent_prompt_fallback(SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_watchdog_prompt() -> String {
+    load_agent_prompt_fallback(WATCHDOG_PROMPT_FALLBACK, "AGENTS.watchdog.md").await
+}
+
 /// The high-level interface to the Codex system.
 /// It operates as a queue pair where you send submissions and receive events.
 pub struct Codex {
     pub(crate) next_id: AtomicU64,
     pub(crate) tx_sub: Sender<Submission>,
     pub(crate) rx_event: Receiver<Event>,
+    pub(crate) conversation_id: ConversationId,
 }
 
 /// Wrapper returned by [`Codex::spawn`] containing the spawned [`Codex`],
@@ -176,6 +212,7 @@ impl Codex {
         models_manager: Arc<ModelsManager>,
         conversation_history: InitialHistory,
         session_source: SessionSource,
+        desired_conversation_id: Option<ConversationId>,
     ) -> CodexResult<CodexSpawnOk> {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
@@ -218,12 +255,29 @@ impl Codex {
             error!("failed to refresh available models: {err:?}");
         }
         let model = models_manager.get_model(&config.model, &config).await;
+        let role_prompt = if config.features.enabled(Feature::SubagentTools) {
+            if let SessionSource::SubAgent(_) = session_source {
+                Some(load_subagent_prompt().await)
+            } else {
+                Some(load_root_agent_prompt().await)
+            }
+        } else {
+            None
+        };
+        let developer_instructions = match (role_prompt, config.developer_instructions.clone()) {
+            (Some(prompt), Some(existing)) if !prompt.is_empty() => {
+                Some(format!("{prompt}\n\n{existing}"))
+            }
+            (Some(prompt), None) if !prompt.is_empty() => Some(prompt),
+            (None, existing) => existing,
+            _ => config.developer_instructions.clone(),
+        };
         let session_configuration = SessionConfiguration {
             provider: config.model_provider.clone(),
             model: model.clone(),
             model_reasoning_effort: config.model_reasoning_effort,
             model_reasoning_summary: config.model_reasoning_summary,
-            developer_instructions: config.developer_instructions.clone(),
+            developer_instructions,
             user_instructions,
             base_instructions: config.base_instructions.clone(),
             compact_prompt: config.compact_prompt.clone(),
@@ -247,6 +301,7 @@ impl Codex {
             conversation_history,
             session_source_clone,
             skills_outcome.clone(),
+            desired_conversation_id,
         )
         .await
         .map_err(|e| {
@@ -261,12 +316,17 @@ impl Codex {
             next_id: AtomicU64::new(0),
             tx_sub,
             rx_event,
+            conversation_id,
         };
 
         Ok(CodexSpawnOk {
             codex,
             conversation_id,
         })
+    }
+
+    pub fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
     }
 
     /// Submit the `op` wrapped in a `Submission` with a unique ID.
@@ -436,6 +496,28 @@ pub(crate) struct SessionSettingsUpdate {
 }
 
 impl Session {
+    pub(crate) fn conversation_id(&self) -> ConversationId {
+        self.conversation_id
+    }
+
+    pub(crate) async fn history_len(&self) -> usize {
+        let mut history = {
+            let state = self.state.lock().await;
+            state.clone_history()
+        };
+        history.get_history().len()
+    }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.active_turn.lock().await.is_some()
+    }
+
+    pub(crate) fn root_inbox_autosubmit_enabled(&self) -> bool {
+        self.services
+            .subagent_manager
+            .root_inbox_autosubmit_enabled()
+    }
+
     /// Don't expand the number of mutated arguments on config. We are in the process of getting rid of it.
     fn build_per_turn_config(session_configuration: &SessionConfiguration) -> Config {
         // todo(aibrahim): store this state somewhere else so we don't need to mut config
@@ -514,6 +596,7 @@ impl Session {
         initial_history: InitialHistory,
         session_source: SessionSource,
         skills: Option<SkillLoadOutcome>,
+        desired_conversation_id: Option<ConversationId>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
             "Configuring session: model={}; provider={:?}",
@@ -528,7 +611,7 @@ impl Session {
 
         let (conversation_id, rollout_params) = match &initial_history {
             InitialHistory::New | InitialHistory::Forked(_) => {
-                let conversation_id = ConversationId::default();
+                let conversation_id = desired_conversation_id.unwrap_or_default();
                 (
                     conversation_id,
                     RolloutRecorderParams::new(
@@ -618,6 +701,14 @@ impl Session {
                     .map(Arc::new);
         }
         let state = SessionState::new(session_configuration.clone());
+        let subagent_registry = SubagentRegistry::new();
+        let subagent_manager = SubagentManager::new(
+            Arc::new(subagent_registry.clone()),
+            config.max_active_subagents,
+            config.root_agent_uses_user_messages,
+            config.subagent_root_inbox_autosubmit,
+            config.subagent_inbox_inject_before_tools,
+        );
 
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
@@ -632,6 +723,8 @@ impl Session {
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills: skills.clone(),
+            subagents: subagent_registry,
+            subagent_manager,
         };
 
         let sess = Arc::new(Session {
@@ -643,6 +736,8 @@ impl Session {
             services,
             next_internal_sub_id: AtomicU64::new(0),
         });
+
+        crate::session_index::register(conversation_id, &sess);
 
         // Dispatch the SessionConfiguredEvent first and then report any errors.
         // If resuming, include converted initial messages in the payload so UIs can render them immediately.
@@ -744,20 +839,21 @@ impl Session {
                 // Ensure initial items are visible to immediate readers (e.g., tests, forks).
                 self.flush_rollout().await;
             }
-            InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
+            InitialHistory::Resumed(_) => {
                 let rollout_items = conversation_history.get_rollout_items();
-                let persist = matches!(conversation_history, InitialHistory::Forked(_));
+                self.services
+                    .subagent_manager
+                    .import_from_rollout(&rollout_items, self.conversation_id)
+                    .await;
 
                 // If resuming, warn when the last recorded model differs from the current one.
-                if let InitialHistory::Resumed(_) = conversation_history
-                    && let Some(prev) = rollout_items.iter().rev().find_map(|it| {
-                        if let RolloutItem::TurnContext(ctx) = it {
-                            Some(ctx.model.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                {
+                if let Some(prev) = rollout_items.iter().rev().find_map(|it| {
+                    if let RolloutItem::TurnContext(ctx) = it {
+                        Some(ctx.model.as_str())
+                    } else {
+                        None
+                    }
+                }) {
                     let curr = turn_context.client.get_model();
                     if prev != curr {
                         warn!(
@@ -784,11 +880,33 @@ impl Session {
                         .await;
                 }
 
-                // If persisting, persist all rollout items as-is (recorder filters)
-                if persist && !rollout_items.is_empty() {
+                // Flush after seeding history and any persisted rollout copy.
+                self.flush_rollout().await;
+            }
+            InitialHistory::Forked(_) => {
+                let rollout_items = conversation_history.get_rollout_items();
+                self.services
+                    .subagent_manager
+                    .import_from_rollout(&rollout_items, self.conversation_id)
+                    .await;
+                let mut reconstructed_history =
+                    self.reconstruct_history_from_rollout(&turn_context, &rollout_items);
+
+                if let Some(dev) = turn_context.developer_instructions.as_deref()
+                    && !dev.trim().is_empty()
+                {
+                    let dev_item: ResponseItem = DeveloperInstructions::new(dev.to_string()).into();
+                    reconstructed_history.push(dev_item);
+                }
+
+                if !reconstructed_history.is_empty() {
+                    self.record_into_history(&reconstructed_history, &turn_context)
+                        .await;
+                }
+
+                if !rollout_items.is_empty() {
                     self.persist_rollout_items(&rollout_items).await;
                 }
-                // Flush after seeding history and any persisted rollout copy.
                 self.flush_rollout().await;
             }
         }
@@ -2135,6 +2253,17 @@ pub(crate) async fn run_task(
                     needs_follow_up,
                     last_agent_message: turn_last_agent_message,
                 } = turn_output;
+                let mut needs_follow_up = needs_follow_up;
+                let inbox_items = sess
+                    .services
+                    .subagent_manager
+                    .drain_root_inbox_to_items(&sess.conversation_id())
+                    .await;
+                if !inbox_items.is_empty() {
+                    sess.record_conversation_items(&turn_context, &inbox_items)
+                        .await;
+                    needs_follow_up = true;
+                }
                 let limit = turn_context
                     .client
                     .get_model_family()
@@ -2925,6 +3054,15 @@ mod tests {
 
         let state = SessionState::new(session_configuration.clone());
 
+        let subagent_registry = SubagentRegistry::new();
+        let subagent_manager = SubagentManager::new(
+            Arc::new(subagent_registry.clone()),
+            config.max_active_subagents,
+            config.root_agent_uses_user_messages,
+            config.subagent_root_inbox_autosubmit,
+            config.subagent_inbox_inject_before_tools,
+        );
+
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
             mcp_startup_cancellation_token: CancellationToken::new(),
@@ -2938,6 +3076,8 @@ mod tests {
             models_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills: None,
+            subagents: subagent_registry,
+            subagent_manager,
         };
 
         let turn_context = Session::make_turn_context(
@@ -3011,6 +3151,15 @@ mod tests {
 
         let state = SessionState::new(session_configuration.clone());
 
+        let subagent_registry = SubagentRegistry::new();
+        let subagent_manager = SubagentManager::new(
+            Arc::new(subagent_registry.clone()),
+            config.max_active_subagents,
+            config.root_agent_uses_user_messages,
+            config.subagent_root_inbox_autosubmit,
+            config.subagent_inbox_inject_before_tools,
+        );
+
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(McpConnectionManager::default())),
             mcp_startup_cancellation_token: CancellationToken::new(),
@@ -3024,6 +3173,8 @@ mod tests {
             models_manager,
             tool_approvals: Mutex::new(ApprovalStore::default()),
             skills: None,
+            subagents: subagent_registry,
+            subagent_manager,
         };
 
         let turn_context = Arc::new(Session::make_turn_context(

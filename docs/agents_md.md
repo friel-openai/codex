@@ -8,6 +8,7 @@ Codex uses [`AGENTS.md`](https://agents.md/) files to gather helpful guidance be
 - If an `AGENTS.override.md` file exists there, it takes priority. If not, Codex falls back to `AGENTS.md`.
 - Only the first non-empty file is used. Other filenames, such as `instructions.md`, have no effect unless Codex is specifically instructed to use them.
 - Whatever Codex finds here stays active for the whole session, and Codex combines it with any project-specific instructions it discovers.
+- Specialized overrides: `AGENTS.root.md` (root agent), `AGENTS.subagent.md` (spawned/forked agents), and `AGENTS.watchdog.md` (watchdog helper) can each override the built-in role prompts without affecting the main `AGENTS.md` content.
 
 ## Project Instructions (per-repository)
 

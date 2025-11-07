@@ -646,6 +646,7 @@ fn exec_command_end_success_produces_completed_command_item() {
             cwd: cwd.clone(),
             parsed_cmd: parsed_cmd.clone(),
             source: ExecCommandSource::Agent,
+            is_user_shell_command: false,
             interaction_input: None,
         }),
     );
@@ -724,6 +725,7 @@ fn command_execution_output_delta_updates_item_progress() {
             parsed_cmd: parsed_cmd.clone(),
             source: ExecCommandSource::Agent,
             interaction_input: None,
+            is_user_shell_command: false,
         }),
     );
     let out_begin = ep.collect_thread_events(&begin);
@@ -807,6 +809,7 @@ fn exec_command_end_failure_produces_failed_command_item() {
             cwd: cwd.clone(),
             parsed_cmd: parsed_cmd.clone(),
             source: ExecCommandSource::Agent,
+            is_user_shell_command: false,
             interaction_input: None,
         }),
     );

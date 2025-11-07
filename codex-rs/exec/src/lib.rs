@@ -10,6 +10,8 @@ mod event_processor_with_human_output;
 pub mod event_processor_with_jsonl_output;
 pub mod exec_events;
 
+use anyhow::Context;
+use anyhow::anyhow;
 pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
@@ -20,6 +22,7 @@ use codex_core::ConversationManager;
 use codex_core::LMSTUDIO_OSS_PROVIDER_ID;
 use codex_core::NewConversation;
 use codex_core::OLLAMA_OSS_PROVIDER_ID;
+use codex_core::RolloutRecorder;
 use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -36,6 +39,7 @@ use codex_core::protocol::ReviewTarget;
 use codex_core::protocol::SessionSource;
 use codex_protocol::approvals::ElicitationAction;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::user_input::UserInput;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
@@ -44,6 +48,7 @@ use serde_json::Value;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 use supports_color::Stream;
 use tracing::debug;
 use tracing::error;
@@ -197,6 +202,10 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         base_instructions: None,
         developer_instructions: None,
         compact_prompt: None,
+        max_active_subagents: None,
+        root_agent_uses_user_messages: None,
+        subagent_root_inbox_autosubmit: None,
+        subagent_inbox_inject_before_tools: None,
         include_apply_patch_tool: None,
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
@@ -282,27 +291,46 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         .get_model(&config.model, &config)
         .await;
 
-    // Handle resume subcommand by resolving a rollout path and using explicit resume API.
+    // Handle resume/fork subcommands by resolving a rollout path and using explicit resume API.
     let NewConversation {
         conversation_id: _,
         conversation,
         session_configured,
-    } = if let Some(ExecCommand::Resume(args)) = command.as_ref() {
-        let resume_path = resolve_resume_path(&config, args).await?;
+    } = match command.as_ref() {
+        Some(ExecCommand::Resume(args)) => {
+            let resume_path = resolve_resume_path(&config, args).await?;
 
-        if let Some(path) = resume_path {
-            conversation_manager
-                .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
-                .await?
-        } else {
+            if let Some(path) = resume_path {
+                conversation_manager
+                    .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
+                    .await?
+            } else {
+                conversation_manager
+                    .new_conversation(config.clone())
+                    .await?
+            }
+        }
+        Some(ExecCommand::Fork(args)) => {
+            let path = resolve_fork_path(&config, &args.session_id).await?;
+            fork_conversation_from_rollout(
+                &conversation_manager,
+                &config,
+                auth_manager.clone(),
+                path,
+            )
+            .await?
+        }
+        None => {
             conversation_manager
                 .new_conversation(config.clone())
                 .await?
         }
-    } else {
-        conversation_manager
-            .new_conversation(config.clone())
-            .await?
+        // Review falls through to default new conversation.
+        Some(ExecCommand::Review(_)) => {
+            conversation_manager
+                .new_conversation(config.clone())
+                .await?
+        }
     };
     let (initial_operation, prompt_summary) = match (command, prompt, images) {
         (Some(ExecCommand::Review(review_cli)), _, _) => {
@@ -323,6 +351,24 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                 })
                 .or(root_prompt);
             let prompt_text = resolve_prompt(prompt_arg);
+            let mut items: Vec<UserInput> = imgs
+                .into_iter()
+                .map(|path| UserInput::LocalImage { path })
+                .collect();
+            items.push(UserInput::Text {
+                text: prompt_text.clone(),
+            });
+            let output_schema = load_output_schema(output_schema_path.clone());
+            (
+                InitialOperation::UserTurn {
+                    items,
+                    output_schema,
+                },
+                prompt_text,
+            )
+        }
+        (Some(ExecCommand::Fork(args)), root_prompt, imgs) => {
+            let prompt_text = resolve_prompt(args.prompt.or(root_prompt));
             let mut items: Vec<UserInput> = imgs
                 .into_iter()
                 .map(|path| UserInput::LocalImage { path })
@@ -496,6 +542,32 @@ async fn resolve_resume_path(
     } else {
         Ok(None)
     }
+}
+
+async fn resolve_fork_path(config: &Config, session_id: &str) -> anyhow::Result<PathBuf> {
+    find_conversation_path_by_id_str(&config.codex_home, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("No session with id {session_id} found"))
+}
+
+async fn fork_conversation_from_rollout(
+    conversation_manager: &ConversationManager,
+    config: &Config,
+    auth_manager: Arc<AuthManager>,
+    path: PathBuf,
+) -> anyhow::Result<NewConversation> {
+    let history = RolloutRecorder::get_rollout_history(&path)
+        .await
+        .context("failed to read session history for fork")?;
+    let fork_history = match history {
+        InitialHistory::New => InitialHistory::New,
+        InitialHistory::Resumed(resumed) => InitialHistory::Forked(resumed.history),
+        InitialHistory::Forked(items) => InitialHistory::Forked(items),
+    };
+    conversation_manager
+        .resume_conversation_with_history(config.clone(), fork_history, auth_manager)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {

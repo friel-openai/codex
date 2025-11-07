@@ -5,8 +5,10 @@ mod review;
 mod undo;
 mod user_shell;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::select;
@@ -18,15 +20,27 @@ use tracing::warn;
 
 use crate::AuthManager;
 use crate::codex::Session;
+use crate::codex::SessionSettingsUpdate;
 use crate::codex::TurnContext;
 use crate::openai_models::models_manager::ModelsManager;
+use crate::parse_command::parse_command;
+use crate::parse_turn_item;
 use crate::protocol::EventMsg;
+use crate::protocol::ItemCompletedEvent;
+use crate::protocol::ItemStartedEvent;
 use crate::protocol::TaskCompleteEvent;
 use crate::protocol::TurnAbortReason;
 use crate::protocol::TurnAbortedEvent;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 use crate::state::TaskKind;
+use crate::tools::context::ToolOutput;
+use crate::tools::handlers::subagent::summarize_tool_output;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ExecCommandBeginEvent;
+use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::user_input::UserInput;
 
 pub(crate) use compact::CompactTask;
@@ -155,6 +169,181 @@ impl Session {
         self.register_new_active_task(running_task).await;
     }
 
+    /// Start a new model turn driven by inbox-derived items (e.g.,
+    /// synthetic `subagent_await` call/output pairs) without fabricating
+    /// additional user text. The model will see the updated history and
+    /// continue from there.
+    pub async fn autosubmit_inbox_task(self: &Arc<Self>, items: Vec<ResponseItem>) {
+        if items.is_empty() {
+            return;
+        }
+
+        let turn_context = self.new_turn(SessionSettingsUpdate::default()).await;
+        let mut await_calls: HashMap<String, String> = HashMap::new();
+
+        // Emit started/completed events for synthetic tool calls so UIs render them.
+        for item in &items {
+            match item {
+                ResponseItem::FunctionCall {
+                    name,
+                    arguments,
+                    call_id,
+                    ..
+                } if name == "subagent_await" => {
+                    await_calls.insert(call_id.clone(), arguments.clone());
+
+                    if let Some(turn_item) = parse_turn_item(item) {
+                        self.send_event(
+                            turn_context.as_ref(),
+                            EventMsg::ItemStarted(ItemStartedEvent {
+                                thread_id: self.conversation_id(),
+                                turn_id: turn_context.sub_id.clone(),
+                                item: turn_item.clone(),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                ResponseItem::FunctionCallOutput { call_id, output } => {
+                    if let Some(arguments) = await_calls.remove(call_id) {
+                        self.as_ref()
+                            .emit_synthetic_await_exec(
+                                turn_context.as_ref(),
+                                call_id,
+                                &arguments,
+                                output,
+                            )
+                            .await;
+                    }
+
+                    if let Some(turn_item) = parse_turn_item(item) {
+                        self.send_event(
+                            turn_context.as_ref(),
+                            EventMsg::ItemCompleted(ItemCompletedEvent {
+                                thread_id: self.conversation_id(),
+                                turn_id: turn_context.sub_id.clone(),
+                                item: turn_item.clone(),
+                            }),
+                        )
+                        .await;
+                    }
+                }
+                _ => {
+                    if let Some(turn_item) = parse_turn_item(item) {
+                        match item {
+                            ResponseItem::FunctionCall { .. } => {
+                                self.send_event(
+                                    turn_context.as_ref(),
+                                    EventMsg::ItemStarted(ItemStartedEvent {
+                                        thread_id: self.conversation_id(),
+                                        turn_id: turn_context.sub_id.clone(),
+                                        item: turn_item.clone(),
+                                    }),
+                                )
+                                .await;
+                            }
+                            ResponseItem::FunctionCallOutput { .. } => {
+                                self.send_event(
+                                    turn_context.as_ref(),
+                                    EventMsg::ItemCompleted(ItemCompletedEvent {
+                                        thread_id: self.conversation_id(),
+                                        turn_id: turn_context.sub_id.clone(),
+                                        item: turn_item.clone(),
+                                    }),
+                                )
+                                .await;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        self.record_conversation_items(&turn_context, &items).await;
+
+        // Kick off a RegularTask with no additional user input; `run_task`
+        // will treat this as an assistant-only turn based on existing
+        // history plus the inbox-derived items.
+        self.spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            crate::tasks::RegularTask,
+        )
+        .await;
+    }
+
+    async fn emit_synthetic_await_exec(
+        &self,
+        turn_context: &TurnContext,
+        call_id: &str,
+        arguments: &str,
+        output: &FunctionCallOutputPayload,
+    ) {
+        let start = Instant::now();
+        let label = serde_json::from_str::<serde_json::Value>(&output.content)
+            .ok()
+            .and_then(|val| {
+                val.get("metadata")
+                    .and_then(|m| m.get("label"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "subagent".to_string());
+        let command = vec![format!("Awaited subagent {label} (autosubmit)")];
+        let parsed_cmd = parse_command(&command);
+
+        self.send_event(
+            turn_context,
+            EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+                call_id: call_id.to_string(),
+                process_id: None,
+                turn_id: turn_context.sub_id.clone(),
+                command: command.clone(),
+                cwd: turn_context.cwd.clone(),
+                parsed_cmd: parsed_cmd.clone(),
+                source: ExecCommandSource::Agent,
+                is_user_shell_command: false,
+                interaction_input: None,
+            }),
+        )
+        .await;
+
+        let tool_output = ToolOutput::Function {
+            content: output.content.clone(),
+            content_items: output.content_items.clone(),
+            success: output.success,
+        };
+        let formatted_output = summarize_tool_output("subagent_await", arguments, &tool_output);
+        let exit_code = if output.success.unwrap_or(true) { 0 } else { 1 };
+        let stderr = if exit_code == 0 {
+            String::new()
+        } else {
+            formatted_output.clone()
+        };
+
+        self.send_event(
+            turn_context,
+            EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+                call_id: call_id.to_string(),
+                process_id: None,
+                turn_id: turn_context.sub_id.clone(),
+                command,
+                cwd: turn_context.cwd.clone(),
+                parsed_cmd,
+                source: ExecCommandSource::Agent,
+                interaction_input: None,
+                stdout: String::new(),
+                stderr,
+                aggregated_output: formatted_output.clone(),
+                exit_code,
+                duration: start.elapsed(),
+                formatted_output,
+            }),
+        )
+        .await;
+    }
+
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
         for task in self.take_all_running_tasks().await {
             self.handle_task_abort(task, reason.clone()).await;
@@ -173,6 +362,7 @@ impl Session {
             *active = None;
         }
         drop(active);
+
         let event = EventMsg::TaskComplete(TaskCompleteEvent { last_agent_message });
         self.send_event(turn_context.as_ref(), event).await;
     }

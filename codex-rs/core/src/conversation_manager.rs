@@ -94,6 +94,7 @@ impl ConversationManager {
             models_manager,
             InitialHistory::New,
             self.session_source.clone(),
+            None,
         )
         .await?;
         self.finalize_spawn(codex, conversation_id).await
@@ -171,6 +172,7 @@ impl ConversationManager {
             self.models_manager.clone(),
             initial_history,
             self.session_source.clone(),
+            None,
         )
         .await?;
         self.finalize_spawn(codex, conversation_id).await
@@ -212,6 +214,7 @@ impl ConversationManager {
             self.models_manager.clone(),
             history,
             self.session_source.clone(),
+            None,
         )
         .await?;
 

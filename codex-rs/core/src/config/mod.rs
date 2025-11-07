@@ -26,6 +26,7 @@ use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crate::model_provider_info::built_in_model_providers;
+use crate::openai_models::model_family::find_family_for_model;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
@@ -50,6 +51,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+use tracing::warn;
 
 use crate::config::profile::ConfigProfile;
 use toml::Value as TomlValue;
@@ -67,6 +69,9 @@ const OPENAI_DEFAULT_REVIEW_MODEL: &str = "gpt-5.1-codex-max";
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
+pub(crate) const DEFAULT_MAX_ACTIVE_SUBAGENTS: usize = 8;
+pub(crate) const MIN_MAX_ACTIVE_SUBAGENTS: usize = 1;
+pub(crate) const MAX_MAX_ACTIVE_SUBAGENTS: usize = 64;
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -98,6 +103,9 @@ pub struct Config {
     /// for either of approval_policy or sandbox_mode.
     pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
+    /// Maximum number of concurrently active subagents allowed in a session.
+    pub max_active_subagents: usize,
+
     /// On Windows, indicates that a previously configured workspace-write sandbox
     /// was coerced to read-only because native auto mode is unsupported.
     pub forced_auto_mode_downgraded_on_windows: bool,
@@ -121,6 +129,30 @@ pub struct Config {
 
     /// Developer instructions override injected as a separate message.
     pub developer_instructions: Option<String>,
+
+    /// When true, messages from the root agent to a subagent should be
+    /// surfaced as `user` role messages in the child’s history instead of
+    /// relying solely on tool calls and inbox semantics. This is useful for
+    /// evaluations that compare direct user-style turns versus tool-mediated
+    /// messaging. When false, root-to-child communication is modeled purely
+    /// via tools and the subagent inbox.
+    pub root_agent_uses_user_messages: bool,
+
+    /// When true, the root agent will, at turn boundaries, drain subagent
+    /// inboxes and inject synthetic `subagent_await` calls + outputs into the
+    /// message stream, and may auto-start a new turn when idle. When false,
+    /// subagent inboxes are only surfaced when explicitly awaited or at
+    /// subagent-specific yield points.
+    pub subagent_root_inbox_autosubmit: bool,
+
+    /// Controls where synthetic `subagent_await` tool calls and outputs for
+    /// inbox delivery are injected relative to real tool call outputs inside a
+    /// turn. When true, inbox-derived `subagent_await` items are recorded
+    /// *before* tool outputs (Option B: closer to chronological ordering). When
+    /// false (default), they are recorded *after* tool outputs (Option A:
+    /// closer to training-time behavior where the model generally sees its own
+    /// tool call and result before additional context).
+    pub subagent_inbox_inject_before_tools: bool,
 
     /// Compact prompt override.
     pub compact_prompt: Option<String>,
@@ -246,6 +278,7 @@ pub struct Config {
     pub tools_web_search_request: bool,
 
     /// If set to `true`, used only the experimental unified exec tool.
+    #[allow(dead_code)]
     pub use_experimental_unified_exec_tool: bool,
 
     /// If set to `true`, use the experimental official Rust MCP client.
@@ -614,6 +647,30 @@ pub struct ConfigToml {
     /// Compact prompt used for history compaction.
     pub compact_prompt: Option<String>,
 
+    /// When true, messages from the root agent to subagents should be
+    /// represented as `user` role messages in the child’s history. When
+    /// false or unset, root-to-child communication is modeled purely via
+    /// `subagent_send_message` and inbox delivery.
+    #[serde(default)]
+    pub root_agent_uses_user_messages: Option<bool>,
+
+    /// When true, the root agent drains subagent inboxes at turn boundaries
+    /// and may auto-start new turns when idle. When false or unset, the root
+    /// only observes subagent inboxes via explicit `subagent_await` calls or
+    /// subagent-driven yield points.
+    #[serde(default)]
+    pub subagent_root_inbox_autosubmit: Option<bool>,
+
+    /// When true, inbox-derived `subagent_await` calls and outputs are
+    /// injected *before* tool outputs inside a turn (Option B, closer to
+    /// strict chronological ordering). When false or unset, synthetic\n    /// `subagent_await` entries are injected *after* tool outputs (Option A,
+    /// closer to training-time patterns where the model generally sees its own
+    /// tool call and result before extra context).\n    #[serde(default)]
+    pub subagent_inbox_inject_before_tools: Option<bool>,
+
+    /// Maximum number of concurrently active subagents allowed in a session.
+    pub max_active_subagents: Option<usize>,
+
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     #[serde(default)]
     pub forced_chatgpt_workspace_id: Option<String>,
@@ -729,6 +786,7 @@ pub struct ConfigToml {
     pub experimental_use_unified_exec_tool: Option<bool>,
     pub experimental_use_rmcp_client: Option<bool>,
     pub experimental_use_freeform_apply_patch: Option<bool>,
+    pub experimental_sandbox_command_assessment: Option<bool>,
     /// Preferred OSS provider for local models, e.g. "lmstudio" or "ollama".
     pub oss_provider: Option<String>,
 }
@@ -911,6 +969,10 @@ pub struct ConfigOverrides {
     pub base_instructions: Option<String>,
     pub developer_instructions: Option<String>,
     pub compact_prompt: Option<String>,
+    pub max_active_subagents: Option<usize>,
+    pub root_agent_uses_user_messages: Option<bool>,
+    pub subagent_root_inbox_autosubmit: Option<bool>,
+    pub subagent_inbox_inject_before_tools: Option<bool>,
     pub include_apply_patch_tool: Option<bool>,
     pub show_raw_agent_reasoning: Option<bool>,
     pub tools_web_search_request: Option<bool>,
@@ -947,6 +1009,27 @@ pub fn resolve_oss_provider(
 }
 
 impl Config {
+    /// Clone the existing config with a model override, re-deriving any model-specific fields.
+    pub fn clone_with_model_override(&self, model: &str) -> std::io::Result<Self> {
+        if model.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "model cannot be empty",
+            ));
+        }
+
+        let mut cfg = self.clone();
+        cfg.model = Some(model.trim().to_string());
+
+        let model_family = find_family_for_model(cfg.model.as_deref().unwrap_or_default())
+            .with_config_overrides(&cfg);
+
+        cfg.model_context_window = model_family.context_window;
+        cfg.model_auto_compact_token_limit = model_family.auto_compact_token_limit();
+
+        Ok(cfg)
+    }
+
     /// Meant to be used exclusively for tests: `load_with_overrides()` should
     /// be used in all other cases.
     pub fn load_from_base_config_with_overrides(
@@ -969,6 +1052,10 @@ impl Config {
             base_instructions,
             developer_instructions,
             compact_prompt,
+            max_active_subagents,
+            root_agent_uses_user_messages,
+            subagent_root_inbox_autosubmit: _,
+            subagent_inbox_inject_before_tools: _,
             include_apply_patch_tool: include_apply_patch_tool_override,
             show_raw_agent_reasoning,
             tools_web_search_request: override_tools_web_search_request,
@@ -996,6 +1083,7 @@ impl Config {
         let feature_overrides = FeatureOverrides {
             include_apply_patch_tool: include_apply_patch_tool_override,
             web_search_request: override_tools_web_search_request,
+            experimental_sandbox_command_assessment: cfg.experimental_sandbox_command_assessment,
         };
 
         let features = Features::from_config(&cfg, &config_profile, feature_overrides);
@@ -1092,6 +1180,7 @@ impl Config {
 
         let include_apply_patch_tool_flag = features.enabled(Feature::ApplyPatchFreeform);
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
+        #[allow(dead_code)]
         let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
         let use_experimental_use_rmcp_client = features.enabled(Feature::RmcpClient);
 
@@ -1149,6 +1238,37 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
+        let raw_max_active_subagents = max_active_subagents
+            .or(config_profile.max_active_subagents)
+            .or(cfg.max_active_subagents)
+            .unwrap_or(DEFAULT_MAX_ACTIVE_SUBAGENTS);
+
+        if raw_max_active_subagents < MIN_MAX_ACTIVE_SUBAGENTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "max_active_subagents must be at least {MIN_MAX_ACTIVE_SUBAGENTS}, got {raw_max_active_subagents}"
+                ),
+            ));
+        }
+
+        let max_active_subagents = if raw_max_active_subagents > MAX_MAX_ACTIVE_SUBAGENTS {
+            warn!(
+                "max_active_subagents clamped from {} to {}",
+                raw_max_active_subagents, MAX_MAX_ACTIVE_SUBAGENTS
+            );
+            MAX_MAX_ACTIVE_SUBAGENTS
+        } else {
+            raw_max_active_subagents
+        };
+
+        let root_agent_uses_user_messages = root_agent_uses_user_messages
+            .or(cfg.root_agent_uses_user_messages)
+            .unwrap_or(true);
+        let subagent_root_inbox_autosubmit = cfg.subagent_root_inbox_autosubmit.unwrap_or(true);
+        let subagent_inbox_inject_before_tools =
+            cfg.subagent_inbox_inject_before_tools.unwrap_or(false);
+
         let check_for_update_on_startup = cfg.check_for_update_on_startup.unwrap_or(true);
 
         let config = Self {
@@ -1168,6 +1288,9 @@ impl Config {
             user_instructions,
             base_instructions,
             developer_instructions,
+            root_agent_uses_user_messages,
+            subagent_root_inbox_autosubmit,
+            subagent_inbox_inject_before_tools,
             compact_prompt,
             // The config.toml omits "_mode" because it's a config file. However, "_mode"
             // is important in code to differentiate the mode from the store implementation.
@@ -1202,6 +1325,7 @@ impl Config {
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
+            max_active_subagents,
             model_reasoning_effort: config_profile
                 .model_reasoning_effort
                 .or(cfg.model_reasoning_effort),
@@ -1593,6 +1717,73 @@ trust_level = "trusted"
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn max_active_subagents_defaults_and_overrides() -> std::io::Result<()> {
+        let temp_dir = TempDir::new()?;
+
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )?;
+        assert_eq!(config.max_active_subagents, DEFAULT_MAX_ACTIVE_SUBAGENTS);
+
+        let custom = ConfigToml {
+            max_active_subagents: Some(3),
+            ..ConfigToml::default()
+        };
+        let config = Config::load_from_base_config_with_overrides(
+            custom,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )?;
+        assert_eq!(config.max_active_subagents, 3);
+
+        let overrides = ConfigOverrides {
+            max_active_subagents: Some(2),
+            ..Default::default()
+        };
+        let config = Config::load_from_base_config_with_overrides(
+            ConfigToml::default(),
+            overrides,
+            temp_dir.path().to_path_buf(),
+        )?;
+        assert_eq!(config.max_active_subagents, 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn max_active_subagents_validates_bounds() {
+        let temp_dir = TempDir::new().expect("tempdir");
+
+        // Below minimum should error.
+        let cfg_zero = ConfigToml {
+            max_active_subagents: Some(0),
+            ..ConfigToml::default()
+        };
+        let err = Config::load_from_base_config_with_overrides(
+            cfg_zero,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )
+        .expect_err("expected invalid input error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        // Above ceiling should clamp.
+        let cfg_high = ConfigToml {
+            max_active_subagents: Some(MAX_MAX_ACTIVE_SUBAGENTS + 10),
+            ..ConfigToml::default()
+        };
+        let config = Config::load_from_base_config_with_overrides(
+            cfg_high,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )
+        .expect("clamped config");
+        assert_eq!(config.max_active_subagents, MAX_MAX_ACTIVE_SUBAGENTS);
     }
 
     #[test]
@@ -2940,6 +3131,7 @@ model_verbosity = "high"
                 approval_policy: AskForApproval::Never,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
+                max_active_subagents: DEFAULT_MAX_ACTIVE_SUBAGENTS,
                 forced_auto_mode_downgraded_on_windows: false,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 user_instructions: None,
@@ -2984,6 +3176,9 @@ model_verbosity = "high"
                 animations: true,
                 show_tooltips: true,
                 otel: OtelConfig::default(),
+                root_agent_uses_user_messages: true,
+                subagent_root_inbox_autosubmit: true,
+                subagent_inbox_inject_before_tools: false,
             },
             o3_profile_config
         );
@@ -3014,6 +3209,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::UnlessTrusted,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            max_active_subagents: DEFAULT_MAX_ACTIVE_SUBAGENTS,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
@@ -3058,6 +3254,9 @@ model_verbosity = "high"
             animations: true,
             show_tooltips: true,
             otel: OtelConfig::default(),
+            root_agent_uses_user_messages: true,
+            subagent_root_inbox_autosubmit: true,
+            subagent_inbox_inject_before_tools: false,
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -3103,6 +3302,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            max_active_subagents: DEFAULT_MAX_ACTIVE_SUBAGENTS,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
@@ -3147,6 +3347,9 @@ model_verbosity = "high"
             animations: true,
             show_tooltips: true,
             otel: OtelConfig::default(),
+            root_agent_uses_user_messages: true,
+            subagent_root_inbox_autosubmit: true,
+            subagent_inbox_inject_before_tools: false,
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -3178,6 +3381,7 @@ model_verbosity = "high"
             approval_policy: AskForApproval::OnFailure,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
+            max_active_subagents: DEFAULT_MAX_ACTIVE_SUBAGENTS,
             forced_auto_mode_downgraded_on_windows: false,
             shell_environment_policy: ShellEnvironmentPolicy::default(),
             user_instructions: None,
@@ -3222,6 +3426,9 @@ model_verbosity = "high"
             animations: true,
             show_tooltips: true,
             otel: OtelConfig::default(),
+            root_agent_uses_user_messages: true,
+            subagent_root_inbox_autosubmit: true,
+            subagent_inbox_inject_before_tools: false,
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);

@@ -270,7 +270,9 @@ async fn remote_compact_persists_replacement_history_in_rollout() -> Result<()> 
         };
         if let RolloutItem::Compacted(compacted) = entry.item
             && compacted.message.is_empty()
-            && compacted.replacement_history.as_ref() == Some(&compacted_history)
+            && let Some(repl) = &compacted.replacement_history
+            && repl.len() >= compacted_history.len()
+            && repl[repl.len() - compacted_history.len()..] == *compacted_history
         {
             saw_compacted_history = true;
             break;

@@ -9,7 +9,32 @@ use crate::protocol::ContextCompactedEvent;
 use crate::protocol::EventMsg;
 use crate::protocol::RolloutItem;
 use crate::protocol::TaskStartedEvent;
+use crate::user_instructions::USER_INSTRUCTIONS_OPEN_TAG_LEGACY;
+use crate::user_instructions::USER_INSTRUCTIONS_PREFIX;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ENVIRONMENT_CONTEXT_OPEN_TAG;
+
+fn is_initial_context_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Message { role, content, .. } => {
+            if role == "developer" {
+                true
+            } else if role == "user" {
+                if let [ContentItem::InputText { text }] = content.as_slice() {
+                    text.starts_with(USER_INSTRUCTIONS_PREFIX)
+                        || text.starts_with(USER_INSTRUCTIONS_OPEN_TAG_LEGACY)
+                        || text.starts_with(ENVIRONMENT_CONTEXT_OPEN_TAG)
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
 
 pub(crate) async fn run_inline_remote_auto_compact_task(
     sess: Arc<Session>,
@@ -49,7 +74,7 @@ async fn run_remote_compact_task_inner_impl(
         output_schema: None,
     };
 
-    let mut new_history = turn_context
+    let new_history = turn_context
         .client
         .compact_conversation_history(&prompt)
         .await?;
@@ -61,15 +86,26 @@ async fn run_remote_compact_task_inner_impl(
         .cloned()
         .collect();
 
+    // Re-apply the initial context (developer + AGENTS + environment) because the
+    // remote compact service may omit it, and replay/resume uses the replacement
+    // history verbatim.
+    let mut rebuilt_history = sess.build_initial_context(turn_context);
+    let compacted_without_context: Vec<ResponseItem> = new_history
+        .into_iter()
+        .skip_while(is_initial_context_item)
+        .collect();
+    rebuilt_history.extend(compacted_without_context);
+
     if !ghost_snapshots.is_empty() {
-        new_history.extend(ghost_snapshots);
+        rebuilt_history.extend(ghost_snapshots);
     }
-    sess.replace_history(new_history.clone()).await;
+
+    sess.replace_history(rebuilt_history.clone()).await;
     sess.recompute_token_usage(turn_context).await;
 
     let compacted_item = CompactedItem {
         message: String::new(),
-        replacement_history: Some(new_history),
+        replacement_history: Some(rebuilt_history),
     };
     sess.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
         .await;

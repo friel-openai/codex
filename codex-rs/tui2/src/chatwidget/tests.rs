@@ -894,6 +894,7 @@ fn begin_exec_with_source(
         cwd,
         parsed_cmd,
         source,
+        is_user_shell_command: false,
         interaction_input,
     };
     chat.handle_codex_event(Event {
@@ -928,6 +929,7 @@ fn end_exec(
         source,
         interaction_input,
         process_id,
+        ..
     } = begin_event;
     chat.handle_codex_event(Event {
         id: call_id.clone(),
@@ -3152,6 +3154,7 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
             cwd: cwd.clone(),
             parsed_cmd: parsed_cmd.clone(),
             source: ExecCommandSource::Agent,
+            is_user_shell_command: false,
             interaction_input: None,
         }),
     });
