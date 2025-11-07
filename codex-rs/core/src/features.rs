@@ -40,6 +40,8 @@ pub enum Feature {
     ViewImageTool,
     /// Allow the model to request web searches.
     WebSearchRequest,
+    /// Enable the built-in subagent orchestration tools.
+    SubagentTools,
     /// Enable the model-based risk assessments for sandboxed commands.
     SandboxCommandAssessment,
     /// Create a ghost commit at each turn.
@@ -281,6 +283,12 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::WebSearchRequest,
         key: "web_search_request",
         stage: Stage::Stable,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::SubagentTools,
+        key: "subagent_tools",
+        stage: Stage::Experimental,
         default_enabled: false,
     },
     FeatureSpec {

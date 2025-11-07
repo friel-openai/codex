@@ -42,6 +42,10 @@ These are entities exit on the codex backend. The intent of this section is to e
 
 The term "UI" is used to refer to the application driving `Codex`. This may be the CLI / TUI chat-like interface that users operate, or it may be a GUI interface like a VSCode extension. The UI is external to `Codex`, as `Codex` is intended to be operated by arbitrary UI implementations.
 
+### Agent identifiers
+
+Every participant in a session (the root UI thread plus each spawned/forked child) is assigned a monotonically increasing numeric `AgentId`. Agent `0` is always the root thread. Subagents inherit their parent's `AgentId` as `parent_agent_id` so UIs can correlate trees even when conversations are forked or exported. These IDs are surfaced in `SubagentSummary` payloads and in a dedicated inbox event described below.
+
 When a `Turn` completes, the `response_id` from the `Model`'s final `response.completed` message is stored in the `Session` state to resume the thread given the next `Op::UserInput`. The `response_id` is also returned in the `EventMsg::TurnComplete` to the UI, which can be used to fork the thread from an earlier point by providing it in the `Op::UserInput`.
 
 Since only 1 `Task` can be run at a time, for parallel tasks it is recommended that a single `Codex` be run for each thread of work.
@@ -75,6 +79,10 @@ For complete documentation of the `Op` and `EventMsg` variants, refer to [protoc
   - `EventMsg::Error` – A task stopped with an error
   - `EventMsg::Warning` – A non-fatal warning that the client should surface to the user
   - `EventMsg::TurnComplete` – Contains a `response_id` bookmark for last `response_id` executed by the task. This can be used to continue the task at a later point in time, perhaps with additional user input.
+- `EventMsg::SubagentLifecycle` – Emits `SubagentSummary` payloads (now including `agent_id`, `parent_agent_id`, and pending inbox counts) whenever a child session is created, updates status/reasoning headers, or is removed.
+- `EventMsg::AgentInbox` – Notifies the UI when a subagent’s inbox depth changes, e.g., after the parent sends an interrupt. Contains the target `agent_id`, `session_id`, and the counts of pending regular vs interrupt messages so UIs can render badges without polling.
+
+Subagent tool reminders: `subagent_await` accepts a `timeout_ms` argument that is capped at 480000 ms (8 minutes). Callers should prefer shorter waits with exponential backoff—e.g., 30 s, then 60 s, then 120 s—so they can check on children, log progress, or deliver interrupts instead of waiting for the entire limit in one call.
 
 The `response_id` returned from each task matches the OpenAI `response_id` stored in the API's `/responses` endpoint. It can be stored and used in future `Sessions` to resume threads of work.
 

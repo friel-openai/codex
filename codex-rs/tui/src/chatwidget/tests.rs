@@ -13,6 +13,7 @@ use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
 use codex_core::config::OPENAI_DEFAULT_MODEL;
+use codex_core::protocol::AgentInboxEvent;
 use codex_core::protocol::AgentMessageDeltaEvent;
 use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentReasoningDeltaEvent;
@@ -37,6 +38,14 @@ use codex_core::protocol::ReviewLineRange;
 use codex_core::protocol::ReviewOutputEvent;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
+use codex_core::protocol::SubagentCreatedEvent;
+use codex_core::protocol::SubagentLifecycleEvent;
+use codex_core::protocol::SubagentLifecycleOrigin;
+use codex_core::protocol::SubagentLifecycleStatus;
+use codex_core::protocol::SubagentReasoningHeaderEvent;
+use codex_core::protocol::SubagentRemovedEvent;
+use codex_core::protocol::SubagentStatusEvent;
+use codex_core::protocol::SubagentSummary;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
 use codex_core::protocol::UndoCompletedEvent;
@@ -345,6 +354,7 @@ fn make_chatwidget_manual() -> (
         frame_requester: FrameRequester::test_dummy(),
         show_welcome_banner: true,
         queued_user_messages: VecDeque::new(),
+        subagent_states: HashMap::new(),
         suppress_session_configured_redraw: false,
         pending_notification: None,
         is_review_mode: false,
@@ -680,6 +690,7 @@ fn begin_exec_with_source(
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             parsed_cmd,
             source,
+            is_user_shell_command: false,
             interaction_input: None,
         }),
     });
@@ -922,6 +933,175 @@ fn exec_history_cell_shows_working_then_completed() {
 }
 
 #[test]
+fn subagent_lifecycle_updates_bottom_pane() {
+    let (mut chat, mut _rx, _ops) = make_chatwidget_manual();
+    let parent_id = ConversationId::new();
+    chat.conversation_id = Some(parent_id);
+    chat.on_task_started();
+
+    let child_id = ConversationId::new();
+    let summary = SubagentSummary {
+        agent_id: 1,
+        parent_agent_id: Some(0),
+        session_id: child_id,
+        parent_session_id: Some(parent_id),
+        origin: SubagentLifecycleOrigin::Fork,
+        status: SubagentLifecycleStatus::Running,
+        label: Some("Docs sweep".to_string()),
+        summary: Some("Rewrite md files".to_string()),
+        reasoning_header: None,
+        started_at_ms: 42,
+        pending_messages: 0,
+        pending_interrupts: 0,
+    };
+
+    chat.dispatch_event_msg(
+        Some("created".into()),
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::Created(SubagentCreatedEvent {
+            subagent: summary,
+        })),
+        false,
+    );
+
+    assert_eq!(chat.bottom_pane.subagent_count(), 1);
+    assert_eq!(chat.bottom_pane.subagent_entries().len(), 2);
+
+    chat.dispatch_event_msg(
+        Some("header".into()),
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::ReasoningHeader(
+            SubagentReasoningHeaderEvent {
+                agent_id: 1,
+                session_id: child_id,
+                reasoning_header: "Scanning tests".to_string(),
+            },
+        )),
+        false,
+    );
+    let entries = chat.bottom_pane.subagent_entries();
+    assert_eq!(entries[1].detail.as_deref(), Some("Scanning tests"));
+
+    chat.dispatch_event_msg(
+        Some("status".into()),
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::Status(SubagentStatusEvent {
+            agent_id: 1,
+            session_id: child_id,
+            status: SubagentLifecycleStatus::Idle,
+        })),
+        false,
+    );
+    assert_eq!(chat.bottom_pane.subagent_count(), 0);
+
+    chat.dispatch_event_msg(
+        Some("deleted".into()),
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::Deleted(SubagentRemovedEvent {
+            agent_id: 1,
+            session_id: child_id,
+        })),
+        false,
+    );
+    assert!(chat.bottom_pane.subagent_entries().is_empty());
+}
+
+#[test]
+fn replayed_subagent_events_are_ignored() {
+    let (mut chat, mut _rx, _ops) = make_chatwidget_manual();
+    let parent_id = ConversationId::new();
+    chat.conversation_id = Some(parent_id);
+
+    let child_id = ConversationId::new();
+    let summary = SubagentSummary {
+        agent_id: 1,
+        parent_agent_id: Some(0),
+        session_id: child_id,
+        parent_session_id: Some(parent_id),
+        origin: SubagentLifecycleOrigin::Spawn,
+        status: SubagentLifecycleStatus::Running,
+        label: None,
+        summary: None,
+        reasoning_header: None,
+        started_at_ms: 100,
+        pending_messages: 0,
+        pending_interrupts: 0,
+    };
+
+    chat.dispatch_event_msg(
+        None,
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::Created(SubagentCreatedEvent {
+            subagent: summary,
+        })),
+        true,
+    );
+
+    assert!(chat.bottom_pane.subagent_entries().is_empty());
+    assert_eq!(chat.bottom_pane.subagent_count(), 0);
+}
+
+#[test]
+fn agent_inbox_updates_pending_counts() {
+    let (mut chat, mut _rx, _ops) = make_chatwidget_manual();
+    let parent_id = ConversationId::new();
+    chat.conversation_id = Some(parent_id);
+
+    let child_id = ConversationId::new();
+    let summary = SubagentSummary {
+        agent_id: 1,
+        parent_agent_id: Some(0),
+        session_id: child_id,
+        parent_session_id: Some(parent_id),
+        origin: SubagentLifecycleOrigin::Spawn,
+        status: SubagentLifecycleStatus::Running,
+        label: Some("Docs sweep".to_string()),
+        summary: None,
+        reasoning_header: None,
+        started_at_ms: 100,
+        pending_messages: 0,
+        pending_interrupts: 0,
+    };
+
+    chat.dispatch_event_msg(
+        None,
+        EventMsg::SubagentLifecycle(SubagentLifecycleEvent::Created(SubagentCreatedEvent {
+            subagent: summary,
+        })),
+        false,
+    );
+
+    chat.dispatch_event_msg(
+        None,
+        EventMsg::AgentInbox(AgentInboxEvent {
+            agent_id: 1,
+            session_id: child_id,
+            pending_messages: 2,
+            pending_interrupts: 1,
+        }),
+        false,
+    );
+
+    let entries = chat.bottom_pane.subagent_entries();
+    assert_eq!(entries.len(), 2);
+    let summary_entry = &entries[0];
+    let detail = summary_entry.detail.as_deref().expect("summary detail");
+    assert!(
+        detail.contains("1 interrupt"),
+        "summary should include interrupt count: {detail}"
+    );
+    assert!(
+        detail.contains("2 pending msgs"),
+        "summary should include pending message count: {detail}"
+    );
+    let agent_entry = &entries[1];
+    let detail = agent_entry.detail.as_deref().expect("agent detail");
+    assert!(
+        detail.contains("1 interrupt"),
+        "agent detail should include interrupt count: {detail}"
+    );
+    assert!(
+        detail.contains("2 pending msgs"),
+        "agent detail should include pending msg count: {detail}"
+    );
+}
+
+#[test]
 fn exec_history_cell_shows_working_then_failed() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
 
@@ -974,6 +1154,52 @@ fn exec_history_shows_unified_exec_startup_commands() {
     assert!(
         blob.contains("• Ran echo unified exec startup"),
         "expected startup command to render: {blob:?}"
+    );
+}
+
+#[test]
+fn subagent_tool_calls_render_as_ran_entries() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual();
+    let call_id = "sub-call-1";
+    let command = vec!["subagent_spawn".to_string(), "label=docs".to_string()];
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    chat.handle_codex_event(Event {
+        id: call_id.to_string(),
+        msg: EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+            call_id: call_id.to_string(),
+            command,
+            cwd,
+            parsed_cmd: Vec::new(),
+            source: ExecCommandSource::Agent,
+            is_user_shell_command: false,
+            interaction_input: None,
+        }),
+    });
+
+    chat.handle_codex_event(Event {
+        id: call_id.to_string(),
+        msg: EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+            call_id: call_id.to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            aggregated_output: "spawned agent #2".to_string(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(8),
+            formatted_output: "spawned agent #2".to_string(),
+        }),
+    });
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected a single exec history cell");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("Ran subagent_spawn"),
+        "expected command header in history cell: {rendered}"
+    );
+    assert!(
+        rendered.contains("spawned agent #2"),
+        "expected tool output to be rendered: {rendered}"
     );
 }
 
@@ -1789,6 +2015,7 @@ async fn binary_size_transcript_snapshot() {
                                     cwd: e.cwd,
                                     parsed_cmd,
                                     source: ExecCommandSource::Agent,
+                                    is_user_shell_command: e.is_user_shell_command,
                                     interaction_input: e.interaction_input.clone(),
                                 }),
                             }
@@ -2877,6 +3104,7 @@ fn chatwidget_exec_and_status_layout_vt100_snapshot() {
                 },
             ],
             source: ExecCommandSource::Agent,
+            is_user_shell_command: false,
             interaction_input: None,
         }),
     });

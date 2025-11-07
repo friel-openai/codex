@@ -6,6 +6,7 @@ use crate::bottom_pane::queued_user_messages::QueuedUserMessages;
 use crate::render::renderable::FlexRenderable;
 use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
+use crate::shimmer::shimmer_spans;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
 use codex_file_search::FileMatch;
@@ -13,6 +14,9 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use ratatui::style::Stylize;
+use ratatui::text::Line;
+use ratatui::text::Span;
 use std::time::Duration;
 
 mod approval_overlay;
@@ -48,6 +52,7 @@ pub(crate) enum CancellationEvent {
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
+use codex_protocol::protocol::SubagentLifecycleStatus;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
 pub(crate) use list_selection_view::SelectionAction;
@@ -74,6 +79,8 @@ pub(crate) struct BottomPane {
     status: Option<StatusIndicatorWidget>,
     /// Queued user messages to show above the composer while a turn is running.
     queued_user_messages: QueuedUserMessages,
+    subagent_summaries: SubagentSummariesWidget,
+    subagent_count: usize,
     context_window_percent: Option<i64>,
 }
 
@@ -105,6 +112,8 @@ impl BottomPane {
             ctrl_c_quit_hint: false,
             status: None,
             queued_user_messages: QueuedUserMessages::new(),
+            subagent_summaries: SubagentSummariesWidget::default(),
+            subagent_count: 0,
             esc_backtrack_hint: false,
             context_window_percent: None,
         }
@@ -262,6 +271,16 @@ impl BottomPane {
         self.status.is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn subagent_entries(&self) -> &[SubagentDisplayEntry] {
+        &self.subagent_summaries.entries
+    }
+
+    #[cfg(test)]
+    pub(crate) fn subagent_count(&self) -> usize {
+        self.subagent_count
+    }
+
     pub(crate) fn show_esc_backtrack_hint(&mut self) {
         self.esc_backtrack_hint = true;
         self.composer.set_esc_backtrack_hint(true);
@@ -291,6 +310,7 @@ impl BottomPane {
             }
             if let Some(status) = self.status.as_mut() {
                 status.set_interrupt_hint_visible(true);
+                status.set_subagent_count(self.subagent_count);
             }
             self.request_redraw();
         } else {
@@ -313,6 +333,9 @@ impl BottomPane {
                 self.frame_requester.clone(),
             ));
             self.request_redraw();
+        }
+        if let Some(status) = self.status.as_mut() {
+            status.set_subagent_count(self.subagent_count);
         }
     }
 
@@ -342,6 +365,23 @@ impl BottomPane {
     /// Update the queued messages preview shown above the composer.
     pub(crate) fn set_queued_user_messages(&mut self, queued: Vec<String>) {
         self.queued_user_messages.messages = queued;
+        self.request_redraw();
+    }
+
+    pub(crate) fn update_subagent_summaries(&mut self, entries: Vec<SubagentDisplayEntry>) {
+        if self.subagent_summaries.update(entries) {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn set_subagent_counts(&mut self, count: usize) {
+        if self.subagent_count == count {
+            return;
+        }
+        self.subagent_count = count;
+        if let Some(status) = self.status.as_mut() {
+            status.set_subagent_count(count);
+        }
         self.request_redraw();
     }
 
@@ -474,6 +514,9 @@ impl BottomPane {
             let mut flex = FlexRenderable::new();
             if let Some(status) = &self.status {
                 flex.push(0, RenderableItem::Borrowed(status));
+                if !self.subagent_summaries.is_empty() {
+                    flex.push(0, RenderableItem::Borrowed(&self.subagent_summaries));
+                }
             }
             flex.push(1, RenderableItem::Borrowed(&self.queued_user_messages));
             if self.status.is_some() || !self.queued_user_messages.messages.is_empty() {
@@ -496,6 +539,102 @@ impl Renderable for BottomPane {
     }
     fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
         self.as_renderable().cursor_pos(area)
+    }
+}
+
+#[derive(Default)]
+struct SubagentSummariesWidget {
+    entries: Vec<SubagentDisplayEntry>,
+}
+
+impl SubagentSummariesWidget {
+    fn update(&mut self, entries: Vec<SubagentDisplayEntry>) -> bool {
+        if self.entries == entries {
+            return false;
+        }
+        self.entries = entries;
+        true
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+impl Renderable for SubagentSummariesWidget {
+    fn desired_height(&self, _width: u16) -> u16 {
+        self.entries.len() as u16
+    }
+
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        for (idx, entry) in self.entries.iter().enumerate() {
+            let y = area.y + idx as u16;
+            if y >= area.bottom() {
+                break;
+            }
+            let line_area = Rect::new(area.x, y, area.width, 1);
+            entry.render(line_area, buf);
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) enum SubagentDisplayEntryKind {
+    Summary,
+    Item,
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct SubagentDisplayEntry {
+    pub(crate) kind: SubagentDisplayEntryKind,
+    pub(crate) label: String,
+    pub(crate) detail: Option<String>,
+    pub(crate) status: Option<SubagentLifecycleStatus>,
+}
+
+impl SubagentDisplayEntry {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let line = match self.kind {
+            SubagentDisplayEntryKind::Summary => {
+                let mut spans: Vec<Span> = vec!["  • ".dim(), self.label.clone().dim()];
+                if let Some(detail) = &self.detail {
+                    spans.push(" — ".dim());
+                    spans.push(detail.clone().dim());
+                }
+                Line::from(spans)
+            }
+            SubagentDisplayEntryKind::Item => {
+                let mut spans: Vec<Span> = Vec::new();
+                spans.push("  • ".dim());
+                spans.push(self.label.clone().bold());
+                if let Some(status) = self.status {
+                    spans.push(" ".into());
+                    spans.push(status_to_span(status));
+                }
+                if let Some(detail) = &self.detail {
+                    spans.push(" — ".dim());
+                    let shimmer = shimmer_spans(detail);
+                    if shimmer.is_empty() {
+                        spans.push(detail.clone().into());
+                    } else {
+                        spans.extend(shimmer);
+                    }
+                }
+                Line::from(spans)
+            }
+        };
+        line.render(area, buf);
+    }
+}
+
+fn status_to_span(status: SubagentLifecycleStatus) -> Span<'static> {
+    match status {
+        SubagentLifecycleStatus::Queued => "queued".blue(),
+        SubagentLifecycleStatus::Running => "running".green(),
+        SubagentLifecycleStatus::Ready => "ready".cyan(),
+        SubagentLifecycleStatus::Idle => "idle".dim(),
+        SubagentLifecycleStatus::Failed => "failed".red(),
+        SubagentLifecycleStatus::Canceled => "canceled".magenta(),
     }
 }
 

@@ -10,11 +10,14 @@ mod event_processor_with_human_output;
 pub mod event_processor_with_jsonl_output;
 pub mod exec_events;
 
+use anyhow::Context;
+use anyhow::anyhow;
 pub use cli::Cli;
 use codex_core::AuthManager;
 use codex_core::BUILT_IN_OSS_MODEL_PROVIDER_ID;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
+use codex_core::RolloutRecorder;
 use codex_core::auth::enforce_login_restrictions;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
@@ -26,6 +29,7 @@ use codex_core::protocol::Op;
 use codex_core::protocol::SessionSource;
 use codex_ollama::DEFAULT_OSS_MODEL;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::user_input::UserInput;
 use event_processor_with_human_output::EventProcessorWithHumanOutput;
 use event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
@@ -34,6 +38,7 @@ use serde_json::Value;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 use supports_color::Stream;
 use tracing::debug;
 use tracing::error;
@@ -77,6 +82,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         // Allow prompt before the subcommand by falling back to the parent-level prompt
         // when the Resume subcommand did not provide its own prompt.
         Some(ExecCommand::Resume(args)) => args.prompt.clone().or(prompt),
+        Some(ExecCommand::Fork(args)) => args.prompt.clone().or(prompt),
         None => prompt,
     };
 
@@ -177,6 +183,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         base_instructions: None,
         developer_instructions: None,
         compact_prompt: None,
+        max_active_subagents: None,
+        root_agent_uses_user_messages: None,
         include_apply_patch_tool: None,
         show_raw_agent_reasoning: oss.then_some(true),
         tools_web_search_request: None,
@@ -257,27 +265,39 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
     );
     let conversation_manager = ConversationManager::new(auth_manager.clone(), SessionSource::Exec);
 
-    // Handle resume subcommand by resolving a rollout path and using explicit resume API.
+    // Handle resume/fork subcommands by resolving a rollout path and using the explicit resume API.
     let NewConversation {
         conversation_id: _,
         conversation,
         session_configured,
-    } = if let Some(ExecCommand::Resume(args)) = command {
-        let resume_path = resolve_resume_path(&config, &args).await?;
-
-        if let Some(path) = resume_path {
-            conversation_manager
-                .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
-                .await?
-        } else {
+    } = match &command {
+        Some(ExecCommand::Resume(args)) => {
+            let resume_path = resolve_resume_path(&config, args).await?;
+            if let Some(path) = resume_path {
+                conversation_manager
+                    .resume_conversation_from_rollout(config.clone(), path, auth_manager.clone())
+                    .await?
+            } else {
+                conversation_manager
+                    .new_conversation(config.clone())
+                    .await?
+            }
+        }
+        Some(ExecCommand::Fork(args)) => {
+            let path = resolve_fork_path(&config, &args.session_id).await?;
+            fork_conversation_from_rollout(
+                &conversation_manager,
+                &config,
+                auth_manager.clone(),
+                path,
+            )
+            .await?
+        }
+        None => {
             conversation_manager
                 .new_conversation(config.clone())
                 .await?
         }
-    } else {
-        conversation_manager
-            .new_conversation(config.clone())
-            .await?
     };
     // Print the effective configuration and prompt so users can see what Codex
     // is using.
@@ -399,6 +419,32 @@ async fn resolve_resume_path(
     } else {
         Ok(None)
     }
+}
+
+async fn resolve_fork_path(config: &Config, session_id: &str) -> anyhow::Result<PathBuf> {
+    find_conversation_path_by_id_str(&config.codex_home, session_id)
+        .await?
+        .ok_or_else(|| anyhow!("No session with id {session_id} found"))
+}
+
+async fn fork_conversation_from_rollout(
+    conversation_manager: &ConversationManager,
+    config: &Config,
+    auth_manager: Arc<AuthManager>,
+    path: PathBuf,
+) -> anyhow::Result<NewConversation> {
+    let history = RolloutRecorder::get_rollout_history(&path)
+        .await
+        .context("failed to read session history for fork")?;
+    let fork_history = match history {
+        InitialHistory::New => InitialHistory::New,
+        InitialHistory::Resumed(resumed) => InitialHistory::Forked(resumed.history),
+        InitialHistory::Forked(items) => InitialHistory::Forked(items),
+    };
+    conversation_manager
+        .resume_conversation_with_history(config.clone(), fork_history, auth_manager)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 fn load_output_schema(path: Option<PathBuf>) -> Option<Value> {

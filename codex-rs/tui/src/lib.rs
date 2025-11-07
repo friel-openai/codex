@@ -155,6 +155,8 @@ pub async fn run_main(
         base_instructions: None,
         developer_instructions: None,
         compact_prompt: None,
+        max_active_subagents: None,
+        root_agent_uses_user_messages: None,
         include_apply_patch_tool: None,
         show_raw_agent_reasoning: cli.oss.then_some(true),
         tools_web_search_request: None,

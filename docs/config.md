@@ -35,6 +35,7 @@ Optional and experimental capabilities are toggled via the `[features]` table in
 [features]
 streamable_shell = true          # enable the streamable exec tool
 web_search_request = true        # allow the model to request web searches
+# subagent_tools = true          # expose spawn/fork/list/await/logs/prune subagent tools
 # view_image_tool defaults to true; omit to keep defaults
 ```
 
@@ -48,6 +49,7 @@ Supported features:
 | `apply_patch_freeform`                    |  false  | Beta         | Include the freeform `apply_patch` tool              |
 | `view_image_tool`                         |  true   | Stable       | Include the `view_image` tool                        |
 | `web_search_request`                      |  false  | Stable       | Allow the model to issue web searches                |
+| `subagent_tools`                          |  false  | Experimental | Enable built-in subagent orchestration tools         |
 | `experimental_sandbox_command_assessment` |  false  | Experimental | Enable model-based sandbox risk assessment           |
 | `ghost_commit`                            |  false  | Experimental | Create a ghost commit each turn                      |
 | `enable_experimental_windows_sandbox`     |  false  | Experimental | Use the Windows restricted-token sandbox             |
@@ -340,6 +342,17 @@ sandbox_mode = "danger-full-access"
 This is reasonable to use if Codex is running in an environment that provides its own sandboxing (such as a Docker container) such that further sandboxing is unnecessary.
 
 Though using this option may also be necessary if you try to use Codex in environments where its native sandboxing mechanisms are unsupported, such as older Linux kernels or on Windows.
+
+### max_active_subagents
+
+Controls how many subagents (spawned or forked conversations) may run concurrently within a single Codex session. Each child keeps one slot until it is pruned or fully shut down, so this setting bounds concurrency as well as memory use.
+
+```toml
+# allow at most eight active subagents (default)
+max_active_subagents = 8
+```
+
+When the limit is reached, additional `spawn`/`fork` tool calls immediately return an error telling the model to prune or await existing children before launching new work. Set this to `0` to block subagents entirely, or raise it if you have headroom for more parallel tasks.
 
 ### tools.\*
 

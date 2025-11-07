@@ -37,6 +37,7 @@ pub(crate) async fn run_codex_conversation_interactive(
     parent_ctx: Arc<TurnContext>,
     cancel_token: CancellationToken,
     initial_history: Option<InitialHistory>,
+    source: SubAgentSource,
 ) -> Result<Codex, CodexErr> {
     let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
@@ -45,7 +46,7 @@ pub(crate) async fn run_codex_conversation_interactive(
         config,
         auth_manager,
         initial_history.unwrap_or(InitialHistory::New),
-        SessionSource::SubAgent(SubAgentSource::Review),
+        SessionSource::SubAgent(source),
     )
     .await?;
     let codex = Arc::new(codex);
@@ -106,6 +107,7 @@ pub(crate) async fn run_codex_conversation_one_shot(
         parent_ctx,
         child_cancel.clone(),
         initial_history,
+        SubAgentSource::Review,
     )
     .await?;
 

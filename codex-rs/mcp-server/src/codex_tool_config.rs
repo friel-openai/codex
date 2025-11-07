@@ -166,6 +166,8 @@ impl CodexToolCallParam {
             base_instructions,
             developer_instructions,
             compact_prompt,
+            max_active_subagents: None,
+            root_agent_uses_user_messages: None,
             include_apply_patch_tool: None,
             show_raw_agent_reasoning: None,
             tools_web_search_request: None,
