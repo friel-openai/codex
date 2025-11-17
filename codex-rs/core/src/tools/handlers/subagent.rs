@@ -10,6 +10,7 @@ use chrono::Utc;
 use codex_protocol::AgentId;
 use codex_protocol::ConversationId;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::protocol::ExecCommandSource;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::json;
@@ -71,7 +72,9 @@ impl ExecEventLogger {
                     command: command.clone(),
                     cwd,
                     parsed_cmd,
+                    source: ExecCommandSource::Agent,
                     is_user_shell_command: false,
+                    interaction_input: None,
                 }),
             )
             .await;
@@ -197,7 +200,7 @@ fn summarize_tool_output(tool_name: &str, _arguments: &str, output: &ToolOutput)
                 .and_then(|v| v.as_str())
                 .unwrap_or("<unlabeled>")
                 .to_string();
-            let kind = if tool_name == "subagent_spawn" {
+            if tool_name == "subagent_spawn" {
                 SubagentRender::Spawn {
                     label,
                     model,
@@ -209,8 +212,7 @@ fn summarize_tool_output(tool_name: &str, _arguments: &str, output: &ToolOutput)
                     model,
                     summary,
                 }
-            };
-            kind
+            }
         }
         "subagent_send_message" => {
             let summary = parsed
@@ -228,14 +230,14 @@ fn summarize_tool_output(tool_name: &str, _arguments: &str, output: &ToolOutput)
             let count = parsed
                 .get("sessions")
                 .and_then(|v| v.as_array())
-                .map(|a| a.len())
+                .map(Vec::len)
                 .unwrap_or(0);
             SubagentRender::List { count }
         }
         "subagent_await" => {
             let timed_out = parsed
                 .get("timed_out")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             let label = parsed
                 .get("metadata")
@@ -291,7 +293,10 @@ fn summarize_tool_output(tool_name: &str, _arguments: &str, output: &ToolOutput)
             SubagentRender::Prune { counts }
         }
         "subagent_logs" => {
-            let returned = parsed.get("returned").and_then(|v| v.as_u64()).unwrap_or(0);
+            let returned = parsed
+                .get("returned")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
             let events = parsed
                 .get("events")
                 .cloned()
@@ -305,16 +310,18 @@ fn summarize_tool_output(tool_name: &str, _arguments: &str, output: &ToolOutput)
                 let text = render_logs_as_text_with_max_lines(
                     session_id,
                     &entries,
-                    parsed.get("earliest_ms").and_then(|v| v.as_i64()),
-                    parsed.get("latest_ms").and_then(|v| v.as_i64()),
+                    parsed
+                        .get("earliest_ms")
+                        .and_then(serde_json::Value::as_i64),
+                    parsed.get("latest_ms").and_then(serde_json::Value::as_i64),
                     returned as usize,
                     parsed
                         .get("total_available")
-                        .and_then(|v| v.as_u64())
+                        .and_then(serde_json::Value::as_u64)
                         .unwrap_or(0) as usize,
                     parsed
                         .get("more_available")
-                        .and_then(|v| v.as_bool())
+                        .and_then(serde_json::Value::as_bool)
                         .unwrap_or(false),
                     30,
                     PageDirection::Backward,
@@ -1279,6 +1286,7 @@ fn render_logs_lines(
 
 /// Render a single paged view over a log window, returning both the rendered
 /// lines and cursor information for paging.
+#[allow(clippy::too_many_arguments)]
 pub fn render_logs_page(
     session_id: ConversationId,
     logs: &[LogEntry],
@@ -1394,6 +1402,7 @@ pub fn render_logs_as_text(
 /// paging direction. This is intended for UIs that want a bounded transcript
 /// (for example, the last 30 lines) while still reusing the same aggregation
 /// logic as the full-text renderer.
+#[allow(clippy::too_many_arguments)]
 pub fn render_logs_as_text_with_max_lines(
     session_id: ConversationId,
     logs: &[LogEntry],

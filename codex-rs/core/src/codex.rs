@@ -721,47 +721,6 @@ impl Session {
         Ok(sess)
     }
 
-    /// Export subagent state for reparenting into a new session (user-initiated fork).
-    pub(crate) async fn export_subagents_for_fork(
-        &self,
-    ) -> crate::subagents::SubagentReparentBundle {
-        let pending_approvals = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.take_pending_approvals()
-                }
-                None => HashMap::new(),
-            }
-        };
-        self.services
-            .subagent_manager
-            .export_for_fork(pending_approvals)
-            .await
-    }
-
-    /// Adopt previously exported subagent state and retarget emitters to this session.
-    pub(crate) async fn adopt_subagents_after_fork(
-        &self,
-        mut bundle: crate::subagents::SubagentReparentBundle,
-    ) {
-        let turn = self.new_turn(SessionSettingsUpdate::default()).await;
-        if !bundle.pending_approvals.is_empty() {
-            let mut active = self.active_turn.lock().await;
-            if let Some(at) = active.as_mut() {
-                let mut ts = at.turn_state.lock().await;
-                ts.extend_pending_approvals(std::mem::take(&mut bundle.pending_approvals));
-            }
-        }
-        if let Some(me) = crate::session_index::get(&self.conversation_id) {
-            self.services
-                .subagent_manager
-                .adopt_from_bundle(bundle, me, turn)
-                .await;
-        }
-    }
-
     pub(crate) fn get_tx_event(&self) -> Sender<Event> {
         self.tx_event.clone()
     }
@@ -845,16 +804,7 @@ impl Session {
                 let mut reconstructed_history =
                     self.reconstruct_history_from_rollout(&turn_context, &rollout_items);
 
-                let is_subagent_session = {
-                    let state = self.state.lock().await;
-                    matches!(
-                        state.session_configuration.session_source,
-                        SessionSource::SubAgent(_)
-                    )
-                };
-
-                if is_subagent_session
-                    && let Some(dev) = turn_context.developer_instructions.as_deref()
+                if let Some(dev) = turn_context.developer_instructions.as_deref()
                     && !dev.trim().is_empty()
                 {
                     let dev_item: ResponseItem = DeveloperInstructions::new(dev.to_string()).into();

@@ -30,7 +30,6 @@ pub(crate) struct ToolsConfig {
     pub apply_patch_tool_type: Option<ApplyPatchToolType>,
     pub web_search_request: bool,
     pub include_view_image_tool: bool,
-    pub experimental_unified_exec_tool: bool,
     pub include_subagent_tools: bool,
     pub experimental_supported_tools: Vec<String>,
 }
@@ -50,9 +49,8 @@ impl ToolsConfig {
         let include_web_search_request = features.enabled(Feature::WebSearchRequest);
         let include_view_image_tool = features.enabled(Feature::ViewImageTool);
         let include_subagent_tools = features.enabled(Feature::SubagentTools);
-        let experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
 
-        let shell_type = if experimental_unified_exec_tool {
+        let shell_type = if features.enabled(Feature::UnifiedExec) {
             ConfigShellToolType::UnifiedExec
         } else if features.enabled(Feature::ShellCommandTool) {
             ConfigShellToolType::ShellCommand
@@ -77,7 +75,6 @@ impl ToolsConfig {
             apply_patch_tool_type,
             web_search_request: include_web_search_request,
             include_view_image_tool,
-            experimental_unified_exec_tool,
             include_subagent_tools,
             experimental_supported_tools: model_family.experimental_supported_tools.clone(),
         }

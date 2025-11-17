@@ -71,21 +71,6 @@ pub(crate) struct TurnState {
 }
 
 impl TurnState {
-    pub(crate) fn take_pending_approvals(
-        &mut self,
-    ) -> HashMap<String, oneshot::Sender<ReviewDecision>> {
-        let mut approvals = HashMap::new();
-        std::mem::swap(&mut self.pending_approvals, &mut approvals);
-        approvals
-    }
-
-    pub(crate) fn extend_pending_approvals(
-        &mut self,
-        approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
-    ) {
-        self.pending_approvals.extend(approvals);
-    }
-
     pub(crate) fn insert_pending_approval(
         &mut self,
         key: String,

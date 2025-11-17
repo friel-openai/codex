@@ -99,7 +99,7 @@ async fn root_subagent_tool_emits_exec_events() -> Result<()> {
 
     let begin = begin.expect("exec begin");
     assert_eq!(
-        begin.command.get(0).map(String::as_str),
+        begin.command.first().map(String::as_str),
         Some("subagent_list")
     );
     let end = end.expect("exec end");

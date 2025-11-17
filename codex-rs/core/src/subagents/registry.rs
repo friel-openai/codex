@@ -92,6 +92,7 @@ impl SubagentRegistry {
         Self::default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_spawn(
         &self,
         session_id: ConversationId,
@@ -115,6 +116,7 @@ impl SubagentRegistry {
         self.insert_if_absent(metadata).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_fork(
         &self,
         session_id: ConversationId,
@@ -138,6 +140,7 @@ impl SubagentRegistry {
         self.insert_if_absent(metadata).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn register_resume(
         &self,
         session_id: ConversationId,

@@ -50,6 +50,7 @@ use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
+use tracing::warn;
 
 use crate::config::profile::ConfigProfile;
 use toml::Value as TomlValue;
@@ -72,6 +73,8 @@ pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub(crate) const DEFAULT_MAX_ACTIVE_SUBAGENTS: usize = 8;
+pub(crate) const MIN_MAX_ACTIVE_SUBAGENTS: usize = 1;
+pub(crate) const MAX_MAX_ACTIVE_SUBAGENTS: usize = 64;
 
 pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -256,6 +259,7 @@ pub struct Config {
     pub experimental_sandbox_command_assessment: bool,
 
     /// If set to `true`, used only the experimental unified exec tool.
+    #[allow(dead_code)]
     pub use_experimental_unified_exec_tool: bool,
 
     /// If set to `true`, use the experimental official Rust MCP client.
@@ -1062,6 +1066,7 @@ impl Config {
 
         let include_apply_patch_tool_flag = features.enabled(Feature::ApplyPatchFreeform);
         let tools_web_search_request = features.enabled(Feature::WebSearchRequest);
+        #[allow(dead_code)]
         let use_experimental_unified_exec_tool = features.enabled(Feature::UnifiedExec);
         let use_experimental_use_rmcp_client = features.enabled(Feature::RmcpClient);
         let experimental_sandbox_command_assessment =
@@ -1149,10 +1154,29 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
-        let max_active_subagents = max_active_subagents
+        let raw_max_active_subagents = max_active_subagents
             .or(config_profile.max_active_subagents)
             .or(cfg.max_active_subagents)
             .unwrap_or(DEFAULT_MAX_ACTIVE_SUBAGENTS);
+
+        if raw_max_active_subagents < MIN_MAX_ACTIVE_SUBAGENTS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!(
+                    "max_active_subagents must be at least {MIN_MAX_ACTIVE_SUBAGENTS}, got {raw_max_active_subagents}"
+                ),
+            ));
+        }
+
+        let max_active_subagents = if raw_max_active_subagents > MAX_MAX_ACTIVE_SUBAGENTS {
+            warn!(
+                "max_active_subagents clamped from {} to {}",
+                raw_max_active_subagents, MAX_MAX_ACTIVE_SUBAGENTS
+            );
+            MAX_MAX_ACTIVE_SUBAGENTS
+        } else {
+            raw_max_active_subagents
+        };
 
         let root_agent_uses_user_messages = root_agent_uses_user_messages
             .or(cfg.root_agent_uses_user_messages)
@@ -1632,6 +1656,37 @@ trust_level = "trusted"
         assert_eq!(config.max_active_subagents, 2);
 
         Ok(())
+    }
+
+    #[test]
+    fn max_active_subagents_validates_bounds() {
+        let temp_dir = TempDir::new().expect("tempdir");
+
+        // Below minimum should error.
+        let cfg_zero = ConfigToml {
+            max_active_subagents: Some(0),
+            ..ConfigToml::default()
+        };
+        let err = Config::load_from_base_config_with_overrides(
+            cfg_zero,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )
+        .expect_err("expected invalid input error");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+
+        // Above ceiling should clamp.
+        let cfg_high = ConfigToml {
+            max_active_subagents: Some(MAX_MAX_ACTIVE_SUBAGENTS + 10),
+            ..ConfigToml::default()
+        };
+        let config = Config::load_from_base_config_with_overrides(
+            cfg_high,
+            ConfigOverrides::default(),
+            temp_dir.path().to_path_buf(),
+        )
+        .expect("clamped config");
+        assert_eq!(config.max_active_subagents, MAX_MAX_ACTIVE_SUBAGENTS);
     }
 
     #[test]

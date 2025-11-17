@@ -36,7 +36,6 @@ use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::SubagentLifecycleEvent;
-use codex_core::protocol::SubagentLifecycleOrigin;
 use codex_core::protocol::SubagentLifecycleStatus;
 use codex_core::protocol::SubagentSummary;
 use codex_core::protocol::TaskCompleteEvent;
@@ -329,10 +328,7 @@ impl From<&str> for UserMessage {
 #[derive(Clone)]
 struct SubagentUiState {
     agent_id: AgentId,
-    parent_agent_id: Option<AgentId>,
     session_id: ConversationId,
-    parent_session_id: Option<ConversationId>,
-    origin: SubagentLifecycleOrigin,
     status: SubagentLifecycleStatus,
     label: Option<String>,
     summary: Option<String>,
@@ -346,10 +342,7 @@ impl From<SubagentSummary> for SubagentUiState {
     fn from(summary: SubagentSummary) -> Self {
         Self {
             agent_id: summary.agent_id,
-            parent_agent_id: summary.parent_agent_id,
             session_id: summary.session_id,
-            parent_session_id: summary.parent_session_id,
-            origin: summary.origin,
             status: summary.status,
             label: summary.label,
             summary: summary.summary,
@@ -400,10 +393,7 @@ impl ChatWidget {
         self.bottom_pane.update_status_header(header);
     }
 
-    fn on_subagent_lifecycle(&mut self, event: SubagentLifecycleEvent, from_replay: bool) {
-        if from_replay {
-            return;
-        }
+    fn on_subagent_lifecycle(&mut self, event: SubagentLifecycleEvent, _from_replay: bool) {
         let Some(parent_id) = self.conversation_id else {
             return;
         };
@@ -1223,9 +1213,8 @@ impl ChatWidget {
 
     pub(crate) fn handle_exec_begin_now(&mut self, ev: ExecCommandBeginEvent) {
         // Ensure the status indicator is visible while the command runs.
-        let is_user_shell_command = ev
-            .is_user_shell_command
-            || matches!(ev.source, ExecCommandSource::UserShell);
+        let is_user_shell_command =
+            ev.is_user_shell_command || matches!(ev.source, ExecCommandSource::UserShell);
         self.running_commands.insert(
             ev.call_id.clone(),
             RunningCommand {

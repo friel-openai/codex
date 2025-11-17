@@ -1,5 +1,6 @@
 use super::*;
 use crate::history_cell::HistoryCell;
+use codex_core::protocol::ExecCommandSource;
 use insta::assert_snapshot;
 
 fn render(cell: &ExecCell) -> String {

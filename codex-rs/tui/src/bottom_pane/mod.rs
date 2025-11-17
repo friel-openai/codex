@@ -563,7 +563,7 @@ impl SubagentSummariesWidget {
 
 impl Renderable for SubagentSummariesWidget {
     fn desired_height(&self, _width: u16) -> u16 {
-        self.entries.len() as u16
+        self.entries.len().min(u16::MAX as usize) as u16
     }
 
     fn render(&self, area: Rect, buf: &mut Buffer) {
@@ -613,11 +613,17 @@ impl SubagentDisplayEntry {
                 }
                 if let Some(detail) = &self.detail {
                     spans.push(" — ".dim());
-                    let shimmer = shimmer_spans(detail);
-                    if shimmer.is_empty() {
-                        spans.push(detail.clone().into());
+                    let should_shimmer =
+                        matches!(self.status, Some(SubagentLifecycleStatus::Running));
+                    if should_shimmer {
+                        let shimmer = shimmer_spans(detail);
+                        if shimmer.is_empty() {
+                            spans.push(detail.clone().into());
+                        } else {
+                            spans.extend(shimmer);
+                        }
                     } else {
-                        spans.extend(shimmer);
+                        spans.push(detail.clone().into());
                     }
                 }
                 Line::from(spans)
@@ -722,6 +728,75 @@ mod tests {
         assert!(
             !r0.contains("Working"),
             "overlay should not render above modal"
+        );
+    }
+
+    #[test]
+    fn subagent_summary_height_clamped() {
+        let mut widget = SubagentSummariesWidget::default();
+        let entries: Vec<SubagentDisplayEntry> = (0..100_000)
+            .map(|i| SubagentDisplayEntry {
+                kind: SubagentDisplayEntryKind::Item,
+                label: format!("agent-{i}"),
+                detail: None,
+                status: None,
+            })
+            .collect();
+        widget.update(entries);
+        assert_eq!(widget.desired_height(80), u16::MAX);
+    }
+
+    #[test]
+    fn subagent_shimmer_only_when_running() {
+        let mut entry = SubagentDisplayEntry {
+            kind: SubagentDisplayEntryKind::Item,
+            label: "agent".to_string(),
+            detail: Some("working".to_string()),
+            status: Some(SubagentLifecycleStatus::Ready),
+        };
+        let area = Rect::new(0, 0, 40, 1);
+        let mut buf = Buffer::empty(area);
+        entry.render(area, &mut buf);
+        let line_ready = snapshot_buffer(&buf);
+
+        entry.status = Some(SubagentLifecycleStatus::Running);
+        let mut buf_run = Buffer::empty(area);
+        entry.render(area, &mut buf_run);
+        let line_run = snapshot_buffer(&buf_run);
+
+        assert!(
+            line_run.contains("working"),
+            "running state should still show detail text"
+        );
+        assert!(
+            line_run != line_ready,
+            "running state should visually differ (shimmer) from non-running"
+        );
+    }
+
+    #[test]
+    fn subagent_count_persists_across_status_hide() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+        });
+
+        pane.set_task_running(true);
+        pane.set_subagent_counts(3);
+        pane.hide_status_indicator();
+        pane.ensure_status_indicator();
+
+        let area = Rect::new(0, 0, 60, 2);
+        let snapshot = render_snapshot(&pane, area);
+        assert!(
+            snapshot.contains("3 subagents"),
+            "subagent count should survive hide/show of status indicator"
         );
     }
 

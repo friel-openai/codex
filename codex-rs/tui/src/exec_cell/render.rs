@@ -389,22 +389,27 @@ impl ExecCell {
             .output
             .as_ref()
             .and_then(|o| subagent_from_formatted_output(&o.formatted_output))
-            .or_else(|| call.subagent.clone());
+            .or_else(|| call.subagent.clone())
+            .or_else(|| {
+                subagent_header_parts(&call.command).map(|(verb, rest)| SubagentCell::Raw {
+                    text: format!(
+                        "{}{}",
+                        verb,
+                        rest.map(|r| format!(" {r}")).unwrap_or_default()
+                    ),
+                })
+            });
 
-        let Some((verb, rest)) = render
-            .as_ref()
-            .and_then(header_parts)
-            .or_else(|| subagent_header_parts(&call.command))
-        else {
+        let Some((verb, rest)) = render.as_ref().and_then(header_parts) else {
             return vec![Line::from(vec![bullet, " ".into(), "Subagent".bold()])];
         };
 
         let mut header: Vec<Span<'static>> = vec![bullet, " ".into(), verb.bold()];
-        if let Some(rest) = rest {
-            if !rest.is_empty() {
-                header.push(" ".into());
-                header.push(rest.into());
-            }
+        if let Some(rest) = rest
+            && !rest.is_empty()
+        {
+            header.push(" ".into());
+            header.push(rest.into());
         }
 
         let mut lines = vec![Line::from(header)];

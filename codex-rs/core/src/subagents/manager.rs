@@ -18,7 +18,6 @@ use codex_protocol::protocol::AgentInboxEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
-use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::SubagentCreatedEvent;
@@ -39,7 +38,6 @@ use tokio::sync::Notify;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
-use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -69,17 +67,6 @@ pub struct SubagentManager {
     permits: Arc<Semaphore>,
     next_agent_id: Arc<AtomicU64>,
     root_agent_uses_user_messages: bool,
-}
-
-// Bundle of subagent state for reparenting during a user-initiated fork.
-pub(crate) struct SubagentReparentBundle {
-    pub(crate) metas: Vec<SubagentMetadata>,
-    pub(crate) runs: HashMap<ConversationId, Arc<ManagedSubagent>>,
-    pub(crate) completions: HashMap<ConversationId, SubagentCompletion>,
-    pub(crate) completed_logs: HashMap<ConversationId, Vec<LoggedEvent>>,
-    pub(crate) completed_inbox: HashMap<ConversationId, Vec<InboxMessage>>,
-    pub(crate) next_agent_id: AgentId,
-    pub(crate) pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
 }
 
 impl SubagentManager {
@@ -119,140 +106,6 @@ impl SubagentManager {
             permits: Arc::new(Semaphore::new(max_active_subagents)),
             next_agent_id: Arc::new(AtomicU64::new(1)),
             root_agent_uses_user_messages,
-        }
-    }
-
-    /// Export all subagent state owned by this manager so it can be adopted by a new parent session.
-    pub(crate) async fn export_for_fork(
-        &self,
-        pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
-    ) -> SubagentReparentBundle {
-        let next_agent_id = self.next_agent_id.load(Ordering::Relaxed);
-        // Snapshot and drain registry entries.
-        let metas = self.registry.list().await;
-        for m in &metas {
-            // Remove entries from registry; adopt will reinsert into the new one
-            let _ = self.registry.remove(&m.session_id).await;
-        }
-
-        // Drain running children and related maps.
-        let runs = {
-            let mut guard = self.runs.write().await;
-            std::mem::take(&mut *guard)
-        };
-        let completions = {
-            let mut guard = self.completions.write().await;
-            std::mem::take(&mut *guard)
-        };
-        let completed_logs = {
-            let mut guard = self.completed_logs.write().await;
-            std::mem::take(&mut *guard)
-        };
-        let completed_inbox = {
-            let mut guard = self.completed_inbox.write().await;
-            std::mem::take(&mut *guard)
-        };
-        // Emitters are parent-session specific; they will be rebuilt on adopt.
-        {
-            let mut emit = self.emitters.write().await;
-            emit.clear();
-        }
-
-        SubagentReparentBundle {
-            metas,
-            runs,
-            completions,
-            completed_logs,
-            completed_inbox,
-            next_agent_id,
-            pending_approvals,
-        }
-    }
-
-    /// Adopt previously exported state into this manager and retarget emitters to the new parent.
-    pub(crate) async fn adopt_from_bundle(
-        &self,
-        mut bundle: SubagentReparentBundle,
-        new_parent_session: Arc<Session>,
-        new_parent_turn: Arc<TurnContext>,
-    ) {
-        // Rewrite parent_session_id and insert metadata.
-        for mut meta in bundle.metas.drain(..) {
-            meta.parent_session_id = Some(new_parent_session.conversation_id());
-            let _ = self.registry.register_imported(meta).await;
-        }
-
-        // Install runs, completions, logs.
-        {
-            let mut guard = self.runs.write().await;
-            for (id, run) in bundle.runs.into_iter() {
-                guard.insert(id, run);
-            }
-        }
-        // Rebind permits for adopted children so the new semaphore enforces limits
-        for run in self.runs.read().await.values() {
-            match self.permits.clone().try_acquire_owned() {
-                Ok(permit) => {
-                    run.replace_permit(permit).await;
-                }
-                Err(err) => {
-                    tracing::warn!("Failed to rebind permit for adopted subagent: {err}");
-                }
-            }
-        }
-        {
-            let mut guard = self.completions.write().await;
-            for (id, c) in bundle.completions.into_iter() {
-                guard.insert(id, c);
-            }
-        }
-        {
-            let mut guard = self.completed_logs.write().await;
-            for (id, logs) in bundle.completed_logs.into_iter() {
-                guard.insert(id, logs);
-            }
-        }
-        {
-            let mut guard = self.completed_inbox.write().await;
-            for (id, inbox) in bundle.completed_inbox.into_iter() {
-                guard.insert(id, inbox);
-            }
-        }
-
-        // Rebuild emitters so child events route to the new parent stream.
-        {
-            let metas = self.registry.list().await;
-            let mut emit = self.emitters.write().await;
-            for m in metas.into_iter() {
-                emit.insert(
-                    m.session_id,
-                    SubagentEmitter {
-                        session: Arc::clone(&new_parent_session),
-                        turn: Arc::clone(&new_parent_turn),
-                    },
-                );
-            }
-        }
-
-        // Continue allocating IDs from the previous manager's counter to preserve stability.
-        let previous = bundle.next_agent_id;
-        let mut current = self.next_agent_id.load(Ordering::Relaxed);
-        while previous > current {
-            match self.next_agent_id.compare_exchange(
-                current,
-                previous,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => break,
-                Err(actual) => current = actual,
-            }
-        }
-
-        // Emit a status update so UIs see children under the new parent.
-        for m in self.registry.list().await.iter() {
-            self.emit_status(&m.session_id, m.status).await;
-            self.emit_inbox(m).await;
         }
     }
 
@@ -322,7 +175,7 @@ impl SubagentManager {
         messages: &[InboxMessage],
         completion: Option<&SubagentCompletion>,
     ) {
-        if messages.is_empty() {
+        if messages.is_empty() && completion.is_none() {
             return;
         }
 
@@ -423,7 +276,7 @@ impl SubagentManager {
                 }
             }
 
-            if !from_others.is_empty() {
+            if !from_others.is_empty() || completion.is_some() {
                 self.inject_synthetic_await_into_session(
                     &child_session_id,
                     metadata.agent_id,
@@ -679,7 +532,7 @@ impl SubagentManager {
                 request.model,
             )
             .await;
-        let _runtime = match launch {
+        let runtime = match launch {
             Ok(runtime) => runtime,
             Err(err) => {
                 self.emit_deleted(&session_id).await;
@@ -689,8 +542,36 @@ impl SubagentManager {
             }
         };
 
-        self.update_status_and_emit(&session_id, SubagentStatus::Ready)
-            .await;
+        let trimmed_prompt = request
+            .prompt
+            .as_ref()
+            .map(|p| p.trim())
+            .filter(|p| !p.is_empty())
+            .map(str::to_string);
+
+        match trimmed_prompt {
+            Some(prompt) => match runtime.submit_prompt(&prompt).await {
+                Ok(true) => {
+                    self.update_status_and_emit(&session_id, SubagentStatus::Running)
+                        .await;
+                }
+                Ok(false) => {
+                    self.update_status_and_emit(&session_id, SubagentStatus::Ready)
+                        .await;
+                }
+                Err(err) => {
+                    self.handle_launch_failure(session_id, runtime.clone(), err)
+                        .await;
+                    return Err(SubagentManagerError::LaunchFailed(
+                        "failed to submit initial prompt".to_string(),
+                    ));
+                }
+            },
+            None => {
+                self.update_status_and_emit(&session_id, SubagentStatus::Ready)
+                    .await;
+            }
+        }
 
         let final_metadata = self.registry.get(&session_id).await.unwrap_or(metadata);
         Ok(final_metadata)
@@ -737,15 +618,8 @@ impl SubagentManager {
             .await
             .ok_or(SubagentManagerError::NotFound)?;
 
-        {
-            let mut completions = self.completions.write().await;
-            completions.remove(&session_id);
-        }
-        {
-            let mut logs = self.completed_logs.write().await;
-            logs.remove(&session_id);
-        }
-
+        // Keep prior completions/logs intact so history reflects previous turns.
+        // Only clear the runtime's in-flight completion latch so new work can proceed.
         runtime.clear_completion();
         let trimmed_prompt = prompt
             .as_ref()
@@ -758,7 +632,6 @@ impl SubagentManager {
                 .enqueue_message(PendingMessage {
                     prompt: trimmed_prompt.clone(),
                     interrupt,
-                    sender_agent_id,
                 })
                 .await;
             self.update_inbox_counts_and_emit(&session_id, counts.0, counts.1)
@@ -1026,8 +899,13 @@ impl SubagentManager {
             completions.insert(*session_id, completion.clone());
         }
 
-        self.update_status_and_emit(session_id, SubagentStatus::Idle)
-            .await;
+        let desired_status = status_from_completion(&completion);
+        if let Some(current) = self.registry.get(session_id).await
+            && current.status != desired_status
+        {
+            self.update_status_and_emit(session_id, desired_status)
+                .await;
+        }
 
         let metadata = self
             .registry
@@ -1600,9 +1478,7 @@ impl SubagentManager {
                 }
             }
         }
-        // Ensure cleanup in case finalization was skipped; this is a no-op if the entry
-        // was already removed inside finalize_terminal.
-        self.remove_runtime_entry(&session_id).await;
+        // Runtime is kept alive after completion so messages can resume; no auto-removal here.
     }
 
     async fn run_mailbox(&self, session_id: ConversationId, runtime: Arc<ManagedSubagent>) {
@@ -1610,11 +1486,7 @@ impl SubagentManager {
         let notify = runtime.mailbox_notifier();
         loop {
             while let Some((message, counts)) = runtime.dequeue_message().await {
-                let PendingMessage {
-                    prompt,
-                    interrupt,
-                    sender_agent_id: _,
-                } = message;
+                let PendingMessage { prompt, interrupt } = message;
                 self.update_inbox_counts_and_emit(&session_id, counts.0, counts.1)
                     .await;
                 if interrupt {
@@ -1680,8 +1552,8 @@ impl SubagentManager {
             let mut inbox = self.completed_inbox.write().await;
             inbox.insert(*session_id, inbox_snapshot);
         }
-        runtime.shutdown().await;
-        self.remove_runtime_entry(session_id).await;
+        // Do NOT shut down or remove the runtime; keep it alive so further messages
+        // can be processed unless explicitly pruned or canceled.
     }
 
     async fn remove_runtime_entry(
@@ -1789,7 +1661,6 @@ pub struct InboxMessage {
 struct PendingMessage {
     prompt: Option<String>,
     interrupt: bool,
-    sender_agent_id: AgentId,
 }
 
 #[derive(Default)]
@@ -1837,7 +1708,7 @@ struct ManagedSubagent {
     inbox_notify: Arc<Notify>,
     mailbox: Mutex<MailboxQueues>,
     mailbox_notify: Arc<Notify>,
-    permit: Mutex<Option<OwnedSemaphorePermit>>,
+    _permit: Mutex<Option<OwnedSemaphorePermit>>,
 }
 
 impl ManagedSubagent {
@@ -1855,13 +1726,8 @@ impl ManagedSubagent {
             inbox_notify: Arc::new(Notify::new()),
             mailbox: Mutex::new(MailboxQueues::default()),
             mailbox_notify: Arc::new(Notify::new()),
-            permit: Mutex::new(Some(permit)),
+            _permit: Mutex::new(Some(permit)),
         }
-    }
-
-    async fn replace_permit(&self, permit: OwnedSemaphorePermit) {
-        let mut guard = self.permit.lock().await;
-        *guard = Some(permit);
     }
 
     async fn submit_prompt(&self, prompt: &str) -> Result<bool, CodexErr> {
@@ -2210,6 +2076,7 @@ fn is_terminal_status(status: SubagentStatus) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use codex_protocol::protocol::TurnAbortReason;
 
     #[tokio::test]
     async fn await_completion_marks_status_completed() {
@@ -2235,6 +2102,39 @@ mod tests {
             .await
             .expect("await result");
         assert_eq!(result.metadata.status, SubagentStatus::Idle);
+    }
+
+    #[tokio::test]
+    async fn await_completion_preserves_failed_and_canceled() {
+        let registry = Arc::new(SubagentRegistry::new());
+        let manager = SubagentManager::new(Arc::clone(&registry), 1, false);
+        let session_id = ConversationId::new();
+        registry
+            .register_spawn(session_id, None, None, 1, 0, None, None)
+            .await;
+
+        for completion in [
+            SubagentCompletion::Failed {
+                message: "boom".to_string(),
+            },
+            SubagentCompletion::Canceled {
+                reason: TurnAbortReason::Interrupted,
+            },
+        ] {
+            {
+                let mut completions = manager.completions.write().await;
+                completions.insert(session_id, completion.clone());
+            }
+
+            let result = manager
+                .await_completion(&session_id, None)
+                .await
+                .expect("await result");
+
+            let expected_status = status_from_completion(&completion);
+            assert_eq!(result.metadata.status, expected_status);
+            assert_eq!(status_from_completion(&completion), expected_status);
+        }
     }
 
     #[tokio::test]

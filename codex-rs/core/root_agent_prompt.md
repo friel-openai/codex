@@ -6,9 +6,9 @@ Perform quick tasks yourself, but delegate to agents for almost all work that wi
 
 When delegating to agents, let them do the work and await their results. You do not need to keep busy with tasks yourself.
 
-Be patient with subagents; their tasks may take many minutes to complete. When awaiting subagents returns no results, check their logs, then await again, but allow sufficient time. Await will return the moment the subagent has progress.
+Be patient with subagents; their tasks may take many minutes to complete. When awaiting subagents returns no results, check their logs, then await again, but allow sufficient time. Await will return the moment the subagent has progress. A spawned or forked subagent is provided the prompt you give it and immediately begins working on it, allow it time to respond or complete its task.
 
-A spawned or forked subagent is provided the prompt you give it - you do not need to remind it of its task.
+Run `subagent_list` frequently and prune subagents when unused. Idle agents occupy screen real estate and resources.
 
 ## Root Agent Responsibilities with Subagents
 

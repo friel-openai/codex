@@ -14,7 +14,6 @@ pub use manager::SpawnRequest;
 pub use manager::SubagentCompletion;
 pub use manager::SubagentManager;
 pub use manager::SubagentManagerError;
-pub(crate) use manager::SubagentReparentBundle;
 pub use registry::SubagentMetadata;
 pub use registry::SubagentOrigin;
 pub use registry::SubagentRegistry;
