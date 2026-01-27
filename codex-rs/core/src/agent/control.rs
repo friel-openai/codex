@@ -1,5 +1,8 @@
+use super::watchdog::WatchdogManager;
+use super::watchdog::WatchdogRegistration;
 use crate::agent::AgentStatus;
 use crate::agent::guards::Guards;
+use crate::config::Config;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::thread_manager::ThreadManagerState;
@@ -18,33 +21,55 @@ use tokio::sync::watch;
 /// An `AgentControl` instance is shared per "user session" which means the same `AgentControl`
 /// is used for every sub-agent spawned by Codex. By doing so, we make sure the guards are
 /// scoped to a user session.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AgentControl {
     /// Weak handle back to the global thread registry/state.
     /// This is `Weak` to avoid reference cycles and shadow persistence of the form
     /// `ThreadManagerState -> CodexThread -> Session -> SessionServices -> ThreadManagerState`.
     manager: Weak<ThreadManagerState>,
-    state: Arc<Guards>,
+    guards: Arc<Guards>,
+    watchdogs: Arc<WatchdogManager>,
+}
+
+impl Default for AgentControl {
+    fn default() -> Self {
+        let manager = Weak::new();
+        let guards = Arc::new(Guards::default());
+        let watchdogs = WatchdogManager::new(manager.clone(), Arc::clone(&guards));
+        Self::from_parts(manager, guards, watchdogs)
+    }
 }
 
 impl AgentControl {
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
     pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
+        let guards = Arc::new(Guards::default());
+        let watchdogs = WatchdogManager::new(manager.clone(), Arc::clone(&guards));
+        watchdogs.start();
+        Self::from_parts(manager, guards, watchdogs)
+    }
+
+    pub(crate) fn from_parts(
+        manager: Weak<ThreadManagerState>,
+        guards: Arc<Guards>,
+        watchdogs: Arc<WatchdogManager>,
+    ) -> Self {
         Self {
             manager,
-            ..Default::default()
+            guards,
+            watchdogs,
         }
     }
 
     /// Spawn a new agent thread and submit the initial prompt.
     pub(crate) async fn spawn_agent(
         &self,
-        config: crate::config::Config,
+        config: Config,
         prompt: String,
         session_source: Option<SessionSource>,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
-        let reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let reservation = self.guards.reserve_spawn_slot(config.agent_max_threads)?;
 
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match session_source {
@@ -75,7 +100,7 @@ impl AgentControl {
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
-        let reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let reservation = self.guards.reserve_spawn_slot(config.agent_max_threads)?;
 
         let resumed_thread = state
             .resume_thread_from_rollout_with_source(
@@ -91,6 +116,43 @@ impl AgentControl {
         state.notify_thread_created(resumed_thread.thread_id);
 
         Ok(resumed_thread.thread_id)
+    }
+
+    /// Fork an existing agent thread and submit a prompt to the fork.
+    pub(crate) async fn fork_agent(
+        &self,
+        config: Config,
+        prompt: String,
+        parent_thread_id: ThreadId,
+        nth_user_message: usize,
+        session_source: SessionSource,
+    ) -> CodexResult<ThreadId> {
+        let state = self.upgrade()?;
+        let reservation = self.guards.reserve_spawn_slot(config.agent_max_threads)?;
+
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        parent_thread.flush_rollout().await;
+        let rollout_path = parent_thread.rollout_path().ok_or_else(|| {
+            CodexErr::UnsupportedOperation(format!(
+                "rollout history unavailable for thread {parent_thread_id}"
+            ))
+        })?;
+
+        let new_thread = state
+            .fork_thread_with_source(
+                nth_user_message,
+                config,
+                self.clone(),
+                rollout_path,
+                session_source,
+            )
+            .await?;
+        reservation.commit(new_thread.thread_id);
+        state.notify_thread_created(new_thread.thread_id);
+
+        self.send_prompt(new_thread.thread_id, prompt).await?;
+
+        Ok(new_thread.thread_id)
     }
 
     /// Send a `user` prompt to an existing agent thread.
@@ -115,7 +177,7 @@ impl AgentControl {
             .await;
         if matches!(result, Err(CodexErr::InternalAgentDied)) {
             let _ = state.remove_thread(&agent_id).await;
-            self.state.release_spawned_thread(agent_id);
+            self.guards.release_spawned_thread(agent_id);
         }
         result
     }
@@ -131,7 +193,7 @@ impl AgentControl {
         let state = self.upgrade()?;
         let result = state.send_op(agent_id, Op::Shutdown {}).await;
         let _ = state.remove_thread(&agent_id).await;
-        self.state.release_spawned_thread(agent_id);
+        self.guards.release_spawned_thread(agent_id);
         result
     }
 
@@ -155,6 +217,25 @@ impl AgentControl {
         let state = self.upgrade()?;
         let thread = state.get_thread(agent_id).await?;
         Ok(thread.subscribe_status())
+    }
+
+    pub(crate) async fn register_watchdog(
+        &self,
+        registration: WatchdogRegistration,
+    ) -> CodexResult<()> {
+        self.watchdogs.register(registration).await
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) async fn run_watchdogs_once_for_tests(&self) {
+        self.watchdogs.run_once().await;
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) async fn force_watchdog_due_for_tests(&self, target_thread_id: ThreadId) {
+        self.watchdogs.force_due_for_tests(target_thread_id).await;
     }
 
     fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
