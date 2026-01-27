@@ -87,16 +87,31 @@ impl ToolHandler for CollabHandler {
 
 mod spawn {
     use super::*;
+    use crate::agent::AgentControl;
     use crate::agent::AgentRole;
-
+    use crate::agent::DEFAULT_WATCHDOG_INTERVAL_S;
+    use crate::agent::MAX_THREAD_SPAWN_DEPTH;
+    use crate::agent::WatchdogRegistration;
     use crate::agent::exceeds_thread_spawn_depth_limit;
     use crate::agent::next_thread_spawn_depth;
     use std::sync::Arc;
+
+    #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+    #[serde(rename_all = "snake_case")]
+    enum SpawnMode {
+        #[default]
+        Spawn,
+        Fork,
+        Watchdog,
+    }
 
     #[derive(Debug, Deserialize)]
     struct SpawnAgentArgs {
         message: String,
         agent_type: Option<AgentRole>,
+        #[serde(default, alias = "mode")]
+        spawn_mode: SpawnMode,
+        interval_s: Option<i64>,
     }
 
     #[derive(Debug, Serialize)]
@@ -111,6 +126,11 @@ mod spawn {
         arguments: String,
     ) -> Result<ToolOutput, FunctionCallError> {
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+        let spawn_mode = args.spawn_mode;
+        let interval_s = match spawn_mode {
+            SpawnMode::Watchdog => Some(watchdog_interval(args.interval_s)?),
+            _ => None,
+        };
         let agent_role = args.agent_type.unwrap_or(AgentRole::Default);
         let prompt = args.message;
         if prompt.trim().is_empty() {
@@ -144,17 +164,40 @@ mod spawn {
         agent_role
             .apply_to_config(&mut config)
             .map_err(FunctionCallError::RespondToModel)?;
-
-        let result = session
-            .services
-            .agent_control
-            .spawn_agent(
-                config,
-                prompt.clone(),
-                Some(thread_spawn_source(session.conversation_id, child_depth)),
-            )
-            .await
-            .map_err(collab_spawn_error);
+        let spawn_source = thread_spawn_source(session.conversation_id, child_depth);
+        let agent_control = &session.services.agent_control;
+        let result = match spawn_mode {
+            SpawnMode::Spawn => {
+                agent_control
+                    .spawn_agent(config, prompt.clone(), Some(spawn_source))
+                    .await
+            }
+            SpawnMode::Fork => {
+                agent_control
+                    .fork_agent(
+                        config,
+                        prompt.clone(),
+                        session.conversation_id,
+                        usize::MAX,
+                        spawn_source,
+                    )
+                    .await
+            }
+            SpawnMode::Watchdog => {
+                let interval_s = interval_s.unwrap_or(DEFAULT_WATCHDOG_INTERVAL_S);
+                spawn_watchdog(
+                    agent_control,
+                    config,
+                    prompt.clone(),
+                    session.conversation_id,
+                    child_depth,
+                    interval_s,
+                    spawn_source,
+                )
+                .await
+            }
+        }
+        .map_err(collab_spawn_error);
         let (new_thread_id, status) = match &result {
             Ok(thread_id) => (
                 Some(*thread_id),
@@ -188,6 +231,43 @@ mod spawn {
             body: FunctionCallOutputBody::Text(content),
             success: Some(true),
         })
+    }
+
+    fn watchdog_interval(interval_s: Option<i64>) -> Result<i64, FunctionCallError> {
+        let interval = interval_s.unwrap_or(DEFAULT_WATCHDOG_INTERVAL_S);
+        if interval <= 0 {
+            return Err(FunctionCallError::RespondToModel(
+                "interval_s must be greater than zero".to_string(),
+            ));
+        }
+        Ok(interval)
+    }
+
+    async fn spawn_watchdog(
+        agent_control: &AgentControl,
+        config: Config,
+        prompt: String,
+        owner_thread_id: ThreadId,
+        child_depth: i32,
+        interval_s: i64,
+        spawn_source: SessionSource,
+    ) -> crate::error::Result<ThreadId> {
+        let target_thread_id = agent_control
+            .spawn_agent(config.clone(), prompt.clone(), Some(spawn_source))
+            .await?;
+        let registration = WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth,
+            interval_s,
+            prompt,
+            config,
+        };
+        if let Err(err) = agent_control.register_watchdog(registration).await {
+            let _ = agent_control.shutdown_agent(target_thread_id).await;
+            return Err(err);
+        }
+        Ok(target_thread_id)
     }
 }
 
@@ -709,9 +789,10 @@ fn agent_id(id: &str) -> Result<ThreadId, FunctionCallError> {
 
 fn collab_spawn_error(err: CodexErr) -> FunctionCallError {
     match err {
-        CodexErr::UnsupportedOperation(_) => {
+        CodexErr::UnsupportedOperation(reason) if reason == "thread manager dropped" => {
             FunctionCallError::RespondToModel("collab manager unavailable".to_string())
         }
+        CodexErr::UnsupportedOperation(reason) => FunctionCallError::RespondToModel(reason),
         err => FunctionCallError::RespondToModel(format!("collab spawn failed: {err}")),
     }
 }
@@ -801,7 +882,10 @@ mod tests {
     use crate::ThreadManager;
     use crate::agent::MAX_THREAD_SPAWN_DEPTH;
     use crate::built_in_model_providers;
+    use crate::client::ModelClient;
+    use crate::codex::Session;
     use crate::codex::make_session_and_context;
+    use crate::config::test_config;
     use crate::config::types::ShellEnvironmentPolicy;
     use crate::function_tool::FunctionCallError;
     use crate::protocol::AskForApproval;
@@ -809,12 +893,15 @@ mod tests {
     use crate::protocol::SandboxPolicy;
     use crate::protocol::SessionSource;
     use crate::protocol::SubAgentSource;
+    use crate::rollout::RolloutRecorder;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::ThreadId;
+    use codex_protocol::user_input::UserInput;
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use serde_json::json;
     use std::collections::HashMap;
+    use std::fs::create_dir_all;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -848,6 +935,37 @@ mod tests {
             CodexAuth::from_api_key("dummy"),
             built_in_model_providers()["openai"].clone(),
         )
+    }
+
+    async fn managed_session_and_turn() -> (ThreadManager, Arc<Session>, Arc<TurnContext>) {
+        let config = test_config();
+        create_dir_all(&config.codex_home).expect("create codex home");
+        let manager = ThreadManager::with_models_provider_and_home(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        );
+        let root = manager
+            .start_thread(config)
+            .await
+            .expect("start root thread");
+        let session = root.thread.session_for_tests();
+        let turn = session.new_default_turn().await;
+        (manager, session, turn)
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnResult {
+        agent_id: String,
+    }
+
+    fn parse_spawn_result(output: ToolOutput) -> ThreadId {
+        let ToolOutput::Function { content, .. } = output else {
+            panic!("expected function output");
+        };
+        let result: SpawnResult =
+            serde_json::from_str(&content).expect("spawn result should be json");
+        ThreadId::from_string(&result.agent_id).expect("spawn result should contain a thread id")
     }
 
     #[tokio::test]
@@ -954,6 +1072,131 @@ mod tests {
                 "Agent depth limit reached. Solve the task yourself.".to_string()
             )
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_fork_mode_preserves_history() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let root_thread_id = session.conversation_id;
+        let root_thread = manager
+            .get_thread(root_thread_id)
+            .await
+            .expect("root thread should exist");
+        let seed_text = "seed-history-for-fork-mode";
+        let _ = root_thread
+            .submit(Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: seed_text.to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+            })
+            .await
+            .expect("seed user input should submit");
+        root_thread.flush_rollout().await;
+
+        let invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "forked prompt",
+                "spawn_mode": "fork"
+            })),
+        );
+        let output = CollabHandler
+            .handle(invocation)
+            .await
+            .expect("fork mode should succeed");
+        let fork_thread_id = parse_spawn_result(output);
+        let fork_thread = manager
+            .get_thread(fork_thread_id)
+            .await
+            .expect("forked thread should exist");
+        let fork_path = fork_thread.rollout_path().expect("fork rollout path");
+        let fork_history = RolloutRecorder::get_rollout_history(&fork_path)
+            .await
+            .expect("fork rollout history");
+        let fork_items = fork_history.get_rollout_items();
+        let serialized = serde_json::to_string(&fork_items).expect("serialize fork rollout");
+        assert!(serialized.contains(seed_text));
+
+        let _ = fork_thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("shutdown fork should submit");
+        let _ = root_thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("shutdown root should submit");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_watchdog_mode_spawns_helper() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let mut created_rx = manager.subscribe_thread_created();
+        let invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog target prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let mut helper_thread_id = None;
+        let mut attempts = 0;
+        while attempts < 3 {
+            attempts += 1;
+            let recv = timeout(Duration::from_secs(1), created_rx.recv())
+                .await
+                .expect("thread created event should arrive")
+                .expect("thread id should be present");
+            if recv != target_thread_id {
+                helper_thread_id = Some(recv);
+                break;
+            }
+        }
+        let helper_thread_id = helper_thread_id.expect("watchdog should spawn a helper thread");
+        let _helper_thread = manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("helper thread should exist");
+
+        let ops = manager.captured_ops();
+        let helper_prompt = ops.into_iter().find_map(|(id, op)| {
+            if id != helper_thread_id {
+                return None;
+            }
+            match op {
+                Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    _ => None,
+                }),
+                _ => None,
+            }
+        });
+        let helper_prompt = helper_prompt.expect("helper prompt should be captured");
+        assert!(helper_prompt.contains(&target_thread_id.to_string()));
+        assert!(helper_prompt.contains("watchdog target prompt"));
     }
 
     #[tokio::test]

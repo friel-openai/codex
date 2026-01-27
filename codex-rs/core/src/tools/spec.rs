@@ -469,6 +469,24 @@ fn create_spawn_agent_tool() -> ToolSpec {
             )),
         },
     );
+    properties.insert(
+        "spawn_mode".to_string(),
+        JsonSchema::String {
+            description: Some(
+                "Optional spawn_mode: spawn (default), fork (preserve history), or watchdog (attach a watchdog that can fork helpers)."
+                    .to_string(),
+            ),
+        },
+    );
+    properties.insert(
+        "interval_s".to_string(),
+        JsonSchema::Number {
+            description: Some(
+                "Optional watchdog interval in seconds. Only used when spawn_mode=watchdog; must be greater than zero."
+                    .to_string(),
+            ),
+        },
+    );
 
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),

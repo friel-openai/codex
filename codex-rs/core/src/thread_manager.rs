@@ -323,15 +323,33 @@ impl ThreadManager {
         config: Config,
         path: PathBuf,
     ) -> CodexResult<NewThread> {
-        let history = RolloutRecorder::get_rollout_history(&path).await?;
-        let history = truncate_before_nth_user_message(history, nth_user_message);
         self.state
-            .spawn_thread(
+            .fork_thread_with_source(
+                nth_user_message,
                 config,
-                history,
-                Arc::clone(&self.state.auth_manager),
                 self.agent_control(),
-                Vec::new(),
+                path,
+                self.state.session_source.clone(),
+            )
+            .await
+    }
+
+    /// Fork an existing thread while explicitly controlling the session source of the
+    /// forked thread.
+    pub async fn fork_thread_with_source(
+        &self,
+        nth_user_message: usize,
+        config: Config,
+        path: PathBuf,
+        session_source: SessionSource,
+    ) -> CodexResult<NewThread> {
+        self.state
+            .fork_thread_with_source(
+                nth_user_message,
+                config,
+                self.agent_control(),
+                path,
+                session_source,
             )
             .await
     }
@@ -503,6 +521,26 @@ impl ThreadManagerState {
 
     pub(crate) fn notify_thread_created(&self, thread_id: ThreadId) {
         let _ = self.thread_created_tx.send(thread_id);
+    }
+
+    pub(crate) async fn fork_thread_with_source(
+        &self,
+        nth_user_message: usize,
+        config: Config,
+        agent_control: AgentControl,
+        path: PathBuf,
+        session_source: SessionSource,
+    ) -> CodexResult<NewThread> {
+        let history = RolloutRecorder::get_rollout_history(&path).await?;
+        let history = truncate_before_nth_user_message(history, nth_user_message);
+        self.spawn_thread_with_source(
+            config,
+            history,
+            Arc::clone(&self.auth_manager),
+            agent_control,
+            session_source,
+        )
+        .await
     }
 }
 
