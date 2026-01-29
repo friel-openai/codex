@@ -9,6 +9,7 @@
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use codex_chatgpt::connectors::AppInfo;
 use codex_common::approval_presets::ApprovalPreset;
@@ -21,6 +22,7 @@ use codex_protocol::openai_models::ModelPreset;
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::SubagentStatusCell;
 
 use codex_core::features::Feature;
 use codex_core::protocol::AskForApproval;
@@ -51,6 +53,11 @@ pub(crate) struct ConnectorsSnapshot {
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     CodexEvent(Event),
+    /// Event emitted from a non-primary thread.
+    ThreadEvent {
+        thread_id: ThreadId,
+        event: Event,
+    },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
@@ -116,6 +123,11 @@ pub(crate) enum AppEvent {
     StartCommitAnimation,
     StopCommitAnimation,
     CommitTick,
+    StartSubagentAnimation,
+    StopSubagentAnimation,
+    SubagentTick,
+    UpdateSubagentPanel(Arc<SubagentStatusCell>),
+    ClearSubagentPanel,
 
     /// Update the current reasoning effort in the running app and widget.
     UpdateReasoningEffort(Option<ReasoningEffort>),

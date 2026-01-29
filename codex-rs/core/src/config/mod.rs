@@ -2,6 +2,7 @@ use crate::auth::AuthCredentialsStoreMode;
 use crate::config::edit::ConfigEdit;
 use crate::config::edit::ConfigEditsBuilder;
 use crate::config::types::AppsConfigToml;
+use crate::config::types::CollabInboxDeliveryRole;
 use crate::config::types::DEFAULT_OTEL_ENVIRONMENT;
 use crate::config::types::History;
 use crate::config::types::McpServerConfig;
@@ -274,6 +275,9 @@ pub struct Config {
 
     /// Maximum number of agent threads that can be open concurrently.
     pub agent_max_threads: Option<usize>,
+
+    /// How inbound collaboration messages are delivered to non-subagent threads.
+    pub collab_inbox_delivery_role: CollabInboxDeliveryRole,
 
     /// Directory containing all Codex state (defaults to `~/.codex` but can be
     /// overridden by the `CODEX_HOME` environment variable).
@@ -1109,6 +1113,9 @@ pub struct AgentsToml {
     /// When unset, no limit is enforced.
     #[schemars(range(min = 1))]
     pub max_threads: Option<usize>,
+
+    /// How inbound collaboration messages are delivered to non-subagent threads.
+    pub inbox_delivery_role: Option<CollabInboxDeliveryRole>,
 }
 
 impl From<ToolsToml> for Tools {
@@ -1542,6 +1549,11 @@ impl Config {
             .as_ref()
             .and_then(|agents| agents.max_threads)
             .or(DEFAULT_AGENT_MAX_THREADS);
+        let collab_inbox_delivery_role = cfg
+            .agents
+            .as_ref()
+            .and_then(|agents| agents.inbox_delivery_role)
+            .unwrap_or_default();
         if agent_max_threads == Some(0) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -1653,7 +1665,6 @@ impl Config {
             mcp_servers,
             exec_policy: _,
             enforce_residency,
-            network: _network_requirements,
         } = requirements;
 
         apply_requirement_constrained_value(
@@ -1724,6 +1735,7 @@ impl Config {
                 .collect(),
             tool_output_token_limit: cfg.tool_output_token_limit,
             agent_max_threads,
+            collab_inbox_delivery_role,
             codex_home,
             log_dir,
             config_layer_stack,
@@ -4018,6 +4030,7 @@ model_verbosity = "high"
                 project_doc_fallback_filenames: Vec::new(),
                 tool_output_token_limit: None,
                 agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+                collab_inbox_delivery_role: CollabInboxDeliveryRole::Developer,
                 codex_home: fixture.codex_home(),
                 log_dir: fixture.codex_home().join("log"),
                 config_layer_stack: Default::default(),
@@ -4106,6 +4119,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            collab_inbox_delivery_role: CollabInboxDeliveryRole::Developer,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
@@ -4209,6 +4223,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            collab_inbox_delivery_role: CollabInboxDeliveryRole::Developer,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
@@ -4298,6 +4313,7 @@ model_verbosity = "high"
             project_doc_fallback_filenames: Vec::new(),
             tool_output_token_limit: None,
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
+            collab_inbox_delivery_role: CollabInboxDeliveryRole::Developer,
             codex_home: fixture.codex_home(),
             log_dir: fixture.codex_home().join("log"),
             config_layer_stack: Default::default(),
@@ -4380,7 +4396,6 @@ model_verbosity = "high"
             mcp_servers: None,
             rules: None,
             enforce_residency: None,
-            network: None,
         };
         let requirement_source = crate::config_loader::RequirementSource::Unknown;
         let requirement_source_for_error = requirement_source.clone();
@@ -4938,7 +4953,6 @@ mcp_oauth_callback_port = 5678
             mcp_servers: None,
             rules: None,
             enforce_residency: None,
-            network: None,
         };
 
         let config = ConfigBuilder::default()

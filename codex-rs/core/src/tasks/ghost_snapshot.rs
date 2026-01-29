@@ -4,13 +4,13 @@ use crate::protocol::WarningEvent;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
+use crate::turn_input::TurnInput;
 use async_trait::async_trait;
 use codex_git::CreateGhostCommitOptions;
 use codex_git::GhostSnapshotReport;
 use codex_git::GitToolingError;
 use codex_git::create_ghost_commit_with_report;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::user_input::UserInput;
 use codex_utils_readiness::Readiness;
 use codex_utils_readiness::Token;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ impl SessionTask for GhostSnapshotTask {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        _input: Vec<UserInput>,
+        _input: TurnInput,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         tokio::task::spawn(async move {

@@ -25,7 +25,9 @@ In this upstream tool surface, you do that by spawning an agent in watchdog mode
 - Put the user’s goal in the `message` with as much detail and nuance as possible (verbatim and then clarifications).
 - Choose a short, reasonable `interval_s` so the watchdog checks in regularly.
 
-A watchdog is attached to the spawned target agent. When the target agent is closed, the watchdog stops as well.
+A watchdog monitors your current agent. It should only check in after you have been idle for roughly `interval_s` seconds.
+
+The tool returns a watchdog handle ID. Keep the handle alive so the watchdog can keep ticking. When you no longer need the watchdog, stop it by calling `close_agent` on that handle ID.
 
 Treat watchdog guidance as high-priority direction. When a watchdog message reveals a missing action, take that action before narrating status to the user.
 
@@ -65,6 +67,7 @@ Send follow-up instructions or course corrections to an existing agent.
 Guidance:
 - Use `interrupt = true` sparingly. Prefer to let agents complete coherent chunks of work.
 - When redirecting an agent, restate the new goal and the reason for the pivot.
+- Messages arriving from other agents are injected as non-user context (by default a synthetic tool output), so treat them as agent updates rather than user input.
 
 ### 3) `wait`
 

@@ -7,11 +7,11 @@ use crate::protocol::UndoStartedEvent;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
+use crate::turn_input::TurnInput;
 use async_trait::async_trait;
 use codex_git::RestoreGhostCommitOptions;
 use codex_git::restore_ghost_commit_with_options;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 use tracing::error;
 use tracing::info;
@@ -35,7 +35,7 @@ impl SessionTask for UndoTask {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        _input: Vec<UserInput>,
+        _input: TurnInput,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         let _ = session

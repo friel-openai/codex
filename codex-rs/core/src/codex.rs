@@ -184,6 +184,7 @@ use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
 use crate::rollout::map_session_init_error;
 use crate::rollout::metadata;
+use crate::rollout::truncation;
 use crate::shell;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::skills::SkillError;
@@ -1341,6 +1342,16 @@ impl Session {
                 self.flush_rollout().await;
             }
             InitialHistory::Forked(rollout_items) => {
+                let mut rollout_items = rollout_items;
+                let fork_reference = rollout_items.iter().find_map(|item| match item {
+                    RolloutItem::ForkReference(_) => Some(item.clone()),
+                    _ => None,
+                });
+                // During the initial fork startup we already have inherited rollout items in
+                // memory; keep fork references for on-disk resume, but do not recurse into them
+                // during this startup reconstruction.
+                rollout_items.retain(|item| !matches!(item, RolloutItem::ForkReference(_)));
+
                 // Always add response items to conversation history
                 let reconstructed_history = self
                     .reconstruct_history_from_rollout(&turn_context, &rollout_items)
@@ -1357,8 +1368,12 @@ impl Session {
                     state.set_token_info(Some(info));
                 }
 
-                // If persisting, persist all rollout items as-is (recorder filters)
-                if !rollout_items.is_empty() {
+                // For forks, persist only a compact fork reference marker instead of copying all
+                // inherited rollout items into the child rollout file.
+                if let Some(reference) = fork_reference {
+                    self.persist_rollout_items(&[reference]).await;
+                } else if !rollout_items.is_empty() {
+                    // Fallback for older forks that do not include a fork reference marker.
                     self.persist_rollout_items(&rollout_items).await;
                 }
 
@@ -2058,34 +2073,89 @@ impl Session {
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
         let mut history = ContextManager::new();
-        for item in rollout_items {
-            match item {
-                RolloutItem::ResponseItem(response_item) => {
-                    history.record_items(
-                        std::iter::once(response_item),
-                        turn_context.truncation_policy,
-                    );
-                }
-                RolloutItem::Compacted(compacted) => {
-                    if let Some(replacement) = &compacted.replacement_history {
-                        history.replace(replacement.clone());
-                    } else {
-                        let user_messages = collect_user_messages(history.raw_items());
-                        let rebuilt = compact::build_compacted_history(
-                            self.build_initial_context(turn_context).await,
-                            &user_messages,
-                            &compacted.message,
-                        );
-                        history.replace(rebuilt);
+        self.apply_rollout_items_to_history(&mut history, turn_context, rollout_items, 0)
+            .await;
+        history.raw_items().to_vec()
+    }
+
+    async fn apply_rollout_items_to_history(
+        &self,
+        history: &mut ContextManager,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+        initial_depth: usize,
+    ) {
+        const MAX_FORK_REFERENCE_DEPTH: usize = 8;
+
+        let mut stack: Vec<(Vec<RolloutItem>, usize, usize)> =
+            vec![(rollout_items.to_vec(), 0, initial_depth)];
+
+        while let Some((items, mut idx, depth)) = stack.pop() {
+            while idx < items.len() {
+                match &items[idx] {
+                    RolloutItem::ForkReference(reference) => {
+                        if depth >= MAX_FORK_REFERENCE_DEPTH {
+                            warn!(
+                                "skipping fork reference recursion at depth {} for {:?}",
+                                depth, reference.rollout_path
+                            );
+                            idx += 1;
+                            continue;
+                        }
+
+                        let parent_history =
+                            match RolloutRecorder::get_rollout_history(&reference.rollout_path)
+                                .await
+                            {
+                                Ok(history) => history,
+                                Err(err) => {
+                                    warn!(
+                                        "failed to load fork reference rollout {:?}: {err}",
+                                        reference.rollout_path
+                                    );
+                                    idx += 1;
+                                    continue;
+                                }
+                            };
+                        let parent_items = parent_history.get_rollout_items();
+                        let parent_items =
+                            truncation::truncate_rollout_before_nth_user_message_from_start(
+                                &parent_items,
+                                reference.nth_user_message,
+                            );
+
+                        // Process referenced parent items before continuing with the current list.
+                        stack.push((items, idx + 1, depth));
+                        stack.push((parent_items, 0, depth + 1));
+                        break;
                     }
+                    RolloutItem::ResponseItem(response_item) => {
+                        history.record_items(
+                            std::iter::once(response_item),
+                            turn_context.truncation_policy,
+                        );
+                    }
+                    RolloutItem::Compacted(compacted) => {
+                        if let Some(replacement) = &compacted.replacement_history {
+                            history.replace(replacement.clone());
+                        } else {
+                            let user_messages = collect_user_messages(history.raw_items());
+                            let rebuilt = compact::build_compacted_history(
+                                self.build_initial_context(turn_context).await,
+                                &user_messages,
+                                &compacted.message,
+                            );
+                            history.replace(rebuilt);
+                        }
+                    }
+                    RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+                        history.drop_last_n_user_turns(rollback.num_turns);
+                    }
+                    _ => {}
                 }
-                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
-                    history.drop_last_n_user_turns(rollback.num_turns);
-                }
-                _ => {}
+                idx += 1;
             }
         }
-        history.raw_items().to_vec()
     }
 
     pub(crate) async fn process_compacted_history(
