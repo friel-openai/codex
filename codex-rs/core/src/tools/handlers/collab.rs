@@ -1,10 +1,9 @@
 use crate::agent::AgentStatus;
-use crate::agent::exceeds_thread_spawn_depth_limit;
+use crate::agent::WatchdogParentCompactionResult;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
 use crate::error::CodexErr;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -15,7 +14,6 @@ use crate::tools::registry::ToolKind;
 use async_trait::async_trait;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
@@ -33,8 +31,6 @@ use serde::Serialize;
 
 pub struct CollabHandler;
 
-/// Minimum wait timeout to prevent tight polling loops from burning CPU.
-pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = 300_000;
 
@@ -75,6 +71,10 @@ impl ToolHandler for CollabHandler {
         match tool_name.as_str() {
             "spawn_agent" => spawn::handle(session, turn, call_id, arguments).await,
             "send_input" => send_input::handle(session, turn, call_id, arguments).await,
+            "compact_parent_context" => {
+                compact_parent_context::handle(session, turn, call_id, arguments).await
+            }
+            "list_agents" => list_agents::handle(session, turn, call_id, arguments).await,
             "resume_agent" => resume_agent::handle(session, turn, call_id, arguments).await,
             "wait" => wait::handle(session, turn, call_id, arguments).await,
             "close_agent" => close_agent::handle(session, turn, call_id, arguments).await,
@@ -138,12 +138,19 @@ mod spawn {
                 "Empty message can't be sent to an agent".to_string(),
             ));
         }
-        let session_source = turn.session_source.clone();
+        let session_source = turn.client.get_session_source();
+        if matches!(spawn_mode, SpawnMode::Watchdog)
+            && matches!(session_source, SessionSource::SubAgent(_))
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs can only be spawned by root agents".to_string(),
+            ));
+        }
         let child_depth = next_thread_spawn_depth(&session_source);
         if exceeds_thread_spawn_depth_limit(child_depth) {
-            return Err(FunctionCallError::RespondToModel(
-                "Agent depth limit reached. Solve the task yourself.".to_string(),
-            ));
+            return Err(FunctionCallError::RespondToModel(format!(
+                "agent depth limit reached: max depth is {MAX_THREAD_SPAWN_DEPTH}"
+            )));
         }
         session
             .send_event(
@@ -156,15 +163,15 @@ mod spawn {
                 .into(),
             )
             .await;
-        let mut config = build_agent_spawn_config(
-            &session.get_base_instructions().await,
-            turn.as_ref(),
-            child_depth,
-        )?;
+        let mut config =
+            build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
         agent_role
             .apply_to_config(&mut config)
             .map_err(FunctionCallError::RespondToModel)?;
-        let spawn_source = thread_spawn_source(session.conversation_id, child_depth);
+        let spawn_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: session.conversation_id,
+            depth: child_depth,
+        });
         let agent_control = &session.services.agent_control;
         let result = match spawn_mode {
             SpawnMode::Spawn => {
@@ -178,6 +185,7 @@ mod spawn {
                         config,
                         prompt.clone(),
                         session.conversation_id,
+                        // Preserve full history for forked agents so model-side caching remains effective.
                         usize::MAX,
                         spawn_source,
                     )
@@ -228,8 +236,9 @@ mod spawn {
         })?;
 
         Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
+            content,
             success: Some(true),
+            content_items: None,
         })
     }
 
@@ -253,8 +262,14 @@ mod spawn {
         spawn_source: SessionSource,
     ) -> crate::error::Result<ThreadId> {
         let target_thread_id = agent_control
-            .spawn_agent(config.clone(), prompt.clone(), Some(spawn_source))
+            .spawn_agent_handle(config.clone(), Some(spawn_source))
             .await?;
+        let superseded_before_register = agent_control
+            .unregister_watchdogs_for_owner(owner_thread_id)
+            .await;
+        for superseded_thread_id in superseded_before_register {
+            let _ = agent_control.shutdown_agent(superseded_thread_id).await;
+        }
         let registration = WatchdogRegistration {
             owner_thread_id,
             target_thread_id,
@@ -263,9 +278,15 @@ mod spawn {
             prompt,
             config,
         };
-        if let Err(err) = agent_control.register_watchdog(registration).await {
-            let _ = agent_control.shutdown_agent(target_thread_id).await;
-            return Err(err);
+        let superseded_after_register = match agent_control.register_watchdog(registration).await {
+            Ok(superseded_after_register) => superseded_after_register,
+            Err(err) => {
+                let _ = agent_control.shutdown_agent(target_thread_id).await;
+                return Err(err);
+            }
+        };
+        for superseded_thread_id in superseded_after_register {
+            let _ = agent_control.shutdown_agent(superseded_thread_id).await;
         }
         Ok(target_thread_id)
     }
@@ -277,7 +298,7 @@ mod send_input {
 
     #[derive(Debug, Deserialize)]
     struct SendInputArgs {
-        id: String,
+        id: Option<String>,
         message: String,
         #[serde(default)]
         interrupt: bool,
@@ -295,7 +316,14 @@ mod send_input {
         arguments: String,
     ) -> Result<ToolOutput, FunctionCallError> {
         let args: SendInputArgs = parse_arguments(&arguments)?;
-        let receiver_thread_id = agent_id(&args.id)?;
+        let receiver_thread_id = match args.id.as_deref().map(str::trim) {
+            Some(id) if !id.is_empty() && !matches!(id, "parent" | "root") => agent_id(id)?,
+            _ => session.parent_thread_id().await.ok_or_else(|| {
+                FunctionCallError::RespondToModel(
+                    "send_input requires an id when no parent agent is available".to_string(),
+                )
+            })?,
+        };
         let prompt = args.message;
         if prompt.trim().is_empty() {
             return Err(FunctionCallError::RespondToModel(
@@ -325,7 +353,7 @@ mod send_input {
         let result = session
             .services
             .agent_control
-            .send_prompt(receiver_thread_id, prompt.clone())
+            .send_collab_message(receiver_thread_id, session.conversation_id, prompt.clone())
             .await
             .map_err(|err| collab_agent_error(receiver_thread_id, err));
         let status = session
@@ -347,14 +375,169 @@ mod send_input {
             )
             .await;
         let submission_id = result?;
+        session.mark_turn_used_collab_send_input();
 
         let content = serde_json::to_string(&SendInputResult { submission_id }).map_err(|err| {
             FunctionCallError::Fatal(format!("failed to serialize send_input result: {err}"))
         })?;
 
         Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
+            content,
             success: Some(true),
+            content_items: None,
+        })
+    }
+}
+
+mod compact_parent_context {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug, Deserialize)]
+    struct CompactParentContextArgs {
+        reason: Option<String>,
+        evidence: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CompactParentContextResult {
+        parent_id: String,
+        submission_id: String,
+    }
+
+    pub async fn handle(
+        session: Arc<Session>,
+        _turn: Arc<TurnContext>,
+        _call_id: String,
+        arguments: String,
+    ) -> Result<ToolOutput, FunctionCallError> {
+        let args: CompactParentContextArgs = parse_arguments(&arguments)?;
+        let _reason = args.reason.and_then(|reason| {
+            let trimmed = reason.trim();
+            (!trimmed.is_empty()).then_some(trimmed.to_string())
+        });
+        let _evidence = args.evidence.and_then(|evidence| {
+            let trimmed = evidence.trim();
+            (!trimmed.is_empty()).then_some(trimmed.to_string())
+        });
+
+        let helper_thread_id = session.conversation_id;
+        let result = session
+            .services
+            .agent_control
+            .compact_parent_for_watchdog_helper(helper_thread_id)
+            .await
+            .map_err(|err| collab_agent_error(helper_thread_id, err))?;
+
+        let (parent_thread_id, submission_id) = match result {
+            WatchdogParentCompactionResult::NotWatchdogHelper => {
+                return Err(FunctionCallError::RespondToModel(
+                    "compact_parent_context is only available to active watchdog helpers"
+                        .to_string(),
+                ));
+            }
+            WatchdogParentCompactionResult::ParentBusy { parent_thread_id } => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "parent agent {parent_thread_id} has an active turn; compact_parent_context requires an idle parent"
+                )));
+            }
+            WatchdogParentCompactionResult::AlreadyInProgress { parent_thread_id } => {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "parent agent {parent_thread_id} already has a compaction in progress"
+                )));
+            }
+            WatchdogParentCompactionResult::Submitted {
+                parent_thread_id,
+                submission_id,
+            } => (parent_thread_id, submission_id),
+        };
+
+        let content = serde_json::to_string(&CompactParentContextResult {
+            parent_id: parent_thread_id.to_string(),
+            submission_id,
+        })
+        .map_err(|err| {
+            FunctionCallError::Fatal(format!(
+                "failed to serialize compact_parent_context result: {err}"
+            ))
+        })?;
+
+        Ok(ToolOutput::Function {
+            content,
+            success: Some(true),
+            content_items: None,
+        })
+    }
+}
+
+mod list_agents {
+    use super::*;
+    use std::sync::Arc;
+
+    #[derive(Debug, Deserialize)]
+    struct ListAgentsArgs {
+        id: Option<String>,
+        #[serde(default = "default_recursive")]
+        recursive: bool,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ListAgentsResult {
+        agents: Vec<ListAgentEntry>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct ListAgentEntry {
+        id: String,
+        parent_id: String,
+        status: AgentStatus,
+        depth: usize,
+    }
+
+    fn default_recursive() -> bool {
+        true
+    }
+
+    pub async fn handle(
+        session: Arc<Session>,
+        _turn: Arc<TurnContext>,
+        _call_id: String,
+        arguments: String,
+    ) -> Result<ToolOutput, FunctionCallError> {
+        let args: ListAgentsArgs = parse_arguments(&arguments)?;
+        let owner_thread_id = match args.id.as_deref().map(str::trim) {
+            Some(id) if !id.is_empty() && !matches!(id, "self") => agent_id(id)?,
+            _ => session.conversation_id,
+        };
+
+        let listings = session
+            .services
+            .agent_control
+            .list_agents(owner_thread_id, args.recursive)
+            .await
+            .map_err(collab_spawn_error)?;
+
+        let agents = listings
+            .into_iter()
+            .map(|entry| ListAgentEntry {
+                id: entry.thread_id.to_string(),
+                parent_id: entry
+                    .parent_thread_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+                status: entry.status,
+                depth: entry.depth,
+            })
+            .collect();
+
+        let content = serde_json::to_string(&ListAgentsResult { agents }).map_err(|err| {
+            FunctionCallError::Fatal(format!("failed to serialize list_agents result: {err}"))
+        })?;
+
+        Ok(ToolOutput::Function {
+            content,
+            success: Some(true),
+            content_items: None,
         })
     }
 }
@@ -550,8 +733,6 @@ mod wait {
             .collect::<Result<Vec<_>, _>>()?;
 
         // Validate timeout.
-        // Very short timeouts encourage busy-polling loops in the orchestrator prompt and can
-        // cause high CPU usage even with a single active worker, so clamp to a minimum.
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
         let timeout_ms = match timeout_ms {
             ms if ms <= 0 => {
@@ -559,7 +740,7 @@ mod wait {
                     "timeout_ms must be greater than zero".to_owned(),
                 ));
             }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
+            ms => ms.min(MAX_WAIT_TIMEOUT_MS),
         };
 
         session
@@ -666,8 +847,9 @@ mod wait {
         })?;
 
         Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
+            content,
             success: None,
+            content_items: None,
         })
     }
 
@@ -746,6 +928,11 @@ pub mod close_agent {
                 return Err(collab_agent_error(agent_id, err));
             }
         };
+        session
+            .services
+            .agent_control
+            .unregister_watchdog(agent_id)
+            .await;
         let result = if !matches!(status, AgentStatus::Shutdown) {
             session
                 .services
@@ -776,8 +963,9 @@ pub mod close_agent {
         })?;
 
         Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
+            content,
             success: Some(true),
+            content_items: None,
         })
     }
 }
@@ -822,34 +1010,18 @@ fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource 
 fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
-    child_depth: i32,
 ) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn, child_depth)?;
-    config.base_instructions = Some(base_instructions.text.clone());
-    Ok(config)
-}
-
-fn build_agent_resume_config(
-    turn: &TurnContext,
-    child_depth: i32,
-) -> Result<Config, FunctionCallError> {
-    let mut config = build_agent_shared_config(turn, child_depth)?;
-    // For resume, keep base instructions sourced from rollout/session metadata.
-    config.base_instructions = None;
-    Ok(config)
-}
-
-fn build_agent_shared_config(
-    turn: &TurnContext,
-    child_depth: i32,
-) -> Result<Config, FunctionCallError> {
-    let base_config = turn.config.clone();
+    let base_config = turn.client.config();
     let mut config = (*base_config).clone();
-    config.model = Some(turn.model_info.slug.clone());
-    config.model_provider = turn.provider.clone();
-    config.model_reasoning_effort = turn.reasoning_effort;
-    config.model_reasoning_summary = turn.reasoning_summary;
-    config.developer_instructions = turn.developer_instructions.clone();
+    config.base_instructions = Some(base_instructions.text.clone());
+    config.model = Some(turn.client.get_model());
+    config.model_provider = turn.client.get_provider();
+    config.model_reasoning_effort = turn.client.get_reasoning_effort();
+    config.model_reasoning_summary = turn.client.get_reasoning_summary();
+    // Use the underlying config's developer instructions rather than the turn-level
+    // instructions. The turn-level instructions already include the root role prompt,
+    // which would otherwise leak into subagents/watchdog helpers.
+    config.developer_instructions = base_config.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
     config.shell_environment_policy = turn.shell_environment_policy.clone();
     config.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
@@ -866,12 +1038,38 @@ fn build_agent_shared_config(
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("sandbox_policy is invalid: {err}"))
         })?;
+    Ok(config)
+}
 
-    // If the new agent will be at max depth:
-    if exceeds_thread_spawn_depth_limit(child_depth + 1) {
-        config.features.disable(Feature::Collab);
-    }
-
+fn build_agent_resume_config(
+    turn: &TurnContext,
+    _child_depth: i32,
+) -> Result<Config, FunctionCallError> {
+    let base_config = turn.client.config();
+    let mut config = (*base_config).clone();
+    // For resume, keep base instructions sourced from rollout/session metadata.
+    config.base_instructions = None;
+    config.model = Some(turn.client.get_model());
+    config.model_provider = turn.client.get_provider();
+    config.model_reasoning_effort = turn.client.get_reasoning_effort();
+    config.model_reasoning_summary = turn.client.get_reasoning_summary();
+    config.developer_instructions = base_config.developer_instructions.clone();
+    config.compact_prompt = turn.compact_prompt.clone();
+    config.shell_environment_policy = turn.shell_environment_policy.clone();
+    config.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
+    config.cwd = turn.cwd.clone();
+    config
+        .approval_policy
+        .set(turn.approval_policy)
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("approval_policy is invalid: {err}"))
+        })?;
+    config
+        .sandbox_policy
+        .set(turn.sandbox_policy.clone())
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("sandbox_policy is invalid: {err}"))
+        })?;
     Ok(config)
 }
 
@@ -881,6 +1079,7 @@ mod tests {
     use crate::CodexAuth;
     use crate::ThreadManager;
     use crate::agent::MAX_THREAD_SPAWN_DEPTH;
+    use crate::agent::WatchdogRegistration;
     use crate::built_in_model_providers;
     use crate::client::ModelClient;
     use crate::codex::Session;
@@ -894,14 +1093,22 @@ mod tests {
     use crate::protocol::SessionSource;
     use crate::protocol::SubAgentSource;
     use crate::rollout::RolloutRecorder;
+    use crate::state::ActiveTurn;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_protocol::ThreadId;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::protocol::COLLAB_INBOX_MESSAGE_PREFIX;
+    use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::TurnCompleteEvent;
     use codex_protocol::user_input::UserInput;
     use pretty_assertions::assert_eq;
     use serde::Deserialize;
     use serde_json::json;
     use std::collections::HashMap;
     use std::fs::create_dir_all;
+    use std::fs::write;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::Duration;
@@ -959,6 +1166,25 @@ mod tests {
         agent_id: String,
     }
 
+    #[derive(Debug, Deserialize)]
+    struct CompactParentContextResult {
+        parent_id: String,
+        submission_id: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ListAgentsResult {
+        agents: Vec<ListAgentsEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ListAgentsEntry {
+        id: String,
+        parent_id: String,
+        status: AgentStatus,
+        depth: usize,
+    }
+
     fn parse_spawn_result(output: ToolOutput) -> ThreadId {
         let ToolOutput::Function { content, .. } = output else {
             panic!("expected function output");
@@ -966,6 +1192,38 @@ mod tests {
         let result: SpawnResult =
             serde_json::from_str(&content).expect("spawn result should be json");
         ThreadId::from_string(&result.agent_id).expect("spawn result should contain a thread id")
+    }
+
+    fn parse_compact_parent_context_result(output: ToolOutput) -> CompactParentContextResult {
+        let ToolOutput::Function { content, .. } = output else {
+            panic!("expected function output");
+        };
+        serde_json::from_str(&content).expect("compact_parent_context result should be json")
+    }
+
+    fn parse_list_agents_result(output: ToolOutput) -> ListAgentsResult {
+        let ToolOutput::Function { content, .. } = output else {
+            panic!("expected function output");
+        };
+        serde_json::from_str(&content).expect("list_agents result should be json")
+    }
+
+    async fn recv_created_thread_excluding(
+        created_rx: &mut tokio::sync::broadcast::Receiver<ThreadId>,
+        excluded: &[ThreadId],
+    ) -> ThreadId {
+        let mut attempts = 0;
+        while attempts < 8 {
+            attempts += 1;
+            let recv = timeout(Duration::from_secs(1), created_rx.recv())
+                .await
+                .expect("thread created event should arrive")
+                .expect("thread id should be present");
+            if !excluded.contains(&recv) {
+                return recv;
+            }
+        }
+        panic!("expected a created thread id that is not excluded");
     }
 
     #[tokio::test]
@@ -1052,10 +1310,21 @@ mod tests {
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
 
-        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: session.conversation_id,
             depth: MAX_THREAD_SPAWN_DEPTH,
         });
+        turn.client = ModelClient::new(
+            turn.client.config(),
+            Some(session.services.auth_manager.clone()),
+            turn.client.get_model_info(),
+            turn.client.get_otel_manager(),
+            turn.client.get_provider(),
+            turn.client.get_reasoning_effort(),
+            turn.client.get_reasoning_summary(),
+            session.conversation_id,
+            session_source,
+        );
 
         let invocation = invocation(
             Arc::new(session),
@@ -1068,9 +1337,9 @@ mod tests {
         };
         assert_eq!(
             err,
-            FunctionCallError::RespondToModel(
-                "Agent depth limit reached. Solve the task yourself.".to_string()
-            )
+            FunctionCallError::RespondToModel(format!(
+                "agent depth limit reached: max depth is {MAX_THREAD_SPAWN_DEPTH}"
+            ))
         );
     }
 
@@ -1118,8 +1387,12 @@ mod tests {
             .await
             .expect("fork rollout history");
         let fork_items = fork_history.get_rollout_items();
-        let serialized = serde_json::to_string(&fork_items).expect("serialize fork rollout");
-        assert!(serialized.contains(seed_text));
+        assert!(
+            fork_items
+                .iter()
+                .any(|item| matches!(item, RolloutItem::ForkReference(_))),
+            "fork rollout should include a fork reference marker instead of copying full history"
+        );
 
         let _ = fork_thread
             .submit(Op::Shutdown {})
@@ -1132,10 +1405,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn build_agent_spawn_config_does_not_include_root_role_prompt() {
+        let mut config = test_config();
+        create_dir_all(&config.codex_home).expect("create codex home");
+        let root_marker = "ROOT_PROMPT_MARKER";
+        let dev_marker = "DEV_PROMPT_MARKER";
+        write(config.codex_home.join("AGENTS.root.md"), root_marker)
+            .expect("write root prompt override");
+        config.developer_instructions = Some(dev_marker.to_string());
+
+        let manager = ThreadManager::with_models_provider_and_home(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        );
+        let root = manager
+            .start_thread(config)
+            .await
+            .expect("start root thread");
+        let session = root.thread.session_for_tests();
+        let turn = session.new_default_turn().await;
+        let base_instructions = session.get_base_instructions().await;
+        let spawn_config = build_agent_spawn_config(&base_instructions, turn.as_ref())
+            .expect("spawn config should build");
+        let developer_instructions = spawn_config
+            .developer_instructions
+            .expect("developer instructions should be present");
+
+        assert!(
+            developer_instructions.contains(dev_marker),
+            "spawn config should include underlying developer instructions"
+        );
+        assert!(
+            !developer_instructions.contains(root_marker),
+            "spawn config should not include the root role prompt marker"
+        );
+    }
+
+    #[tokio::test]
     async fn spawn_agent_watchdog_mode_spawns_helper() {
         let (manager, session, turn) = managed_session_and_turn().await;
         let mut created_rx = manager.subscribe_thread_created();
-        let invocation = invocation(
+        let spawn_invocation = invocation(
             Arc::clone(&session),
             Arc::clone(&turn),
             "spawn_agent",
@@ -1146,7 +1457,7 @@ mod tests {
             })),
         );
         let output = CollabHandler
-            .handle(invocation)
+            .handle(spawn_invocation)
             .await
             .expect("watchdog mode should succeed");
         let target_thread_id = parse_spawn_result(output);
@@ -1195,8 +1506,743 @@ mod tests {
             }
         });
         let helper_prompt = helper_prompt.expect("helper prompt should be captured");
-        assert!(helper_prompt.contains(&target_thread_id.to_string()));
         assert!(helper_prompt.contains("watchdog target prompt"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_watchdog_mode_handle_does_not_receive_prompt() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog handle prompt should not run",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        let saw_handle_prompt = manager
+            .captured_ops()
+            .into_iter()
+            .any(|(id, op)| id == target_thread_id && matches!(op, Op::UserInput { .. }));
+        assert!(
+            !saw_handle_prompt,
+            "watchdog handle thread should not receive the initial prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_watchdog_mode_rejects_subagent_callers() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let root_id = session.conversation_id;
+        let config = turn.client.config().as_ref().clone();
+        let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_id,
+            depth: 1,
+        });
+        let subagent_id = manager
+            .agent_control()
+            .spawn_agent(config, "subagent".to_string(), Some(session_source))
+            .await
+            .expect("subagent should spawn");
+        let subagent_thread = manager
+            .get_thread(subagent_id)
+            .await
+            .expect("subagent thread should exist");
+        let subagent_session = subagent_thread.session_for_tests();
+        let subagent_turn = subagent_session.new_default_turn().await;
+
+        let spawn_invocation = invocation(
+            subagent_session,
+            subagent_turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog target prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let Err(err) = CollabHandler.handle(spawn_invocation).await else {
+            panic!("subagents should not be allowed to spawn watchdogs");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "watchdogs can only be spawned by root agents".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_watchdog_mode_supersedes_existing_watchdog() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let mut created_rx = manager.subscribe_thread_created();
+        let first_spawn = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog target prompt 1",
+                "spawn_mode": "watchdog",
+                "interval_s": 60
+            })),
+        );
+        let first_output = CollabHandler
+            .handle(first_spawn)
+            .await
+            .expect("first watchdog spawn should succeed");
+        let first_watchdog_id = parse_spawn_result(first_output);
+
+        let second_spawn = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog target prompt 2",
+                "spawn_mode": "watchdog",
+                "interval_s": 60
+            })),
+        );
+        let second_output = CollabHandler
+            .handle(second_spawn)
+            .await
+            .expect("second watchdog spawn should succeed");
+        let second_watchdog_id = parse_spawn_result(second_output);
+        assert_ne!(first_watchdog_id, second_watchdog_id);
+
+        let mut saw_first = false;
+        let mut saw_second = false;
+        let mut attempts = 0;
+        while attempts < 8 {
+            attempts += 1;
+            let recv = timeout(Duration::from_secs(1), created_rx.recv())
+                .await
+                .expect("thread created event should arrive")
+                .expect("thread id should be present");
+            if recv == first_watchdog_id {
+                saw_first = true;
+            } else if recv == second_watchdog_id {
+                saw_second = true;
+            }
+            if saw_first && saw_second {
+                break;
+            }
+        }
+        assert!(saw_first, "first watchdog handle should be created");
+        assert!(saw_second, "second watchdog handle should be created");
+
+        assert_eq!(
+            session
+                .services
+                .agent_control
+                .get_status(first_watchdog_id)
+                .await,
+            AgentStatus::NotFound
+        );
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(first_watchdog_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let stale_recv = timeout(Duration::from_millis(200), created_rx.recv()).await;
+        assert!(
+            stale_recv.is_err(),
+            "superseded watchdog should not spawn helpers"
+        );
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(second_watchdog_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let helper_id = timeout(Duration::from_secs(1), created_rx.recv())
+            .await
+            .expect("helper thread should be created for active watchdog")
+            .expect("thread id should be present");
+        assert_ne!(helper_id, first_watchdog_id);
+        assert_ne!(helper_id, second_watchdog_id);
+    }
+
+    #[tokio::test]
+    async fn compact_parent_context_rejects_non_watchdog_helpers() {
+        let (_manager, session, turn) = managed_session_and_turn().await;
+        let invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "compact_parent_context",
+            function_payload(json!({})),
+        );
+        let Err(err) = CollabHandler.handle(invocation).await else {
+            panic!("non-watchdog callers should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "compact_parent_context is only available to active watchdog helpers".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_parent_context_submits_compact_for_watchdog_parent() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let mut created_rx = manager.subscribe_thread_created();
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog helper prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let helper_thread_id =
+            recv_created_thread_excluding(&mut created_rx, &[target_thread_id]).await;
+        let helper_thread = manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("helper thread should exist");
+        let helper_session = helper_thread.session_for_tests();
+        let helper_turn = helper_session.new_default_turn().await;
+        let invocation = invocation(
+            helper_session,
+            helper_turn,
+            "compact_parent_context",
+            function_payload(json!({
+                "reason": "looping on same summary",
+                "evidence": "three repeated planning messages and no tool calls"
+            })),
+        );
+        let output = CollabHandler
+            .handle(invocation)
+            .await
+            .expect("watchdog helper should compact parent");
+        let result = parse_compact_parent_context_result(output);
+        assert_eq!(result.parent_id, owner_id.to_string());
+        assert!(
+            !result.submission_id.is_empty(),
+            "compact_parent_context should return a submission id"
+        );
+
+        let compact_sent = manager
+            .captured_ops()
+            .into_iter()
+            .any(|(id, op)| id == owner_id && matches!(op, Op::Compact));
+        assert!(
+            compact_sent,
+            "compact_parent_context should submit Op::Compact to the owner thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_parent_context_rejects_when_parent_busy() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let mut created_rx = manager.subscribe_thread_created();
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog helper prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+        let helper_thread_id =
+            recv_created_thread_excluding(&mut created_rx, &[target_thread_id]).await;
+
+        *session.active_turn.lock().await = Some(ActiveTurn::default());
+
+        let helper_thread = manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("helper thread should exist");
+        let helper_session = helper_thread.session_for_tests();
+        let helper_turn = helper_session.new_default_turn().await;
+        let invocation = invocation(
+            helper_session,
+            helper_turn,
+            "compact_parent_context",
+            function_payload(json!({})),
+        );
+        let Err(err) = CollabHandler.handle(invocation).await else {
+            panic!("compact_parent_context should reject busy parents");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "parent agent {owner_id} has an active turn; compact_parent_context requires an idle parent"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn compact_parent_context_rejects_when_compaction_already_in_progress() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let mut created_rx = manager.subscribe_thread_created();
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog helper prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+        let helper_thread_id =
+            recv_created_thread_excluding(&mut created_rx, &[target_thread_id]).await;
+        let helper_thread = manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("helper thread should exist");
+        let helper_session = helper_thread.session_for_tests();
+
+        let first_turn = helper_session.new_default_turn().await;
+        let first_invocation = invocation(
+            Arc::clone(&helper_session),
+            first_turn,
+            "compact_parent_context",
+            function_payload(json!({})),
+        );
+        CollabHandler
+            .handle(first_invocation)
+            .await
+            .expect("first compact_parent_context call should succeed");
+
+        *session.active_turn.lock().await = Some(ActiveTurn::default());
+
+        let second_turn = helper_session.new_default_turn().await;
+        let second_invocation = invocation(
+            helper_session,
+            second_turn,
+            "compact_parent_context",
+            function_payload(json!({})),
+        );
+        let Err(err) = CollabHandler.handle(second_invocation).await else {
+            panic!("second compact_parent_context call should report in-progress compaction");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!(
+                "parent agent {owner_id} already has a compaction in progress"
+            ))
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_recurs_after_helper_completion() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let owner_turn = session.new_default_turn().await;
+        session
+            .send_event(
+                owner_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    last_agent_message: None,
+                }),
+            )
+            .await;
+        let mut created_rx = manager.subscribe_thread_created();
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog recurring prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let first_helper_id =
+            recv_created_thread_excluding(&mut created_rx, &[target_thread_id]).await;
+        assert_ne!(
+            first_helper_id, owner_id,
+            "watchdog helper should be a new child thread"
+        );
+
+        let helper_thread = manager
+            .get_thread(first_helper_id)
+            .await
+            .expect("helper thread should exist");
+        let helper_session = helper_thread.session_for_tests();
+        let helper_turn = helper_session.new_default_turn().await;
+        helper_session
+            .send_event(
+                helper_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    last_agent_message: None,
+                }),
+            )
+            .await;
+
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let second_helper_id =
+            recv_created_thread_excluding(&mut created_rx, &[target_thread_id, first_helper_id])
+                .await;
+        assert_ne!(
+            second_helper_id, first_helper_id,
+            "watchdog should spawn a new helper after the interval"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_forwards_helper_completion_when_helper_does_not_send_input() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let config = turn.client.config().as_ref().clone();
+
+        let owner_turn = session.new_default_turn().await;
+        session
+            .send_event(
+                owner_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    last_agent_message: None,
+                }),
+            )
+            .await;
+
+        session
+            .services
+            .agent_control
+            .register_watchdog(WatchdogRegistration {
+                owner_thread_id: owner_id,
+                target_thread_id: owner_id,
+                child_depth: 1,
+                interval_s: 60,
+                prompt: "watchdog prompt".to_string(),
+                config: config.clone(),
+            })
+            .await
+            .expect("register watchdog");
+
+        let helper = manager
+            .start_thread(config)
+            .await
+            .expect("start helper thread");
+        let helper_thread_id = helper.thread_id;
+        let helper_session = helper.thread.session_for_tests();
+        let helper_turn = helper_session.new_default_turn().await;
+        helper_session
+            .send_event(
+                helper_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    last_agent_message: Some("pong 1".to_string()),
+                }),
+            )
+            .await;
+
+        session
+            .services
+            .agent_control
+            .set_watchdog_active_helper_for_tests(owner_id, helper_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let expected_text = format!("{COLLAB_INBOX_MESSAGE_PREFIX}{helper_thread_id}] pong 1");
+        let expected_items = vec![ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: expected_text,
+            }],
+        }];
+        let delivered = manager.captured_ops().into_iter().any(|(id, op)| {
+            id == owner_id
+                && matches!(op, Op::InjectResponseItems { items } if items == expected_items)
+        });
+        assert!(
+            delivered,
+            "watchdog should inject a forwarded helper message into the owner thread"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_watchdog_mode_injects_watchdog_developer_prompt() {
+        let config = test_config();
+        create_dir_all(&config.codex_home).expect("create codex home");
+        let watchdog_marker = "WATCHDOG_PROMPT_MARKER";
+        write(
+            config.codex_home.join("AGENTS.watchdog.md"),
+            watchdog_marker,
+        )
+        .expect("write watchdog prompt override");
+
+        let manager = ThreadManager::with_models_provider_and_home(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        );
+        let root = manager
+            .start_thread(config)
+            .await
+            .expect("start root thread");
+        let session = root.thread.session_for_tests();
+        let turn = session.new_default_turn().await;
+        let mut created_rx = manager.subscribe_thread_created();
+
+        let invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog prompt for developer injection",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let mut helper_thread_id = None;
+        let mut attempts = 0;
+        while attempts < 3 {
+            attempts += 1;
+            let recv = timeout(Duration::from_secs(1), created_rx.recv())
+                .await
+                .expect("thread created event should arrive")
+                .expect("thread id should be present");
+            if recv != target_thread_id {
+                helper_thread_id = Some(recv);
+                break;
+            }
+        }
+        let helper_thread_id = helper_thread_id.expect("watchdog should spawn a helper thread");
+        let helper_thread = manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("helper thread should exist");
+        assert!(
+            helper_thread.rollout_path().is_none(),
+            "watchdog helpers should run in ephemeral mode and not persist rollouts"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_agent_stops_watchdog() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let mut created_rx = manager.subscribe_thread_created();
+        let spawn_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "watchdog target prompt",
+                "spawn_mode": "watchdog",
+                "interval_s": 1
+            })),
+        );
+        let output = CollabHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("watchdog mode should succeed");
+        let target_thread_id = parse_spawn_result(output);
+
+        let mut saw_target = false;
+        let mut attempts = 0;
+        while attempts < 3 {
+            attempts += 1;
+            let recv = timeout(Duration::from_secs(1), created_rx.recv())
+                .await
+                .expect("thread created event should arrive")
+                .expect("thread id should be present");
+            if recv == target_thread_id {
+                saw_target = true;
+                break;
+            }
+        }
+        assert!(saw_target, "watchdog handle thread should be created");
+
+        let close_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "close_agent",
+            function_payload(json!({
+                "id": target_thread_id.to_string()
+            })),
+        );
+        CollabHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_agent should succeed");
+
+        session
+            .services
+            .agent_control
+            .force_watchdog_due_for_tests(target_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .run_watchdogs_once_for_tests()
+            .await;
+
+        let recv = timeout(Duration::from_millis(200), created_rx.recv()).await;
+        assert!(
+            recv.is_err(),
+            "no helper thread should spawn after closing watchdog handle"
+        );
+    }
+
+    #[tokio::test]
+    async fn watchdog_does_not_trigger_when_owner_has_active_turn() {
+        let (manager, session, _turn) = managed_session_and_turn().await;
+        let owner_id = session.conversation_id;
+        let agent_control = manager.agent_control();
+        let config = test_config();
+
+        // Simulate a stale non-running status while a turn is still active.
+        session
+            .send_event_raw(codex_protocol::protocol::Event {
+                id: String::new(),
+                msg: EventMsg::TurnComplete(TurnCompleteEvent {
+                    last_agent_message: None,
+                }),
+            })
+            .await;
+        *session.active_turn.lock().await = Some(ActiveTurn::default());
+
+        agent_control
+            .register_watchdog(WatchdogRegistration {
+                owner_thread_id: owner_id,
+                target_thread_id: owner_id,
+                child_depth: 1,
+                interval_s: 1,
+                prompt: "watchdog prompt".to_string(),
+                config,
+            })
+            .await
+            .expect("register watchdog");
+
+        let before = manager.list_thread_ids().await.len();
+
+        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        agent_control.run_watchdogs_once_for_tests().await;
+
+        let after = manager.list_thread_ids().await.len();
+        assert_eq!(
+            after, before,
+            "watchdog should not spawn while owner turn is active"
+        );
     }
 
     #[tokio::test]
@@ -1238,6 +2284,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_input_requires_id_when_no_parent_exists() {
+        let (session, turn) = make_session_and_context().await;
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "send_input",
+            function_payload(json!({"message": "hi"})),
+        );
+        let Err(err) = CollabHandler.handle(invocation).await else {
+            panic!("missing id without parent should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "send_input requires an id when no parent agent is available".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn send_input_defaults_to_parent_when_subagent_omits_id() {
+        let (manager, session, turn) = managed_session_and_turn().await;
+        let root_id = session.conversation_id;
+        let config = turn.client.config().as_ref().clone();
+        let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_id,
+            depth: 1,
+        });
+        let subagent_id = manager
+            .agent_control()
+            .spawn_agent(config, "subagent".to_string(), Some(session_source))
+            .await
+            .expect("subagent should spawn");
+        let subagent_thread = manager
+            .get_thread(subagent_id)
+            .await
+            .expect("subagent thread should exist");
+        let subagent_session = subagent_thread.session_for_tests();
+        let subagent_turn = subagent_session.new_default_turn().await;
+
+        let invocation = invocation(
+            Arc::clone(&subagent_session),
+            subagent_turn,
+            "send_input",
+            function_payload(json!({"message": "hi"})),
+        );
+        CollabHandler
+            .handle(invocation)
+            .await
+            .expect("send_input should succeed for subagent parent");
+
+        let expected_text = format!("{COLLAB_INBOX_MESSAGE_PREFIX}{subagent_id}] hi");
+        let expected_items = vec![ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: expected_text,
+            }],
+        }];
+        let delivered = manager.captured_ops().into_iter().any(|(id, op)| {
+            id == root_id
+                && matches!(op, Op::InjectResponseItems { items } if items == expected_items)
+        });
+        assert!(
+            delivered,
+            "send_input without id should deliver to the parent/root thread"
+        );
+    }
+
+    #[tokio::test]
     async fn send_input_reports_missing_agent() {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
@@ -1263,7 +2378,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
+        let config = turn.client.config().as_ref().clone();
         let thread = manager.start_thread(config).await.expect("start thread");
         let agent_id = thread.thread_id;
         let invocation = invocation(
@@ -1288,7 +2403,7 @@ mod tests {
             .collect();
         assert_eq!(ops_for_agent.len(), 2);
         assert!(matches!(ops_for_agent[0], Op::Interrupt));
-        assert!(matches!(ops_for_agent[1], Op::UserInput { .. }));
+        assert!(matches!(ops_for_agent[1], Op::InjectResponseItems { .. }));
 
         let _ = thread
             .thread
@@ -1484,6 +2599,98 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn list_agents_returns_descendants_recursively() {
+        let (_manager, session, turn) = managed_session_and_turn().await;
+        let root_thread_id = session.conversation_id;
+
+        let child_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({"message": "child"})),
+        );
+        let child_output = CollabHandler
+            .handle(child_invocation)
+            .await
+            .expect("spawn child should succeed");
+        let child_thread_id = parse_spawn_result(child_output);
+
+        let list_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "list_agents",
+            function_payload(json!({})),
+        );
+        let list_output = CollabHandler
+            .handle(list_invocation)
+            .await
+            .expect("list_agents should succeed");
+        let result = parse_list_agents_result(list_output);
+
+        let by_id: HashMap<ThreadId, &ListAgentsEntry> = result
+            .agents
+            .iter()
+            .map(|entry| {
+                (
+                    ThreadId::from_string(&entry.id).expect("entry id should be a thread id"),
+                    entry,
+                )
+            })
+            .collect();
+
+        let child = by_id.get(&child_thread_id).expect("child should be listed");
+        assert_eq!(child.parent_id, root_thread_id.to_string());
+        assert_eq!(child.depth, 1);
+        assert!(!matches!(child.status, AgentStatus::NotFound));
+    }
+
+    #[tokio::test]
+    async fn list_agents_non_recursive_returns_only_direct_children() {
+        let (_manager, session, turn) = managed_session_and_turn().await;
+        let root_thread_id = session.conversation_id;
+
+        let child_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "spawn_agent",
+            function_payload(json!({"message": "child"})),
+        );
+        let child_output = CollabHandler
+            .handle(child_invocation)
+            .await
+            .expect("spawn child should succeed");
+        let child_thread_id = parse_spawn_result(child_output);
+
+        let list_invocation = invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "list_agents",
+            function_payload(json!({"recursive": false})),
+        );
+        let list_output = CollabHandler
+            .handle(list_invocation)
+            .await
+            .expect("list_agents should succeed");
+        let result = parse_list_agents_result(list_output);
+
+        let ids: Vec<ThreadId> = result
+            .agents
+            .iter()
+            .map(|entry| ThreadId::from_string(&entry.id).expect("entry id should be a thread id"))
+            .collect();
+
+        assert!(ids.contains(&child_thread_id));
+
+        let child = result
+            .agents
+            .iter()
+            .find(|entry| entry.id == child_thread_id.to_string())
+            .expect("child entry should exist");
+        assert_eq!(child.parent_id, root_thread_id.to_string());
+        assert_eq!(child.depth, 1);
+    }
+
     #[derive(Debug, Deserialize, PartialEq, Eq)]
     struct WaitResult {
         status: HashMap<ThreadId, AgentStatus>,
@@ -1568,9 +2775,7 @@ mod tests {
             .await
             .expect("wait should succeed");
         let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
+            content, success, ..
         } = output
         else {
             panic!("expected function output");
@@ -1595,7 +2800,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
+        let config = turn.client.config().as_ref().clone();
         let thread = manager.start_thread(config).await.expect("start thread");
         let agent_id = thread.thread_id;
         let invocation = invocation(
@@ -1604,7 +2809,7 @@ mod tests {
             "wait",
             function_payload(json!({
                 "ids": [agent_id.to_string()],
-                "timeout_ms": MIN_WAIT_TIMEOUT_MS
+                "timeout_ms": 10
             })),
         );
         let output = CollabHandler
@@ -1612,9 +2817,7 @@ mod tests {
             .await
             .expect("wait should succeed");
         let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
+            content, success, ..
         } = output
         else {
             panic!("expected function output");
@@ -1638,42 +2841,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_clamps_short_timeouts_to_minimum() {
-        let (mut session, turn) = make_session_and_context().await;
-        let manager = thread_manager();
-        session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
-        let thread = manager.start_thread(config).await.expect("start thread");
-        let agent_id = thread.thread_id;
-        let invocation = invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "wait",
-            function_payload(json!({
-                "ids": [agent_id.to_string()],
-                "timeout_ms": 10
-            })),
-        );
-
-        let early = timeout(Duration::from_millis(50), CollabHandler.handle(invocation)).await;
-        assert!(
-            early.is_err(),
-            "wait should not return before the minimum timeout clamp"
-        );
-
-        let _ = thread
-            .thread
-            .submit(Op::Shutdown {})
-            .await
-            .expect("shutdown should submit");
-    }
-
-    #[tokio::test]
     async fn wait_returns_final_status_without_timeout() {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
+        let config = turn.client.config().as_ref().clone();
         let thread = manager.start_thread(config).await.expect("start thread");
         let agent_id = thread.thread_id;
         let mut status_rx = manager
@@ -1705,9 +2877,7 @@ mod tests {
             .await
             .expect("wait should succeed");
         let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
+            content, success, ..
         } = output
         else {
             panic!("expected function output");
@@ -1729,7 +2899,7 @@ mod tests {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
-        let config = turn.config.as_ref().clone();
+        let config = turn.client.config().as_ref().clone();
         let thread = manager.start_thread(config).await.expect("start thread");
         let agent_id = thread.thread_id;
         let status_before = manager.agent_control().get_status(agent_id).await;
@@ -1745,9 +2915,7 @@ mod tests {
             .await
             .expect("close_agent should succeed");
         let ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success,
-            ..
+            content, success, ..
         } = output
         else {
             panic!("expected function output");
@@ -1822,14 +2990,14 @@ mod tests {
             turn.config.sandbox_policy.get().clone(),
         );
 
-        let config = build_agent_spawn_config(&base_instructions, &turn, 0).expect("spawn config");
-        let mut expected = (*turn.config).clone();
+        let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
+        let mut expected = (*turn.client.config()).clone();
         expected.base_instructions = Some(base_instructions.text);
-        expected.model = Some(turn.model_info.slug.clone());
-        expected.model_provider = turn.provider.clone();
-        expected.model_reasoning_effort = turn.reasoning_effort;
-        expected.model_reasoning_summary = turn.reasoning_summary;
-        expected.developer_instructions = turn.developer_instructions.clone();
+        expected.model = Some(turn.client.get_model());
+        expected.model_provider = turn.client.get_provider();
+        expected.model_reasoning_effort = turn.client.get_reasoning_effort();
+        expected.model_reasoning_summary = turn.client.get_reasoning_summary();
+        expected.developer_instructions = turn.client.config().developer_instructions.clone();
         expected.compact_prompt = turn.compact_prompt.clone();
         expected.shell_environment_policy = turn.shell_environment_policy.clone();
         expected.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
@@ -1847,16 +3015,27 @@ mod tests {
 
     #[tokio::test]
     async fn build_agent_spawn_config_preserves_base_user_instructions() {
-        let (_session, mut turn) = make_session_and_context().await;
-        let mut base_config = (*turn.config).clone();
+        let (session, mut turn) = make_session_and_context().await;
+        let session_source = turn.client.get_session_source();
+        let mut base_config = (*turn.client.config()).clone();
         base_config.user_instructions = Some("base-user".to_string());
         turn.user_instructions = Some("resolved-user".to_string());
-        turn.config = Arc::new(base_config.clone());
+        turn.client = ModelClient::new(
+            Arc::new(base_config.clone()),
+            Some(session.services.auth_manager.clone()),
+            turn.client.get_model_info(),
+            turn.client.get_otel_manager(),
+            turn.client.get_provider(),
+            turn.client.get_reasoning_effort(),
+            turn.client.get_reasoning_summary(),
+            session.conversation_id,
+            session_source,
+        );
         let base_instructions = BaseInstructions {
             text: "base".to_string(),
         };
 
-        let config = build_agent_spawn_config(&base_instructions, &turn, 0).expect("spawn config");
+        let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
 
         assert_eq!(config.user_instructions, base_config.user_instructions);
     }

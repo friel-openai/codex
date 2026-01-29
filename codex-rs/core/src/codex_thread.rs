@@ -1,6 +1,7 @@
 use crate::agent::AgentStatus;
 use crate::codex::Codex;
 use crate::codex::SteerInputError;
+use crate::config::types::CollabInboxDeliveryRole;
 use crate::error::Result as CodexResult;
 use crate::protocol::Event;
 use crate::protocol::Op;
@@ -26,6 +27,7 @@ pub struct ThreadConfigSnapshot {
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub session_source: SessionSource,
+    pub collab_inbox_delivery_role: CollabInboxDeliveryRole,
 }
 
 pub struct CodexThread {
@@ -70,6 +72,14 @@ impl CodexThread {
 
     pub(crate) fn subscribe_status(&self) -> watch::Receiver<AgentStatus> {
         self.codex.agent_status.clone()
+    }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.codex.has_active_turn().await
+    }
+
+    pub(crate) fn last_completed_turn_used_collab_send_input(&self) -> bool {
+        self.codex.last_completed_turn_used_collab_send_input()
     }
 
     pub fn rollout_path(&self) -> Option<PathBuf> {

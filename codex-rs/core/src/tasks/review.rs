@@ -21,6 +21,7 @@ use crate::config::Constrained;
 use crate::review_format::format_review_findings_block;
 use crate::review_format::render_review_output_text;
 use crate::state::TaskKind;
+use crate::turn_input::TurnInput;
 use codex_protocol::user_input::UserInput;
 
 use super::SessionTask;
@@ -45,7 +46,7 @@ impl SessionTask for ReviewTask {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        input: Vec<UserInput>,
+        input: TurnInput,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         let _ = session
@@ -53,6 +54,7 @@ impl SessionTask for ReviewTask {
             .services
             .otel_manager
             .counter("codex.task.review", 1, &[]);
+        let input = input.into_user().unwrap_or_default();
 
         // Start sub-codex conversation and get the receiver for events.
         let output = match start_review_conversation(

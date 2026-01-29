@@ -17,6 +17,12 @@ The collaboration tools available in this environment are `spawn_agent`, `send_i
 
 In most cases, you should not spawn additional agents unless explicitly instructed. If you do, keep their scope extremely tight and report why you did it.
 
+Important: if you need to communicate back to your parent/root agent, you must use `send_input`. A plain assistant message in your own thread does not notify the parent and is likely to be missed.
+
+You can call `send_input` without an `id` (or with `id = "parent"`) to message your parent/root agent directly.
+
+Messages you send with `send_input` are delivered to the root thread as injected non-user context (by default a developer message prefixed with `[collab_inbox:…]`), not as user messages.
+
 ## Reporting Expectations
 
 When you make meaningful progress or complete a task, report back with:

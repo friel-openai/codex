@@ -30,11 +30,11 @@ use crate::session_prefix::TURN_ABORTED_OPEN_TAG;
 use crate::state::ActiveTurn;
 use crate::state::RunningTask;
 use crate::state::TaskKind;
+use crate::turn_input::TurnInput;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
-use codex_protocol::user_input::UserInput;
 
 pub(crate) use compact::CompactTask;
 pub(crate) use ghost_snapshot::GhostSnapshotTask;
@@ -98,7 +98,7 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        input: Vec<UserInput>,
+        input: TurnInput,
         cancellation_token: CancellationToken,
     ) -> Option<String>;
 
@@ -116,7 +116,7 @@ impl Session {
     pub async fn spawn_task<T: SessionTask>(
         self: &Arc<Self>,
         turn_context: Arc<TurnContext>,
-        input: Vec<UserInput>,
+        input: TurnInput,
         task: T,
     ) {
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
@@ -189,6 +189,7 @@ impl Session {
         turn_context: Arc<TurnContext>,
         last_agent_message: Option<String>,
     ) {
+        self.snapshot_collab_send_input_on_turn_complete();
         let mut active = self.active_turn.lock().await;
         let mut pending_input = Vec::<ResponseInputItem>::new();
         let mut should_close_processes = false;
@@ -219,6 +220,7 @@ impl Session {
     }
 
     async fn register_new_active_task(&self, task: RunningTask) {
+        self.reset_turn_collab_send_input_flag();
         let mut active = self.active_turn.lock().await;
         let mut turn = ActiveTurn::default();
         turn.add_task(task);

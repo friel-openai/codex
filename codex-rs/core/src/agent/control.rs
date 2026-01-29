@@ -3,17 +3,30 @@ use super::watchdog::WatchdogRegistration;
 use crate::agent::AgentStatus;
 use crate::agent::guards::Guards;
 use crate::config::Config;
+use crate::config::types::CollabInboxDeliveryRole;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::COLLAB_INBOX_KIND;
+use codex_protocol::protocol::COLLAB_INBOX_MESSAGE_PREFIX;
+use codex_protocol::protocol::CollabInboxPayload;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use tokio::sync::Mutex;
 use tokio::sync::watch;
+use uuid::Uuid;
 
 /// Control-plane handle for multi-agent operations.
 /// `AgentControl` is held by each session (via `SessionServices`). It provides capability to
@@ -29,6 +42,30 @@ pub(crate) struct AgentControl {
     manager: Weak<ThreadManagerState>,
     guards: Arc<Guards>,
     watchdogs: Arc<WatchdogManager>,
+    watchdog_compactions_in_progress: Arc<Mutex<HashSet<ThreadId>>>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct AgentListing {
+    pub(crate) thread_id: ThreadId,
+    pub(crate) parent_thread_id: Option<ThreadId>,
+    pub(crate) status: AgentStatus,
+    pub(crate) depth: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchdogParentCompactionResult {
+    NotWatchdogHelper,
+    ParentBusy {
+        parent_thread_id: ThreadId,
+    },
+    AlreadyInProgress {
+        parent_thread_id: ThreadId,
+    },
+    Submitted {
+        parent_thread_id: ThreadId,
+        submission_id: String,
+    },
 }
 
 impl Default for AgentControl {
@@ -58,6 +95,7 @@ impl AgentControl {
             manager,
             guards,
             watchdogs,
+            watchdog_compactions_in_progress: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
@@ -88,6 +126,36 @@ impl AgentControl {
         state.notify_thread_created(new_thread.thread_id);
 
         self.send_prompt(new_thread.thread_id, prompt).await?;
+
+        Ok(new_thread.thread_id)
+    }
+
+    /// Spawn a new agent thread but do not submit an initial prompt.
+    ///
+    /// This is used for watchdog handles, which should not run a model turn on
+    /// their own. The watchdog manager will fork helpers from the owner thread
+    /// when the owner becomes idle.
+    pub(crate) async fn spawn_agent_handle(
+        &self,
+        config: Config,
+        session_source: Option<SessionSource>,
+    ) -> CodexResult<ThreadId> {
+        let state = self.upgrade()?;
+        let reservation = self.guards.reserve_spawn_slot(config.agent_max_threads)?;
+
+        let new_thread = match session_source {
+            Some(session_source) => {
+                state
+                    .spawn_new_thread_with_source(config, self.clone(), session_source)
+                    .await?
+            }
+            None => state.spawn_new_thread(config, self.clone()).await?,
+        };
+        reservation.commit(new_thread.thread_id);
+
+        // Notify a new thread has been created. This notification will be processed by clients
+        // to subscribe or drain this newly created thread.
+        state.notify_thread_created(new_thread.thread_id);
 
         Ok(new_thread.thread_id)
     }
@@ -182,6 +250,31 @@ impl AgentControl {
         result
     }
 
+    /// Send a prompt to an existing agent thread using the configured collab inbox delivery role.
+    pub(crate) async fn send_collab_message(
+        &self,
+        agent_id: ThreadId,
+        sender_thread_id: ThreadId,
+        message: String,
+    ) -> CodexResult<String> {
+        let state = self.upgrade()?;
+        let thread = state.get_thread(agent_id).await?;
+        let snapshot = thread.config_snapshot().await;
+
+        if matches!(snapshot.session_source, SessionSource::SubAgent(_)) {
+            return self.send_prompt(agent_id, message).await;
+        }
+
+        let items = build_collab_inbox_items(
+            snapshot.collab_inbox_delivery_role,
+            sender_thread_id,
+            message,
+        )?;
+        state
+            .send_op(agent_id, Op::InjectResponseItems { items })
+            .await
+    }
+
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
@@ -222,8 +315,64 @@ impl AgentControl {
     pub(crate) async fn register_watchdog(
         &self,
         registration: WatchdogRegistration,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<Vec<ThreadId>> {
         self.watchdogs.register(registration).await
+    }
+
+    pub(crate) async fn unregister_watchdog(&self, target_thread_id: ThreadId) {
+        self.watchdogs.unregister(target_thread_id).await;
+    }
+
+    pub(crate) async fn unregister_watchdogs_for_owner(
+        &self,
+        owner_thread_id: ThreadId,
+    ) -> Vec<ThreadId> {
+        self.watchdogs.take_for_owner(owner_thread_id).await
+    }
+
+    pub(crate) async fn compact_parent_for_watchdog_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> CodexResult<WatchdogParentCompactionResult> {
+        let Some(parent_thread_id) = self
+            .watchdogs
+            .owner_for_active_helper(helper_thread_id)
+            .await
+        else {
+            return Ok(WatchdogParentCompactionResult::NotWatchdogHelper);
+        };
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        let parent_has_active_turn = parent_thread.has_active_turn().await;
+
+        {
+            let mut compacting = self.watchdog_compactions_in_progress.lock().await;
+            if compacting.contains(&parent_thread_id) {
+                if parent_has_active_turn {
+                    return Ok(WatchdogParentCompactionResult::AlreadyInProgress {
+                        parent_thread_id,
+                    });
+                }
+                // Clear stale marker when the parent is no longer actively compacting.
+                compacting.remove(&parent_thread_id);
+            }
+            if parent_has_active_turn {
+                return Ok(WatchdogParentCompactionResult::ParentBusy { parent_thread_id });
+            }
+            compacting.insert(parent_thread_id);
+        }
+
+        match state.send_op(parent_thread_id, Op::Compact).await {
+            Ok(submission_id) => Ok(WatchdogParentCompactionResult::Submitted {
+                parent_thread_id,
+                submission_id,
+            }),
+            Err(err) => {
+                let mut compacting = self.watchdog_compactions_in_progress.lock().await;
+                compacting.remove(&parent_thread_id);
+                Err(err)
+            }
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -238,11 +387,139 @@ impl AgentControl {
         self.watchdogs.force_due_for_tests(target_thread_id).await;
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[allow(dead_code)]
+    pub(crate) async fn set_watchdog_active_helper_for_tests(
+        &self,
+        target_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+    ) {
+        self.watchdogs
+            .set_active_helper_for_tests(target_thread_id, helper_thread_id)
+            .await;
+    }
+
+    pub(crate) async fn list_agents(
+        &self,
+        owner_thread_id: ThreadId,
+        recursive: bool,
+    ) -> CodexResult<Vec<AgentListing>> {
+        let state = self.upgrade()?;
+        let threads = state.list_threads().await;
+
+        let mut parent_by_thread: HashMap<ThreadId, Option<ThreadId>> =
+            HashMap::with_capacity(threads.len());
+        let mut status_by_thread: HashMap<ThreadId, AgentStatus> =
+            HashMap::with_capacity(threads.len());
+
+        for (thread_id, thread) in &threads {
+            let snapshot = thread.config_snapshot().await;
+            let parent_thread_id = match snapshot.session_source {
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id, ..
+                }) => Some(parent_thread_id),
+                _ => None,
+            };
+            parent_by_thread.insert(*thread_id, parent_thread_id);
+            status_by_thread.insert(*thread_id, thread.agent_status().await);
+        }
+
+        let mut children_by_parent: HashMap<ThreadId, Vec<ThreadId>> = HashMap::new();
+        for (thread_id, parent_thread_id) in &parent_by_thread {
+            if let Some(parent_thread_id) = parent_thread_id {
+                children_by_parent
+                    .entry(*parent_thread_id)
+                    .or_default()
+                    .push(*thread_id);
+            }
+        }
+
+        for children in children_by_parent.values_mut() {
+            children.sort_by_key(ToString::to_string);
+        }
+
+        let mut listings = Vec::new();
+        let mut queue: VecDeque<(ThreadId, usize)> = VecDeque::new();
+        if let Some(children) = children_by_parent.get(&owner_thread_id) {
+            for child in children {
+                queue.push_back((*child, 1));
+            }
+        }
+
+        while let Some((thread_id, depth)) = queue.pop_front() {
+            listings.push(AgentListing {
+                thread_id,
+                parent_thread_id: parent_by_thread.get(&thread_id).copied().flatten(),
+                status: status_by_thread
+                    .get(&thread_id)
+                    .cloned()
+                    .unwrap_or(AgentStatus::NotFound),
+                depth,
+            });
+
+            if recursive && let Some(children) = children_by_parent.get(&thread_id) {
+                for child in children {
+                    queue.push_back((*child, depth + 1));
+                }
+            }
+        }
+
+        Ok(listings)
+    }
+
     fn upgrade(&self) -> CodexResult<Arc<ThreadManagerState>> {
         self.manager
             .upgrade()
             .ok_or_else(|| CodexErr::UnsupportedOperation("thread manager dropped".to_string()))
     }
+}
+
+fn build_collab_inbox_items(
+    role: CollabInboxDeliveryRole,
+    sender_thread_id: ThreadId,
+    message: String,
+) -> CodexResult<Vec<ResponseInputItem>> {
+    let items = match role {
+        CollabInboxDeliveryRole::Tool => {
+            let call_id = format!("collab_inbox_{}", Uuid::new_v4());
+            let payload = CollabInboxPayload::new(sender_thread_id, message);
+            let output = serde_json::to_string(&payload).map_err(|err| {
+                CodexErr::UnsupportedOperation(format!(
+                    "failed to serialize collab inbox payload: {err}"
+                ))
+            })?;
+
+            vec![
+                ResponseInputItem::FunctionCall {
+                    name: COLLAB_INBOX_KIND.to_string(),
+                    arguments: "{}".to_string(),
+                    call_id: call_id.clone(),
+                },
+                ResponseInputItem::FunctionCallOutput {
+                    call_id,
+                    output: FunctionCallOutputPayload {
+                        content: output,
+                        ..Default::default()
+                    },
+                },
+            ]
+        }
+        CollabInboxDeliveryRole::Assistant => {
+            let text = format!("{COLLAB_INBOX_MESSAGE_PREFIX}{sender_thread_id}] {message}");
+            vec![ResponseInputItem::Message {
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText { text }],
+            }]
+        }
+        CollabInboxDeliveryRole::Developer => {
+            let text = format!("{COLLAB_INBOX_MESSAGE_PREFIX}{sender_thread_id}] {message}");
+            vec![ResponseInputItem::Message {
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText { text }],
+            }]
+        }
+    };
+    Ok(items)
 }
 
 #[cfg(test)]
@@ -729,4 +1006,46 @@ mod tests {
             .await
             .expect("shutdown resumed thread");
     }
+
+    #[test]
+    fn build_collab_inbox_items_tool_role_emits_function_call_and_output() {
+        let sender_thread_id = ThreadId::new();
+        let message = "ping".to_string();
+
+        let items =
+            build_collab_inbox_items(CollabInboxDeliveryRole::Tool, sender_thread_id, message)
+                .expect("tool role should build inbox items");
+
+        assert_eq!(items.len(), 2);
+
+        let call_id = match &items[0] {
+            ResponseInputItem::FunctionCall {
+                name,
+                arguments,
+                call_id,
+            } => {
+                assert_eq!(name, COLLAB_INBOX_KIND);
+                assert_eq!(arguments, "{}");
+                call_id.clone()
+            }
+            other => panic!("expected function call item, got {other:?}"),
+        };
+
+        match &items[1] {
+            ResponseInputItem::FunctionCallOutput {
+                call_id: output_call_id,
+                output,
+            } => {
+                assert_eq!(output_call_id, &call_id);
+                let payload: CollabInboxPayload =
+                    serde_json::from_str(&output.content).expect("payload should be valid json");
+                assert!(payload.injected);
+                assert_eq!(payload.kind, COLLAB_INBOX_KIND);
+                assert_eq!(payload.sender_thread_id, sender_thread_id);
+                assert_eq!(payload.message, "ping");
+            }
+            other => panic!("expected function call output item, got {other:?}"),
+        }
+    }
+
 }

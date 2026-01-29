@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+// Collab helpers are retained for reference; subagent panel rendering bypasses these.
+
 use crate::history_cell::PlainHistoryCell;
 use crate::render::line_utils::prefix_lines;
 use crate::text_formatting::truncate_text;
