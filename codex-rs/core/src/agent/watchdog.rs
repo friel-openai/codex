@@ -250,6 +250,9 @@ impl WatchdogManager {
             depth: snapshot.child_depth,
         });
         let mut helper_config = snapshot.config.clone();
+        // Watchdog helpers are short-lived check-ins. Keep their state in-memory and
+        // avoid writing full forked rollout history to disk for each helper run.
+        helper_config.ephemeral = true;
         let watchdog_instructions =
             watchdog_developer_instructions(&helper_config, snapshot.owner_thread_id).await;
         helper_config.developer_instructions = Some(match helper_config.developer_instructions {
@@ -263,6 +266,7 @@ impl WatchdogManager {
                 helper_config,
                 snapshot.prompt.clone(),
                 snapshot.owner_thread_id,
+                // Keep full history for helper forks to maximize model-side caching efficiency.
                 usize::MAX,
                 session_source,
             )

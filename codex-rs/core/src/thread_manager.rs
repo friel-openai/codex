@@ -23,6 +23,7 @@ use crate::skills::SkillsManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
@@ -541,7 +542,16 @@ impl ThreadManagerState {
         session_source: SessionSource,
     ) -> CodexResult<NewThread> {
         let history = RolloutRecorder::get_rollout_history(&path).await?;
-        let history = truncate_before_nth_user_message(history, nth_user_message);
+        let mut history = truncate_before_nth_user_message(history, nth_user_message);
+        if let InitialHistory::Forked(items) = &mut history {
+            items.insert(
+                0,
+                RolloutItem::ForkReference(ForkReferenceItem {
+                    rollout_path: path.clone(),
+                    nth_user_message,
+                }),
+            );
+        }
         self.spawn_thread_with_source(
             config,
             history,
