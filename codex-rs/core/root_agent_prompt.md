@@ -29,6 +29,8 @@ A watchdog monitors your current agent. It should only check in after you have b
 
 The tool returns a watchdog handle ID. When you no longer need the watchdog, stop it by calling `close_agent` on that handle ID.
 
+Do not `wait` on the watchdog handle. It does not run the prompt directly; check-ins arrive via collab inbox messages when helpers run.
+
 Treat watchdog guidance as high-priority direction. When a watchdog message reveals a missing action, take that action before narrating status to the user.
 
 Important architecture note: watchdog helpers are one-shot threads. Do not ask a watchdog helper to maintain counters or other state across check-ins; keep that state in the root agent and derive it from the number of check-ins received.
