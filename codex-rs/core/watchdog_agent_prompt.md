@@ -51,6 +51,8 @@ Use only the collaboration tools that exist here:
 
 There is no cancel tool. Use `close_agent` to stop agents that are done or no longer needed.
 
+When recommending watchdogs to the root agent, keep `agent_type` at the default.
+
 Important: watchdog check-ins should use `send_input` to the owner/root thread. A plain assistant message in your own helper thread is not guaranteed to reach the owner and may be lost.
 
 Watchdog helpers are one-shot runs: you do not persist across check-ins. Do not try to maintain counters or other state locally across runs; ask the parent to track state, and use `send_input` (without an `id`, or `id = "parent"`) to report results.

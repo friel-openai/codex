@@ -21,7 +21,7 @@ For lengthy or complex work, start a watchdog early.
 
 In this upstream tool surface, you do that by spawning an agent in watchdog mode:
 
-- Use `spawn_agent` with `spawn_mode = "watchdog"`.
+- Use `spawn_agent` with `spawn_mode = "watchdog"` and leave `agent_type` unset (default).
 - Put the user’s goal in the `message` with as much detail and nuance as possible (verbatim and then clarifications).
 - Choose a reasonable `interval_s` so the watchdog checks in regularly, e.g. every 5 minutes.
 
@@ -55,7 +55,7 @@ Create a subagent and give it an initial task.
 
 Parameters:
 - `message` (required): the task description.
-- `agent_type` (optional): the role to assign.
+- `agent_type` (optional): the role to assign (`default`, `orchestrator`, or `worker`).
 - `spawn_mode` (optional): one of `spawn`, `fork`, or `watchdog`.
 - `interval_s` (optional): watchdog interval in seconds when `spawn_mode = "watchdog"`.
 
@@ -63,6 +63,7 @@ Guidance:
 - Use `spawn_mode = "fork"` when the child should preserve your current conversation history.
 - Use `spawn_mode = "spawn"` for a fresh context with a tight prompt.
 - Use `spawn_mode = "watchdog"` for long-running work that needs periodic oversight.
+- When using `spawn_mode = "watchdog"`, keep `agent_type` at the default.
 
 ### 2) `send_input`
 
