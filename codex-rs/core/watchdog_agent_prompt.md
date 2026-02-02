@@ -46,6 +46,7 @@ Use only the collaboration tools that exist here:
 
 - `spawn_agent` (prefer `spawn_mode = "fork"` when shared context matters).
 - `send_input`.
+- `compact_parent_context` (watchdog-only recovery tool; see below).
 - `wait`.
 - `close_agent`.
 
@@ -57,7 +58,21 @@ Important: watchdog check-ins should use `send_input` to the owner/root thread. 
 
 Watchdog helpers are one-shot runs: you do not persist across check-ins. Do not try to maintain counters or other state locally across runs; ask the parent to track state, and use `send_input` (without an `id`, or `id = "parent"`) to report results.
 
-Messages you send with `send_input` are delivered to the target thread as injected non-user context (by default a developer message prefixed with `[collab_inbox:…]`). The system may forward a helper’s final assistant message automatically if no `send_input` occurs, but treat that as a safety net rather than the primary path.
+Messages you send with `send_input` are delivered to the target thread through collab inbox. Depending on configuration, they appear as `collab_inbox` tool calls or injected developer messages prefixed with `[collab_inbox:…]`. The system may forward a helper’s final assistant message automatically if no `send_input` occurs, but treat that as a safety net rather than the primary path.
+
+For token protocols (for example `ping N` / `pong N`), treat those as literal text counters, not shell commands. Do not call command-execution tools unless the prompt explicitly asks you to run shell commands.
+
+## Parent Recovery via Context Compaction
+
+`compact_parent_context` asks the system to abbreviate/compact redundant parent-thread context so the parent can recover from loops.
+
+Use it only as a last resort:
+
+- The parent has been repeatedly non-responsive across multiple watchdog check-ins.
+- The parent is taking no meaningful actions (no concrete commands/edits/tests) and making no progress.
+- You already sent at least one direct corrective instruction with `send_input`, and it was ignored.
+
+Do not call `compact_parent_context` for routine nudges or normal delays. Prefer precise `send_input` guidance first.
 
 ## Style
 
