@@ -399,6 +399,17 @@ impl WatchdogManager {
         registrations.remove(&target_thread_id);
     }
 
+    pub(crate) async fn owner_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let registrations = self.registrations.lock().await;
+        registrations.values().find_map(|entry| {
+            (entry.active_helper_id == Some(helper_thread_id))
+                .then_some(entry.registration.owner_thread_id)
+        })
+    }
+
     pub(crate) async fn take_for_owner(&self, owner_thread_id: ThreadId) -> Vec<ThreadId> {
         let mut registrations = self.registrations.lock().await;
         let removed_targets: Vec<ThreadId> = registrations
