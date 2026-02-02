@@ -87,7 +87,7 @@ impl WatchdogManager {
     pub(crate) async fn register(
         self: &Arc<Self>,
         registration: WatchdogRegistration,
-    ) -> CodexResult<()> {
+    ) -> CodexResult<Vec<ThreadId>> {
         if exceeds_thread_spawn_depth_limit(registration.child_depth) {
             return Err(CodexErr::UnsupportedOperation(format!(
                 "agent depth limit reached: max depth is {MAX_THREAD_SPAWN_DEPTH}"
@@ -108,8 +108,19 @@ impl WatchdogManager {
         };
 
         let mut registrations = self.registrations.lock().await;
+        let superseded_targets: Vec<ThreadId> = registrations
+            .iter()
+            .filter_map(|(target_thread_id, existing_entry)| {
+                (existing_entry.registration.owner_thread_id == entry.registration.owner_thread_id
+                    && *target_thread_id != entry.registration.target_thread_id)
+                    .then_some(*target_thread_id)
+            })
+            .collect();
+        for superseded_target in &superseded_targets {
+            registrations.remove(superseded_target);
+        }
         registrations.insert(entry.registration.target_thread_id, entry);
-        Ok(())
+        Ok(superseded_targets)
     }
 
     async fn run_loop(self: Arc<Self>) {
@@ -386,6 +397,20 @@ impl WatchdogManager {
     pub(crate) async fn unregister(&self, target_thread_id: ThreadId) {
         let mut registrations = self.registrations.lock().await;
         registrations.remove(&target_thread_id);
+    }
+
+    pub(crate) async fn take_for_owner(&self, owner_thread_id: ThreadId) -> Vec<ThreadId> {
+        let mut registrations = self.registrations.lock().await;
+        let removed_targets: Vec<ThreadId> = registrations
+            .iter()
+            .filter_map(|(target_thread_id, entry)| {
+                (entry.registration.owner_thread_id == owner_thread_id).then_some(*target_thread_id)
+            })
+            .collect();
+        for removed_target in &removed_targets {
+            registrations.remove(removed_target);
+        }
+        removed_targets
     }
 
     #[cfg(any(test, feature = "test-support"))]
