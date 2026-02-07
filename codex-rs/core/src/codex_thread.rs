@@ -94,12 +94,6 @@ impl CodexThread {
         self.codex.session.flush_rollout().await;
     }
 
-    #[cfg(any(test, feature = "test-support"))]
-    #[allow(dead_code)]
-    pub(crate) fn session_for_tests(&self) -> std::sync::Arc<crate::codex::Session> {
-        std::sync::Arc::clone(&self.codex.session)
-    }
-
     pub async fn config_snapshot(&self) -> ThreadConfigSnapshot {
         self.codex.thread_config_snapshot().await
     }

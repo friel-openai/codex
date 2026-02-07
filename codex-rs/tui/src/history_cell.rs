@@ -25,6 +25,8 @@ use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
+use crate::shimmer::shimmer_spans;
+use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 use crate::text_formatting::format_and_truncate_tool_result;
@@ -40,6 +42,7 @@ use base64::Engine;
 use codex_common::format_env_display::format_env_display;
 use codex_core::config::Config;
 use codex_core::config::types::McpServerTransportConfig;
+use codex_core::protocol::AgentStatus;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::McpAuthStatus;
 use codex_core::protocol::McpInvocation;
@@ -72,6 +75,8 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::error;
@@ -396,6 +401,206 @@ impl PlainHistoryCell {
 impl HistoryCell for PlainHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         self.lines.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentPanelAgent {
+    pub(crate) ordinal: i32,
+    pub(crate) name: String,
+    pub(crate) status: AgentStatus,
+    pub(crate) preview: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentPanelState {
+    pub(crate) started_at: Instant,
+    pub(crate) total_agents: i32,
+    pub(crate) running_agents: Vec<SubagentPanelAgent>,
+}
+
+impl SubagentPanelState {
+    pub(crate) fn running_count(&self) -> i32 {
+        self.running_agents.len() as i32
+    }
+
+    pub(crate) fn has_running_agents(&self) -> bool {
+        self.running_count() > 0
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentStatusCell {
+    state: Arc<Mutex<SubagentPanelState>>,
+    animations_enabled: bool,
+}
+
+impl SubagentStatusCell {
+    pub(crate) fn new(
+        state: Arc<Mutex<SubagentPanelState>>,
+        animations_enabled: bool,
+    ) -> SubagentStatusCell {
+        SubagentStatusCell {
+            state,
+            animations_enabled,
+        }
+    }
+
+    pub(crate) fn state_handle(&self) -> Arc<Mutex<SubagentPanelState>> {
+        Arc::clone(&self.state)
+    }
+
+    pub(crate) fn matches_state(&self, other: &Arc<Mutex<SubagentPanelState>>) -> bool {
+        Arc::ptr_eq(&self.state, other)
+    }
+}
+
+impl HistoryCell for SubagentStatusCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let state = {
+            let guard = self.state.lock().expect("subagent panel state lock");
+            guard.clone()
+        };
+        if state.running_agents.is_empty() {
+            return Vec::new();
+        }
+
+        let elapsed = fmt_elapsed_compact(state.started_at.elapsed().as_secs());
+        let running_count = state.running_count();
+        let total_agents = state.total_agents.max(running_count);
+        let count_label = subagent_count_label(total_agents, running_count);
+        let header_suffix = format!("({elapsed} • {count_label} • esc to interrupt)");
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            "• ".dim(),
+            "Subagents".bold(),
+            " ".into(),
+            header_suffix.dim(),
+        ]));
+
+        let mut running_agents = state.running_agents;
+        running_agents.sort_by(|left, right| left.ordinal.cmp(&right.ordinal));
+        let preview_budget = running_preview_budget(width);
+        lines.extend(running_agents.into_iter().map(|agent| {
+            let preview = truncate_text(agent.preview.trim(), preview_budget);
+            let mut spans: Vec<Span<'static>> = vec![
+                "• ".dim(),
+                format!("[#{}] ", agent.ordinal).dim(),
+                Span::from(agent.name),
+                " ".into(),
+                running_status_span(&agent.status),
+                " — ".dim(),
+            ];
+            if self.animations_enabled && is_running_status(&agent.status) {
+                spans.extend(shimmer_spans(&preview));
+            } else {
+                spans.push(Span::from(preview));
+            }
+            Line::from(spans)
+        }));
+
+        lines
+    }
+
+    fn transcript_animation_tick(&self) -> Option<u64> {
+        if !self.animations_enabled {
+            return None;
+        }
+        let guard = self.state.lock().expect("subagent panel state lock");
+        if !guard.has_running_agents() {
+            return None;
+        }
+        Some((guard.started_at.elapsed().as_millis() / 100) as u64)
+    }
+}
+
+pub(crate) fn new_subagent_spawned_cell(name: &str, prompt_preview: &str) -> PlainHistoryCell {
+    let mut lines = Vec::new();
+    lines.push(Line::from(vec![
+        "• ".dim(),
+        "Spawned subagent ".into(),
+        Span::from(name.to_string()).bold(),
+    ]));
+
+    let preview = truncate_text(prompt_preview.trim(), 240);
+    if !preview.is_empty() {
+        lines.push(Line::from(vec![
+            "  └ ".dim(),
+            Span::from(format!("\"{preview}\"")).dim(),
+        ]));
+    }
+
+    PlainHistoryCell::new(lines)
+}
+
+pub(crate) fn new_subagent_update_cell(
+    name: &str,
+    status: &AgentStatus,
+    summary: &str,
+) -> PlainHistoryCell {
+    let mut spans: Vec<Span<'static>> = vec![
+        "• ".dim(),
+        "Subagent update: ".into(),
+        Span::from(name.to_string()).bold(),
+        " ".into(),
+        status_label_span(status),
+    ];
+
+    let summary = truncate_text(summary.trim(), 240);
+    if !summary.is_empty() {
+        spans.push(" — ".dim());
+        spans.push(Span::from(summary));
+    }
+
+    PlainHistoryCell::new(vec![Line::from(spans)])
+}
+
+fn running_preview_budget(width: u16) -> usize {
+    let width = width as usize;
+    width.saturating_sub(24).clamp(60, 160)
+}
+
+fn is_running_status(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+}
+
+fn running_status_span(status: &AgentStatus) -> Span<'static> {
+    match status {
+        AgentStatus::PendingInit | AgentStatus::Running => "running".cyan().bold(),
+        AgentStatus::Completed(_) => "completed".green(),
+        AgentStatus::Errored(_) => "errored".red(),
+        AgentStatus::Shutdown => "shutdown".dim(),
+        AgentStatus::NotFound => "not found".red(),
+    }
+}
+
+fn status_label_span(status: &AgentStatus) -> Span<'static> {
+    match status {
+        AgentStatus::PendingInit | AgentStatus::Running => "running".cyan().bold(),
+        AgentStatus::Completed(_) => "completed".green(),
+        AgentStatus::Errored(_) => "errored".red(),
+        AgentStatus::Shutdown => "shutdown".dim(),
+        AgentStatus::NotFound => "not found".red(),
+    }
+}
+
+fn subagent_count_label(total: i32, running: i32) -> String {
+    if total <= 0 || running <= 0 {
+        return "no subagents running".to_string();
+    }
+    let total_label = subagent_pluralize(total, "subagent");
+    if running >= total {
+        return format!("{total_label} running");
+    }
+    format!("{total_label}, {running} running")
+}
+
+fn subagent_pluralize(count: i32, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
     }
 }
 
