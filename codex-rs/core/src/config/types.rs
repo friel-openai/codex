@@ -28,8 +28,8 @@ pub const DEFAULT_OTEL_ENVIRONMENT: &str = "dev";
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
 pub enum CollabInboxDeliveryRole {
-    #[default]
     Developer,
+    #[default]
     Tool,
     Assistant,
 }
