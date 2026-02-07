@@ -4,13 +4,13 @@ use crate::codex::TurnContext;
 use crate::codex::run_turn;
 use crate::state::TaskKind;
 use async_trait::async_trait;
+use codex_protocol::user_input::UserInput;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
 use tracing::trace_span;
 
 use super::SessionTask;
 use super::SessionTaskContext;
-use crate::turn_input::TurnInput;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct RegularTask;
@@ -25,7 +25,7 @@ impl SessionTask for RegularTask {
         self: Arc<Self>,
         session: Arc<SessionTaskContext>,
         ctx: Arc<TurnContext>,
-        input: TurnInput,
+        input: Vec<UserInput>,
         cancellation_token: CancellationToken,
     ) -> Option<String> {
         let sess = session.clone_session();

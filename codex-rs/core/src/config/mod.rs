@@ -1664,6 +1664,7 @@ impl Config {
             web_search_mode: mut constrained_web_search_mode,
             mcp_servers,
             exec_policy: _,
+            network: _,
             enforce_residency,
         } = requirements;
 
@@ -4395,6 +4396,7 @@ model_verbosity = "high"
             ]),
             mcp_servers: None,
             rules: None,
+            network: None,
             enforce_residency: None,
         };
         let requirement_source = crate::config_loader::RequirementSource::Unknown;
@@ -4952,6 +4954,7 @@ mcp_oauth_callback_port = 5678
             allowed_web_search_modes: None,
             mcp_servers: None,
             rules: None,
+            network: None,
             enforce_residency: None,
         };
 

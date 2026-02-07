@@ -4,7 +4,9 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -532,6 +534,14 @@ impl Codex {
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
         self.session.state_db()
     }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.session.has_active_turn().await
+    }
+
+    pub(crate) fn last_completed_turn_used_collab_send_input(&self) -> bool {
+        self.session.last_completed_turn_used_collab_send_input()
+    }
 }
 
 /// Context for an initialized model agent
@@ -549,6 +559,10 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) services: SessionServices,
     next_internal_sub_id: AtomicU64,
+    /// Tracks whether the current turn delivered a collab inbox message via send_input.
+    turn_used_collab_send_input: AtomicBool,
+    /// Snapshots whether the last completed turn used collab send_input.
+    last_completed_turn_used_collab_send_input: AtomicBool,
 }
 
 /// The context needed for a single turn of the thread.
@@ -703,6 +717,7 @@ impl SessionConfiguration {
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             personality: self.personality,
             session_source: self.session_source.clone(),
+            collab_inbox_delivery_role: self.original_config_do_not_use.collab_inbox_delivery_role,
         }
     }
 
@@ -1141,6 +1156,8 @@ impl Session {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            turn_used_collab_send_input: AtomicBool::new(false),
+            last_completed_turn_used_collab_send_input: AtomicBool::new(false),
         });
 
         // Warm a websocket in the background so the first turn can reuse it.
@@ -1241,6 +1258,43 @@ impl Session {
 
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
         self.services.state_db.clone()
+    }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.active_turn.lock().await.is_some()
+    }
+
+    pub(crate) async fn parent_thread_id(&self) -> Option<ThreadId> {
+        let state = self.state.lock().await;
+        match &state.session_configuration.session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => Some(*parent_thread_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn mark_turn_used_collab_send_input(&self) {
+        self.turn_used_collab_send_input
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn reset_turn_collab_send_input_flag(&self) {
+        self.turn_used_collab_send_input
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn snapshot_collab_send_input_on_turn_complete(&self) {
+        let used_collab_send_input = self
+            .turn_used_collab_send_input
+            .swap(false, Ordering::AcqRel);
+        self.last_completed_turn_used_collab_send_input
+            .store(used_collab_send_input, Ordering::Release);
+    }
+
+    pub(crate) fn last_completed_turn_used_collab_send_input(&self) -> bool {
+        self.last_completed_turn_used_collab_send_input
+            .load(Ordering::Acquire)
     }
 
     /// Ensure all rollout writes are durably flushed.
@@ -3655,12 +3709,9 @@ async fn spawn_review_thread(
     per_turn_config.model = Some(model.clone());
     per_turn_config.features = review_features.clone();
     if let Err(err) = per_turn_config.web_search_mode.set(review_web_search_mode) {
-        let fallback_value = per_turn_config.web_search_mode.value();
         tracing::warn!(
             error = %err,
-            ?review_web_search_mode,
-            ?fallback_value,
-            "review web_search_mode is disallowed by requirements; keeping constrained value"
+            "failed to force review web_search_mode=disabled; keeping constrained value"
         );
     }
 
@@ -6043,6 +6094,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            turn_used_collab_send_input: AtomicBool::new(false),
+            last_completed_turn_used_collab_send_input: AtomicBool::new(false),
         };
 
         (session, turn_context)
@@ -6175,6 +6228,8 @@ mod tests {
             active_turn: Mutex::new(None),
             services,
             next_internal_sub_id: AtomicU64::new(0),
+            turn_used_collab_send_input: AtomicBool::new(false),
+            last_completed_turn_used_collab_send_input: AtomicBool::new(false),
         });
 
         (session, turn_context, rx_event)

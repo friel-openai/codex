@@ -53,11 +53,6 @@ pub(crate) struct ConnectorsSnapshot {
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     CodexEvent(Event),
-    /// Event emitted from a non-primary thread.
-    ThreadEvent {
-        thread_id: ThreadId,
-        event: Event,
-    },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.
