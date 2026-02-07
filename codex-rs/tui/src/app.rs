@@ -292,6 +292,21 @@ impl ThreadEventStore {
                 self.session_configured = Some(event);
                 return;
             }
+            EventMsg::CollabAgentSpawnBegin(_)
+            | EventMsg::CollabAgentSpawnEnd(_)
+            | EventMsg::CollabAgentInteractionBegin(_)
+            | EventMsg::CollabAgentInteractionEnd(_)
+            | EventMsg::CollabWaitingBegin(_)
+            | EventMsg::CollabWaitingEnd(_)
+            | EventMsg::CollabCloseBegin(_)
+            | EventMsg::CollabCloseEnd(_)
+            | EventMsg::CollabResumeBegin(_)
+            | EventMsg::CollabResumeEnd(_) => {
+                // Collab events are rendered through the subagent registry and panel.
+                // Storing raw collab tool events in thread history causes noisy
+                // "Agent spawned / Wait complete / Agent closed" transcripts.
+                return;
+            }
             EventMsg::ItemCompleted(completed) => {
                 if let TurnItem::UserMessage(item) = &completed.item {
                     if !event.id.is_empty() && self.user_message_ids.contains(&event.id) {
@@ -3126,7 +3141,18 @@ mod tests {
     use codex_core::config::ConfigBuilder;
     use codex_core::config::ConfigOverrides;
     use codex_core::models_manager::manager::ModelsManager;
+    use codex_core::protocol::AgentStatus;
     use codex_core::protocol::AskForApproval;
+    use codex_core::protocol::CollabAgentInteractionBeginEvent;
+    use codex_core::protocol::CollabAgentInteractionEndEvent;
+    use codex_core::protocol::CollabAgentSpawnBeginEvent;
+    use codex_core::protocol::CollabAgentSpawnEndEvent;
+    use codex_core::protocol::CollabCloseBeginEvent;
+    use codex_core::protocol::CollabCloseEndEvent;
+    use codex_core::protocol::CollabResumeBeginEvent;
+    use codex_core::protocol::CollabResumeEndEvent;
+    use codex_core::protocol::CollabWaitingBeginEvent;
+    use codex_core::protocol::CollabWaitingEndEvent;
     use codex_core::protocol::Event;
     use codex_core::protocol::EventMsg;
     use codex_core::protocol::SandboxPolicy;
@@ -3138,6 +3164,7 @@ mod tests {
     use insta::assert_snapshot;
     use pretty_assertions::assert_eq;
     use ratatui::prelude::Line;
+    use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
@@ -3706,5 +3733,100 @@ mod tests {
             summary.resume_command,
             Some("codex resume my-session".to_string())
         );
+    }
+
+    #[test]
+    fn thread_event_store_skips_collab_events() {
+        let sender_thread_id = ThreadId::new();
+        let receiver_thread_id = ThreadId::new();
+        let mut statuses = HashMap::new();
+        statuses.insert(receiver_thread_id, AgentStatus::Running);
+
+        let collab_messages = vec![
+            EventMsg::CollabAgentSpawnBegin(CollabAgentSpawnBeginEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                prompt: "spawn".to_string(),
+            }),
+            EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+                call_id: "call-1".to_string(),
+                sender_thread_id,
+                new_thread_id: Some(receiver_thread_id),
+                prompt: "spawn".to_string(),
+                status: AgentStatus::PendingInit,
+            }),
+            EventMsg::CollabAgentInteractionBegin(CollabAgentInteractionBeginEvent {
+                call_id: "call-2".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                prompt: "status?".to_string(),
+            }),
+            EventMsg::CollabAgentInteractionEnd(CollabAgentInteractionEndEvent {
+                call_id: "call-2".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                prompt: "status?".to_string(),
+                status: AgentStatus::Completed(Some("done".to_string())),
+            }),
+            EventMsg::CollabWaitingBegin(CollabWaitingBeginEvent {
+                sender_thread_id,
+                receiver_thread_ids: vec![receiver_thread_id],
+                call_id: "call-3".to_string(),
+            }),
+            EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
+                sender_thread_id,
+                call_id: "call-3".to_string(),
+                statuses: statuses.clone(),
+            }),
+            EventMsg::CollabCloseBegin(CollabCloseBeginEvent {
+                call_id: "call-4".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+            }),
+            EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+                call_id: "call-4".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                status: AgentStatus::Shutdown,
+            }),
+            EventMsg::CollabResumeBegin(CollabResumeBeginEvent {
+                call_id: "call-5".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+            }),
+            EventMsg::CollabResumeEnd(CollabResumeEndEvent {
+                call_id: "call-5".to_string(),
+                sender_thread_id,
+                receiver_thread_id,
+                status: AgentStatus::Running,
+            }),
+        ];
+
+        let mut store = ThreadEventStore::new(32);
+        for (index, msg) in collab_messages.into_iter().enumerate() {
+            store.push_event(Event {
+                id: format!("collab-{index}"),
+                msg,
+            });
+        }
+
+        let snapshot = store.snapshot();
+        assert!(snapshot.events.is_empty());
+    }
+
+    #[test]
+    fn thread_event_store_keeps_non_collab_events() {
+        let mut store = ThreadEventStore::new(8);
+        store.push_event(Event {
+            id: "keep-me".to_string(),
+            msg: EventMsg::ShutdownComplete,
+        });
+
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot.events.len(), 1);
+        assert!(matches!(
+            snapshot.events.first().map(|event| &event.msg),
+            Some(EventMsg::ShutdownComplete)
+        ));
     }
 }
