@@ -239,10 +239,12 @@ impl AgentControl {
             return self.send_prompt(agent_id, message).await;
         }
 
+        let prepend_turn_start_user_message = !thread.has_active_turn().await;
         let items = build_collab_inbox_items(
             snapshot.collab_inbox_delivery_role,
             sender_thread_id,
             message,
+            prepend_turn_start_user_message,
         )?;
         state
             .send_op(agent_id, Op::InjectResponseItems { items })
@@ -452,8 +454,18 @@ fn build_collab_inbox_items(
     role: CollabInboxDeliveryRole,
     sender_thread_id: ThreadId,
     message: String,
+    prepend_turn_start_user_message: bool,
 ) -> CodexResult<Vec<ResponseInputItem>> {
-    let items = match role {
+    let mut items = Vec::new();
+    if prepend_turn_start_user_message {
+        items.push(ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: String::new(),
+            }],
+        });
+    }
+    let role_items = match role {
         CollabInboxDeliveryRole::Tool => {
             let call_id = format!("collab_inbox_{}", Uuid::new_v4());
             let payload = CollabInboxPayload::new(sender_thread_id, message);
@@ -493,6 +505,7 @@ fn build_collab_inbox_items(
             }]
         }
     };
+    items.extend(role_items);
     Ok(items)
 }
 
@@ -736,6 +749,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn send_collab_message_to_idle_thread_prepends_empty_user_message() {
+        let harness = AgentControlHarness::new().await;
+        let (receiver_thread_id, _thread) = harness.start_thread().await;
+        let sender_thread_id = ThreadId::new();
+
+        let submission_id = harness
+            .control
+            .send_collab_message(
+                receiver_thread_id,
+                sender_thread_id,
+                "watchdog update".to_string(),
+            )
+            .await
+            .expect("send_collab_message should succeed");
+        assert!(!submission_id.is_empty());
+
+        let captured = harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .find(|(thread_id, op)| {
+                *thread_id == receiver_thread_id && matches!(op, Op::InjectResponseItems { .. })
+            })
+            .expect("expected injected collab inbox op");
+
+        let Op::InjectResponseItems { items } = captured.1 else {
+            unreachable!("matched above");
+        };
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            ResponseInputItem::Message { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(
+                    content,
+                    &vec![ContentItem::InputText {
+                        text: String::new()
+                    }]
+                );
+            }
+            other => panic!("expected prepended user message, got {other:?}"),
+        }
+        match &items[1] {
+            ResponseInputItem::FunctionCall {
+                name, arguments, ..
+            } => {
+                assert_eq!(name, COLLAB_INBOX_KIND);
+                assert_eq!(arguments, "{}");
+            }
+            other => panic!("expected collab function call, got {other:?}"),
+        }
+        match &items[2] {
+            ResponseInputItem::FunctionCallOutput { output, .. } => {
+                let output_text = output
+                    .body
+                    .to_text()
+                    .expect("payload should convert to text");
+                let payload: CollabInboxPayload =
+                    serde_json::from_str(&output_text).expect("payload should be valid json");
+                assert_eq!(payload.sender_thread_id, sender_thread_id);
+                assert_eq!(payload.message, "watchdog update");
+            }
+            other => panic!("expected collab function call output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn spawn_agent_creates_thread_and_sends_prompt() {
         let harness = AgentControlHarness::new().await;
         let thread_id = harness
@@ -884,9 +963,13 @@ mod tests {
         let sender_thread_id = ThreadId::new();
         let message = "ping".to_string();
 
-        let items =
-            build_collab_inbox_items(CollabInboxDeliveryRole::Tool, sender_thread_id, message)
-                .expect("tool role should build inbox items");
+        let items = build_collab_inbox_items(
+            CollabInboxDeliveryRole::Tool,
+            sender_thread_id,
+            message,
+            false,
+        )
+        .expect("tool role should build inbox items");
 
         assert_eq!(items.len(), 2);
 
@@ -921,6 +1004,100 @@ mod tests {
                 assert_eq!(payload.message, "ping");
             }
             other => panic!("expected function call output item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_collab_inbox_items_tool_role_prepends_empty_user_message_when_requested() {
+        let sender_thread_id = ThreadId::new();
+        let message = "ping".to_string();
+
+        let items = build_collab_inbox_items(
+            CollabInboxDeliveryRole::Tool,
+            sender_thread_id,
+            message,
+            true,
+        )
+        .expect("tool role should build inbox items");
+
+        assert_eq!(items.len(), 3);
+        match &items[0] {
+            ResponseInputItem::Message { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(
+                    content,
+                    &vec![ContentItem::InputText {
+                        text: String::new()
+                    }]
+                );
+            }
+            other => panic!("expected prepended user message, got {other:?}"),
+        }
+        assert_matches!(&items[1], ResponseInputItem::FunctionCall { .. });
+        assert_matches!(&items[2], ResponseInputItem::FunctionCallOutput { .. });
+    }
+
+    #[test]
+    fn build_collab_inbox_items_assistant_role_prepends_empty_user_message_when_requested() {
+        let sender_thread_id = ThreadId::new();
+        let message = "hello".to_string();
+
+        let items = build_collab_inbox_items(
+            CollabInboxDeliveryRole::Assistant,
+            sender_thread_id,
+            message,
+            true,
+        )
+        .expect("assistant role should build inbox items");
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ResponseInputItem::Message { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(
+                    content,
+                    &vec![ContentItem::InputText {
+                        text: String::new()
+                    }]
+                );
+            }
+            other => panic!("expected prepended user message, got {other:?}"),
+        }
+        match &items[1] {
+            ResponseInputItem::Message { role, .. } => assert_eq!(role, "assistant"),
+            other => panic!("expected assistant message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn build_collab_inbox_items_developer_role_prepends_empty_user_message_when_requested() {
+        let sender_thread_id = ThreadId::new();
+        let message = "hello".to_string();
+
+        let items = build_collab_inbox_items(
+            CollabInboxDeliveryRole::Developer,
+            sender_thread_id,
+            message,
+            true,
+        )
+        .expect("developer role should build inbox items");
+
+        assert_eq!(items.len(), 2);
+        match &items[0] {
+            ResponseInputItem::Message { role, content } => {
+                assert_eq!(role, "user");
+                assert_eq!(
+                    content,
+                    &vec![ContentItem::InputText {
+                        text: String::new()
+                    }]
+                );
+            }
+            other => panic!("expected prepended user message, got {other:?}"),
+        }
+        match &items[1] {
+            ResponseInputItem::Message { role, .. } => assert_eq!(role, "developer"),
+            other => panic!("expected developer message, got {other:?}"),
         }
     }
 }
