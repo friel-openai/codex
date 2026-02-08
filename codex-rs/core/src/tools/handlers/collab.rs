@@ -19,6 +19,7 @@ use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
 use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
 use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CollabAgentSpawnMode;
 use codex_protocol::protocol::CollabCloseBeginEvent;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::CollabWaitingBeginEvent;
@@ -118,6 +119,16 @@ mod spawn {
     #[derive(Debug, Serialize)]
     struct SpawnAgentResult {
         agent_id: String,
+    }
+
+    impl From<SpawnMode> for CollabAgentSpawnMode {
+        fn from(value: SpawnMode) -> Self {
+            match value {
+                SpawnMode::Spawn => CollabAgentSpawnMode::Spawn,
+                SpawnMode::Fork => CollabAgentSpawnMode::Fork,
+                SpawnMode::Watchdog => CollabAgentSpawnMode::Watchdog,
+            }
+        }
     }
 
     pub async fn handle(
@@ -222,6 +233,7 @@ mod spawn {
                     sender_thread_id: session.conversation_id,
                     new_thread_id,
                     prompt,
+                    spawn_mode: spawn_mode.into(),
                     status,
                 }
                 .into(),

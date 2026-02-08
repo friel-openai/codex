@@ -58,6 +58,7 @@ use codex_core::protocol::AgentMessageEvent;
 use codex_core::protocol::AgentStatus;
 use codex_core::protocol::AskForApproval;
 use codex_core::protocol::CollabAgentSpawnEndEvent;
+use codex_core::protocol::CollabAgentSpawnMode;
 use codex_core::protocol::CollabCloseEndEvent;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
@@ -390,6 +391,7 @@ struct SubagentInfo {
     ordinal: i32,
     name: String,
     prompt_preview: String,
+    spawn_mode: CollabAgentSpawnMode,
     status: AgentStatus,
     spawned_at: Instant,
     started_at: Option<Instant>,
@@ -400,12 +402,18 @@ struct SubagentInfo {
 }
 
 impl SubagentInfo {
-    fn new(ordinal: i32, name: String, prompt_preview: String) -> Self {
+    fn new(
+        ordinal: i32,
+        name: String,
+        prompt_preview: String,
+        spawn_mode: CollabAgentSpawnMode,
+    ) -> Self {
         let now = Instant::now();
         Self {
             ordinal,
             name,
             prompt_preview: prompt_preview.clone(),
+            spawn_mode,
             status: AgentStatus::PendingInit,
             spawned_at: now,
             started_at: None,
@@ -418,6 +426,24 @@ impl SubagentInfo {
 
     fn is_running(&self) -> bool {
         matches!(self.status, AgentStatus::PendingInit | AgentStatus::Running)
+    }
+
+    fn is_watchdog(&self) -> bool {
+        self.spawn_mode == CollabAgentSpawnMode::Watchdog
+    }
+
+    fn is_visible_in_panel(&self) -> bool {
+        if self.is_watchdog() {
+            return matches!(self.status, AgentStatus::PendingInit | AgentStatus::Running);
+        }
+        self.is_running()
+    }
+
+    fn is_running_for_panel(&self) -> bool {
+        if self.is_watchdog() {
+            return matches!(self.status, AgentStatus::Running);
+        }
+        self.is_running()
     }
 
     fn running_started_at(&self) -> Instant {
@@ -473,7 +499,7 @@ impl SubagentRegistry {
         let prompt_preview = prompt_preview(&event.prompt);
         let name = derive_subagent_name(&event.prompt, ordinal);
 
-        let mut info = SubagentInfo::new(ordinal, name.clone(), prompt_preview);
+        let mut info = SubagentInfo::new(ordinal, name.clone(), prompt_preview, event.spawn_mode);
         info.status = event.status.clone();
         info.latest_preview = info.prompt_preview.clone();
         info.latest_update_at = Instant::now();
@@ -627,14 +653,14 @@ impl SubagentRegistry {
     }
 
     fn has_running_agents(&self) -> bool {
-        self.agents.values().any(SubagentInfo::is_running)
+        self.agents.values().any(SubagentInfo::is_running_for_panel)
     }
 
     fn rebuild_panel_state(&mut self) {
         let mut running_infos: Vec<&SubagentInfo> = self
             .agents
             .values()
-            .filter(|info| info.is_running())
+            .filter(|info| info.is_visible_in_panel())
             .collect();
         running_infos.sort_by_key(|info| info.ordinal);
 
@@ -649,13 +675,21 @@ impl SubagentRegistry {
             .map(|info| info.running_started_at())
             .min()
             .unwrap_or_else(Instant::now);
-        let total_agents = i32::try_from(self.agents.len()).unwrap_or(i32::MAX);
+        let running_count = i32::try_from(
+            running_infos
+                .iter()
+                .filter(|info| info.is_running_for_panel())
+                .count(),
+        )
+        .unwrap_or(i32::MAX);
+        let total_agents = i32::try_from(running_infos.len()).unwrap_or(i32::MAX);
         let running_agents = running_infos
             .into_iter()
             .map(|info| SubagentPanelAgent {
                 ordinal: info.ordinal,
                 name: info.name.clone(),
                 status: info.status.clone(),
+                is_watchdog: info.is_watchdog(),
                 preview: running_preview(info),
             })
             .collect();
@@ -663,6 +697,7 @@ impl SubagentRegistry {
         let state = SubagentPanelState {
             started_at,
             total_agents,
+            running_count,
             running_agents,
         };
 
@@ -3753,6 +3788,7 @@ mod tests {
                 sender_thread_id,
                 new_thread_id: Some(receiver_thread_id),
                 prompt: "spawn".to_string(),
+                spawn_mode: CollabAgentSpawnMode::Spawn,
                 status: AgentStatus::PendingInit,
             }),
             EventMsg::CollabAgentInteractionBegin(CollabAgentInteractionBeginEvent {

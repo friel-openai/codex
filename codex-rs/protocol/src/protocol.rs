@@ -2443,6 +2443,16 @@ pub struct CollabAgentSpawnBeginEvent {
     pub prompt: String,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS, Default)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum CollabAgentSpawnMode {
+    #[default]
+    Spawn,
+    Fork,
+    Watchdog,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct CollabAgentSpawnEndEvent {
     /// Identifier for the collab tool call.
@@ -2454,6 +2464,9 @@ pub struct CollabAgentSpawnEndEvent {
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,
+    /// Spawn mode used for this agent.
+    #[serde(default)]
+    pub spawn_mode: CollabAgentSpawnMode,
     /// Last known status of the new agent reported to the sender agent.
     pub status: AgentStatus,
 }
