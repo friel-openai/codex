@@ -2892,6 +2892,15 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op, &mut previous_context)
                     .await;
             }
+            Op::InjectResponseItems { items } => {
+                handlers::inject_response_items(
+                    &sess,
+                    sub.id.clone(),
+                    items,
+                    &mut previous_context,
+                )
+                .await;
+            }
             Op::ExecApproval { id, decision } => {
                 handlers::exec_approval(&sess, id, decision).await;
             }
@@ -3024,11 +3033,15 @@ mod handlers {
     use codex_protocol::request_user_input::RequestUserInputResponse;
 
     use crate::context_manager::is_user_turn_boundary;
+    use crate::parse_turn_item;
     use codex_protocol::config_types::CollaborationMode;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
     use codex_protocol::dynamic_tools::DynamicToolResponse;
+    use codex_protocol::items::TurnItem;
     use codex_protocol::mcp::RequestId as ProtocolRequestId;
+    use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::user_input::UserInput;
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
@@ -3140,6 +3153,67 @@ mod handlers {
                 .await;
             *previous_context = Some(current_context);
         }
+    }
+
+    pub async fn inject_response_items(
+        sess: &Arc<Session>,
+        sub_id: String,
+        items: Vec<ResponseInputItem>,
+        previous_context: &mut Option<Arc<TurnContext>>,
+    ) {
+        let mut pending_items = match sess.inject_response_items(items).await {
+            Ok(()) => return,
+            Err(items) => items,
+        };
+
+        let mut turn_input = pop_leading_user_message_input(&mut pending_items).unwrap_or_default();
+        if turn_input.is_empty() {
+            turn_input.push(UserInput::Text {
+                text: String::new(),
+                text_elements: Vec::new(),
+            });
+        }
+
+        let current_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        current_context.otel_manager.user_prompt(&turn_input);
+        sess.seed_initial_context_if_needed(&current_context).await;
+        let resumed_model = sess.take_pending_resume_previous_model().await;
+        let update_items = sess.build_settings_update_items(
+            previous_context.as_ref(),
+            resumed_model.as_deref(),
+            &current_context,
+        );
+        if !update_items.is_empty() {
+            sess.record_conversation_items(&current_context, &update_items)
+                .await;
+        }
+
+        sess.refresh_mcp_servers_if_requested(&current_context)
+            .await;
+        sess.spawn_task(Arc::clone(&current_context), turn_input, RegularTask)
+            .await;
+        *previous_context = Some(Arc::clone(&current_context));
+
+        if !pending_items.is_empty()
+            && let Err(remaining_items) = sess.inject_response_items(pending_items).await
+        {
+            warn!(
+                remaining_items = remaining_items.len(),
+                "failed to inject response items after starting a turn"
+            );
+        }
+    }
+
+    fn pop_leading_user_message_input(
+        items: &mut Vec<ResponseInputItem>,
+    ) -> Option<Vec<UserInput>> {
+        let first_item = items.first().cloned()?;
+        let response_item: ResponseItem = first_item.into();
+        let TurnItem::UserMessage(user_message) = parse_turn_item(&response_item)? else {
+            return None;
+        };
+        let _ = items.remove(0);
+        Some(user_message.content)
     }
 
     pub async fn run_user_shell_command(
@@ -6447,6 +6521,111 @@ mod tests {
             history.raw_items().iter().any(|item| item == &expected),
             "expected pending input to be persisted into history on turn completion"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn inject_response_items_handler_adds_pending_input_for_active_turn() {
+        let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+        let input = vec![UserInput::Text {
+            text: "hello".to_string(),
+            text_elements: Vec::new(),
+        }];
+        sess.spawn_task(
+            Arc::clone(&tc),
+            input,
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let mut previous_context = None;
+        let injected_item = ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "collab inbox test".to_string(),
+            }],
+        };
+        handlers::inject_response_items(
+            &sess,
+            "inject-active-turn".to_string(),
+            vec![injected_item.clone()],
+            &mut previous_context,
+        )
+        .await;
+
+        let pending = sess.get_pending_input().await;
+        assert_eq!(pending, vec![injected_item]);
+
+        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submission_loop_handles_inject_response_items_op() {
+        let (sess, tc, _rx) = make_session_and_context_with_rx().await;
+        let input = vec![UserInput::Text {
+            text: "hello".to_string(),
+            text_elements: Vec::new(),
+        }];
+        sess.spawn_task(
+            Arc::clone(&tc),
+            input,
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let config = sess.get_config().await;
+        let (tx_sub, rx_sub) = async_channel::bounded(4);
+        let session = Arc::clone(&sess);
+        let loop_handle = tokio::spawn(async move {
+            submission_loop(session, config, rx_sub).await;
+        });
+
+        let injected_item = ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "submission-loop collab inbox".to_string(),
+            }],
+        };
+        tx_sub
+            .send(Submission {
+                id: "inject-op".to_string(),
+                op: Op::InjectResponseItems {
+                    items: vec![injected_item.clone()],
+                },
+            })
+            .await
+            .expect("submit inject op");
+
+        let pending = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let pending = sess.get_pending_input().await;
+                if !pending.is_empty() {
+                    break pending;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("inject op should be routed to pending input");
+        assert_eq!(pending, vec![injected_item]);
+
+        tx_sub
+            .send(Submission {
+                id: "shutdown-op".to_string(),
+                op: Op::Shutdown,
+            })
+            .await
+            .expect("submit shutdown op");
+        loop_handle
+            .await
+            .expect("submission loop task should exit cleanly");
+
+        sess.abort_all_tasks(TurnAbortReason::Replaced).await;
     }
 
     #[tokio::test]
