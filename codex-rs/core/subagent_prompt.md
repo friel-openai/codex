@@ -21,7 +21,7 @@ Important: if you need to communicate back to your parent/root agent, you must u
 
 You can call `send_input` without an `id` (or with `id = "parent"`) to message your parent/root agent directly.
 
-Messages you send with `send_input` are delivered to the root thread as injected non-user context (by default a developer message prefixed with `[collab_inbox:…]`), not as user messages.
+Messages you send with `send_input` are delivered to the root thread through collab inbox, not as user messages. Depending on configuration, they appear in the root thread as `collab_inbox` tool calls or injected developer messages prefixed with `[collab_inbox:…]`.
 
 ## Reporting Expectations
 
