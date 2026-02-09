@@ -81,6 +81,9 @@ Wait for one or more agents to complete or report status.
 Guidance:
 - You do not need to wait after every spawn. Do useful parallel work, then wait when you need results.
 - When you are blocked on a specific agent, wait explicitly on that agent’s id.
+- Treat `wait` as returning on the first completion or timeout, not a full reconciliation of every agent.
+- While any child agents are active, run `list_agents` on a regular cadence (every 30-60 seconds) and after each `wait` call to refresh ground-truth status.
+- Keep an explicit set of outstanding agent ids and continue `wait`/`list_agents` reconciliation until no non-final agents remain.
 
 ### 4) `close_agent`
 

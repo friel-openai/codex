@@ -53,6 +53,15 @@ pub(crate) struct ConnectorsSnapshot {
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     CodexEvent(Event),
+    /// Forward an event for a specific thread id.
+    ///
+    /// Used by background listeners for non-active threads so the app can keep
+    /// subagent status/panel state in sync even when those threads are not the
+    /// focused chat thread.
+    CodexThreadEvent {
+        thread_id: ThreadId,
+        event: Event,
+    },
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
     /// Switch the active thread to the selected agent.

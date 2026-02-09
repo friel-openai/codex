@@ -411,6 +411,7 @@ pub(crate) struct SubagentPanelAgent {
     pub(crate) status: AgentStatus,
     pub(crate) is_watchdog: bool,
     pub(crate) preview: String,
+    pub(crate) latest_update_at: Instant,
 }
 
 #[derive(Clone, Debug)]
@@ -426,8 +427,10 @@ impl SubagentPanelState {
         self.running_count
     }
 
-    pub(crate) fn has_running_agents(&self) -> bool {
-        self.running_count() > 0
+    pub(crate) fn has_animating_agents(&self, now: Instant) -> bool {
+        self.running_agents
+            .iter()
+            .any(|agent| should_shimmer(agent, now))
     }
 }
 
@@ -484,6 +487,7 @@ impl HistoryCell for SubagentStatusCell {
         let mut running_agents = state.running_agents;
         running_agents.sort_by(|left, right| left.ordinal.cmp(&right.ordinal));
         let preview_budget = running_preview_budget(width);
+        let now = Instant::now();
         lines.extend(running_agents.into_iter().map(|agent| {
             let preview = truncate_text(agent.preview.trim(), preview_budget);
             let mut spans: Vec<Span<'static>> =
@@ -495,7 +499,7 @@ impl HistoryCell for SubagentStatusCell {
             spans.push(" ".into());
             spans.push(status_span_for_panel(&agent));
             spans.push(" — ".dim());
-            if self.animations_enabled && should_shimmer(&agent) {
+            if self.animations_enabled && should_shimmer(&agent, now) {
                 spans.extend(shimmer_spans(&preview));
             } else {
                 spans.push(Span::from(preview));
@@ -511,10 +515,11 @@ impl HistoryCell for SubagentStatusCell {
             return None;
         }
         let guard = self.state.lock().expect("subagent panel state lock");
-        if !guard.has_running_agents() {
+        let now = Instant::now();
+        if !guard.has_animating_agents(now) {
             return None;
         }
-        Some((guard.started_at.elapsed().as_millis() / 100) as u64)
+        Some((now.duration_since(guard.started_at).as_millis() / 100) as u64)
     }
 }
 
@@ -579,11 +584,14 @@ fn status_span_for_panel(agent: &SubagentPanelAgent) -> Span<'static> {
     }
 }
 
-fn should_shimmer(agent: &SubagentPanelAgent) -> bool {
+const SUBAGENT_SHIMMER_WINDOW: Duration = Duration::from_secs(1);
+
+fn should_shimmer(agent: &SubagentPanelAgent, now: Instant) -> bool {
     if agent.is_watchdog && matches!(agent.status, AgentStatus::PendingInit) {
         return false;
     }
     is_running_status(&agent.status)
+        && now.saturating_duration_since(agent.latest_update_at) <= SUBAGENT_SHIMMER_WINDOW
 }
 
 fn status_label_span(status: &AgentStatus) -> Span<'static> {
@@ -2572,6 +2580,7 @@ mod tests {
                 status: AgentStatus::PendingInit,
                 is_watchdog: true,
                 preview: "monitor parent progress".to_string(),
+                latest_update_at: Instant::now(),
             }],
         }));
         let cell = SubagentStatusCell::new(state, true);
@@ -2593,6 +2602,53 @@ mod tests {
                 status: AgentStatus::PendingInit,
                 is_watchdog: true,
                 preview: "monitor parent progress".to_string(),
+                latest_update_at: Instant::now(),
+            }],
+        }));
+        let cell = SubagentStatusCell::new(state, true);
+
+        assert_eq!(cell.transcript_animation_tick(), None);
+    }
+
+    #[test]
+    fn subagent_panel_animation_tick_runs_for_recent_running_updates() {
+        let state = Arc::new(Mutex::new(SubagentPanelState {
+            started_at: Instant::now(),
+            total_agents: 1,
+            running_count: 1,
+            running_agents: vec![SubagentPanelAgent {
+                ordinal: 1,
+                name: "worker-agent".to_string(),
+                status: AgentStatus::Running,
+                is_watchdog: false,
+                preview: "working".to_string(),
+                latest_update_at: Instant::now(),
+            }],
+        }));
+        let cell = SubagentStatusCell::new(state, true);
+
+        assert!(
+            cell.transcript_animation_tick().is_some(),
+            "recent running updates should animate"
+        );
+    }
+
+    #[test]
+    fn subagent_panel_animation_tick_stops_when_updates_are_stale() {
+        let stale_update = Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .unwrap_or_else(Instant::now);
+        let state = Arc::new(Mutex::new(SubagentPanelState {
+            started_at: Instant::now(),
+            total_agents: 1,
+            running_count: 1,
+            running_agents: vec![SubagentPanelAgent {
+                ordinal: 1,
+                name: "worker-agent".to_string(),
+                status: AgentStatus::Running,
+                is_watchdog: false,
+                preview: "working".to_string(),
+                latest_update_at: stale_update,
             }],
         }));
         let cell = SubagentStatusCell::new(state, true);
