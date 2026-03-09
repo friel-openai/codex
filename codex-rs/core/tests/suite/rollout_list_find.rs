@@ -268,7 +268,7 @@ async fn find_does_not_move_unrelated_file_for_stale_archived_db_path() {
         unrelated_active_path.clone(),
     )
     .await;
-    let runtime = StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string(), None)
+    let runtime = StateRuntime::init(home.path().to_path_buf(), "test-provider".to_string())
         .await
         .unwrap();
     runtime.mark_backfill_complete(None).await.unwrap();

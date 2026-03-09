@@ -22,7 +22,6 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::AGENT_INBOX_KIND;
 use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::InitialHistory;
@@ -229,26 +228,9 @@ impl AgentControl {
                                 "parent thread rollout unavailable for fork: {parent_thread_id}"
                             ))
                         })?;
-                    let mut forked_rollout_items =
-                    let mut forked_rollout_items =
-                        RolloutRecorder::get_rollout_history(&rollout_path)
-                            .await?
-                            .get_rollout_items();
-                    if forked_rollout_items
-                        .iter()
-                        .any(|item| matches!(item, RolloutItem::ForkReference(_)))
-                    {
-                        forked_rollout_items =
-                            crate::rollout::truncation::materialize_rollout_items_for_replay(
-                                config.codex_home.as_path(),
-                                &forked_rollout_items,
-                            )
-                            .await;
-                    }
-                    forked_rollout_items.push(RolloutItem::ForkReference(ForkReferenceItem {
-                        rollout_path: rollout_path.clone(),
-                        nth_user_message: usize::MAX,
-                    }));
+                    let mut forked_rollout_items = RolloutRecorder::get_fork_history(&rollout_path)
+                        .await?
+                        .get_rollout_items();
                     let mut output = FunctionCallOutputPayload::from_text(
                         FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string(),
                     );
@@ -1121,6 +1103,7 @@ mod tests {
     use codex_protocol::protocol::AgentInboxPayload;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::ForkReferenceItem;
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::TurnAbortReason;

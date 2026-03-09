@@ -58,6 +58,7 @@ use codex_core::config::resolve_oss_provider;
 use codex_core::config_loader::ConfigLoadError;
 use codex_core::config_loader::LoaderOverrides;
 use codex_core::config_loader::format_config_error_with_source;
+use codex_core::find_thread_path_by_id_str;
 use codex_core::format_exec_policy_error_with_source;
 use codex_core::git_info::get_git_repo_root;
 use codex_feedback::CodexFeedback;
