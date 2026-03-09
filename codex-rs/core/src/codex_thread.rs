@@ -33,6 +33,7 @@ pub struct ThreadConfigSnapshot {
     pub sandbox_policy: SandboxPolicy,
     pub cwd: PathBuf,
     pub ephemeral: bool,
+    pub agent_use_function_call_inbox: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub session_source: SessionSource,
@@ -99,6 +100,16 @@ impl CodexThread {
 
     pub(crate) async fn total_token_usage(&self) -> Option<TokenUsage> {
         self.codex.session.total_token_usage().await
+    }
+
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.codex.session.has_active_turn().await
+    }
+
+    pub(crate) fn last_completed_turn_used_agent_send_input(&self) -> bool {
+        self.codex
+            .session
+            .last_completed_turn_used_agent_send_input()
     }
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.

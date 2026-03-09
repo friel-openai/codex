@@ -4,7 +4,9 @@ use std::fmt::Debug;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -126,6 +128,7 @@ use rmcp::model::ReadResourceResult;
 use rmcp::model::RequestId;
 use serde_json;
 use serde_json::Value;
+use tokio::fs;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
@@ -275,6 +278,83 @@ use crate::skills::injection::app_id_from_path;
 use crate::skills::injection::tool_kind_for_path;
 use crate::skills::resolve_skill_dependencies_for_turn;
 use crate::state::ActiveTurn;
+
+const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../root_agent_prompt.md");
+const ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../root_agent_watchdog_prompt.md");
+const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../subagent_prompt.md");
+const SUBAGENT_WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../subagent_watchdog_prompt.md");
+const WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../watchdog_agent_prompt.md");
+
+async fn load_agent_prompt_fallback(
+    codex_home: &Path,
+    fallback: &str,
+    override_filename: &str,
+) -> String {
+    let override_path = codex_home.join(override_filename);
+    if let Ok(contents) = fs::read_to_string(&override_path).await
+        && !contents.trim().is_empty()
+    {
+        return contents;
+    }
+
+    fallback.to_string()
+}
+
+async fn maybe_load_agent_prompt_fragment(
+    codex_home: &Path,
+    fallback: &str,
+    override_filename: &str,
+    enabled: bool,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let fragment = load_agent_prompt_fallback(codex_home, fallback, override_filename).await;
+    if fragment.trim().is_empty() {
+        None
+    } else {
+        Some(fragment)
+    }
+}
+
+async fn load_root_agent_prompt(codex_home: &Path, include_watchdog: bool) -> String {
+    let mut prompt =
+        load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await;
+    if let Some(fragment) = maybe_load_agent_prompt_fragment(
+        codex_home,
+        ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK,
+        "AGENTS.root.watchdog.md",
+        include_watchdog,
+    )
+    .await
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(fragment.trim());
+    }
+    prompt
+}
+
+async fn load_subagent_prompt(codex_home: &Path, include_watchdog: bool) -> String {
+    let mut prompt =
+        load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md")
+            .await;
+    if let Some(fragment) = maybe_load_agent_prompt_fragment(
+        codex_home,
+        SUBAGENT_WATCHDOG_PROMPT_FALLBACK,
+        "AGENTS.subagent.watchdog.md",
+        include_watchdog,
+    )
+    .await
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(fragment.trim());
+    }
+    prompt
+}
+
+pub(crate) async fn load_watchdog_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(codex_home, WATCHDOG_PROMPT_FALLBACK, "AGENTS.watchdog.md").await
+}
 use crate::state::SessionServices;
 use crate::state::SessionState;
 use crate::state_db;
@@ -440,6 +520,33 @@ impl Codex {
         let model = models_manager
             .get_default_model(&config.model, refresh_strategy)
             .await;
+        let role_prompt = if config.features.enabled(Feature::Collab)
+            && config.features.enabled(Feature::AgentPromptInjection)
+        {
+            match session_source {
+                SessionSource::SubAgent(_) => Some(
+                    load_subagent_prompt(
+                        &config.codex_home,
+                        config.features.enabled(Feature::AgentWatchdog),
+                    )
+                    .await,
+                ),
+                _ => Some(
+                    load_root_agent_prompt(
+                        &config.codex_home,
+                        config.features.enabled(Feature::AgentWatchdog),
+                    )
+                    .await,
+                ),
+            }
+        } else {
+            None
+        };
+        let developer_instructions = match (role_prompt, config.developer_instructions.clone()) {
+            (Some(prompt), Some(existing)) => Some(format!("{prompt}\n\n{existing}")),
+            (Some(prompt), None) => Some(prompt),
+            (None, existing) => existing,
+        };
 
         // Resolve base instructions for the session. Priority order:
         // 1. config.base_instructions override
@@ -494,7 +601,7 @@ impl Codex {
             collaboration_mode,
             model_reasoning_summary: config.model_reasoning_summary,
             service_tier: config.service_tier,
-            developer_instructions: config.developer_instructions.clone(),
+            developer_instructions,
             user_instructions,
             personality: config.personality,
             base_instructions,
@@ -654,6 +761,8 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     js_repl: Arc<JsReplHandle>,
     next_internal_sub_id: AtomicU64,
+    turn_used_agent_send_input: AtomicBool,
+    last_completed_turn_used_agent_send_input: AtomicBool,
 }
 
 #[derive(Clone, Debug)]
@@ -941,6 +1050,9 @@ impl SessionConfiguration {
             sandbox_policy: self.sandbox_policy.get().clone(),
             cwd: self.cwd.clone(),
             ephemeral: self.original_config_do_not_use.ephemeral,
+            agent_use_function_call_inbox: self
+                .original_config_do_not_use
+                .agent_use_function_call_inbox,
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             personality: self.personality,
             session_source: self.session_source.clone(),
@@ -1603,6 +1715,8 @@ impl Session {
             services,
             js_repl,
             next_internal_sub_id: AtomicU64::new(0),
+            turn_used_agent_send_input: AtomicBool::new(false),
+            last_completed_turn_used_agent_send_input: AtomicBool::new(false),
         });
         if let Some(network_policy_decider_session) = network_policy_decider_session {
             let mut guard = network_policy_decider_session.write().await;
@@ -1723,7 +1837,44 @@ impl Session {
         self.services.state_db.clone()
     }
 
-    /// Ensure rollout file writes are durably flushed.
+    pub(crate) async fn has_active_turn(&self) -> bool {
+        self.active_turn.lock().await.is_some()
+    }
+
+    pub(crate) async fn parent_thread_id(&self) -> Option<ThreadId> {
+        let state = self.state.lock().await;
+        match &state.session_configuration.session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => Some(*parent_thread_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn mark_turn_used_agent_send_input(&self) {
+        self.turn_used_agent_send_input
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn reset_turn_agent_send_input_flag(&self) {
+        self.turn_used_agent_send_input
+            .store(false, Ordering::Release);
+    }
+
+    pub(crate) fn snapshot_agent_send_input_on_turn_complete(&self) {
+        let used_agent_send_input = self
+            .turn_used_agent_send_input
+            .swap(false, Ordering::AcqRel);
+        self.last_completed_turn_used_agent_send_input
+            .store(used_agent_send_input, Ordering::Release);
+    }
+
+    pub(crate) fn last_completed_turn_used_agent_send_input(&self) -> bool {
+        self.last_completed_turn_used_agent_send_input
+            .load(Ordering::Acquire)
+    }
+
+    /// Ensure all rollout writes are durably flushed.
     pub(crate) async fn flush_rollout(&self) {
         let recorder = {
             let guard = self.services.rollout.lock().await;
@@ -4003,6 +4154,10 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     handlers::user_input_or_turn(&sess, sub.id.clone(), sub.op).await;
                     false
                 }
+                Op::InjectResponseItems { items } => {
+                    handlers::inject_response_items(&sess, sub.id.clone(), items).await;
+                    false
+                }
                 Op::ExecApproval {
                     id: approval_id,
                     turn_id,
@@ -4213,7 +4368,10 @@ mod handlers {
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::config_types::Settings;
     use codex_protocol::dynamic_tools::DynamicToolResponse;
+    use codex_protocol::items::TurnItem;
     use codex_protocol::mcp::RequestId as ProtocolRequestId;
+    use codex_protocol::models::ResponseInputItem;
+    use codex_protocol::models::ResponseItem;
     use codex_protocol::user_input::UserInput;
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
@@ -4318,6 +4476,73 @@ mod handlers {
             sess.spawn_task(Arc::clone(&current_context), items, regular_task)
                 .await;
         }
+    }
+
+    pub async fn inject_response_items(
+        sess: &Arc<Session>,
+        sub_id: String,
+        items: Vec<ResponseInputItem>,
+    ) {
+        const MAX_TURN_RESTART_ATTEMPTS: usize = 3;
+
+        let mut pending_items = items;
+        let mut attempts = 0usize;
+        loop {
+            match sess.inject_response_items(pending_items).await {
+                Ok(()) => return,
+                Err(items_without_active_turn) => {
+                    pending_items = items_without_active_turn;
+                }
+            }
+
+            if attempts >= MAX_TURN_RESTART_ATTEMPTS {
+                warn!(
+                    attempts,
+                    remaining_items = pending_items.len(),
+                    "dropping response items after repeated turn restart failures"
+                );
+                return;
+            }
+            attempts += 1;
+
+            let turn_input =
+                pop_leading_user_message_input(&mut pending_items).unwrap_or_else(|| {
+                    vec![UserInput::Text {
+                        text: String::new(),
+                        text_elements: Vec::new(),
+                    }]
+                });
+            let turn_sub_id = if attempts == 1 {
+                sub_id.clone()
+            } else {
+                format!("{sub_id}-retry-{attempts}")
+            };
+            let current_context = sess.new_default_turn_with_sub_id(turn_sub_id).await;
+            // Keep injected inbox wakeups visible to telemetry after the TurnContext field rename.
+            current_context.session_telemetry.user_prompt(&turn_input);
+
+            sess.refresh_mcp_servers_if_requested(&current_context)
+                .await;
+            let regular_task = sess.take_startup_regular_task().await.unwrap_or_default();
+            sess.spawn_task(Arc::clone(&current_context), turn_input, regular_task)
+                .await;
+
+            if pending_items.is_empty() {
+                return;
+            }
+        }
+    }
+
+    fn pop_leading_user_message_input(
+        items: &mut Vec<ResponseInputItem>,
+    ) -> Option<Vec<UserInput>> {
+        let first_item = items.first().cloned()?;
+        let response_item = ResponseItem::from(first_item);
+        let TurnItem::UserMessage(user_message) = crate::parse_turn_item(&response_item)? else {
+            return None;
+        };
+        let _ = items.remove(0);
+        Some(user_message.content)
     }
 
     pub async fn run_user_shell_command(sess: &Arc<Session>, sub_id: String, command: String) {
