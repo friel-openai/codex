@@ -26,12 +26,14 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelsResponse;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -408,8 +410,39 @@ impl ThreadManager {
         path: PathBuf,
         persist_extended_history: bool,
     ) -> CodexResult<NewThread> {
-        let history = RolloutRecorder::get_rollout_history(&path).await?;
-        let history = truncate_before_nth_user_message(history, nth_user_message);
+        // True forks must discard the source rollout's conversation id so the child gets a
+        // distinct thread id and preserves `forked_from_id` in its SessionMeta. Using the
+        // resume loader here silently turns a fork into an in-place resume.
+        let history = RolloutRecorder::get_fork_history(&path).await?;
+        let mut history = truncate_before_nth_user_message(
+            config.codex_home.as_path(),
+            history,
+            nth_user_message,
+        )
+        .await;
+        if let InitialHistory::Forked(items) = &mut history {
+            let source_session_meta = items.iter().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta_line) => Some(meta_line.clone()),
+                RolloutItem::ForkReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            });
+            // Keep the source SessionMeta in-memory so startup can derive `forked_from_id`
+            // for SessionConfigured while still persisting only the compact ForkReference
+            // suffix to the child rollout on disk.
+            *items = source_session_meta
+                .into_iter()
+                .map(RolloutItem::SessionMeta)
+                .chain(std::iter::once(RolloutItem::ForkReference(
+                    ForkReferenceItem {
+                        rollout_path: path.clone(),
+                        nth_user_message,
+                    },
+                )))
+                .collect();
+        }
         Box::pin(self.state.spawn_thread(
             config,
             history,
@@ -656,8 +689,18 @@ impl ThreadManagerState {
 
 /// Return a prefix of `items` obtained by cutting strictly before the nth user message
 /// (0-based) and all items that follow it.
-fn truncate_before_nth_user_message(history: InitialHistory, n: usize) -> InitialHistory {
-    let items: Vec<RolloutItem> = history.get_rollout_items();
+async fn truncate_before_nth_user_message(
+    codex_home: &Path,
+    history: InitialHistory,
+    n: usize,
+) -> InitialHistory {
+    let mut items: Vec<RolloutItem> = history.get_rollout_items();
+    if items
+        .iter()
+        .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+    {
+        items = truncation::materialize_rollout_items_for_replay(codex_home, &items).await;
+    }
     let rolled = truncation::truncate_rollout_before_nth_user_message_from_start(&items, n);
 
     if rolled.is_empty() {
@@ -700,8 +743,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn drops_from_last_user_only() {
+    #[tokio::test]
+    async fn drops_from_last_user_only() {
         let items = [
             user_msg("u1"),
             assistant_msg("a1"),
@@ -730,7 +773,9 @@ mod tests {
             .cloned()
             .map(RolloutItem::ResponseItem)
             .collect();
-        let truncated = truncate_before_nth_user_message(InitialHistory::Forked(initial), 1);
+        let truncated =
+            truncate_before_nth_user_message(Path::new("/tmp"), InitialHistory::Forked(initial), 1)
+                .await;
         let got_items = truncated.get_rollout_items();
         let expected_items = vec![
             RolloutItem::ResponseItem(items[0].clone()),
@@ -747,7 +792,12 @@ mod tests {
             .cloned()
             .map(RolloutItem::ResponseItem)
             .collect();
-        let truncated2 = truncate_before_nth_user_message(InitialHistory::Forked(initial2), 2);
+        let truncated2 = truncate_before_nth_user_message(
+            Path::new("/tmp"),
+            InitialHistory::Forked(initial2),
+            2,
+        )
+        .await;
         assert_matches!(truncated2, InitialHistory::New);
     }
 
@@ -766,7 +816,12 @@ mod tests {
             .map(RolloutItem::ResponseItem)
             .collect();
 
-        let truncated = truncate_before_nth_user_message(InitialHistory::Forked(rollout_items), 1);
+        let truncated = truncate_before_nth_user_message(
+            Path::new("/tmp"),
+            InitialHistory::Forked(rollout_items),
+            1,
+        )
+        .await;
         let got_items = truncated.get_rollout_items();
 
         let expected: Vec<RolloutItem> = vec![
