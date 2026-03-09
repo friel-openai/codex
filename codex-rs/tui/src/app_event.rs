@@ -8,8 +8,6 @@
 //! Exit is modelled explicitly via `AppEvent::Exit(ExitMode)` so callers can request shutdown-first
 //! quits without reaching into the app loop or coupling to shutdown/exit sequencing.
 
-use std::path::PathBuf;
-
 use codex_chatgpt::connectors::AppInfo;
 use codex_file_search::FileMatch;
 use codex_protocol::ThreadId;
@@ -17,10 +15,13 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_utils_approval_presets::ApprovalPreset;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::StatusLineItem;
 use crate::history_cell::HistoryCell;
+use crate::history_cell::SubagentStatusCell;
 
 use codex_core::features::Feature;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -174,6 +175,11 @@ pub(crate) enum AppEvent {
     StartCommitAnimation,
     StopCommitAnimation,
     CommitTick,
+    StartSubagentAnimation,
+    StopSubagentAnimation,
+    SubagentTick,
+    UpdateSubagentPanel(Arc<SubagentStatusCell>),
+    ClearSubagentPanel,
 
     /// Update the current reasoning effort in the running app and widget.
     UpdateReasoningEffort(Option<ReasoningEffort>),

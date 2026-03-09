@@ -11,3 +11,9 @@ slow-timeout = { period = "1m", terminate-after = 4 }
 [[profile.default.overrides]]
 filter = 'test(approval_matrix_covers_all_modes)'
 slow-timeout = { period = "30s", terminate-after = 2 }
+
+[[profile.default.overrides]]
+# Schema fixture generation can take longer than the default timeout on slower
+# Windows runners when app-server protocol fixture sets grow.
+filter = 'test(schema_fixtures_match_generated)'
+slow-timeout = { period = "1m", terminate-after = 2 }

@@ -89,11 +89,13 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::AGENT_INBOX_KIND;
+use codex_protocol::protocol::AGENT_INBOX_MESSAGE_PREFIX;
 use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::AgentMessageDeltaEvent;
 use codex_protocol::protocol::AgentMessageEvent;
@@ -252,6 +254,7 @@ use crate::history_cell::AgentMessageCell;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::McpToolCallCell;
 use crate::history_cell::PlainHistoryCell;
+use crate::history_cell::SubagentStatusCell;
 use crate::history_cell::WebSearchCell;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
@@ -267,6 +270,7 @@ use crate::slash_command::SlashCommand;
 use crate::status::RateLimitSnapshotDisplay;
 use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
 use crate::status_indicator_widget::StatusDetailsCapitalization;
+use crate::text_formatting::extract_first_bold;
 use crate::text_formatting::truncate_text;
 use crate::tui::FrameRequester;
 mod interrupts;
@@ -369,16 +373,35 @@ fn is_unified_exec_source(source: ExecCommandSource) -> bool {
     )
 }
 
-fn agent_inbox_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
-    let ResponseItem::FunctionCallOutput { output, .. } = item else {
-        return None;
-    };
-    let text = output.body.to_text()?;
-    let payload: AgentInboxPayload = serde_json::from_str(&text).ok()?;
-    if !payload.injected || payload.kind != AGENT_INBOX_KIND {
-        return None;
+fn agent_inbox_message_from_item(item: &ResponseItem) -> Option<(Option<String>, String)> {
+    match item {
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            let text = output.body.to_text()?;
+            let payload: AgentInboxPayload = serde_json::from_str(&text).ok()?;
+            if !payload.injected || payload.kind != AGENT_INBOX_KIND {
+                return None;
+            }
+            Some((Some(payload.sender_thread_id.to_string()), payload.message))
+        }
+        ResponseItem::Message { content, .. } => {
+            let text = content.iter().find_map(|item| match item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    Some(text.as_str())
+                }
+                _ => None,
+            })?;
+            let rest = text.strip_prefix(AGENT_INBOX_MESSAGE_PREFIX)?;
+            let (sender, message) = rest.split_once(']')?;
+            let message = message.trim_start().to_string();
+            let sender = sender.trim().to_string();
+            if sender.is_empty() {
+                Some((None, message))
+            } else {
+                Some((Some(sender), message))
+            }
+        }
+        _ => None,
     }
-    Some((payload.sender_thread_id.to_string(), payload.message))
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
@@ -558,6 +581,7 @@ pub(crate) struct ChatWidget {
     codex_op_tx: UnboundedSender<Op>,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
+    subagent_panel: Option<SubagentStatusCell>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     ///
     /// The transcript overlay appends a cached "live tail" for the current active cell. Most
@@ -719,6 +743,7 @@ pub(crate) struct ChatWidget {
     status_line_branch_lookup_complete: bool,
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
+    last_replayed_agent_inbox_message: Option<(Option<String>, String)>,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
 }
 
@@ -2537,14 +2562,30 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_raw_response_item(&mut self, event: RawResponseItemEvent) {
-        if let Some((sender, message)) = agent_inbox_message_from_item(&event.item) {
-            self.add_to_history(history_cell::new_info_event(
-                format!("Agent message: {message}"),
-                Some(format!("from {sender}")),
-            ));
-            self.request_redraw();
+    fn on_raw_response_item(&mut self, event: RawResponseItemEvent, from_replay: bool) {
+        let Some((sender, message)) = agent_inbox_message_from_item(&event.item) else {
+            if from_replay {
+                self.last_replayed_agent_inbox_message = None;
+            }
+            return;
+        };
+
+        let replay_key = (sender.clone(), message.clone());
+        if from_replay {
+            if self.last_replayed_agent_inbox_message.as_ref() == Some(&replay_key) {
+                return;
+            }
+            self.last_replayed_agent_inbox_message = Some(replay_key);
+        } else {
+            self.last_replayed_agent_inbox_message = None;
         }
+
+        let hint = sender.map(|sender| format!("from {sender}"));
+        self.add_to_history(history_cell::new_info_event(
+            format!("Agent message: {message}"),
+            hint,
+        ));
+        self.request_redraw();
     }
 
     fn on_get_history_entry_response(
@@ -2652,6 +2693,35 @@ impl ChatWidget {
     /// catch-up mode drains larger batches to reduce queue lag.
     pub(crate) fn on_commit_tick(&mut self) {
         self.run_commit_tick();
+    }
+
+    pub(crate) fn on_subagent_panel_updated(&mut self, panel: Arc<SubagentStatusCell>) {
+        let state_handle = panel.state_handle();
+
+        if let Some(existing) = self.subagent_panel.as_mut() {
+            if existing.matches_state(&state_handle) {
+                self.request_redraw();
+                return;
+            }
+            *existing = panel.as_ref().clone();
+            self.request_redraw();
+            return;
+        }
+
+        self.subagent_panel = Some(panel.as_ref().clone());
+        self.request_redraw();
+    }
+
+    pub(crate) fn clear_subagent_panel(&mut self) {
+        if self.subagent_panel.take().is_some() {
+            self.request_redraw();
+        }
+    }
+
+    pub(crate) fn on_subagent_tick(&mut self) {
+        if self.subagent_panel.is_some() {
+            self.request_redraw();
+        }
     }
 
     /// Runs a regular periodic commit tick.
@@ -3195,6 +3265,7 @@ impl ChatWidget {
                 skills: None,
             }),
             active_cell,
+            subagent_panel: None,
             active_cell_revision: 0,
             config,
             skills_all: Vec::new(),
@@ -3271,6 +3342,7 @@ impl ChatWidget {
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
+            last_replayed_agent_inbox_message: None,
             last_rendered_user_message_event: None,
         };
 
@@ -3378,6 +3450,7 @@ impl ChatWidget {
                 skills: None,
             }),
             active_cell,
+            subagent_panel: None,
             active_cell_revision: 0,
             config,
             skills_all: Vec::new(),
@@ -3454,6 +3527,7 @@ impl ChatWidget {
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
+            last_replayed_agent_inbox_message: None,
             last_rendered_user_message_event: None,
         };
 
@@ -3553,6 +3627,7 @@ impl ChatWidget {
                 skills: None,
             }),
             active_cell: None,
+            subagent_panel: None,
             active_cell_revision: 0,
             config,
             skills_all: Vec::new(),
@@ -3629,6 +3704,7 @@ impl ChatWidget {
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
+            last_replayed_agent_inbox_message: None,
             last_rendered_user_message_event: None,
         };
 
@@ -4409,6 +4485,14 @@ impl ChatWidget {
 
     fn flush_active_cell(&mut self) {
         if let Some(active) = self.active_cell.take() {
+            // Subagent status is a transient panel, not transcript history. If we
+            // flush it into history every time another cell is inserted, the
+            // transcript gets spammed with repeated identical "Subagents ..." blocks.
+            // Keep the panel mounted so later transcript cells do not make it disappear.
+            if active.as_any().is::<SubagentStatusCell>() {
+                self.active_cell = Some(active);
+                return;
+            }
             self.needs_final_message_separator = true;
             self.app_event_tx.send(AppEvent::InsertHistoryCell(active));
         }
@@ -4811,6 +4895,9 @@ impl ChatWidget {
         if !is_resume_initial_replay && !is_stream_error {
             self.restore_retry_status_header_if_present();
         }
+        if !from_replay || !matches!(&msg, EventMsg::RawResponseItem(_)) {
+            self.last_replayed_agent_inbox_message = None;
+        }
 
         match msg {
             EventMsg::AgentMessageDelta(_)
@@ -4995,7 +5082,7 @@ impl ChatWidget {
                     });
                 }
             }
-            EventMsg::RawResponseItem(ev) => self.on_raw_response_item(ev),
+            EventMsg::RawResponseItem(ev) => self.on_raw_response_item(ev, from_replay),
             EventMsg::ItemStarted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::ReasoningContentDelta(_)
@@ -8575,8 +8662,13 @@ impl ChatWidget {
             Some(cell) => RenderableItem::Borrowed(cell).inset(Insets::tlbr(1, 0, 0, 0)),
             None => RenderableItem::Owned(Box::new(())),
         };
+        let subagent_panel_renderable = match &self.subagent_panel {
+            Some(panel) => RenderableItem::Borrowed(panel).inset(Insets::tlbr(1, 0, 0, 0)),
+            None => RenderableItem::Owned(Box::new(())),
+        };
         let mut flex = FlexRenderable::new();
         flex.push(1, active_cell_renderable);
+        flex.push(0, subagent_panel_renderable);
         flex.push(
             0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(1, 0, 0, 0)),
@@ -8775,36 +8867,6 @@ const PLACEHOLDERS: [&str; 8] = [
     "Run /review on my current changes",
     "Use /skills to list available skills",
 ];
-
-// Extract the first bold (Markdown) element in the form **...** from `s`.
-// Returns the inner text if found; otherwise `None`.
-fn extract_first_bold(s: &str) -> Option<String> {
-    let bytes = s.as_bytes();
-    let mut i = 0usize;
-    while i + 1 < bytes.len() {
-        if bytes[i] == b'*' && bytes[i + 1] == b'*' {
-            let start = i + 2;
-            let mut j = start;
-            while j + 1 < bytes.len() {
-                if bytes[j] == b'*' && bytes[j + 1] == b'*' {
-                    // Found closing **
-                    let inner = &s[start..j];
-                    let trimmed = inner.trim();
-                    if !trimmed.is_empty() {
-                        return Some(trimmed.to_string());
-                    } else {
-                        return None;
-                    }
-                }
-                j += 1;
-            }
-            // No closing; stop searching (wait for more deltas)
-            return None;
-        }
-        i += 1;
-    }
-    None
-}
 
 async fn fetch_rate_limits(base_url: String, auth: CodexAuth) -> Vec<RateLimitSnapshot> {
     match BackendClient::from_auth(base_url, &auth) {
