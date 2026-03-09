@@ -193,6 +193,7 @@ impl MessageProcessor {
             auth_manager.clone(),
             session_source,
             config.model_catalog.clone(),
+            config.custom_models.clone(),
             CollaborationModesConfig {
                 default_mode_request_user_input: config
                     .features
