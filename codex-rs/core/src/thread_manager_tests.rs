@@ -15,6 +15,7 @@ use codex_protocol::protocol::UserMessageEvent;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
@@ -294,6 +295,8 @@ async fn new_uses_configured_openai_provider_for_model_refresh() {
         &config,
         auth_manager,
         SessionSource::Exec,
+        None,
+        HashMap::new(),
         CollaborationModesConfig::default(),
         Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
