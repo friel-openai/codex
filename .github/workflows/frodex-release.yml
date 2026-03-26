@@ -50,6 +50,16 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Set package version from tag
+        if: ${{ startsWith(github.ref_name, 'frodex-v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#frodex-v}"
+          perl -0pi -e 's#^version = "0\.0\.0"-1 = "'"${version}"'"#m' Cargo.toml
+          perl -0pi -e 's#version = "0\.0\.0"#version = "'"${version}"'"#g' Cargo.lock
+          rg -n '^version = "'"${version}"'"' Cargo.toml
+
       - name: Cargo build
         shell: bash
         run: |
