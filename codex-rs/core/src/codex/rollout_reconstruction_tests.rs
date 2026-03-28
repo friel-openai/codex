@@ -86,6 +86,7 @@ fn write_rollout_items(
                 source: SessionSource::Exec,
                 agent_nickname: None,
                 agent_role: None,
+                agent_path: None,
                 model_provider: Some("openai".to_string()),
                 base_instructions: None,
                 dynamic_tools: None,

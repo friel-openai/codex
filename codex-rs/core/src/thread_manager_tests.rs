@@ -4,7 +4,6 @@ use crate::config::test_config;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::RefreshStrategy;
 use crate::tasks::interrupted_turn_history_marker;
-use assert_matches::assert_matches;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
