@@ -543,7 +543,8 @@ impl AgentControl {
             vec![UserInput::Text {
                 text: prompt,
                 text_elements: Vec::new(),
-            }].into(),
+            }]
+            .into(),
         )
         .await
     }
