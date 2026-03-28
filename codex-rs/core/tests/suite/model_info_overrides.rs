@@ -106,7 +106,6 @@ async fn custom_model_alias_applies_request_model_and_context_overrides() {
                 experimental_supported_tools: Vec::new(),
                 input_modalities: default_input_modalities(),
                 web_search_tool_type: WebSearchToolType::Text,
-                prefer_websockets: false,
                 used_fallback_model_metadata: false,
             }],
         }),

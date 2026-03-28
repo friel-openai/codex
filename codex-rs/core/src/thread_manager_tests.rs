@@ -427,6 +427,8 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         &config,
         auth_manager.clone(),
         SessionSource::Exec,
+        config.model_catalog.clone(),
+        config.custom_models.clone(),
         CollaborationModesConfig::default(),
         Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
@@ -527,6 +529,8 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
         &config,
         auth_manager.clone(),
         SessionSource::Exec,
+        config.model_catalog.clone(),
+        config.custom_models.clone(),
         CollaborationModesConfig::default(),
         Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,
@@ -616,6 +620,8 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         &config,
         auth_manager.clone(),
         SessionSource::Exec,
+        config.model_catalog.clone(),
+        config.custom_models.clone(),
         CollaborationModesConfig::default(),
         Arc::new(codex_exec_server::EnvironmentManager::new(
             /*exec_server_url*/ None,

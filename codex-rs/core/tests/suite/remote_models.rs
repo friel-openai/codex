@@ -319,6 +319,7 @@ async fn custom_model_alias_sends_base_model_slug() -> Result<()> {
             final_output_json_schema: None,
             cwd: cwd.path().to_path_buf(),
             approval_policy: config.permissions.approval_policy.value(),
+            approvals_reviewer: None,
             sandbox_policy: config.permissions.sandbox_policy.get().clone(),
             model: alias.to_string(),
             effort: None,
