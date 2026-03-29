@@ -5,6 +5,7 @@ use crate::agent::control::render_input_preview;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::agent::role::default_fork_context_for_role;
 use codex_protocol::AgentPath;
 use codex_protocol::models::DeveloperInstructions;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -37,12 +38,13 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-        let fork_mode = args.fork_mode()?;
         let role_name = args
             .agent_type
             .as_deref()
             .map(str::trim)
             .filter(|role| !role.is_empty());
+        let fork_context = default_fork_context_for_role(&turn.config, role_name);
+        let fork_mode = args.fork_mode(fork_context)?;
 
         let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
         let prompt = render_input_preview(&initial_operation);
@@ -70,7 +72,7 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if !args.fork_context {
+        if fork_mode.is_none() {
             apply_requested_spawn_agent_model_overrides(
                 &session,
                 turn.as_ref(),
@@ -229,7 +231,10 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
-    fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
+    fn fork_mode(
+        &self,
+        default_fork_context: bool,
+    ) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
                 "fork_context is not supported in MultiAgentV2; use fork_turns instead".to_string(),
@@ -242,7 +247,7 @@ impl SpawnAgentArgs {
             .map(str::trim)
             .filter(|fork_turns| !fork_turns.is_empty())
         else {
-            return Ok(None);
+            return Ok(default_fork_context.then_some(SpawnAgentForkMode::FullHistory));
         };
 
         if fork_turns.eq_ignore_ascii_case("none") {

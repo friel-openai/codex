@@ -4,6 +4,7 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::agent::role::default_fork_context_for_role;
 
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
@@ -61,7 +62,10 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if !args.fork_context {
+        let fork_context = args
+            .fork_context
+            .unwrap_or_else(|| default_fork_context_for_role(&turn.config, role_name));
+        if !fork_context {
             apply_requested_spawn_agent_model_overrides(
                 &session,
                 turn.as_ref(),
@@ -91,8 +95,8 @@ impl ToolHandler for Handler {
                     /*task_name*/ None,
                 )?),
                 SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-                    fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+                    fork_parent_spawn_call_id: fork_context.then(|| call_id.clone()),
+                    fork_mode: fork_context.then_some(SpawnAgentForkMode::FullHistory),
                 },
             )
             .await
@@ -177,8 +181,7 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    #[serde(default)]
-    fork_context: bool,
+    fork_context: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
