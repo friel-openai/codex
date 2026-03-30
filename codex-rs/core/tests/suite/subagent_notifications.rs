@@ -144,6 +144,7 @@ async fn setup_turn_one_with_spawned_child(
         server,
         json!({
             "message": CHILD_PROMPT,
+            "fork_context": false,
         }),
         child_response_delay,
         /*wait_for_parent_notification*/ true,
