@@ -1673,7 +1673,10 @@ async fn turn_start_emits_spawn_agent_item_with_effective_inherited_model_metada
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
     const INHERITED_MODEL: &str = "gpt-5.2-codex";
-    const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
+    // thread/start only sets the model here; the session keeps the resolved collaboration-mode
+    // effort for that thread, so fork-context children should inherit `Medium`, not the model
+    // catalog default.
+    const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
     const REQUESTED_MODEL: &str = "gpt-5.1";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 
