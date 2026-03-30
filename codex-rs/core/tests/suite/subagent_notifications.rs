@@ -30,7 +30,9 @@ const TURN_1_PROMPT: &str = "spawn a child and continue";
 const TURN_2_NO_WAIT_PROMPT: &str = "follow up without wait";
 const CHILD_PROMPT: &str = "child: do work";
 const INHERITED_MODEL: &str = "gpt-5.2-codex";
-const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::XHigh;
+// Fork-context children inherit the spawning turn's effective effort, which resolves to the
+// model's default Medium effort in this test harness.
+const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
 const REQUESTED_MODEL: &str = "gpt-5.1";
 const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
 const ROLE_MODEL: &str = "gpt-5.1-codex-max";
@@ -221,15 +223,14 @@ async fn setup_turn_one_with_custom_spawned_child(
     test.submit_turn(TURN_1_PROMPT).await?;
     if child_response_delay.is_none() && wait_for_parent_notification {
         let _ = wait_for_requests(&child_request_log).await?;
-        let rollout_path = test
-            .codex
-            .rollout_path()
-            .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
+        let rollout_path = test.codex.rollout_path().expect("rollout path");
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
-            let has_notification = tokio::fs::read_to_string(&rollout_path)
-                .await
-                .is_ok_and(|rollout| rollout.contains("<subagent_notification>"));
+            test.codex.ensure_rollout_materialized().await;
+            test.codex.flush_rollout().await;
+            let has_notification = std::fs::read_to_string(&rollout_path)
+                .ok()
+                .is_some_and(|rollout| rollout.contains("<subagent_notification>"));
             if has_notification {
                 break;
             }
