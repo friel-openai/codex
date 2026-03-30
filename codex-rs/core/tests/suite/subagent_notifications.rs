@@ -389,8 +389,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_without_role()
--> Result<()> {
+async fn spawn_agent_inherits_parent_model_and_reasoning_without_role() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -405,10 +404,10 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
     )
     .await?;
 
-    assert_eq!(child_snapshot.model, REQUESTED_MODEL);
+    assert_eq!(child_snapshot.model, INHERITED_MODEL);
     assert_eq!(
         child_snapshot.reasoning_effort,
-        Some(REQUESTED_REASONING_EFFORT)
+        Some(INHERITED_REASONING_EFFORT)
     );
 
     Ok(())
