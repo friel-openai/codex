@@ -617,7 +617,7 @@ impl ThreadManager {
                 truncate_before_nth_user_message(
                     config.codex_home.as_path(),
                     history,
-                    nth_user_message,
+                    i64::try_from(nth_user_message).unwrap_or(i64::MAX),
                     &snapshot_state,
                 )
                 .await
@@ -652,7 +652,7 @@ impl ThreadManager {
                 .chain(std::iter::once(RolloutItem::ForkReference(
                     ForkReferenceItem {
                         rollout_path: path.clone(),
-                        nth_user_message,
+                        nth_user_message: i64::try_from(nth_user_message).unwrap_or(i64::MAX),
                     },
                 )))
                 .collect();
@@ -952,7 +952,7 @@ impl ThreadManagerState {
 async fn truncate_before_nth_user_message(
     codex_home: &Path,
     history: InitialHistory,
-    n: usize,
+    n: i64,
     snapshot_state: &SnapshotTurnState,
 ) -> InitialHistory {
     let mut items: Vec<RolloutItem> = history.get_rollout_items();
@@ -963,7 +963,9 @@ async fn truncate_before_nth_user_message(
         items = truncation::materialize_rollout_items_for_replay(codex_home, &items).await;
     }
     let user_positions = truncation::user_message_positions_in_rollout(&items);
-    let rolled = if snapshot_state.ends_mid_turn && n >= user_positions.len() {
+    let rolled = if snapshot_state.ends_mid_turn
+        && usize::try_from(n).map_or(true, |n| n >= user_positions.len())
+    {
         if let Some(cut_idx) = snapshot_state
             .active_turn_start_index
             .or_else(|| user_positions.last().copied())
@@ -1075,150 +1077,3 @@ fn append_interrupted_boundary(history: InitialHistory, turn_id: Option<String>)
 #[cfg(test)]
 #[path = "thread_manager_tests.rs"]
 mod tests;
-// Keep this inline fork-reference test module disabled on the refreshed main API;
-// branch coverage now comes from the package/integration tests that match current types.
-#[cfg(any())]
-mod fork_reference_tests {
-    use super::*;
-    use crate::codex::make_session_and_context;
-    use codex_protocol::models::ContentItem;
-    use codex_protocol::models::ReasoningItemReasoningSummary;
-    use codex_protocol::models::ResponseItem;
-    use pretty_assertions::assert_eq;
-
-    fn user_msg(text: &str) -> ResponseItem {
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: text.to_string(),
-            }],
-            end_turn: None,
-            phase: None,
-        }
-    }
-    fn assistant_msg(text: &str) -> ResponseItem {
-        ResponseItem::Message {
-            id: None,
-            role: "assistant".to_string(),
-            content: vec![ContentItem::OutputText {
-                text: text.to_string(),
-            }],
-            end_turn: None,
-            phase: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn drops_from_last_user_only() {
-        let items = [
-            user_msg("u1"),
-            assistant_msg("a1"),
-            assistant_msg("a2"),
-            user_msg("u2"),
-            assistant_msg("a3"),
-            ResponseItem::Reasoning {
-                id: "r1".to_string(),
-                summary: vec![ReasoningItemReasoningSummary::SummaryText {
-                    text: "s".to_string(),
-                }],
-                content: None,
-                encrypted_content: None,
-            },
-            ResponseItem::FunctionCall {
-                id: None,
-                call_id: "c1".to_string(),
-                name: "tool".to_string(),
-                namespace: None,
-                arguments: "{}".to_string(),
-            },
-            assistant_msg("a4"),
-        ];
-
-        let initial: Vec<RolloutItem> = items
-            .iter()
-            .cloned()
-            .map(RolloutItem::ResponseItem)
-            .collect();
-        let truncated = truncate_before_nth_user_message(
-            Path::new("/tmp"),
-            InitialHistory::Forked(initial),
-            1,
-            &SnapshotTurnState {
-                ends_mid_turn: false,
-                active_turn_id: None,
-                active_turn_start_index: None,
-            },
-        )
-        .await;
-        let got_items = truncated.get_rollout_items();
-        let expected_items = vec![
-            RolloutItem::ResponseItem(items[0].clone()),
-            RolloutItem::ResponseItem(items[1].clone()),
-            RolloutItem::ResponseItem(items[2].clone()),
-        ];
-        assert_eq!(
-            serde_json::to_value(&got_items).unwrap(),
-            serde_json::to_value(&expected_items).unwrap()
-        );
-
-        let initial2: Vec<RolloutItem> = items
-            .iter()
-            .cloned()
-            .map(RolloutItem::ResponseItem)
-            .collect();
-        let truncated2 = truncate_before_nth_user_message(
-            Path::new("/tmp"),
-            InitialHistory::Forked(initial2),
-            2,
-            &SnapshotTurnState {
-                ends_mid_turn: false,
-                active_turn_id: None,
-                active_turn_start_index: None,
-            },
-        )
-        .await;
-        assert!(matches!(truncated2, InitialHistory::New));
-    }
-
-    #[tokio::test]
-    async fn ignores_session_prefix_messages_when_truncating() {
-        let (session, turn_context) = make_session_and_context().await;
-        let mut items = session.build_initial_context(&turn_context).await;
-        items.push(user_msg("feature request"));
-        items.push(assistant_msg("ack"));
-        items.push(user_msg("second question"));
-        items.push(assistant_msg("answer"));
-
-        let rollout_items: Vec<RolloutItem> = items
-            .iter()
-            .cloned()
-            .map(RolloutItem::ResponseItem)
-            .collect();
-
-        let truncated = truncate_before_nth_user_message(
-            Path::new("/tmp"),
-            InitialHistory::Forked(rollout_items),
-            1,
-            &SnapshotTurnState {
-                ends_mid_turn: false,
-                active_turn_id: None,
-                active_turn_start_index: None,
-            },
-        )
-        .await;
-        let got_items = truncated.get_rollout_items();
-
-        let expected: Vec<RolloutItem> = vec![
-            RolloutItem::ResponseItem(items[0].clone()),
-            RolloutItem::ResponseItem(items[1].clone()),
-            RolloutItem::ResponseItem(items[2].clone()),
-            RolloutItem::ResponseItem(items[3].clone()),
-        ];
-
-        assert_eq!(
-            serde_json::to_value(&got_items).unwrap(),
-            serde_json::to_value(&expected).unwrap()
-        );
-    }
-}

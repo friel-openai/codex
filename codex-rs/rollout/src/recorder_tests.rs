@@ -7,6 +7,8 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ForkReferenceItem;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::UserMessageEvent;
@@ -60,6 +62,47 @@ fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<Path
     });
     writeln!(file, "{user_event}")?;
     Ok(path)
+}
+
+#[tokio::test]
+async fn get_rollout_history_preserves_legacy_fork_reference_boundaries() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let parent_id = Uuid::new_v4();
+    let child_id = Uuid::new_v4();
+    let ts = "2025-01-03T12:00:00.000Z";
+    let parent_rollout_path = write_session_file(home.path(), ts, parent_id)?;
+    let child_rollout_path = write_session_file(home.path(), ts, child_id)?;
+
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(&child_rollout_path)?;
+    let fork_reference_line = serde_json::json!({
+        "timestamp": ts,
+        "type": "fork_reference",
+        "payload": {
+            "rollout_path": parent_rollout_path,
+            "nth_user_message": u64::MAX,
+        },
+    });
+    writeln!(file, "{fork_reference_line}")?;
+
+    let history = RolloutRecorder::get_rollout_history(&child_rollout_path).await?;
+    let InitialHistory::Resumed(resumed) = history else {
+        panic!("expected resumed history");
+    };
+
+    let loaded_fork_reference = resumed.history.last().and_then(|item| match item {
+        RolloutItem::ForkReference(fork_reference) => Some(fork_reference),
+        _ => None,
+    });
+    assert_eq!(
+        loaded_fork_reference,
+        Some(&ForkReferenceItem {
+            rollout_path: parent_rollout_path,
+            nth_user_message: i64::MAX,
+        }),
+    );
+    Ok(())
 }
 
 #[tokio::test]

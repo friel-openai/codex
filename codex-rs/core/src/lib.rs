@@ -151,6 +151,7 @@ pub use rollout::policy::EventPersistenceMode;
 pub use rollout::resolve_fork_reference_rollout_path;
 pub use rollout::rollout_date_parts;
 pub use rollout::session_index::find_thread_names_by_ids;
+pub use thread_rollout_truncation::materialize_rollout_items_for_replay;
 mod function_tool;
 mod state;
 mod tasks;

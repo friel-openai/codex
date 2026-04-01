@@ -92,21 +92,30 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
     fork_turn_positions
 }
 
+/// Return the current fork boundary to persist in a `ForkReferenceItem`.
+///
+/// The boundary is the next user-message index in the current effective rollout. Persisting that
+/// snapshot, instead of a "live tail" sentinel, prevents later parent turns from being pulled
+/// into the child when the child rollout is replayed.
+pub(crate) fn fork_reference_user_message_boundary(items: &[RolloutItem]) -> i64 {
+    i64::try_from(user_message_positions_in_rollout(items).len()).unwrap_or(i64::MAX)
+}
+
 /// Return a prefix of `items` obtained by cutting strictly before the nth user message.
 ///
 /// The boundary index is 0-based from the start of `items` (so `n_from_start = 0` returns
 /// a prefix that excludes the first user message and everything after it).
 ///
-/// If `n_from_start` is `usize::MAX`, this returns the full rollout (no truncation).
+/// If `n_from_start` is negative, this returns the full rollout (no truncation).
 /// If fewer than or equal to `n_from_start` user messages exist, this returns the full
 /// rollout unchanged.
 pub(crate) fn truncate_rollout_before_nth_user_message_from_start(
     items: &[RolloutItem],
-    n_from_start: usize,
+    n_from_start: i64,
 ) -> Vec<RolloutItem> {
-    if n_from_start == usize::MAX {
+    let Ok(n_from_start) = usize::try_from(n_from_start) else {
         return items.to_vec();
-    }
+    };
 
     let user_positions = user_message_positions_in_rollout(items);
 
@@ -157,7 +166,12 @@ fn is_trigger_turn_boundary(item: &ResponseItem) -> bool {
             .is_some_and(|communication| communication.trigger_turn)
 }
 
-pub(crate) async fn materialize_rollout_items_for_replay(
+/// Expand `ForkReference` items into the referenced parent rollout slices they encode.
+///
+/// This preserves child rollout compactness on disk while letting replay callers rebuild the
+/// effective inherited transcript before reconstructing conversation history or deriving thread
+/// summaries.
+pub async fn materialize_rollout_items_for_replay(
     codex_home: &Path,
     rollout_items: &[RolloutItem],
 ) -> Vec<RolloutItem> {

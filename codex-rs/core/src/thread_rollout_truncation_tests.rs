@@ -102,7 +102,8 @@ fn truncation_max_keeps_full_rollout() {
         RolloutItem::ResponseItem(user_msg("u2")),
     ];
 
-    let truncated = truncate_rollout_before_nth_user_message_from_start(&rollout, usize::MAX);
+    let truncated =
+        truncate_rollout_before_nth_user_message_from_start(&rollout, /*n_from_start*/ -1);
 
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),

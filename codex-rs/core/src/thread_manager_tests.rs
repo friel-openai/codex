@@ -131,7 +131,7 @@ async fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
     let truncated = truncate_before_nth_user_message(
         Path::new("/tmp"),
         InitialHistory::Forked(items.clone()),
-        usize::MAX,
+        /*n*/ -1,
         &SnapshotTurnState {
             ends_mid_turn: true,
             active_turn_id: None,
@@ -192,7 +192,7 @@ async fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
     let truncated = truncate_before_nth_user_message(
         Path::new("/tmp"),
         InitialHistory::Forked(items.clone()),
-        usize::MAX,
+        /*n*/ -1,
         &snapshot_state,
     )
     .await;
