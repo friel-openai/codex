@@ -376,7 +376,7 @@ async fn multi_agent_v2_spawn_fork_turns_ignores_child_model_overrides() {
             Arc::new(turn),
             "spawn_agent",
             function_payload(json!({
-                "message": "inspect this repo",
+                "items": [{"type": "text", "text": "inspect this repo"}],
                 "model": "not-a-real-model",
                 "reasoning_effort": "low",
                 "fork_turns": "all",
