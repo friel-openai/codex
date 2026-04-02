@@ -35,7 +35,8 @@ fn test_config(codex_home: &Path) -> RolloutConfig {
 fn write_session_file(root: &Path, ts: &str, uuid: Uuid) -> std::io::Result<PathBuf> {
     let day_dir = root.join("sessions/2025/01/03");
     fs::create_dir_all(&day_dir)?;
-    let path = day_dir.join(format!("rollout-{ts}-{uuid}.jsonl"));
+    let file_ts = ts.replace(':', "-");
+    let path = day_dir.join(format!("rollout-{file_ts}-{uuid}.jsonl"));
     let mut file = File::create(&path)?;
     let meta = serde_json::json!({
         "timestamp": ts,

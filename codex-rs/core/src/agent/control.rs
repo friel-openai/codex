@@ -396,16 +396,19 @@ impl AgentControl {
             )
             .await;
         }
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+        match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
+                forked_rollout_items.push(RolloutItem::ForkReference(ForkReferenceItem {
+                    rollout_path: rollout_path.clone(),
+                    nth_user_message: fork_boundary,
+                }));
+            }
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                forked_rollout_items =
+                    truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+            }
         }
-        forked_rollout_items.retain(keep_forked_rollout_item);
-        let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
-        forked_rollout_items.push(RolloutItem::ForkReference(ForkReferenceItem {
-            rollout_path: rollout_path.clone(),
-            nth_user_message: fork_boundary,
-        }));
 
         let mut output =
             FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
