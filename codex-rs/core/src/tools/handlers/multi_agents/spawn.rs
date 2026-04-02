@@ -14,6 +14,7 @@ use crate::config::Config;
 use codex_features::Feature;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub(crate) struct Handler;
@@ -347,13 +348,18 @@ impl ToolOutput for SpawnAgentResult {
 
 async fn spawn_watchdog(
     agent_control: &crate::agent::AgentControl,
-    config: Config,
+    mut config: Config,
     prompt: String,
     owner_thread_id: ThreadId,
     child_depth: i32,
     interval_s: i64,
     spawn_source: SessionSource,
 ) -> crate::error::Result<ThreadId> {
+    config.mcp_servers.set(HashMap::new()).map_err(|err| {
+        crate::error::CodexErr::UnsupportedOperation(format!(
+            "failed to clear watchdog MCP servers: {err}"
+        ))
+    })?;
     let target_thread_id = agent_control
         .spawn_agent(config.clone(), Op::Interrupt, Some(spawn_source))
         .await?;
