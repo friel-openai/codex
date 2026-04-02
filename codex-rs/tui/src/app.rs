@@ -844,12 +844,18 @@ struct SubagentRegistry {
     panel_state: Option<Arc<StdMutex<SubagentPanelState>>>,
     panel_cell: Option<Arc<SubagentStatusCell>>,
     animations_enabled: bool,
+    watchdog_countdown_duration: Duration,
 }
 
 impl SubagentRegistry {
-    fn new(animations_enabled: bool) -> Self {
+    fn new(animations_enabled: bool, watchdog_interval_s: i64) -> Self {
         Self {
             animations_enabled,
+            watchdog_countdown_duration: u64::try_from(watchdog_interval_s)
+                .ok()
+                .filter(|seconds| *seconds > 0)
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(60)),
             ..Self::default()
         }
     }
@@ -932,8 +938,10 @@ impl SubagentRegistry {
     #[cfg_attr(not(test), allow(dead_code))]
     fn on_close_end(&mut self, event: &CollabCloseEndEvent) -> Option<Box<dyn HistoryCell>> {
         let receiver_id = event.receiver_thread_id;
-        let info = self.agents.get_mut(&receiver_id)?;
-        info.status = event.status.clone();
+        let mut info = self.agents.remove(&receiver_id)?;
+        self.order.retain(|thread_id| *thread_id != receiver_id);
+        self.pending_events.remove(&receiver_id);
+        info.status = AgentStatus::Shutdown;
         info.latest_update_at = Instant::now();
 
         if is_terminal_status(&info.status) && !info.notified_terminal {
@@ -1125,6 +1133,7 @@ impl SubagentRegistry {
                 name: info.name.clone(),
                 status: info.status.clone(),
                 is_watchdog: info.is_watchdog(),
+                watchdog_countdown_duration: self.watchdog_countdown_duration,
                 watchdog_countdown_started_at: info
                     .is_watchdog()
                     .then_some(info.running_started_at()),
@@ -2229,7 +2238,9 @@ impl App {
                     self.subagents.on_wait_end(ev);
                 }
                 EventMsg::CollabCloseEnd(ev) => {
-                    let _ = self.subagents.on_close_end(ev);
+                    if let Some(cell) = self.subagents.on_close_end(ev) {
+                        self.emit_or_queue_subagent_history(cell);
+                    }
                 }
                 _ => {}
             }
@@ -2267,7 +2278,7 @@ impl App {
 
         let ThreadItem::CollabAgentToolCall {
             id,
-            tool: CollabAgentTool::SpawnAgent,
+            tool,
             sender_thread_id,
             receiver_thread_ids,
             prompt,
@@ -2294,17 +2305,37 @@ impl App {
             .map(app_server_collab_state_to_agent_status)
             .unwrap_or(AgentStatus::PendingInit);
 
-        let _ = self.subagents.on_spawn_end(&CollabAgentSpawnEndEvent {
-            call_id: id.clone(),
-            sender_thread_id,
-            new_thread_id: Some(new_thread_id),
-            new_agent_nickname: entry.and_then(|entry| entry.agent_nickname.clone()),
-            new_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
-            prompt: prompt.clone().unwrap_or_default(),
-            model: String::new(),
-            reasoning_effort: ReasoningEffortConfig::Medium,
-            status,
-        });
+        match tool {
+            CollabAgentTool::SpawnAgent => {
+                let _ = self.subagents.on_spawn_end(&CollabAgentSpawnEndEvent {
+                    call_id: id.clone(),
+                    sender_thread_id,
+                    new_thread_id: Some(new_thread_id),
+                    new_agent_nickname: entry.and_then(|entry| entry.agent_nickname.clone()),
+                    new_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
+                    prompt: prompt.clone().unwrap_or_default(),
+                    model: String::new(),
+                    reasoning_effort: ReasoningEffortConfig::Medium,
+                    status,
+                });
+            }
+            CollabAgentTool::CloseAgent => {
+                if let ServerNotification::ItemCompleted(_) = notification
+                    && let Some(cell) = self.subagents.on_close_end(&CollabCloseEndEvent {
+                        call_id: id.clone(),
+                        sender_thread_id,
+                        receiver_thread_id: new_thread_id,
+                        receiver_agent_nickname: entry
+                            .and_then(|entry| entry.agent_nickname.clone()),
+                        receiver_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
+                        status,
+                    })
+                {
+                    self.emit_or_queue_subagent_history(cell);
+                }
+            }
+            CollabAgentTool::SendInput | CollabAgentTool::ResumeAgent | CollabAgentTool::Wait => {}
+        }
 
         self.sync_subagent_panel_state();
     }
@@ -3897,7 +3928,8 @@ impl App {
         self.abort_all_thread_event_listeners();
         self.subagent_anim_running.store(false, Ordering::Release);
         self.thread_event_channels.clear();
-        self.subagents = SubagentRegistry::new(self.config.animations);
+        self.subagents =
+            SubagentRegistry::new(self.config.animations, self.config.watchdog_interval_s);
         self.agent_navigation.clear();
         self.active_thread_id = None;
         self.active_thread_rx = None;
@@ -4400,6 +4432,7 @@ impl App {
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
         let animations_enabled = config.animations;
+        let watchdog_interval_s = config.watchdog_interval_s;
 
         let mut app = Self {
             model_catalog,
@@ -4433,7 +4466,7 @@ impl App {
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
-            subagents: SubagentRegistry::new(animations_enabled),
+            subagents: SubagentRegistry::new(animations_enabled, watchdog_interval_s),
             agent_navigation: AgentNavigationState::default(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -9803,6 +9836,7 @@ guardian_approval = true
         let model = codex_core::test_support::get_model_offline(config.model.as_deref());
         let session_telemetry = test_session_telemetry(&config, model.as_str());
         let animations_enabled = config.animations;
+        let watchdog_interval_s = config.watchdog_interval_s;
 
         App {
             model_catalog: chat_widget.model_catalog(),
@@ -9836,7 +9870,7 @@ guardian_approval = true
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
-            subagents: SubagentRegistry::new(animations_enabled),
+            subagents: SubagentRegistry::new(animations_enabled, watchdog_interval_s),
             agent_navigation: AgentNavigationState::default(),
             active_thread_id: None,
             active_thread_rx: None,
@@ -9859,6 +9893,7 @@ guardian_approval = true
         let model = codex_core::test_support::get_model_offline(config.model.as_deref());
         let session_telemetry = test_session_telemetry(&config, model.as_str());
         let animations_enabled = config.animations;
+        let watchdog_interval_s = config.watchdog_interval_s;
 
         (
             App {
@@ -9893,7 +9928,7 @@ guardian_approval = true
                 windows_sandbox: WindowsSandboxState::default(),
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
-                subagents: SubagentRegistry::new(animations_enabled),
+                subagents: SubagentRegistry::new(animations_enabled, watchdog_interval_s),
                 agent_navigation: AgentNavigationState::default(),
                 active_thread_id: None,
                 active_thread_rx: None,
