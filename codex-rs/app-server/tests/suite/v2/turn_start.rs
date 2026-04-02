@@ -1871,6 +1871,11 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     const CHILD_PROMPT: &str = "child: do work";
     const PARENT_PROMPT: &str = "spawn a child and continue";
     const SPAWN_CALL_ID: &str = "spawn-call-1";
+    const INHERITED_MODEL: &str = "gpt-5.2-codex";
+    // thread/start only sets the model here; the session keeps the resolved collaboration-mode
+    // effort for that thread, so fork-context children should inherit `Medium`, not the model
+    // catalog default.
+    const INHERITED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
     const REQUESTED_MODEL: &str = "gpt-5.1";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
     const ROLE_MODEL: &str = "gpt-5.1-codex-max";
@@ -2013,8 +2018,8 @@ config_file = "./custom-role.toml"
     assert_eq!(sender_thread_id, thread.id);
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(ROLE_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
+    assert_eq!(model, Some(INHERITED_MODEL.to_string()));
+    assert_eq!(reasoning_effort, Some(INHERITED_REASONING_EFFORT));
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");
