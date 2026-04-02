@@ -153,6 +153,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
             ToolHandlerKind::CodeModeWait => {
                 builder.register_handler(handler.name, code_mode_wait_handler.clone());
             }
+            ToolHandlerKind::CompactParentContext => {
+                builder.register_handler(handler.name, Arc::new(CompactParentContextHandler));
+            }
             ToolHandlerKind::DynamicTool => {
                 builder.register_handler(handler.name, dynamic_tool_handler.clone());
             }
@@ -231,6 +234,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::WaitAgentV2 => {
                 builder.register_handler(handler.name, Arc::new(WaitAgentHandlerV2));
+            }
+            ToolHandlerKind::WatchdogSelfClose => {
+                builder.register_handler(handler.name, Arc::new(WatchdogSelfCloseHandler));
             }
         }
     }

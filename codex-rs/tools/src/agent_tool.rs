@@ -1,4 +1,6 @@
 use crate::JsonSchema;
+use crate::ResponsesApiNamespace;
+use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
 use crate::ToolSpec;
 use codex_protocol::openai_models::ModelPreset;
@@ -412,6 +414,29 @@ pub fn create_compact_parent_context_tool() -> ToolSpec {
             additional_properties: Some(false.into()),
         },
         output_schema: None,
+    })
+}
+
+pub fn create_watchdog_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::LocalShell {}
+            | ToolSpec::ImageGeneration { .. }
+            | ToolSpec::WebSearch { .. }
+            | ToolSpec::Freeform(_) => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "watchdog".to_string(),
+        description:
+            "Watchdog-only tools for parent-thread recovery and watchdog check-in lifecycle control."
+                .to_string(),
+        tools,
     })
 }
 

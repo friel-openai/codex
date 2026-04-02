@@ -417,6 +417,15 @@ impl AgentControl {
                 },
             ));
         }
+        append_post_fork_developer_message(
+            &mut forked_rollout_items,
+            build_post_fork_developer_message(
+                &config,
+                &session_source,
+                /*extra_message*/ None,
+            )
+            .await,
+        );
 
         state
             .fork_thread_with_source(
