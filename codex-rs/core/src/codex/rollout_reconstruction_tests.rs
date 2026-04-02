@@ -204,16 +204,12 @@ async fn record_initial_history_forked_materializes_fork_reference_rollout_items
         .record_initial_history(InitialHistory::Forked(rollout_items))
         .await;
 
-    let reconstruction_turn = session.new_default_turn().await;
-    let mut expected = vec![user_message("first user"), assistant_message("first reply")];
-    expected.extend(
-        session
-            .build_initial_context(reconstruction_turn.as_ref())
-            .await,
-    );
-
     let history = session.state.lock().await.clone_history();
-    assert_eq!(expected, history.raw_items());
+    assert_eq!(
+        vec![user_message("first user"), assistant_message("first reply")],
+        history.raw_items()
+    );
+    assert!(session.reference_context_item().await.is_none());
 }
 
 #[tokio::test]
