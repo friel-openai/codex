@@ -1114,6 +1114,67 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
 }
 
 #[tokio::test]
+async fn spawn_agent_fork_skips_output_when_parent_spawn_call_is_missing() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread.codex.session.flush_rollout().await;
+
+    let synthetic_call_id = format!("watchdog_{parent_thread_id}");
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(synthetic_call_id.clone()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+            },
+        )
+        .await
+        .expect("forked spawn should succeed")
+        .thread_id;
+
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    let history = child_thread.codex.session.clone_history().await;
+
+    assert!(!history.raw_items().iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::FunctionCallOutput { call_id, .. } if call_id == &synthetic_call_id
+        )
+    }));
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    let _ = parent_thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
 async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;

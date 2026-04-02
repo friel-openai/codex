@@ -317,6 +317,12 @@ impl WatchdogManager {
         });
         let mut helper_config = snapshot.config.clone();
         helper_config.ephemeral = true;
+        if let Err(err) = helper_config.mcp_servers.set(HashMap::new()) {
+            warn!(
+                target_thread_id = %target_thread_id,
+                "failed to clear watchdog helper MCP servers: {err}"
+            );
+        }
         if helper_config
             .features
             .enabled(Feature::AgentPromptInjection)

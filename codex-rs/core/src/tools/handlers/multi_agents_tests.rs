@@ -607,6 +607,11 @@ async fn spawn_agent_watchdog_role_returns_handle_with_role_defaults() {
         manager.agent_control().get_status(agent_id).await,
         AgentStatus::PendingInit
     );
+    let watchdog_targets = manager.agent_control().watchdog_targets(&[agent_id]).await;
+    assert_eq!(
+        watchdog_targets,
+        std::collections::HashSet::from([agent_id])
+    );
 }
 
 #[tokio::test]

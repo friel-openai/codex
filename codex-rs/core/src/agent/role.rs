@@ -29,7 +29,9 @@ const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not availabl
 
 pub(crate) fn watchdog_interval_for_role(config: &Config, role_name: Option<&str>) -> Option<i64> {
     let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
-    resolve_role_config(config, role_name).and_then(|role| role.watchdog_interval_s)
+    let role = resolve_role_config(config, role_name)?;
+    role.watchdog_interval_s
+        .or_else(|| (role_name == "watchdog").then_some(config.watchdog_interval_s))
 }
 
 /// Applies a named role layer to `config` while preserving caller-owned model selection.
@@ -424,7 +426,7 @@ Rules:
 - Close the watchdog handle only when it is no longer needed or when replacing it with a new watchdog."#.to_string()),
                         model: None,
                         config_file: None,
-                        watchdog_interval_s: Some(crate::config::DEFAULT_WATCHDOG_INTERVAL_S),
+                        watchdog_interval_s: None,
                         nickname_candidates: None,
                         fork_context: Some(true),
                     }

@@ -397,15 +397,26 @@ impl AgentControl {
             }
         }
 
-        let mut output =
-            FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
-        output.success = Some(true);
-        forked_rollout_items.push(RolloutItem::ResponseItem(
-            ResponseItem::FunctionCallOutput {
-                call_id: call_id.to_string(),
-                output,
-            },
-        ));
+        let has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                    call_id: existing_call_id,
+                    ..
+                }) if existing_call_id == call_id
+            )
+        });
+        if has_matching_spawn_call {
+            let mut output =
+                FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
+            output.success = Some(true);
+            forked_rollout_items.push(RolloutItem::ResponseItem(
+                ResponseItem::FunctionCallOutput {
+                    call_id: call_id.to_string(),
+                    output,
+                },
+            ));
+        }
 
         state
             .fork_thread_with_source(
