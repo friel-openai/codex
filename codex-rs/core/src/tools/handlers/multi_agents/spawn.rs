@@ -348,20 +348,24 @@ impl ToolOutput for SpawnAgentResult {
 
 async fn spawn_watchdog(
     agent_control: &crate::agent::AgentControl,
-    mut config: Config,
+    config: Config,
     prompt: String,
     owner_thread_id: ThreadId,
     child_depth: i32,
     interval_s: i64,
     spawn_source: SessionSource,
 ) -> crate::error::Result<ThreadId> {
-    config.mcp_servers.set(HashMap::new()).map_err(|err| {
-        crate::error::CodexErr::UnsupportedOperation(format!(
-            "failed to clear watchdog MCP servers: {err}"
-        ))
-    })?;
+    let mut handle_config = config.clone();
+    handle_config
+        .mcp_servers
+        .set(HashMap::new())
+        .map_err(|err| {
+            crate::error::CodexErr::UnsupportedOperation(format!(
+                "failed to clear watchdog MCP servers: {err}"
+            ))
+        })?;
     let target_thread_id = agent_control
-        .spawn_agent(config.clone(), Op::Interrupt, Some(spawn_source))
+        .spawn_agent(handle_config, Op::Interrupt, Some(spawn_source))
         .await?;
     let superseded_before_register = agent_control
         .unregister_watchdogs_for_owner(owner_thread_id)
