@@ -750,6 +750,7 @@ impl Codex {
             metrics_service_name,
             app_server_client_name: None,
             session_source,
+            prompt_cache_key: None,
             dynamic_tools,
             persist_extended_history,
             inherited_shell_snapshot,
@@ -1231,6 +1232,8 @@ pub(crate) struct SessionConfiguration {
     app_server_client_name: Option<String>,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
+    /// Stable Responses prompt-cache key inherited across forked subagents.
+    prompt_cache_key: Option<ThreadId>,
     dynamic_tools: Vec<DynamicToolSpec>,
     persist_extended_history: bool,
     inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
@@ -1334,6 +1337,26 @@ impl SessionConfiguration {
         }
         Ok(next_configuration)
     }
+}
+
+fn prompt_cache_key_from_initial_history(
+    initial_history: &InitialHistory,
+    fallback_conversation_id: ThreadId,
+) -> ThreadId {
+    initial_history
+        .get_rollout_items()
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta_line) => {
+                Some(meta_line.meta.forked_from_id.unwrap_or(meta_line.meta.id))
+            }
+            RolloutItem::ForkReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => None,
+        })
+        .unwrap_or(fallback_conversation_id)
 }
 
 #[derive(Default, Clone)]
@@ -1651,6 +1674,10 @@ impl Session {
                 ),
             ),
         };
+        session_configuration.prompt_cache_key = Some(prompt_cache_key_from_initial_history(
+            &initial_history,
+            conversation_id,
+        ));
         let state_builder = match &initial_history {
             InitialHistory::Resumed(resumed) => metadata::builder_from_items(
                 resumed.history.as_slice(),
@@ -2028,6 +2055,9 @@ impl Session {
             model_client: ModelClient::new(
                 Some(Arc::clone(&auth_manager)),
                 conversation_id,
+                session_configuration
+                    .prompt_cache_key
+                    .unwrap_or(conversation_id),
                 session_configuration.provider.clone(),
                 session_configuration.session_source.clone(),
                 config.model_verbosity,
