@@ -511,7 +511,8 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> Result<()> {
+async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings_without_fork_context()
+-> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -522,6 +523,7 @@ async fn spawn_agent_role_overrides_requested_model_and_reasoning_settings() -> 
             "agent_type": "custom",
             "model": REQUESTED_MODEL,
             "reasoning_effort": REQUESTED_REASONING_EFFORT,
+            "fork_context": false,
         }),
         |builder| {
             builder.with_config(|config| {

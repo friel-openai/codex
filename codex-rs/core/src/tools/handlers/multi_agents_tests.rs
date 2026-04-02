@@ -58,6 +58,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use tracing_test::traced_test;
 
 fn invocation(
     session: Arc<crate::codex::Session>,
@@ -95,11 +96,14 @@ fn thread_manager() -> ThreadManager {
 
 async fn install_role_with_model_provider_and_profile_override(turn: &mut TurnContext) -> String {
     let role_name = "fork-context-role".to_string();
+    tokio::fs::create_dir_all(&turn.config.codex_home)
+        .await
+        .expect("codex home should be created");
     let role_config_path = turn.config.codex_home.join("fork-context-role.toml");
     tokio::fs::write(
         &role_config_path,
         r#"developer_instructions = "Forked children should keep the parent model config."
-model_provider = "role-provider"
+model_provider = "openai"
 model_context_window = 12345
 model_auto_compact_token_limit = 1234
 model_verbosity = "low"
@@ -108,19 +112,13 @@ profile = "role-profile"
 service_tier = "fast"
 
 [profiles.role-profile]
-model_provider = "role-provider"
+model_provider = "openai"
 "#,
     )
     .await
     .expect("role config should be written");
 
     let mut config = (*turn.config).clone();
-    let mut role_provider =
-        built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone();
-    role_provider.name = "Role Provider".to_string();
-    config
-        .model_providers
-        .insert("role-provider".to_string(), role_provider);
     config.service_tier = Some(ServiceTier::Flex);
     config.plan_mode_reasoning_effort = Some(ReasoningEffort::High);
     config.model_verbosity = Some(Verbosity::High);
@@ -354,6 +352,7 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 }
 
 #[tokio::test]
+#[traced_test]
 async fn spawn_agent_fork_context_ignores_child_model_overrides() {
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_provider_and_profile_override(&mut turn).await;
