@@ -1,4 +1,5 @@
 use super::*;
+use crate::CodexThread;
 use crate::ThreadManager;
 use crate::agent::WatchdogRegistration;
 use crate::built_in_model_providers;
@@ -103,7 +104,7 @@ async fn attach_watchdog_helper_for_tests(
     manager: &ThreadManager,
     agent_control: &crate::agent::AgentControl,
     config: &crate::config::Config,
-) -> ThreadId {
+) -> (ThreadId, ThreadId, ThreadId) {
     let owner = manager
         .start_thread(config.clone())
         .await
@@ -137,7 +138,24 @@ async fn attach_watchdog_helper_for_tests(
         Some(owner.thread_id),
         "watchdog helper should be registered for owner"
     );
-    helper.thread_id
+    (owner.thread_id, target, helper.thread_id)
+}
+
+async fn wait_for_owner_close_end_event(
+    owner_thread: &CodexThread,
+    target_thread_id: ThreadId,
+) -> CollabCloseEndEvent {
+    loop {
+        let event = timeout(Duration::from_secs(2), owner_thread.next_event())
+            .await
+            .expect("owner close event should arrive")
+            .expect("owner event should be readable");
+        if let EventMsg::CollabCloseEnd(close_end) = event.msg
+            && close_end.receiver_thread_id == target_thread_id
+        {
+            return close_end;
+        }
+    }
 }
 
 async fn install_role_with_model_provider_and_profile_override(turn: &mut TurnContext) -> String {
@@ -3477,15 +3495,19 @@ async fn watchdog_self_close_rejects_non_watchdog_thread() {
 }
 
 #[tokio::test]
-async fn watchdog_self_close_closes_watchdog_helper_and_returns_previous_status() {
+async fn watchdog_self_close_closes_watchdog_handle_and_returns_previous_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     let agent_control = manager.agent_control();
     session.services.agent_control = agent_control.clone();
-    let helper_thread_id =
+    let (owner_thread_id, target_thread_id, helper_thread_id) =
         attach_watchdog_helper_for_tests(&manager, &agent_control, turn.config.as_ref()).await;
+    let owner_thread = manager
+        .get_thread(owner_thread_id)
+        .await
+        .expect("owner thread should exist");
     session.conversation_id = helper_thread_id;
-    let status_before = agent_control.get_status(helper_thread_id).await;
+    let status_before = agent_control.get_status(target_thread_id).await;
 
     let output = WatchdogSelfCloseHandler
         .handle(invocation(
@@ -3503,18 +3525,89 @@ async fn watchdog_self_close_closes_watchdog_helper_and_returns_previous_status(
     assert_eq!(
         result,
         WatchdogSelfCloseResult {
-            previous_status: status_before,
+            previous_status: status_before.clone(),
         }
     );
     assert_eq!(success, Some(true));
     assert_eq!(
-        agent_control.get_status(helper_thread_id).await,
+        agent_control.get_status(target_thread_id).await,
         AgentStatus::NotFound
     );
+    assert_eq!(
+        agent_control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound,
+    );
+    let close_end = wait_for_owner_close_end_event(owner_thread.as_ref(), target_thread_id).await;
+    assert_eq!(close_end.sender_thread_id, helper_thread_id);
+    assert_eq!(close_end.receiver_thread_id, target_thread_id);
+    assert_eq!(close_end.status, status_before);
 }
 
 #[tokio::test]
-async fn multi_agent_v2_watchdog_self_close_closes_watchdog_helper_and_returns_previous_status() {
+async fn watchdog_self_close_sends_final_message_to_owner_before_closing_handle() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    let (owner_thread_id, target_thread_id, helper_thread_id) =
+        attach_watchdog_helper_for_tests(&manager, &agent_control, turn.config.as_ref()).await;
+    let owner_thread = manager
+        .get_thread(owner_thread_id)
+        .await
+        .expect("owner thread should exist");
+    session.conversation_id = helper_thread_id;
+
+    let output = WatchdogSelfCloseHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "watchdog_self_close",
+            function_payload(json!({"message": "watchdog done"})),
+        ))
+        .await
+        .expect("watchdog helper should self-close and notify owner");
+    let (_content, success) = expect_text_output(output);
+
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        agent_control.get_status(target_thread_id).await,
+        AgentStatus::NotFound,
+    );
+    let captured_ops = manager.captured_ops();
+    let owner_wakeup_items = captured_ops
+        .iter()
+        .into_iter()
+        .find_map(|(thread_id, op)| match op {
+            Op::InjectResponseItems { items } if *thread_id == owner_thread_id => {
+                Some(items.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("owner should receive watchdog final message: {captured_ops:?}"));
+    let output = owner_wakeup_items
+        .iter()
+        .find_map(|item| match item {
+            ResponseInputItem::FunctionCallOutput { output, .. } => Some(output),
+            ResponseInputItem::Message { .. }
+            | ResponseInputItem::FunctionCall { .. }
+            | ResponseInputItem::McpToolCallOutput { .. }
+            | ResponseInputItem::CustomToolCallOutput { .. }
+            | ResponseInputItem::ToolSearchOutput { .. } => None,
+        })
+        .expect("watchdog final message should be forwarded through the owner inbox");
+    let FunctionCallOutputBody::Text(output_text) = &output.body else {
+        panic!("watchdog final inbox payload should be text");
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(output_text).expect("watchdog inbox payload should be json");
+    assert_eq!(payload["message"], "watchdog done");
+    let close_end = wait_for_owner_close_end_event(owner_thread.as_ref(), target_thread_id).await;
+    assert_eq!(close_end.sender_thread_id, helper_thread_id);
+    assert_eq!(close_end.receiver_thread_id, target_thread_id);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_watchdog_self_close_sends_final_message_to_owner_before_closing_handle() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let agent_control = manager.agent_control();
@@ -3524,11 +3617,81 @@ async fn multi_agent_v2_watchdog_self_close_closes_watchdog_helper_and_returns_p
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
-    let helper_thread_id =
+    let (owner_thread_id, target_thread_id, helper_thread_id) =
         attach_watchdog_helper_for_tests(&manager, &agent_control, &config).await;
+    let owner_thread = manager
+        .get_thread(owner_thread_id)
+        .await
+        .expect("owner thread should exist");
     session.conversation_id = helper_thread_id;
     turn.config = Arc::new(config);
-    let status_before = agent_control.get_status(helper_thread_id).await;
+
+    let output = WatchdogSelfCloseHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "watchdog_self_close",
+            function_payload(json!({"message": "watchdog done"})),
+        ))
+        .await
+        .expect("watchdog helper should self-close and notify owner");
+    let (_content, success) = expect_text_output(output);
+
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        agent_control.get_status(target_thread_id).await,
+        AgentStatus::NotFound,
+    );
+    let owner_wakeup_items = manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(thread_id, op)| match op {
+            Op::InjectResponseItems { items } if thread_id == owner_thread_id => Some(items),
+            _ => None,
+        })
+        .expect("owner should receive watchdog final message");
+    let output = owner_wakeup_items
+        .iter()
+        .find_map(|item| match item {
+            ResponseInputItem::FunctionCallOutput { output, .. } => Some(output),
+            ResponseInputItem::Message { .. }
+            | ResponseInputItem::FunctionCall { .. }
+            | ResponseInputItem::McpToolCallOutput { .. }
+            | ResponseInputItem::CustomToolCallOutput { .. }
+            | ResponseInputItem::ToolSearchOutput { .. } => None,
+        })
+        .expect("watchdog final message should be forwarded through the owner inbox");
+    let FunctionCallOutputBody::Text(output_text) = &output.body else {
+        panic!("watchdog final inbox payload should be text");
+    };
+    let payload: serde_json::Value =
+        serde_json::from_str(output_text).expect("watchdog inbox payload should be json");
+    assert_eq!(payload["message"], "watchdog done");
+    let close_end = wait_for_owner_close_end_event(owner_thread.as_ref(), target_thread_id).await;
+    assert_eq!(close_end.sender_thread_id, helper_thread_id);
+    assert_eq!(close_end.receiver_thread_id, target_thread_id);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_watchdog_self_close_closes_watchdog_handle_and_returns_previous_status() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    let mut config = turn.config.as_ref().clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let (owner_thread_id, target_thread_id, helper_thread_id) =
+        attach_watchdog_helper_for_tests(&manager, &agent_control, &config).await;
+    let owner_thread = manager
+        .get_thread(owner_thread_id)
+        .await
+        .expect("owner thread should exist");
+    session.conversation_id = helper_thread_id;
+    turn.config = Arc::new(config);
+    let status_before = agent_control.get_status(target_thread_id).await;
 
     let output = WatchdogSelfCloseHandlerV2
         .handle(invocation(
@@ -3546,14 +3709,22 @@ async fn multi_agent_v2_watchdog_self_close_closes_watchdog_helper_and_returns_p
     assert_eq!(
         result,
         WatchdogSelfCloseResult {
-            previous_status: status_before,
+            previous_status: status_before.clone(),
         }
     );
     assert_eq!(success, Some(true));
     assert_eq!(
-        agent_control.get_status(helper_thread_id).await,
+        agent_control.get_status(target_thread_id).await,
         AgentStatus::NotFound
     );
+    assert_eq!(
+        agent_control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound,
+    );
+    let close_end = wait_for_owner_close_end_event(owner_thread.as_ref(), target_thread_id).await;
+    assert_eq!(close_end.sender_thread_id, helper_thread_id);
+    assert_eq!(close_end.receiver_thread_id, target_thread_id);
+    assert_eq!(close_end.status, status_before);
 }
 
 #[tokio::test]

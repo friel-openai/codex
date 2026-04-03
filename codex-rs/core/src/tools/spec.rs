@@ -237,6 +237,56 @@ pub(crate) fn build_specs_with_discoverable_tools(
     builder
 }
 
+fn build_tool_search_corpus(
+    config: &ToolsConfig,
+    app_tools: Option<&HashMap<String, ToolInfo>>,
+) -> HashMap<String, ToolInfo> {
+    let mut tools = app_tools.cloned().unwrap_or_default();
+    if !config.agent_watchdog {
+        return tools;
+    }
+
+    for tool in [
+        create_compact_parent_context_tool(),
+        create_watchdog_self_close_tool(),
+    ] {
+        let ToolSpec::Function(tool) = tool else {
+            continue;
+        };
+        let Ok(input_schema) = serde_json::to_value(&tool.parameters) else {
+            continue;
+        };
+        let search_key = format!("watchdog__{}", tool.name);
+        tools.insert(
+            search_key,
+            ToolInfo {
+                server_name: "watchdog".to_string(),
+                tool_name: tool.name.replace('-', "_"),
+                tool_namespace: "watchdog".to_string(),
+                tool: rmcp::model::Tool {
+                    name: tool.name.clone().into(),
+                    title: Some(tool.name.replace(['_', '-'], " ").into()),
+                    description: Some(tool.description.into()),
+                    input_schema: Arc::new(rmcp::model::object(input_schema)),
+                    output_schema: None,
+                    annotations: None,
+                    execution: None,
+                    icons: None,
+                    meta: None,
+                },
+                connector_id: None,
+                connector_name: Some("watchdog".to_string()),
+                plugin_display_names: Vec::new(),
+                connector_description: Some(
+                    "Watchdog-only tools for parent-thread recovery and watchdog check-in lifecycle control."
+                        .to_string(),
+                ),
+            },
+        );
+    }
+    tools
+}
+
 #[cfg(test)]
 #[path = "spec_tests.rs"]
 mod tests;

@@ -125,7 +125,7 @@ fn configured_tool_spec_name_delegates_to_tool_spec() {
 }
 
 #[test]
-fn watchdog_self_close_tool_spec_is_deferred_and_parameterless() {
+fn watchdog_self_close_tool_spec_is_deferred_and_can_send_a_final_message() {
     let ToolSpec::Function(ResponsesApiTool {
         name,
         defer_loading,
@@ -142,7 +142,15 @@ fn watchdog_self_close_tool_spec_is_deferred_and_parameterless() {
     assert_eq!(
         parameters,
         JsonSchema::Object {
-            properties: BTreeMap::new(),
+            properties: BTreeMap::from([(
+                "message".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Optional final message to send to the parent/root thread before closing this watchdog handle and ending this check-in immediately."
+                            .to_string(),
+                    ),
+                },
+            )]),
             required: None,
             additional_properties: Some(AdditionalProperties::Boolean(false)),
         }
