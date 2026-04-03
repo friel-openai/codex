@@ -2245,9 +2245,18 @@ impl App {
                 _ => {}
             }
         } else {
-            let updates = self.subagents.on_agent_event(thread_id, &event.msg);
-            for cell in updates {
-                self.emit_or_queue_subagent_history(cell);
+            match &event.msg {
+                EventMsg::CollabCloseEnd(ev) => {
+                    if let Some(cell) = self.subagents.on_close_end(ev) {
+                        self.emit_or_queue_subagent_history(cell);
+                    }
+                }
+                _ => {
+                    let updates = self.subagents.on_agent_event(thread_id, &event.msg);
+                    for cell in updates {
+                        self.emit_or_queue_subagent_history(cell);
+                    }
+                }
             }
         }
 

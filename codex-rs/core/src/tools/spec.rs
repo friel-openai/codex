@@ -12,10 +12,13 @@ use codex_tools::DiscoverableTool;
 use codex_tools::ToolHandlerKind;
 use codex_tools::ToolRegistryPlanAppTool;
 use codex_tools::ToolRegistryPlanParams;
+use codex_tools::ToolSpec;
 use codex_tools::ToolUserShellType;
 use codex_tools::ToolsConfig;
 use codex_tools::WaitAgentTimeoutOptions;
 use codex_tools::build_tool_registry_plan;
+use codex_tools::create_compact_parent_context_tool;
+use codex_tools::create_watchdog_self_close_tool;
 use std::collections::HashMap;
 use std::sync::Arc;
 pub(crate) fn tool_user_shell_type(user_shell: &Shell) -> ToolUserShellType {
@@ -113,6 +116,7 @@ pub(crate) fn build_specs_with_discoverable_tools(
     let request_user_input_handler = Arc::new(RequestUserInputHandler {
         default_mode_request_user_input: config.default_mode_request_user_input,
     });
+    let tool_search_corpus = build_tool_search_corpus(config, app_tools.as_ref());
     let mut tool_search_handler = None;
     let tool_suggest_handler = Arc::new(ToolSuggestHandler);
     let code_mode_handler = Arc::new(CodeModeExecuteHandler);
@@ -212,9 +216,8 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::ToolSearch => {
                 if tool_search_handler.is_none() {
-                    tool_search_handler = app_tools
-                        .as_ref()
-                        .map(|app_tools| Arc::new(ToolSearchHandler::new(app_tools.clone())));
+                    tool_search_handler =
+                        Some(Arc::new(ToolSearchHandler::new(tool_search_corpus.clone())));
                 }
                 if let Some(tool_search_handler) = tool_search_handler.as_ref() {
                     builder.register_handler(handler.name, tool_search_handler.clone());
@@ -241,6 +244,56 @@ pub(crate) fn build_specs_with_discoverable_tools(
         }
     }
     builder
+}
+
+fn build_tool_search_corpus(
+    config: &ToolsConfig,
+    app_tools: Option<&HashMap<String, ToolInfo>>,
+) -> HashMap<String, ToolInfo> {
+    let mut tools = app_tools.cloned().unwrap_or_default();
+    if !config.agent_watchdog {
+        return tools;
+    }
+
+    for tool in [
+        create_compact_parent_context_tool(),
+        create_watchdog_self_close_tool(),
+    ] {
+        let ToolSpec::Function(tool) = tool else {
+            continue;
+        };
+        let Ok(input_schema) = serde_json::to_value(&tool.parameters) else {
+            continue;
+        };
+        let search_key = format!("watchdog__{}", tool.name);
+        tools.insert(
+            search_key,
+            ToolInfo {
+                server_name: "watchdog".to_string(),
+                tool_name: tool.name.replace('-', "_"),
+                tool_namespace: "watchdog".to_string(),
+                tool: rmcp::model::Tool {
+                    name: tool.name.clone().into(),
+                    title: Some(tool.name.replace(['_', '-'], " ").into()),
+                    description: Some(tool.description.into()),
+                    input_schema: Arc::new(rmcp::model::object(input_schema)),
+                    output_schema: None,
+                    annotations: None,
+                    execution: None,
+                    icons: None,
+                    meta: None,
+                },
+                connector_id: None,
+                connector_name: Some("watchdog".to_string()),
+                plugin_display_names: Vec::new(),
+                connector_description: Some(
+                    "Watchdog-only tools for parent-thread recovery and watchdog check-in lifecycle control."
+                        .to_string(),
+                ),
+            },
+        );
+    }
+    tools
 }
 
 #[cfg(test)]

@@ -23,15 +23,24 @@ impl ToolHandler for Handler {
             ..
         } = invocation;
         let arguments = function_arguments(payload)?;
-        let _args: WatchdogSelfCloseArgs = parse_arguments(&arguments)?;
+        let args: WatchdogSelfCloseArgs = parse_arguments(&arguments)?;
         let helper_thread_id = session.conversation_id;
-        if session
+        let Some(owner_thread_id) = session
             .services
             .agent_control
             .watchdog_owner_for_active_helper(helper_thread_id)
             .await
-            .is_none()
-        {
+        else {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdog_self_close is only available in watchdog check-in threads.".to_string(),
+            ));
+        };
+        let Some(target_thread_id) = session
+            .services
+            .agent_control
+            .watchdog_target_for_active_helper(helper_thread_id)
+            .await
+        else {
             return Err(FunctionCallError::RespondToModel(
                 "watchdog_self_close is only available in watchdog check-in threads.".to_string(),
             ));
@@ -40,7 +49,7 @@ impl ToolHandler for Handler {
         let receiver_agent = session
             .services
             .agent_control
-            .get_agent_metadata(helper_thread_id)
+            .get_agent_metadata(target_thread_id)
             .unwrap_or_default();
 
         session
@@ -49,7 +58,7 @@ impl ToolHandler for Handler {
                 CollabCloseBeginEvent {
                     call_id: call_id.clone(),
                     sender_thread_id: helper_thread_id,
-                    receiver_thread_id: helper_thread_id,
+                    receiver_thread_id: target_thread_id,
                 }
                 .into(),
             )
@@ -58,7 +67,7 @@ impl ToolHandler for Handler {
         let status = match session
             .services
             .agent_control
-            .subscribe_status(helper_thread_id)
+            .subscribe_status(target_thread_id)
             .await
         {
             Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
@@ -66,7 +75,7 @@ impl ToolHandler for Handler {
                 let status = session
                     .services
                     .agent_control
-                    .get_status(helper_thread_id)
+                    .get_status(target_thread_id)
                     .await;
                 session
                     .send_event(
@@ -74,7 +83,7 @@ impl ToolHandler for Handler {
                         CollabCloseEndEvent {
                             call_id: call_id.clone(),
                             sender_thread_id: helper_thread_id,
-                            receiver_thread_id: helper_thread_id,
+                            receiver_thread_id: target_thread_id,
                             receiver_agent_nickname: receiver_agent.agent_nickname.clone(),
                             receiver_agent_role: receiver_agent.agent_role.clone(),
                             status,
@@ -82,35 +91,60 @@ impl ToolHandler for Handler {
                         .into(),
                     )
                     .await;
-                return Err(collab_agent_error(helper_thread_id, err));
+                return Err(collab_agent_error(target_thread_id, err));
             }
         };
+
+        if let Some(message) = args.message
+            && !message.trim().is_empty()
+        {
+            let _ = session
+                .services
+                .agent_control
+                .send_watchdog_wakeup(owner_thread_id, target_thread_id, message)
+                .await;
+        }
 
         let result = session
             .services
             .agent_control
-            .close_agent(helper_thread_id)
+            .close_agent(target_thread_id)
             .await
-            .map_err(|err| collab_agent_error(helper_thread_id, err))
+            .map_err(|err| collab_agent_error(target_thread_id, err))
             .map(|_| ());
 
         let receiver_agent = session
             .services
             .agent_control
-            .get_agent_metadata(helper_thread_id)
+            .get_agent_metadata(target_thread_id)
             .unwrap_or_default();
+        let receiver_agent_nickname = receiver_agent.agent_nickname.clone();
+        let receiver_agent_role = receiver_agent.agent_role.clone();
         session
             .send_event(
                 &turn,
                 CollabCloseEndEvent {
                     call_id,
                     sender_thread_id: helper_thread_id,
-                    receiver_thread_id: helper_thread_id,
-                    receiver_agent_nickname: receiver_agent.agent_nickname,
-                    receiver_agent_role: receiver_agent.agent_role,
+                    receiver_thread_id: target_thread_id,
+                    receiver_agent_nickname: receiver_agent_nickname.clone(),
+                    receiver_agent_role: receiver_agent_role.clone(),
                     status: status.clone(),
                 }
                 .into(),
+            )
+            .await;
+        let _ = session
+            .services
+            .agent_control
+            .send_watchdog_close_end(
+                owner_thread_id,
+                turn.sub_id.clone(),
+                helper_thread_id,
+                target_thread_id,
+                receiver_agent_nickname,
+                receiver_agent_role,
+                status.clone(),
             )
             .await;
 
@@ -123,7 +157,9 @@ impl ToolHandler for Handler {
 }
 
 #[derive(Debug, Deserialize)]
-struct WatchdogSelfCloseArgs {}
+struct WatchdogSelfCloseArgs {
+    message: Option<String>,
+}
 
 #[derive(Debug, Serialize)]
 pub(crate) struct WatchdogSelfCloseResult {

@@ -10,6 +10,7 @@ use codex_app_server_protocol::AppInfo;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_mcp::mcp::CODEX_APPS_MCP_SERVER_NAME;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ConfigShellToolType;
@@ -17,6 +18,7 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_tools::ConfiguredToolSpec;
 use codex_tools::DiscoverableTool;
 use codex_tools::JsonSchema;
@@ -1502,6 +1504,44 @@ fn search_tool_registers_namespaced_app_tool_aliases() {
 
     assert!(registry.has_handler(TOOL_SEARCH_TOOL_NAME, /*namespace*/ None));
     assert!(registry.has_handler(alias.as_str(), /*namespace*/ None));
+}
+
+#[test]
+fn search_tool_corpus_includes_watchdog_namespace_tools() {
+    let model_info = search_capable_model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::AgentWatchdog);
+    features.enable(Feature::Apps);
+    features.enable(Feature::Collab);
+    features.enable(Feature::ToolSearch);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let corpus = build_tool_search_corpus(&tools_config, Some(&HashMap::new()));
+    let mut tool_keys = corpus.into_keys().collect::<Vec<_>>();
+    tool_keys.sort();
+
+    assert_eq!(
+        tool_keys,
+        vec![
+            "watchdog__compact_parent_context".to_string(),
+            "watchdog__watchdog_self_close".to_string(),
+        ]
+    );
 }
 
 #[test]

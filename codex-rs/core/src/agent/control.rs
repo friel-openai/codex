@@ -22,6 +22,7 @@ use crate::thread_rollout_truncation::fork_reference_user_message_boundary;
 use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use codex_features::Feature;
+use codex_mcp::mcp_connection_manager::McpConnectionManager;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -31,6 +32,9 @@ use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AGENT_INBOX_KIND;
 use codex_protocol::protocol::AgentInboxPayload;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -49,6 +53,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
 use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 use tokio::sync::watch;
 use tracing::warn;
 use uuid::Uuid;
@@ -226,6 +231,12 @@ impl AgentControl {
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
             .await;
+        let inherited_prompt_cache_key = self
+            .inherited_prompt_cache_key_for_source(&state, session_source.as_ref())
+            .await;
+        let inherited_mcp_connection_manager = self
+            .inherited_mcp_connection_manager_for_source(&state, session_source.as_ref())
+            .await;
         let (session_source, mut agent_metadata) = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -259,6 +270,8 @@ impl AgentControl {
                     &options,
                     inherited_shell_snapshot,
                     inherited_exec_policy,
+                    inherited_prompt_cache_key,
+                    inherited_mcp_connection_manager,
                 )
                 .await?
             }
@@ -272,6 +285,8 @@ impl AgentControl {
                         /*metrics_service_name*/ None,
                         inherited_shell_snapshot,
                         inherited_exec_policy,
+                        inherited_prompt_cache_key,
+                        inherited_mcp_connection_manager,
                     )
                     .await?
             }
@@ -323,6 +338,8 @@ impl AgentControl {
         options: &SpawnAgentOptions,
         inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        inherited_prompt_cache_key: Option<ThreadId>,
+        inherited_mcp_connection_manager: Option<Arc<RwLock<McpConnectionManager>>>,
     ) -> CodexResult<crate::thread_manager::NewThread> {
         let Some(call_id) = options.fork_parent_spawn_call_id.as_deref() else {
             return Err(CodexErr::Fatal(
@@ -383,21 +400,7 @@ impl AgentControl {
             )
             .await;
         }
-        match fork_mode {
-            SpawnAgentForkMode::FullHistory => {
-                let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
-                forked_rollout_items.push(RolloutItem::ForkReference(ForkReferenceItem {
-                    rollout_path: rollout_path.clone(),
-                    nth_user_message: fork_boundary,
-                }));
-            }
-            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
-                forked_rollout_items =
-                    truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
-            }
-        }
-
-        let has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
+        let parent_has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
             matches!(
                 item,
                 RolloutItem::ResponseItem(ResponseItem::FunctionCall {
@@ -406,6 +409,46 @@ impl AgentControl {
                 }) if existing_call_id == call_id
             )
         });
+        match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                let source_session_meta = forked_rollout_items.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => Some(meta_line.clone()),
+                    RolloutItem::ForkReference(_)
+                    | RolloutItem::ResponseItem(_)
+                    | RolloutItem::Compacted(_)
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::EventMsg(_) => None,
+                });
+                let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
+                forked_rollout_items = source_session_meta
+                    .into_iter()
+                    .map(RolloutItem::SessionMeta)
+                    .chain(std::iter::once(RolloutItem::ForkReference(
+                        ForkReferenceItem {
+                            rollout_path: rollout_path.clone(),
+                            nth_user_message: fork_boundary,
+                        },
+                    )))
+                    .collect();
+            }
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                forked_rollout_items =
+                    truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+            }
+        }
+
+        let has_matching_spawn_call = match fork_mode {
+            SpawnAgentForkMode::FullHistory => parent_has_matching_spawn_call,
+            SpawnAgentForkMode::LastNTurns(_) => forked_rollout_items.iter().any(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                        call_id: existing_call_id,
+                        ..
+                    }) if existing_call_id == call_id
+                )
+            }),
+        };
         if has_matching_spawn_call {
             let mut output =
                 FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
@@ -436,6 +479,8 @@ impl AgentControl {
                 /*persist_extended_history*/ false,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
+                inherited_prompt_cache_key,
+                inherited_mcp_connection_manager,
             )
             .await
     }
@@ -558,6 +603,12 @@ impl AgentControl {
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, Some(&session_source), &config)
             .await;
+        let inherited_prompt_cache_key = self
+            .inherited_prompt_cache_key_for_source(&state, Some(&session_source))
+            .await;
+        let inherited_mcp_connection_manager = self
+            .inherited_mcp_connection_manager_for_source(&state, Some(&session_source))
+            .await;
         let rollout_path =
             match find_thread_path_by_id_str(config.codex_home.as_path(), &thread_id.to_string())
                 .await?
@@ -579,6 +630,8 @@ impl AgentControl {
                 session_source,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
+                inherited_prompt_cache_key,
+                inherited_mcp_connection_manager,
             )
             .await?;
         let mut agent_metadata = agent_metadata;
@@ -1219,6 +1272,45 @@ impl AgentControl {
             .await
     }
 
+    pub(crate) async fn watchdog_target_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        self.watchdogs
+            .target_for_active_helper(helper_thread_id)
+            .await
+    }
+
+    pub(crate) async fn send_watchdog_close_end(
+        &self,
+        owner_thread_id: ThreadId,
+        event_id: String,
+        sender_thread_id: ThreadId,
+        receiver_thread_id: ThreadId,
+        receiver_agent_nickname: Option<String>,
+        receiver_agent_role: Option<String>,
+        status: AgentStatus,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let thread = state.get_thread(owner_thread_id).await?;
+        thread
+            .codex
+            .session
+            .send_event_raw(Event {
+                id: event_id.clone(),
+                msg: EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+                    call_id: event_id,
+                    sender_thread_id,
+                    receiver_thread_id,
+                    receiver_agent_nickname,
+                    receiver_agent_role,
+                    status,
+                }),
+            })
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn list_agents(
         &self,
         owner_thread_id: ThreadId,
@@ -1423,6 +1515,39 @@ impl AgentControl {
 
         Some(Arc::clone(
             &parent_thread.codex.session.services.exec_policy,
+        ))
+    }
+
+    async fn inherited_prompt_cache_key_for_source(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        session_source: Option<&SessionSource>,
+    ) -> Option<ThreadId> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = session_source?
+        else {
+            return None;
+        };
+        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+        Some(parent_thread.codex.session.prompt_cache_key())
+    }
+
+    async fn inherited_mcp_connection_manager_for_source(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        session_source: Option<&SessionSource>,
+    ) -> Option<Arc<RwLock<McpConnectionManager>>> {
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id, ..
+        }) = session_source?
+        else {
+            return None;
+        };
+
+        let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+        Some(Arc::clone(
+            &parent_thread.codex.session.services.mcp_connection_manager,
         ))
     }
 

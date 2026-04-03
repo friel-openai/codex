@@ -308,6 +308,10 @@ impl ModelClient {
         self.state.auth_manager.clone()
     }
 
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.state.prompt_cache_key
+    }
+
     fn take_cached_websocket_session(&self) -> WebsocketSession {
         let mut cached_websocket_session = self
             .state
