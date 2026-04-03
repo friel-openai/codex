@@ -396,13 +396,36 @@ impl AgentControl {
             )
             .await;
         }
+        let parent_has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                    call_id: existing_call_id,
+                    ..
+                }) if existing_call_id == call_id
+            )
+        });
         match fork_mode {
             SpawnAgentForkMode::FullHistory => {
+                let source_session_meta = forked_rollout_items.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => Some(meta_line.clone()),
+                    RolloutItem::ForkReference(_)
+                    | RolloutItem::ResponseItem(_)
+                    | RolloutItem::Compacted(_)
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::EventMsg(_) => None,
+                });
                 let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
-                forked_rollout_items.push(RolloutItem::ForkReference(ForkReferenceItem {
-                    rollout_path: rollout_path.clone(),
-                    nth_user_message: fork_boundary,
-                }));
+                forked_rollout_items = source_session_meta
+                    .into_iter()
+                    .map(RolloutItem::SessionMeta)
+                    .chain(std::iter::once(RolloutItem::ForkReference(
+                        ForkReferenceItem {
+                            rollout_path: rollout_path.clone(),
+                            nth_user_message: fork_boundary,
+                        },
+                    )))
+                    .collect();
             }
             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
                 forked_rollout_items =
@@ -410,15 +433,29 @@ impl AgentControl {
             }
         }
 
-        let mut output =
-            FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
-        output.success = Some(true);
-        forked_rollout_items.push(RolloutItem::ResponseItem(
-            ResponseItem::FunctionCallOutput {
-                call_id: call_id.to_string(),
-                output,
-            },
-        ));
+        let has_matching_spawn_call = match fork_mode {
+            SpawnAgentForkMode::FullHistory => parent_has_matching_spawn_call,
+            SpawnAgentForkMode::LastNTurns(_) => forked_rollout_items.iter().any(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                        call_id: existing_call_id,
+                        ..
+                    }) if existing_call_id == call_id
+                )
+            }),
+        };
+        if has_matching_spawn_call {
+            let mut output =
+                FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
+            output.success = Some(true);
+            forked_rollout_items.push(RolloutItem::ResponseItem(
+                ResponseItem::FunctionCallOutput {
+                    call_id: call_id.to_string(),
+                    output,
+                },
+            ));
+        }
 
         state
             .fork_thread_with_source(
