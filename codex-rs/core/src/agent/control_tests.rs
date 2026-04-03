@@ -957,15 +957,25 @@ async fn spawn_agent_fork_snapshots_parent_boundary_for_persisted_fork_reference
         panic!("child rollout should include session metadata");
     };
 
-    assert!(resumed.history.iter().any(|item| {
-        matches!(
-            item,
+    assert_matches!(
+        resumed.history.as_slice(),
+        [
+            RolloutItem::SessionMeta(meta_line),
             RolloutItem::ForkReference(ForkReferenceItem {
                 rollout_path,
                 nth_user_message: 1,
-            }) if rollout_path == &parent_rollout_path
-        )
-    }));
+            }),
+            RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
+                call_id,
+                output,
+            }),
+            ..
+        ] if meta_line.meta.id == child_thread_id
+            && meta_line.meta.forked_from_id == Some(parent_thread_id)
+            && rollout_path == &parent_rollout_path
+            && call_id == "spawn-call-dedup"
+            && output.text_content() == Some(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+    );
     let materialized_child_rollout =
         crate::rollout::truncation::materialize_rollout_items_for_replay(
             harness.config.codex_home.as_path(),
