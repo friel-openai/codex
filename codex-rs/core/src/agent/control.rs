@@ -520,11 +520,6 @@ impl AgentControl {
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = &session_source
-            && *depth >= config.agent_max_depth
-        {
-            let _ = config.features.disable(Feature::SpawnCsv);
-        }
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {

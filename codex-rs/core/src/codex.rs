@@ -576,12 +576,6 @@ impl Codex {
             );
         }
 
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
-            && depth >= config.agent_max_depth
-        {
-            let _ = config.features.disable(Feature::SpawnCsv);
-        }
-
         if config.features.enabled(Feature::JsRepl)
             && let Err(err) = resolve_compatible_node(config.js_repl_node_path.as_deref()).await
         {
