@@ -2243,6 +2243,30 @@ impl Session {
         self.active_turn.lock().await.is_some()
     }
 
+    pub(crate) async fn parent_thread_id(&self) -> Option<ThreadId> {
+        let state = self.state.lock().await;
+        match &state.session_configuration.session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => Some(*parent_thread_id),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn mark_turn_used_agent_send_input(&self) {
+        self.turn_used_agent_send_input
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn current_turn_used_agent_send_input(&self) -> bool {
+        self.turn_used_agent_send_input.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn reset_turn_agent_send_input_flag(&self) {
+        self.turn_used_agent_send_input
+            .store(false, Ordering::Release);
+    }
+
     pub(crate) fn snapshot_agent_send_input_on_turn_complete(&self) {
         let used_agent_send_input = self
             .turn_used_agent_send_input
@@ -7909,6 +7933,13 @@ async fn try_run_sampling_request(
         return Err(CodexErr::TurnAborted);
     }
 
+    if should_stop_watchdog_turn_after_send_input(sess.as_ref(), turn_context.as_ref()).await {
+        return Ok(SamplingRequestResult {
+            needs_follow_up: false,
+            last_agent_message: None,
+        });
+    }
+
     if should_emit_turn_diff {
         let unified_diff = {
             let mut tracker = turn_diff_tracker.lock().await;
@@ -7921,6 +7952,23 @@ async fn try_run_sampling_request(
     }
 
     outcome
+}
+
+async fn should_stop_watchdog_turn_after_send_input(
+    sess: &Session,
+    turn_context: &TurnContext,
+) -> bool {
+    if !sess.current_turn_used_agent_send_input()
+        || !matches!(turn_context.session_source, SessionSource::SubAgent(_))
+    {
+        return false;
+    }
+
+    sess.services
+        .agent_control
+        .watchdog_owner_for_active_helper(sess.conversation_id)
+        .await
+        .is_some()
 }
 
 pub(super) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {

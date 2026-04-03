@@ -12,7 +12,6 @@ use crate::agent::role::default_fork_context_for_role;
 use crate::agent::role::watchdog_interval_for_role;
 use crate::config::Config;
 use codex_features::Feature;
-use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use std::collections::HashSet;
 
