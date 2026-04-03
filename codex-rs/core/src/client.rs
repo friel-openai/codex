@@ -135,6 +135,7 @@ pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
 struct ModelClientState {
     auth_manager: Option<Arc<AuthManager>>,
     conversation_id: ThreadId,
+    prompt_cache_key: ThreadId,
     provider: ModelProviderInfo,
     auth_env_telemetry: AuthEnvTelemetry,
     session_source: SessionSource,
@@ -256,6 +257,7 @@ impl ModelClient {
     pub fn new(
         auth_manager: Option<Arc<AuthManager>>,
         conversation_id: ThreadId,
+        prompt_cache_key: ThreadId,
         provider: ModelProviderInfo,
         session_source: SessionSource,
         model_verbosity: Option<VerbosityConfig>,
@@ -272,6 +274,7 @@ impl ModelClient {
             state: Arc::new(ModelClientState {
                 auth_manager,
                 conversation_id,
+                prompt_cache_key,
                 provider,
                 auth_env_telemetry,
                 session_source,
@@ -299,6 +302,10 @@ impl ModelClient {
 
     pub(crate) fn auth_manager(&self) -> Option<Arc<AuthManager>> {
         self.state.auth_manager.clone()
+    }
+
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.state.prompt_cache_key
     }
 
     fn take_cached_websocket_session(&self) -> WebsocketSession {
@@ -729,7 +736,7 @@ impl ModelClientSession {
             None
         };
         let text = create_text_param_for_request(verbosity, &prompt.output_schema);
-        let prompt_cache_key = Some(self.client.state.conversation_id.to_string());
+        let prompt_cache_key = Some(self.client.state.prompt_cache_key.to_string());
         let request = ResponsesApiRequest {
             model: model_info.request_model_slug().to_string(),
             instructions: instructions.clone(),

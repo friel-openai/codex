@@ -854,6 +854,7 @@ async fn send_provider_auth_request(server: &MockServer, auth: ModelProviderAuth
             "unused-api-key",
         ))),
         conversation_id,
+        conversation_id,
         provider,
         SessionSource::Exec,
         config.model_verbosity,
@@ -2080,6 +2081,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
 
     let client = ModelClient::new(
         /*auth_manager*/ None,
+        conversation_id,
         conversation_id,
         provider.clone(),
         SessionSource::Exec,

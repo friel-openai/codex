@@ -1000,6 +1000,14 @@ async fn spawn_agent_can_fork_parent_thread_history() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
+    assert_eq!(
+        child_thread.codex.session.prompt_cache_key(),
+        parent_thread.codex.session.prompt_cache_key(),
+    );
+    assert!(Arc::ptr_eq(
+        &child_thread.codex.session.services.mcp_connection_manager,
+        &parent_thread.codex.session.services.mcp_connection_manager,
+    ));
     let history = child_thread.codex.session.clone_history().await;
     assert!(history_contains_text(
         history.raw_items(),
