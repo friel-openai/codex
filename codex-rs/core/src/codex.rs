@@ -580,7 +580,6 @@ impl Codex {
             && depth >= config.agent_max_depth
         {
             let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
 
         if config.features.enabled(Feature::JsRepl)

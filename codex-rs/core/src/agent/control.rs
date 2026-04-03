@@ -524,7 +524,6 @@ impl AgentControl {
             && *depth >= config.agent_max_depth
         {
             let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
