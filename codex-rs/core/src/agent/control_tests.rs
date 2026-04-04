@@ -1152,7 +1152,6 @@ async fn spawn_agent_fork_skips_output_when_parent_spawn_call_is_missing() {
             })),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(synthetic_call_id.clone()),
-                post_fork_developer_message: None,
             },
         )
         .await

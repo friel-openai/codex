@@ -71,7 +71,6 @@ pub(crate) enum SpawnAgentForkMode {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
-    pub(crate) post_fork_developer_message: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
 }
 
