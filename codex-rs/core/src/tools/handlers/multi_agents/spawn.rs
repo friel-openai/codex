@@ -12,7 +12,9 @@ use crate::agent::role::default_fork_context_for_role;
 use crate::agent::role::watchdog_interval_for_role;
 use crate::config::Config;
 use codex_features::Feature;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use std::collections::HashMap;
 use std::collections::HashSet;
 
 pub(crate) struct Handler;
@@ -117,39 +119,67 @@ impl ToolHandler for Handler {
             }
             apply_spawn_agent_runtime_overrides(&mut candidate_config, turn.as_ref())?;
             apply_spawn_agent_overrides(&mut candidate_config, child_depth);
-            let attempt_result = session
-                .services
-                .agent_control
-                .spawn_agent_with_metadata(
+            let spawn_source = thread_spawn_source(
+                session.conversation_id,
+                &turn.session_source,
+                child_depth,
+                role_name,
+                /*task_name*/ None,
+            )?;
+            let attempt_result = if let Some(interval_s) = watchdog_interval_s {
+                let thread_id = spawn_watchdog(
+                    &session.services.agent_control,
                     candidate_config,
-                    input_items.clone(),
-                    Some(thread_spawn_source(
-                        session.conversation_id,
-                        &turn.session_source,
-                        child_depth,
-                        role_name,
-                        /*task_name*/ None,
-                    )?),
-                    SpawnAgentOptions {
-                        fork_parent_spawn_call_id: if fork_context {
-                            Some(call_id.clone())
-                        } else {
-                            None
-                        },
-                        fork_mode: if fork_context {
-                            Some(SpawnAgentForkMode::FullHistory)
-                        } else {
-                            None
-                        },
-                    },
+                    prompt.clone(),
+                    session.conversation_id,
+                    child_depth,
+                    interval_s,
+                    spawn_source,
                 )
                 .await;
+                thread_id.map(|thread_id| {
+                    (
+                        thread_id,
+                        session.services.agent_control.get_agent_metadata(thread_id),
+                        AgentStatus::PendingInit,
+                    )
+                })
+            } else {
+                session
+                    .services
+                    .agent_control
+                    .spawn_agent_with_metadata(
+                        candidate_config,
+                        input_items.clone(),
+                        Some(spawn_source),
+                        SpawnAgentOptions {
+                            fork_parent_spawn_call_id: if fork_context {
+                                Some(call_id.clone())
+                            } else {
+                                None
+                            },
+                            fork_mode: if fork_context {
+                                Some(SpawnAgentForkMode::FullHistory)
+                            } else {
+                                None
+                            },
+                        },
+                    )
+                    .await
+                    .map(|spawned_agent| {
+                        (
+                            spawned_agent.thread_id,
+                            Some(spawned_agent.metadata),
+                            spawned_agent.status,
+                        )
+                    })
+            };
             match attempt_result {
-                Ok(spawned_agent) => {
+                Ok((thread_id, metadata, attempt_status)) => {
                     let status = if idx + 1 < candidates_to_try.len() {
                         match probe_spawn_attempt_for_async_quota_exhaustion(
-                            spawned_agent.status.clone(),
-                            spawned_agent.thread_id,
+                            attempt_status.clone(),
+                            thread_id,
                             &session.services.agent_control,
                         )
                         .await
@@ -158,7 +188,7 @@ impl ToolHandler for Handler {
                             SpawnAttemptRetryDecision::Retry(retry_status) => {
                                 match close_quota_exhausted_spawn_attempt(
                                     &session.services.agent_control,
-                                    spawned_agent.thread_id,
+                                    thread_id,
                                     retry_status,
                                 )
                                 .await
@@ -181,9 +211,9 @@ impl ToolHandler for Handler {
                             }
                         }
                     } else {
-                        spawned_agent.status.clone()
+                        attempt_status
                     };
-                    spawn_result = Some((spawned_agent, status, attempt_call_id));
+                    spawn_result = Some((thread_id, metadata, status, attempt_call_id));
                     break;
                 }
                 Err(err) => {
@@ -206,14 +236,13 @@ impl ToolHandler for Handler {
                 }
             }
         }
-        let Some((spawned_agent, status, spawn_event_call_id)) = spawn_result else {
+        let Some((new_thread_id, new_agent_metadata, status, spawn_event_call_id)) = spawn_result
+        else {
             return Err(FunctionCallError::RespondToModel(
                 "No spawn attempts were executed".to_string(),
             ));
         };
-        let new_thread_id = Some(spawned_agent.thread_id);
-        let new_agent_metadata = Some(spawned_agent.metadata.clone());
-        let agent_snapshot = match new_thread_id {
+        let agent_snapshot = match Some(new_thread_id) {
             Some(thread_id) => {
                 session
                     .services
@@ -252,7 +281,7 @@ impl ToolHandler for Handler {
                 CollabAgentSpawnEndEvent {
                     call_id: spawn_event_call_id,
                     sender_thread_id: session.conversation_id,
-                    new_thread_id,
+                    new_thread_id: Some(new_thread_id),
                     new_agent_nickname,
                     new_agent_role,
                     prompt,
@@ -263,7 +292,6 @@ impl ToolHandler for Handler {
                 .into(),
             )
             .await;
-        let new_thread_id = spawned_agent.thread_id;
         let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
         turn.session_telemetry.counter(
             "codex.multi_agent.spawn",
@@ -326,18 +354,17 @@ async fn spawn_watchdog(
     interval_s: i64,
     spawn_source: SessionSource,
 ) -> crate::error::Result<ThreadId> {
+    let mut handle_config = config.clone();
+    handle_config
+        .mcp_servers
+        .set(HashMap::new())
+        .map_err(|err| {
+            crate::error::CodexErr::UnsupportedOperation(format!(
+                "failed to clear watchdog MCP servers: {err}"
+            ))
+        })?;
     let target_thread_id = agent_control
-        .spawn_agent(
-            config.clone(),
-            Op::UserInput {
-                items: vec![codex_protocol::user_input::UserInput::Text {
-                    text: prompt.clone(),
-                    text_elements: Vec::new(),
-                }],
-                final_output_json_schema: None,
-            },
-            Some(spawn_source),
-        )
+        .spawn_agent(handle_config, Op::Interrupt, Some(spawn_source))
         .await?;
     let superseded_before_register = agent_control
         .unregister_watchdogs_for_owner(owner_thread_id)
