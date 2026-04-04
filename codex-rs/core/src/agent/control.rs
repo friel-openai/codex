@@ -56,7 +56,6 @@ const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
-    pub(crate) post_fork_developer_message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -279,20 +278,31 @@ impl AgentControl {
                     let mut forked_rollout_items = RolloutRecorder::get_fork_history(&rollout_path)
                         .await?
                         .get_rollout_items();
-                    let mut output = FunctionCallOutputPayload::from_text(
-                        FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string(),
-                    );
-                    output.success = Some(true);
-                    forked_rollout_items.push(RolloutItem::ResponseItem(
-                        ResponseItem::FunctionCallOutput {
-                            call_id: call_id.clone(),
-                            output,
-                        },
-                    ));
+                    let has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
+                        matches!(
+                            item,
+                            RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                                call_id: existing_call_id,
+                                ..
+                            }) if existing_call_id == call_id
+                        )
+                    });
+                    if has_matching_spawn_call {
+                        let mut output = FunctionCallOutputPayload::from_text(
+                            FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string(),
+                        );
+                        output.success = Some(true);
+                        forked_rollout_items.push(RolloutItem::ResponseItem(
+                            ResponseItem::FunctionCallOutput {
+                                call_id: call_id.clone(),
+                                output,
+                            },
+                        ));
+                    }
                     let post_fork_developer_message = build_post_fork_developer_message(
                         &config,
                         &session_source,
-                        options.post_fork_developer_message.as_deref(),
+                        /*extra_message*/ None,
                     )
                     .await;
                     append_post_fork_developer_message(
