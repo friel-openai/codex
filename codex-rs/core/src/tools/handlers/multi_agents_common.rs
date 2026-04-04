@@ -8,7 +8,6 @@ use crate::models_manager::manager::RefreshStrategy;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
-use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
@@ -559,12 +558,7 @@ pub(crate) fn apply_spawn_agent_runtime_overrides(
     Ok(())
 }
 
-pub(crate) fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
-    if child_depth >= config.agent_max_depth && !config.features.enabled(Feature::MultiAgentV2) {
-        let _ = config.features.disable(Feature::SpawnCsv);
-        let _ = config.features.disable(Feature::Collab);
-    }
-}
+pub(crate) fn apply_spawn_agent_overrides(_config: &mut Config, _child_depth: i32) {}
 
 pub(crate) async fn apply_requested_spawn_agent_model_overrides(
     session: &Session,
