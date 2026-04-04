@@ -103,14 +103,18 @@ fn decode_body_bytes(body: &[u8], content_encoding: Option<&str>) -> Vec<u8> {
 
 impl ResponsesRequest {
     pub fn body_json(&self) -> Value {
-        let body = decode_body_bytes(
+        let body = self.decoded_body_bytes();
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    pub fn decoded_body_bytes(&self) -> Vec<u8> {
+        decode_body_bytes(
             &self.0.body,
             self.0
                 .headers
                 .get("content-encoding")
                 .and_then(|value| value.to_str().ok()),
-        );
-        serde_json::from_slice(&body).unwrap()
+        )
     }
 
     pub fn body_bytes(&self) -> Vec<u8> {

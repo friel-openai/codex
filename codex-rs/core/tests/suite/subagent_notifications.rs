@@ -131,6 +131,39 @@ fn has_subagent_notification(req: &ResponsesRequest) -> bool {
         .any(|text| text.contains("<subagent_notification>"))
 }
 
+fn decoded_body_prefix_before_function_call_output(
+    request: &ResponsesRequest,
+    call_id: &str,
+) -> Vec<u8> {
+    let marker = format!(r#"{{"call_id":"{call_id}","output":"#);
+    let body = request.decoded_body_bytes();
+    let marker_offset = body
+        .windows(marker.len())
+        .position(|window| window == marker.as_bytes())
+        .unwrap_or_else(|| {
+            panic!(
+                "expected request body to contain function_call_output marker {marker:?}: {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+    body[..marker_offset].to_vec()
+}
+
+fn decoded_body_suffix_from_tools(request: &ResponsesRequest) -> Vec<u8> {
+    let body = request.decoded_body_bytes();
+    let marker = br#""tools":["#;
+    let marker_offset = body
+        .windows(marker.len())
+        .position(|window| window == marker)
+        .unwrap_or_else(|| {
+            panic!(
+                "expected request body to contain tools marker: {}",
+                String::from_utf8_lossy(&body)
+            )
+        });
+    body[marker_offset..].to_vec()
+}
+
 fn tool_parameter_description(
     req: &ResponsesRequest,
     tool_name: &str,
@@ -463,7 +496,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     )
     .await;
 
-    let _child_request_log = mount_sse_once_match(
+    let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, CHILD_PROMPT),
         sse(vec![
@@ -474,7 +507,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     )
     .await;
 
-    let _turn1_followup = mount_sse_once_match(
+    let turn1_followup = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
         sse(vec![
@@ -498,32 +531,52 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
 
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = spawn_turn.single_request();
+    let parent_followup_requests = wait_for_requests(&turn1_followup).await?;
+    let parent_followup_request = parent_followup_requests
+        .first()
+        .expect("parent follow-up request should be captured");
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let child_request = loop {
-        if let Some(request) = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
+    let child_requests = loop {
+        let requests = child_request_log.requests();
+        let matching = requests
             .into_iter()
-            .find(|request| {
-                body_contains(request, CHILD_PROMPT)
-                    && body_contains(request, FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
+            .filter(|request| {
+                request.body_contains_text(CHILD_PROMPT)
+                    && request.body_contains_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE)
             })
-        {
-            break request;
+            .collect::<Vec<_>>();
+        if !matching.is_empty() {
+            break matching;
         }
         if Instant::now() >= deadline {
             anyhow::bail!("timed out waiting for forked child request");
         }
         sleep(Duration::from_millis(10)).await;
     };
-    assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
-    assert!(body_contains(&child_request, "seeded"));
+    let child_request = child_requests
+        .first()
+        .expect("forked child request should be captured");
+    assert!(
+        child_request.body_contains_text(TURN_0_FORK_PROMPT),
+        "expected forked child request to include parent seed prompt"
+    );
+    assert!(
+        child_request.body_contains_text("seeded"),
+        "expected forked child request to include parent seed response"
+    );
+    assert_eq!(
+        decoded_body_prefix_before_function_call_output(parent_followup_request, SPAWN_CALL_ID),
+        decoded_body_prefix_before_function_call_output(child_request, SPAWN_CALL_ID),
+        "forked child request must preserve the parent request byte-for-byte through the spawn_agent call; first divergence may only start at the spawn_agent tool response"
+    );
+    assert_eq!(
+        decoded_body_suffix_from_tools(parent_followup_request),
+        decoded_body_suffix_from_tools(child_request),
+        "parent and forked child requests must expose an identical serialized tools suffix, so adding/removing namespace shells cannot invalidate cache layout"
+    );
 
-    let child_body = child_request
-        .body_json::<serde_json::Value>()
-        .expect("forked child request body should be json");
+    let child_body = child_request.body_json();
     let function_call_output = child_body["input"]
         .as_array()
         .and_then(|items| {

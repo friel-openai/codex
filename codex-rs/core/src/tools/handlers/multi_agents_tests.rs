@@ -110,7 +110,7 @@ async fn attach_watchdog_helper_for_tests(
         .await
         .expect("owner thread should start");
     let target = agent_control
-        .spawn_agent_handle(config.clone(), /*session_source*/ None)
+        .spawn_agent(config.clone(), Op::Interrupt, /*session_source*/ None)
         .await
         .expect("watchdog target thread should start");
     let helper = manager

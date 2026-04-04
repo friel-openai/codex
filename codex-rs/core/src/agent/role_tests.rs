@@ -79,7 +79,9 @@ async fn default_fork_context_for_role_defaults_unspecified_custom_roles_to_true
         "custom".to_string(),
         AgentRoleConfig {
             description: Some("Custom role".to_string()),
+            model: None,
             config_file: None,
+            watchdog_interval_s: None,
             nickname_candidates: None,
             fork_context: None,
         },
@@ -143,7 +145,9 @@ async fn default_fork_context_for_role_uses_explicit_custom_role_override() {
         "custom".to_string(),
         AgentRoleConfig {
             description: Some("Custom role".to_string()),
+            model: None,
             config_file: None,
+            watchdog_interval_s: None,
             nickname_candidates: None,
             fork_context: Some(false),
         },

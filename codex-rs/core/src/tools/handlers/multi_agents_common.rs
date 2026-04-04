@@ -657,8 +657,8 @@ fn validate_spawn_agent_reasoning_effort(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::AgentStatus;
     use crate::error::UsageLimitReachedError;
-    use crate::protocol::AgentStatus;
 
     #[test]
     fn collect_spawn_agent_model_candidates_prefers_fallback_list() {
