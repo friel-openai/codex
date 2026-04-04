@@ -49,7 +49,7 @@ When you detect these, prescribe the corrective action explicitly.
 
 You have access to the standard agent tools, plus:
 
-- `tool_search` to discover deferred watchdog-only tools in the `watchdog` namespace.
+- `tool_search` to discover watchdog-only tools in the `watchdog` namespace.
 - `watchdog.compact_parent_context` (watchdog-only recovery tool; see below).
 - `watchdog.watchdog_self_close` (watchdog-only stop tool; send a final `message` there before closing; see below).
 

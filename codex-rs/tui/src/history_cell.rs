@@ -730,7 +730,6 @@ fn status_span_for_panel(agent: &SubagentPanelAgent, now: Instant) -> Span<'stat
 
 #[cfg_attr(not(test), allow(dead_code))]
 const SUBAGENT_SHIMMER_WINDOW: Duration = Duration::from_secs(1);
-
 #[cfg_attr(not(test), allow(dead_code))]
 fn should_shimmer(agent: &SubagentPanelAgent, now: Instant) -> bool {
     if agent.is_watchdog && matches!(agent.status, AgentStatus::PendingInit) {

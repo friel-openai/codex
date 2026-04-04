@@ -1230,6 +1230,7 @@ pub(crate) struct SessionConfiguration {
     app_server_client_name: Option<String>,
     /// Source of the session (cli, vscode, exec, mcp, ...)
     session_source: SessionSource,
+    /// Stable Responses prompt-cache key inherited across forked subagents.
     prompt_cache_key: Option<ThreadId>,
     dynamic_tools: Vec<DynamicToolSpec>,
     persist_extended_history: bool,
@@ -1335,6 +1336,26 @@ impl SessionConfiguration {
         }
         Ok(next_configuration)
     }
+}
+
+fn prompt_cache_key_from_initial_history(
+    initial_history: &InitialHistory,
+    fallback_conversation_id: ThreadId,
+) -> ThreadId {
+    initial_history
+        .get_rollout_items()
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta_line) => {
+                Some(meta_line.meta.forked_from_id.unwrap_or(meta_line.meta.id))
+            }
+            RolloutItem::ForkReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => None,
+        })
+        .unwrap_or(fallback_conversation_id)
 }
 
 #[derive(Default, Clone)]
@@ -1652,11 +1673,12 @@ impl Session {
                 ),
             ),
         };
-        session_configuration.prompt_cache_key = Some(
+        session_configuration.prompt_cache_key = Some(prompt_cache_key_from_initial_history(
+            &initial_history,
             session_configuration
                 .prompt_cache_key
                 .unwrap_or(conversation_id),
-        );
+        ));
         let state_builder = match &initial_history {
             InitialHistory::Resumed(resumed) => metadata::builder_from_items(
                 resumed.history.as_slice(),
@@ -2236,14 +2258,12 @@ impl Session {
         self.active_turn.lock().await.is_some()
     }
 
-    pub(crate) async fn parent_thread_id(&self) -> Option<ThreadId> {
-        let state = self.state.lock().await;
-        match &state.session_configuration.session_source {
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id, ..
-            }) => Some(*parent_thread_id),
-            _ => None,
-        }
+    pub(crate) fn snapshot_agent_send_input_on_turn_complete(&self) {
+        let used_agent_send_input = self
+            .turn_used_agent_send_input
+            .swap(false, Ordering::AcqRel);
+        self.last_completed_turn_used_agent_send_input
+            .store(used_agent_send_input, Ordering::Release);
     }
 
     pub(crate) fn mark_turn_used_agent_send_input(&self) {
@@ -2255,17 +2275,8 @@ impl Session {
         self.turn_used_agent_send_input.load(Ordering::Acquire)
     }
 
-    pub(crate) fn reset_turn_agent_send_input_flag(&self) {
-        self.turn_used_agent_send_input
-            .store(false, Ordering::Release);
-    }
-
-    pub(crate) fn snapshot_agent_send_input_on_turn_complete(&self) {
-        let used_agent_send_input = self
-            .turn_used_agent_send_input
-            .swap(false, Ordering::AcqRel);
-        self.last_completed_turn_used_agent_send_input
-            .store(used_agent_send_input, Ordering::Release);
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.services.model_client.prompt_cache_key()
     }
 
     pub(crate) fn last_completed_turn_used_agent_send_input(&self) -> bool {
@@ -2273,11 +2284,7 @@ impl Session {
             .load(Ordering::Acquire)
     }
 
-    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
-        self.services.model_client.prompt_cache_key()
-    }
-
-    /// Ensure rollout file writes are durably flushed.
+    /// Ensure all rollout writes are durably flushed.
     pub(crate) async fn flush_rollout(&self) {
         let recorder = {
             let guard = self.services.rollout.lock().await;

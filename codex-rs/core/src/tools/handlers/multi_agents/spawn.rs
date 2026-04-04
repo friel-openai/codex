@@ -1,7 +1,6 @@
 use super::*;
 use crate::agent::RemovedWatchdog;
 use crate::agent::WatchdogRegistration;
-use crate::agent::control::LiveAgent;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
@@ -164,7 +163,6 @@ impl ToolHandler for Handler {
                             } else {
                                 None
                             },
-                            ..Default::default()
                         },
                     )
                     .await
@@ -294,6 +292,7 @@ impl ToolHandler for Handler {
                 .into(),
             )
             .await;
+        let new_thread_id = new_thread_id;
         let role_tag = role_name.unwrap_or(DEFAULT_ROLE_NAME);
         turn.session_telemetry.counter(
             "codex.multi_agent.spawn",

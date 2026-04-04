@@ -7950,69 +7950,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn process_subagent_side_effects_handles_non_root_watchdog_close_end() {
-        let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
-        let root_thread_id = ThreadId::new();
-        let watchdog_thread_id = ThreadId::new();
-        let helper_thread_id = ThreadId::new();
-
-        app.primary_thread_id = Some(root_thread_id);
-        app.active_thread_id = Some(root_thread_id);
-
-        app.process_subagent_side_effects(
-            root_thread_id,
-            &Event {
-                id: "spawn-watchdog".to_string(),
-                msg: EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
-                    call_id: "spawn-watchdog".to_string(),
-                    sender_thread_id: root_thread_id,
-                    new_thread_id: Some(watchdog_thread_id),
-                    new_agent_nickname: Some("Hume".to_string()),
-                    new_agent_role: Some("watchdog".to_string()),
-                    prompt: "watchdog prompt".to_string(),
-                    model: "gpt-test".to_string(),
-                    reasoning_effort: ReasoningEffortConfig::Low,
-                    spawn_mode: CollabAgentSpawnMode::Watchdog,
-                    status: AgentStatus::PendingInit,
-                }),
-            },
-        );
-        while app_event_rx.try_recv().is_ok() {}
-
-        app.process_subagent_side_effects(
-            helper_thread_id,
-            &Event {
-                id: "close-watchdog".to_string(),
-                msg: EventMsg::CollabCloseEnd(CollabCloseEndEvent {
-                    call_id: "close-watchdog".to_string(),
-                    sender_thread_id: helper_thread_id,
-                    receiver_thread_id: watchdog_thread_id,
-                    receiver_agent_nickname: Some("Hume".to_string()),
-                    receiver_agent_role: Some("watchdog".to_string()),
-                    status: AgentStatus::Shutdown,
-                }),
-            },
-        );
-
-        let mut saw_shutdown_update = false;
-        let mut saw_clear_panel = false;
-        while let Ok(event) = app_event_rx.try_recv() {
-            match event {
-                AppEvent::InsertHistoryCell(cell) => {
-                    let transcript = lines_to_single_string(&cell.transcript_lines(/*width*/ 80));
-                    saw_shutdown_update |= transcript.contains("shutdown");
-                }
-                AppEvent::ClearSubagentPanel => saw_clear_panel = true,
-                _ => {}
-            }
-        }
-
-        assert!(saw_shutdown_update);
-        assert!(saw_clear_panel);
-        assert!(app.subagents.panel_cell().is_none());
-    }
-
-    #[tokio::test]
     async fn replay_thread_snapshot_restores_collaboration_mode_for_draft_submit() {
         let (mut app, _app_event_rx, _op_rx) = make_test_app_with_channels().await;
         let thread_id = ThreadId::new();

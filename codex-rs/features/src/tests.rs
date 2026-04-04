@@ -199,21 +199,6 @@ fn enable_fanout_normalization_enables_multi_agent_one_way() {
 }
 
 #[test]
-fn agent_watchdog_normalization_enables_tool_search_one_way() {
-    let mut watchdog_features = Features::with_defaults();
-    watchdog_features.enable(Feature::AgentWatchdog);
-    watchdog_features.normalize_dependencies();
-    assert_eq!(watchdog_features.enabled(Feature::AgentWatchdog), true);
-    assert_eq!(watchdog_features.enabled(Feature::ToolSearch), true);
-
-    let mut tool_search_features = Features::with_defaults();
-    tool_search_features.enable(Feature::ToolSearch);
-    tool_search_features.normalize_dependencies();
-    assert_eq!(tool_search_features.enabled(Feature::ToolSearch), true);
-    assert_eq!(tool_search_features.enabled(Feature::AgentWatchdog), false);
-}
-
-#[test]
 fn apps_require_feature_flag_and_chatgpt_auth() {
     let mut features = Features::with_defaults();
     assert!(!features.apps_enabled_for_auth(/*auth*/ None));
