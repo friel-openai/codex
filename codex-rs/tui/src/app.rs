@@ -932,8 +932,10 @@ impl SubagentRegistry {
     #[cfg_attr(not(test), allow(dead_code))]
     fn on_close_end(&mut self, event: &CollabCloseEndEvent) -> Option<Box<dyn HistoryCell>> {
         let receiver_id = event.receiver_thread_id;
-        let info = self.agents.get_mut(&receiver_id)?;
-        info.status = event.status.clone();
+        let mut info = self.agents.remove(&receiver_id)?;
+        self.order.retain(|thread_id| *thread_id != receiver_id);
+        self.pending_events.remove(&receiver_id);
+        info.status = AgentStatus::Shutdown;
         info.latest_update_at = Instant::now();
 
         if is_terminal_status(&info.status) && !info.notified_terminal {
@@ -2229,7 +2231,9 @@ impl App {
                     self.subagents.on_wait_end(ev);
                 }
                 EventMsg::CollabCloseEnd(ev) => {
-                    let _ = self.subagents.on_close_end(ev);
+                    if let Some(cell) = self.subagents.on_close_end(ev) {
+                        self.emit_or_queue_subagent_history(cell);
+                    }
                 }
                 _ => {}
             }
@@ -2276,7 +2280,7 @@ impl App {
 
         let ThreadItem::CollabAgentToolCall {
             id,
-            tool: CollabAgentTool::SpawnAgent,
+            tool,
             sender_thread_id,
             receiver_thread_ids,
             prompt,
@@ -2303,17 +2307,37 @@ impl App {
             .map(app_server_collab_state_to_agent_status)
             .unwrap_or(AgentStatus::PendingInit);
 
-        let _ = self.subagents.on_spawn_end(&CollabAgentSpawnEndEvent {
-            call_id: id.clone(),
-            sender_thread_id,
-            new_thread_id: Some(new_thread_id),
-            new_agent_nickname: entry.and_then(|entry| entry.agent_nickname.clone()),
-            new_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
-            prompt: prompt.clone().unwrap_or_default(),
-            model: String::new(),
-            reasoning_effort: ReasoningEffortConfig::Medium,
-            status,
-        });
+        match tool {
+            CollabAgentTool::SpawnAgent => {
+                let _ = self.subagents.on_spawn_end(&CollabAgentSpawnEndEvent {
+                    call_id: id.clone(),
+                    sender_thread_id,
+                    new_thread_id: Some(new_thread_id),
+                    new_agent_nickname: entry.and_then(|entry| entry.agent_nickname.clone()),
+                    new_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
+                    prompt: prompt.clone().unwrap_or_default(),
+                    model: String::new(),
+                    reasoning_effort: ReasoningEffortConfig::Medium,
+                    status,
+                });
+            }
+            CollabAgentTool::CloseAgent => {
+                if let ServerNotification::ItemCompleted(_) = notification
+                    && let Some(cell) = self.subagents.on_close_end(&CollabCloseEndEvent {
+                        call_id: id.clone(),
+                        sender_thread_id,
+                        receiver_thread_id: new_thread_id,
+                        receiver_agent_nickname: entry
+                            .and_then(|entry| entry.agent_nickname.clone()),
+                        receiver_agent_role: entry.and_then(|entry| entry.agent_role.clone()),
+                        status,
+                    })
+                {
+                    self.emit_or_queue_subagent_history(cell);
+                }
+            }
+            CollabAgentTool::SendInput | CollabAgentTool::ResumeAgent | CollabAgentTool::Wait => {}
+        }
 
         self.sync_subagent_panel_state();
     }
