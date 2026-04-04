@@ -5,6 +5,7 @@ use crate::DiscoverablePluginInfo;
 use crate::DiscoverableTool;
 use crate::FreeformTool;
 use crate::JsonSchema;
+use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
 use crate::ResponsesApiWebSearchFilters;
 use crate::ResponsesApiWebSearchUserLocation;
@@ -1870,8 +1871,16 @@ fn strip_descriptions_tool(spec: &mut ToolSpec) {
         ToolSpec::Function(ResponsesApiTool { parameters, .. }) => {
             strip_descriptions_schema(parameters);
         }
-        ToolSpec::Namespace(_)
-        | ToolSpec::Freeform(FreeformTool { .. })
+        ToolSpec::Namespace(namespace) => {
+            for tool in &mut namespace.tools {
+                match tool {
+                    ResponsesApiNamespaceTool::Function(tool) => {
+                        strip_descriptions_schema(&mut tool.parameters);
+                    }
+                }
+            }
+        }
+        ToolSpec::Freeform(FreeformTool { .. })
         | ToolSpec::LocalShell {}
         | ToolSpec::ImageGeneration { .. }
         | ToolSpec::WebSearch { .. } => {}

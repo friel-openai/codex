@@ -164,6 +164,7 @@ impl ToolHandler for Handler {
                             } else {
                                 None
                             },
+                            ..Default::default()
                         },
                     )
                     .await
