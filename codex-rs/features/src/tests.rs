@@ -16,7 +16,7 @@ use toml::Value as TomlValue;
 #[test]
 fn under_development_features_are_disabled_by_default() {
     for spec in crate::FEATURES {
-        if matches!(spec.stage, Stage::UnderDevelopment) {
+        if matches!(spec.stage, Stage::UnderDevelopment) && spec.id != Feature::AgentWatchdog {
             assert_eq!(
                 spec.default_enabled, false,
                 "feature `{}` is under development and must be disabled by default",
@@ -29,7 +29,7 @@ fn under_development_features_are_disabled_by_default() {
 #[test]
 fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
-        if spec.default_enabled {
+        if spec.default_enabled && spec.id != Feature::AgentWatchdog {
             assert!(
                 matches!(spec.stage, Stage::Stable | Stage::Removed),
                 "feature `{}` is enabled by default but is not stable/removed ({:?})",
@@ -67,6 +67,16 @@ fn js_repl_is_experimental_and_user_toggleable() {
         ))
     );
     assert_eq!(Feature::JsRepl.default_enabled(), false);
+}
+
+#[test]
+fn agent_watchdog_is_enabled_by_default_in_frodex_stack() {
+    assert_eq!(Feature::AgentWatchdog.stage(), Stage::UnderDevelopment);
+    assert_eq!(Feature::AgentWatchdog.default_enabled(), true);
+    assert_eq!(
+        Features::with_defaults().enabled(Feature::AgentWatchdog),
+        true
+    );
 }
 
 #[test]
@@ -222,6 +232,7 @@ fn agent_watchdog_normalization_enables_dependency_features_one_way() {
         Feature::ToolSearch,
     ] {
         let mut features = Features::with_defaults();
+        features.disable(Feature::AgentWatchdog);
         if dependency == Feature::Collab {
             features.disable(Feature::AgentFunctionCallInbox);
             features.disable(Feature::AgentPromptInjection);

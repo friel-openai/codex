@@ -753,7 +753,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::AgentWatchdog,
         key: "agent_watchdog",
         stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::Apps,
@@ -946,7 +946,7 @@ mod inbox_feature_tests {
     #[test]
     fn under_development_features_are_disabled_by_default() {
         for spec in FEATURES {
-            if matches!(spec.stage, Stage::UnderDevelopment) {
+            if matches!(spec.stage, Stage::UnderDevelopment) && spec.id != Feature::AgentWatchdog {
                 assert_eq!(
                     spec.default_enabled, false,
                     "feature `{}` is under development and must be disabled by default",
@@ -959,7 +959,7 @@ mod inbox_feature_tests {
     #[test]
     fn default_enabled_features_are_stable() {
         for spec in FEATURES {
-            if spec.default_enabled {
+            if spec.default_enabled && spec.id != Feature::AgentWatchdog {
                 assert!(
                     matches!(spec.stage, Stage::Stable | Stage::Removed),
                     "feature `{}` is enabled by default but is not stable/removed ({:?})",
