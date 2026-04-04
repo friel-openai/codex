@@ -1,6 +1,7 @@
 use super::*;
 use crate::agent::RemovedWatchdog;
 use crate::agent::WatchdogRegistration;
+use crate::agent::control::LiveAgent;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;

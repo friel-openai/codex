@@ -988,6 +988,7 @@ async fn spawn_agent_can_fork_parent_thread_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
             },
         )
         .await
@@ -1082,6 +1083,7 @@ async fn spawn_agent_fork_injects_output_for_parent_spawn_call() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
             },
         )
         .await
@@ -1216,6 +1218,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
             },
         )
         .await
