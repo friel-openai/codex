@@ -44,6 +44,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
+const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -337,11 +338,11 @@ impl AgentControl {
         inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     ) -> CodexResult<crate::thread_manager::NewThread> {
-        if options.fork_parent_spawn_call_id.is_none() {
+        let Some(call_id) = options.fork_parent_spawn_call_id.as_deref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
-        }
+        };
         let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
@@ -430,6 +431,7 @@ impl AgentControl {
             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
                 forked_rollout_items =
                     truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+                forked_rollout_items.retain(keep_forked_rollout_item);
             }
         }
 
