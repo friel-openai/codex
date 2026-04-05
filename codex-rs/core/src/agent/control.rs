@@ -430,6 +430,7 @@ impl AgentControl {
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::EventMsg(_) => None,
                 });
+                forked_rollout_items.retain(keep_forked_rollout_item);
                 let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
                 forked_rollout_items = source_session_meta
                     .into_iter()

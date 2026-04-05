@@ -376,7 +376,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
             .unwrap_or_default()
             .into_iter()
             .find(|request| {
-                body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+                body_contains(request, CHILD_PROMPT) && body_contains(request, SPAWN_CALL_ID)
             })
         {
             break request;
@@ -387,7 +387,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
         sleep(Duration::from_millis(10)).await;
     };
     assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
-    assert!(!body_contains(&child_request, SPAWN_CALL_ID));
+    assert!(body_contains(&child_request, SPAWN_CALL_ID));
 
     Ok(())
 }
