@@ -1,4 +1,5 @@
 use super::*;
+use crate::agent::WatchdogRegistration;
 use crate::config::ConfigBuilder;
 use crate::config::test_config;
 use crate::config_loader::ConfigLayerStack;
@@ -2402,7 +2403,9 @@ enabled = false
         "custom".to_string(),
         crate::config::AgentRoleConfig {
             description: None,
+            model: None,
             config_file: Some(role_path),
+            watchdog_interval_s: None,
             nickname_candidates: None,
             fork_context: None,
         },
@@ -2801,10 +2804,51 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         js_repl,
+        turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
+        last_completed_turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     };
 
     (session, turn_context)
+}
+
+#[tokio::test]
+async fn should_stop_watchdog_turn_after_send_input_only_for_active_watchdog_helpers() {
+    let (session, mut turn_context) = make_session_and_context().await;
+
+    session.mark_turn_used_agent_send_input();
+    assert!(!should_stop_watchdog_turn_after_send_input(&session, &turn_context).await);
+
+    let owner_thread_id = ThreadId::new();
+    let target_thread_id = ThreadId::new();
+    turn_context.session_source =
+        SessionSource::SubAgent(codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+            parent_thread_id: owner_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+    session
+        .services
+        .agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 1,
+            interval_s: 1,
+            prompt: "ping".to_string(),
+            config: (*turn_context.config).clone(),
+        })
+        .await
+        .expect("register watchdog");
+    session
+        .services
+        .agent_control
+        .set_watchdog_active_helper_for_tests(target_thread_id, session.conversation_id)
+        .await;
+
+    assert!(should_stop_watchdog_turn_after_send_input(&session, &turn_context).await);
 }
 
 #[tokio::test]
@@ -3644,6 +3688,8 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         js_repl,
+        turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
+        last_completed_turn_used_agent_send_input: std::sync::atomic::AtomicBool::new(false),
         next_internal_sub_id: AtomicU64::new(0),
     });
 
@@ -5520,4 +5566,28 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
     );
 
     pretty_assertions::assert_eq!(output, expected);
+}
+
+#[tokio::test]
+async fn root_agent_prompt_only_includes_watchdog_fragment_when_enabled() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let without_watchdog =
+        load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ false).await;
+    assert!(!without_watchdog.contains("## Watchdogs"));
+
+    let with_watchdog = load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ true).await;
+    assert!(with_watchdog.contains("## Watchdogs"));
+}
+
+#[tokio::test]
+async fn subagent_prompt_only_includes_watchdog_fragment_when_enabled() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let without_watchdog =
+        load_subagent_prompt(codex_home.path(), /*include_watchdog*/ false).await;
+    assert!(!without_watchdog.contains("## Watchdog-only Guidance"));
+
+    let with_watchdog = load_subagent_prompt(codex_home.path(), /*include_watchdog*/ true).await;
+    assert!(with_watchdog.contains("## Watchdog-only Guidance"));
 }

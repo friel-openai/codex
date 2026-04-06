@@ -6,6 +6,13 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentRoleSpawnMode": {
+      "enum": [
+        "spawn",
+        "fork"
+      ],
+      "type": "string"
+    },
     "AgentRoleToml": {
       "additionalProperties": false,
       "properties": {
@@ -25,12 +32,30 @@
           "description": "Default fork-context behavior for this role.",
           "type": "boolean"
         },
+        "model": {
+          "description": "Optional model override applied by this role.",
+          "type": "string"
+        },
         "nickname_candidates": {
           "description": "Candidate nicknames for agents spawned with this role.",
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        "spawn_mode": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AgentRoleSpawnMode"
+            }
+          ],
+          "description": "Optional default spawn mode when `spawn_agent` omits `spawn_mode`."
+        },
+        "watchdog_interval_s": {
+          "description": "Optional watchdog interval in seconds for roles that should behave as watchdogs.",
+          "format": "int64",
+          "minimum": 1.0,
+          "type": "integer"
         }
       },
       "type": "object"
@@ -57,6 +82,11 @@
           "format": "uint",
           "minimum": 1.0,
           "type": "integer"
+        },
+        "use_function_call_inbox": {
+          "default": false,
+          "description": "Deliver inbound agent messages to non-subagent threads as a synthetic function_call/function_call_output pair instead of plain user input.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -337,6 +367,12 @@
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
             "agent_function_call_inbox": {
+              "type": "boolean"
+            },
+            "agent_prompt_injection": {
+              "type": "boolean"
+            },
+            "agent_watchdog": {
               "type": "boolean"
             },
             "apply_patch_freeform": {
@@ -2049,6 +2085,12 @@
         "agent_function_call_inbox": {
           "type": "boolean"
         },
+        "agent_prompt_injection": {
+          "type": "boolean"
+        },
+        "agent_watchdog": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -2625,6 +2667,11 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "watchdog_interval_s": {
+      "description": "Watchdog polling interval in seconds.",
+      "format": "int64",
+      "type": "integer"
     },
     "web_search": {
       "allOf": [
