@@ -6,6 +6,7 @@ use crate::AdditionalProperties;
 use crate::FreeformTool;
 use crate::FreeformToolFormat;
 use crate::JsonSchema;
+use crate::ResponsesApiNamespace;
 use crate::ResponsesApiTool;
 use crate::create_tools_json_for_responses_api;
 use codex_protocol::config_types::WebSearchContextSize;
@@ -46,6 +47,15 @@ fn tool_spec_name_covers_all_variants() {
         }
         .name(),
         "tool_search"
+    );
+    assert_eq!(
+        ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "agents".to_string(),
+            description: "Agent tools".to_string(),
+            tools: Vec::new(),
+        })
+        .name(),
+        "agents"
     );
     assert_eq!(ToolSpec::LocalShell {}.name(), "local_shell");
     assert_eq!(
@@ -101,6 +111,38 @@ fn configured_tool_spec_name_delegates_to_tool_spec() {
         )
         .name(),
         "lookup_order"
+    );
+}
+
+#[test]
+fn watchdog_self_close_tool_spec_is_deferred_and_can_send_a_final_message() {
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        defer_loading,
+        parameters,
+        ..
+    }) = crate::create_watchdog_self_close_tool()
+    else {
+        panic!("watchdog_self_close should be a function tool");
+    };
+
+    assert_eq!(name, "watchdog_self_close");
+    assert_eq!(defer_loading, Some(true));
+    assert_eq!(
+        parameters,
+        JsonSchema::Object {
+            properties: BTreeMap::from([(
+                "message".to_string(),
+                JsonSchema::String {
+                    description: Some(
+                        "Optional final message to send to the parent/root thread before closing this watchdog handle and ending this check-in immediately."
+                            .to_string(),
+                    ),
+                },
+            )]),
+            required: None,
+            additional_properties: Some(AdditionalProperties::Boolean(false)),
+        }
     );
 }
 
@@ -163,6 +205,24 @@ fn create_tools_json_for_responses_api_includes_top_level_name() {
                 },
             },
         })]
+    );
+}
+
+#[test]
+fn namespace_tool_spec_serializes_expected_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "agents".to_string(),
+            description: "Agent collaboration tools.".to_string(),
+            tools: Vec::new(),
+        }))
+        .expect("serialize namespace"),
+        json!({
+            "type": "namespace",
+            "name": "agents",
+            "description": "Agent collaboration tools.",
+            "tools": []
+        })
     );
 }
 
