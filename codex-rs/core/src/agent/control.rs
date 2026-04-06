@@ -13,14 +13,18 @@ use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::thread_manager::ThreadManagerState;
+use crate::thread_rollout_truncation::fork_reference_user_message_boundary;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -40,6 +44,7 @@ use tokio::sync::watch;
 use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
+const FORKED_SPAWN_AGENT_OUTPUT_MESSAGE: &str = "You are the newly spawned agent. The prior conversation history was forked from your parent agent. Treat the next user message as your new task, and use the forked history only as background context.";
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -116,7 +121,8 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
             | ResponseItem::Compaction { .. }
             | ResponseItem::Other,
         ) => false,
-        RolloutItem::Compacted(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
         | RolloutItem::SessionMeta(_)
         | RolloutItem::TurnContext(_) => true,
@@ -332,11 +338,11 @@ impl AgentControl {
         inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     ) -> CodexResult<crate::thread_manager::NewThread> {
-        if options.fork_parent_spawn_call_id.is_none() {
+        let Some(call_id) = options.fork_parent_spawn_call_id.as_deref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
-        }
+        };
         let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
@@ -381,11 +387,77 @@ impl AgentControl {
         let mut forked_rollout_items = RolloutRecorder::get_rollout_history(&rollout_path)
             .await?
             .get_rollout_items();
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+        if forked_rollout_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+        {
+            forked_rollout_items = materialize_rollout_items_for_replay(
+                config.codex_home.as_path(),
+                &forked_rollout_items,
+            )
+            .await;
         }
-        forked_rollout_items.retain(keep_forked_rollout_item);
+        let parent_has_matching_spawn_call = forked_rollout_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                    call_id: existing_call_id,
+                    ..
+                }) if existing_call_id == call_id
+            )
+        });
+        match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                let source_session_meta = forked_rollout_items.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta_line) => Some(meta_line.clone()),
+                    RolloutItem::ForkReference(_)
+                    | RolloutItem::ResponseItem(_)
+                    | RolloutItem::Compacted(_)
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::EventMsg(_) => None,
+                });
+                let fork_boundary = fork_reference_user_message_boundary(&forked_rollout_items);
+                forked_rollout_items = source_session_meta
+                    .into_iter()
+                    .map(RolloutItem::SessionMeta)
+                    .chain(std::iter::once(RolloutItem::ForkReference(
+                        ForkReferenceItem {
+                            rollout_path: rollout_path.clone(),
+                            nth_user_message: fork_boundary,
+                        },
+                    )))
+                    .collect();
+            }
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                forked_rollout_items =
+                    truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
+                forked_rollout_items.retain(keep_forked_rollout_item);
+            }
+        }
+
+        let has_matching_spawn_call = match fork_mode {
+            SpawnAgentForkMode::FullHistory => parent_has_matching_spawn_call,
+            SpawnAgentForkMode::LastNTurns(_) => forked_rollout_items.iter().any(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+                        call_id: existing_call_id,
+                        ..
+                    }) if existing_call_id == call_id
+                )
+            }),
+        };
+        if has_matching_spawn_call {
+            let mut output =
+                FunctionCallOutputPayload::from_text(FORKED_SPAWN_AGENT_OUTPUT_MESSAGE.to_string());
+            output.success = Some(true);
+            forked_rollout_items.push(RolloutItem::ResponseItem(
+                ResponseItem::FunctionCallOutput {
+                    call_id: call_id.to_string(),
+                    output,
+                },
+            ));
+        }
 
         state
             .fork_thread_with_source(
