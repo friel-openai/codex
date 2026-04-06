@@ -23,6 +23,7 @@ use codex_login::CodexAuth;
 use codex_mcp::mcp_connection_manager::McpConnectionManager;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_models_manager::manager::RefreshStrategy;
@@ -33,6 +34,7 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ForkReferenceItem;
@@ -220,6 +222,8 @@ impl ThreadManager {
         config: &Config,
         auth_manager: Arc<AuthManager>,
         session_source: SessionSource,
+        model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
         collaboration_modes_config: CollaborationModesConfig,
         environment_manager: Arc<EnvironmentManager>,
     ) -> Self {
@@ -249,7 +253,8 @@ impl ThreadManager {
                 models_manager: Arc::new(ModelsManager::new_with_provider(
                     codex_home,
                     auth_manager.clone(),
-                    config.model_catalog.clone(),
+                    model_catalog,
+                    custom_models,
                     collaboration_modes_config,
                     openai_models_provider,
                 )),

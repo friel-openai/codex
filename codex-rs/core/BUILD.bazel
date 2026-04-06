@@ -1,5 +1,12 @@
 load("//:defs.bzl", "codex_rust_crate")
 
+exports_files(
+    [
+        "config.schema.json",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 filegroup(
     name = "model_availability_nux_fixtures",
     srcs = [

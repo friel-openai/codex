@@ -66,6 +66,7 @@ use codex_model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use codex_model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_model_provider_info::built_in_model_providers;
+pub use codex_models_manager::CustomModelConfig;
 use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::ForcedLoginMethod;
@@ -178,6 +179,12 @@ pub(crate) fn test_config() -> Config {
         codex_home.path().to_path_buf(),
     )
     .expect("load default test config")
+}
+
+impl Config {
+    pub(crate) fn custom_model_alias(&self, alias: &str) -> Option<&CustomModelConfig> {
+        self.custom_models.get(alias)
+    }
 }
 
 /// Application configuration loaded from disk and merged with overrides.
@@ -399,6 +406,9 @@ pub struct Config {
 
     /// Combined provider map (defaults plus user-defined providers).
     pub model_providers: HashMap<String, ModelProviderInfo>,
+
+    /// User-defined model aliases shown in the picker.
+    pub custom_models: HashMap<String, CustomModelConfig>,
 
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: usize,
@@ -709,6 +719,7 @@ impl Config {
             personality_enabled: self.features.enabled(Feature::Personality),
             model_supports_reasoning_summaries: self.model_supports_reasoning_summaries,
             model_catalog: self.model_catalog.clone(),
+            custom_models: self.custom_models.clone(),
         }
     }
 
@@ -1267,6 +1278,10 @@ pub struct ConfigToml {
     #[serde(default, deserialize_with = "deserialize_model_providers")]
     pub model_providers: HashMap<String, ModelProviderInfo>,
 
+    /// User-defined model aliases that can override model context settings.
+    #[serde(default)]
+    pub custom_models: Vec<CustomModelToml>,
+
     /// Maximum number of bytes to include from an AGENTS.md project doc file.
     pub project_doc_max_bytes: Option<usize>,
 
@@ -1546,6 +1561,19 @@ pub struct RealtimeToml {
 pub struct RealtimeAudioToml {
     pub microphone: Option<String>,
     pub speaker: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct CustomModelToml {
+    /// User-facing alias shown in the model picker.
+    pub name: String,
+    /// Provider-facing model slug used on API requests.
+    pub model: String,
+    /// Optional context window override applied when this alias is selected.
+    pub model_context_window: Option<i64>,
+    /// Optional auto-compaction token limit override applied when this alias is selected.
+    pub model_auto_compact_token_limit: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
@@ -2360,6 +2388,24 @@ impl Config {
         for (key, provider) in cfg.model_providers.into_iter() {
             model_providers.entry(key).or_insert(provider);
         }
+        let mut custom_models = HashMap::new();
+        for custom in cfg.custom_models {
+            let alias = custom.name;
+            if custom_models.contains_key(&alias) {
+                return Err(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!("duplicate custom model alias: {alias}"),
+                ));
+            }
+            custom_models.insert(
+                alias,
+                CustomModelConfig {
+                    model: custom.model,
+                    model_context_window: custom.model_context_window,
+                    model_auto_compact_token_limit: custom.model_auto_compact_token_limit,
+                },
+            );
+        }
 
         let model_provider_id = model_provider
             .or(config_profile.model_provider)
@@ -2702,6 +2748,7 @@ impl Config {
             mcp_oauth_callback_port: cfg.mcp_oauth_callback_port,
             mcp_oauth_callback_url: cfg.mcp_oauth_callback_url.clone(),
             model_providers,
+            custom_models,
             project_doc_max_bytes: cfg.project_doc_max_bytes.unwrap_or(PROJECT_DOC_MAX_BYTES),
             project_doc_fallback_filenames: cfg
                 .project_doc_fallback_filenames

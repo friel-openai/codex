@@ -247,6 +247,48 @@ web_search = false
 }
 
 #[test]
+fn config_toml_deserializes_custom_models() {
+    let custom_models = r#"
+[[custom_models]]
+name = "gpt-5.4 1m"
+model = "gpt-5.4"
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+"#;
+    let custom_models_cfg = toml::from_str::<ConfigToml>(custom_models)
+        .expect("TOML deserialization should succeed for custom models");
+
+    assert_eq!(
+        custom_models_cfg.custom_models,
+        vec![CustomModelToml {
+            name: "gpt-5.4 1m".to_string(),
+            model: "gpt-5.4".to_string(),
+            model_context_window: Some(1_000_000),
+            model_auto_compact_token_limit: Some(900_000),
+        }]
+    );
+
+    let config = Config::load_from_base_config_with_overrides(
+        custom_models_cfg,
+        ConfigOverrides::default(),
+        tempdir().expect("tempdir").path().to_path_buf(),
+    )
+    .expect("load config from custom models settings");
+
+    assert_eq!(
+        config.custom_models,
+        HashMap::from([(
+            "gpt-5.4 1m".to_string(),
+            CustomModelConfig {
+                model: "gpt-5.4".to_string(),
+                model_context_window: Some(1_000_000),
+                model_auto_compact_token_limit: Some(900_000),
+            },
+        )])
+    );
+}
+
+#[test]
 fn rejects_provider_auth_with_env_key() {
     let err = toml::from_str::<ConfigToml>(
         r#"
@@ -4466,6 +4508,7 @@ fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            custom_models: HashMap::new(),
             service_tier: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
@@ -4613,6 +4656,7 @@ fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        custom_models: HashMap::new(),
         service_tier: None,
         model_provider_id: "openai-custom".to_string(),
         model_provider: fixture.openai_custom_provider.clone(),
@@ -4758,6 +4802,7 @@ fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        custom_models: HashMap::new(),
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),
@@ -4889,6 +4934,7 @@ fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         review_model: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        custom_models: HashMap::new(),
         service_tier: None,
         model_provider_id: "openai".to_string(),
         model_provider: fixture.openai_provider.clone(),

@@ -37,6 +37,8 @@ pub async fn build_prompt_input(
         &config,
         Arc::clone(&auth_manager),
         SessionSource::Exec,
+        config.model_catalog.clone(),
+        config.custom_models.clone(),
         CollaborationModesConfig {
             default_mode_request_user_input: config
                 .features
