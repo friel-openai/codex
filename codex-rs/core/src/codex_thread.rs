@@ -43,6 +43,7 @@ pub struct ThreadConfigSnapshot {
     pub sandbox_policy: SandboxPolicy,
     pub cwd: PathBuf,
     pub ephemeral: bool,
+    pub agent_use_function_call_inbox: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub personality: Option<Personality>,
     pub active_profile: Option<String>,

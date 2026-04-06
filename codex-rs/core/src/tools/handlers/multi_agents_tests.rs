@@ -1979,6 +1979,10 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
 
     let mut config = (*turn.config).clone();
     config.agent_max_depth = DEFAULT_AGENT_MAX_DEPTH + 1;
+    config
+        .features
+        .enable(Feature::SpawnCsv)
+        .expect("test config should allow spawn_csv");
     turn.config = Arc::new(config);
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: root.thread_id,
@@ -2002,6 +2006,12 @@ async fn spawn_agent_allows_depth_up_to_configured_max_depth() {
     let result: SpawnAgentResult =
         serde_json::from_str(&content).expect("spawn_agent result should be json");
     assert!(!result.agent_id.is_empty());
+    let child_thread = manager
+        .get_thread(parse_agent_id(&result.agent_id))
+        .await
+        .expect("spawned max-depth child thread should exist");
+    assert!(child_thread.enabled(Feature::Collab));
+    assert!(child_thread.enabled(Feature::SpawnCsv));
     assert!(
         result
             .nickname
@@ -3421,6 +3431,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
 
     let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
     let mut expected = (*turn.config).clone();
+    expected.features = config.features.clone();
     expected.base_instructions = Some(base_instructions.text);
     expected.model = Some(turn.model_info.slug.clone());
     expected.model_provider = turn.provider.clone();
