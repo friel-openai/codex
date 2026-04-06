@@ -5561,6 +5561,8 @@ async fn root_agent_prompt_only_includes_watchdog_fragment_when_enabled() {
 
     let with_watchdog = load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ true).await;
     assert!(with_watchdog.contains("## Watchdogs"));
+    assert!(with_watchdog.contains("## Long-Running Multi-Agent Work"));
+    assert!(with_watchdog.contains("Root agents own sequencing, integration, and final quality"));
 }
 
 #[tokio::test]

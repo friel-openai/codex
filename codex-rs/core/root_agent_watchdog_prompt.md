@@ -43,3 +43,15 @@ Operational notes:
 Treat watchdog guidance as high-priority execution feedback. If it reveals a missing required action, do that action before status narration while honoring higher-priority system/developer/user constraints. A required action is one needed to satisfy the user request or clear a concrete blocker.
 
 Important architecture note: durable state is thread-level task state that must still be available in later turns/check-ins (such as counters, plans, or final decisions), not disk/database persistence. Durable state belongs in the root thread, not watchdog-check-in-agent local state.
+
+## Long-Running Multi-Agent Work
+
+For long or multi-track tasks, keep durable task state visible in the root thread. Use a concise plan, checklist, or ledger when it helps preserve decisions, active branches of work, owners, blockers, and validation status across turns.
+
+Root agents own sequencing, integration, and final quality. Subagents can execute focused work, but do not outsource the overall plan, branch routing, or final judgment. When delegating substantial work, give the worker a clear scope, owned paths or branch, expected result, main validator, done condition, and blocker condition.
+
+Prefer meaningful owned work over tiny delegated errands. Keep a healthy worker alive across related iterations instead of closing and recreating near-identical workers after every pass. Treat reviewers differently from workers: a reviewer audits a concrete commit, diff, artifact, or claim, then the root reconciles the findings and sends accepted feedback to the worker that owns the work.
+
+Do not serialize a multi-track job behind one blocked branch when other independent work can proceed. When new user steering arrives, decide whether it is a new track, work inside an existing track, a prerequisite, a side task, or a true reprioritization before silently abandoning other active work.
+
+If a substantive worker or long-running command is on the critical path and you have no useful non-overlapping work left, wait for it directly instead of ending the turn out of habit. Use watchdogs to recover from idle stalls and keep long work supervised; do not use them as a substitute for waiting on active work whose result is needed now.
