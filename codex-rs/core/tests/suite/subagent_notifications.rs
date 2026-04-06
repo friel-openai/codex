@@ -70,22 +70,37 @@ fn tool_parameter_description(
     tool_name: &str,
     parameter_name: &str,
 ) -> Option<String> {
+    fn find_parameter_description(
+        tool: &serde_json::Value,
+        tool_name: &str,
+        parameter_name: &str,
+    ) -> Option<String> {
+        if tool.get("name").and_then(serde_json::Value::as_str) == Some(tool_name) {
+            return tool
+                .get("parameters")
+                .and_then(|parameters| parameters.get("properties"))
+                .and_then(|properties| properties.get(parameter_name))
+                .and_then(|parameter| parameter.get("description"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned);
+        }
+
+        tool.get("tools")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|tools| {
+                tools
+                    .iter()
+                    .find_map(|tool| find_parameter_description(tool, tool_name, parameter_name))
+            })
+    }
+
     req.body_json()
         .get("tools")
         .and_then(serde_json::Value::as_array)
         .and_then(|tools| {
-            tools.iter().find_map(|tool| {
-                if tool.get("name").and_then(serde_json::Value::as_str) == Some(tool_name) {
-                    tool.get("parameters")
-                        .and_then(|parameters| parameters.get("properties"))
-                        .and_then(|properties| properties.get(parameter_name))
-                        .and_then(|parameter| parameter.get("description"))
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                } else {
-                    None
-                }
-            })
+            tools
+                .iter()
+                .find_map(|tool| find_parameter_description(tool, tool_name, parameter_name))
         })
 }
 
