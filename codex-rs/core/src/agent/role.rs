@@ -412,6 +412,7 @@ Rules:
                         config_file: None,
                         watchdog_interval_s: None,
                         nickname_candidates: None,
+                        fork_context: None,
                     }
                 ),
                 (

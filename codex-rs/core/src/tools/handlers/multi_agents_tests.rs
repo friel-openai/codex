@@ -132,7 +132,9 @@ model_provider = "openai"
         role_name.clone(),
         AgentRoleConfig {
             description: Some("Role with model-provider and profile overrides".to_string()),
+            model: None,
             config_file: Some(role_config_path),
+            watchdog_interval_s: None,
             nickname_candidates: None,
             fork_context: None,
         },

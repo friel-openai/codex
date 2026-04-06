@@ -567,6 +567,12 @@ impl AgentControl {
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
             .await;
+        let inherited_prompt_cache_key = self
+            .inherited_prompt_cache_key_for_source(&state, session_source.as_ref())
+            .await;
+        let inherited_mcp_connection_manager = self
+            .inherited_mcp_connection_manager_for_source(&state, session_source.as_ref())
+            .await;
 
         let new_thread = match session_source {
             Some(session_source) => {
@@ -579,6 +585,8 @@ impl AgentControl {
                         /*metrics_service_name*/ None,
                         inherited_shell_snapshot,
                         inherited_exec_policy,
+                        inherited_prompt_cache_key,
+                        inherited_mcp_connection_manager,
                     )
                     .await?
             }
@@ -610,6 +618,12 @@ impl AgentControl {
             .await;
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, Some(&session_source), &config)
+            .await;
+        let inherited_prompt_cache_key = self
+            .inherited_prompt_cache_key_for_source(&state, Some(&session_source))
+            .await;
+        let inherited_mcp_connection_manager = self
+            .inherited_mcp_connection_manager_for_source(&state, Some(&session_source))
             .await;
 
         let parent_thread = state.get_thread(parent_thread_id).await.ok();
@@ -647,6 +661,8 @@ impl AgentControl {
                 /*persist_extended_history*/ false,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
+                inherited_prompt_cache_key,
+                inherited_mcp_connection_manager,
             )
             .await?;
         let agent_metadata = AgentMetadata {
