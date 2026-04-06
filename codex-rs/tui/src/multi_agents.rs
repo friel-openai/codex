@@ -583,7 +583,6 @@ fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
 mod tests {
     use super::*;
     use crate::history_cell::HistoryCell;
-    use codex_protocol::protocol::AgentSpawnMode;
     #[cfg(target_os = "macos")]
     use crossterm::event::KeyEvent;
     #[cfg(target_os = "macos")]
