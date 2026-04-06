@@ -439,6 +439,7 @@ async fn spawned_multi_agent_v2_child_receives_xml_tagged_developer_context() ->
     let server = start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
         "message": CHILD_PROMPT,
+        "fork_turns": "none",
         "task_name": "worker",
     }))?;
     mount_sse_once_match(
