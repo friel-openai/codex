@@ -306,6 +306,14 @@ const ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../root_agent_wa
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../subagent_prompt.md");
 const SUBAGENT_WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../subagent_watchdog_prompt.md");
 const WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../watchdog_agent_prompt.md");
+const CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+
+fn materialize_ephemeral_rollouts_for_debug() -> bool {
+    std::env::var(CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -1707,8 +1715,9 @@ impl Session {
         // - initialize RolloutRecorder with new or resumed session info
         // - perform default shell discovery
         // - load history metadata (skipped for subagents)
+        let materialize_ephemeral_rollout = materialize_ephemeral_rollouts_for_debug();
         let rollout_fut = async {
-            if config.ephemeral {
+            if config.ephemeral && !materialize_ephemeral_rollout {
                 Ok::<_, anyhow::Error>((None, None))
             } else {
                 let state_db_ctx = state_db::init(&config).await;
@@ -1726,6 +1735,7 @@ impl Session {
             "session_init.rollout",
             otel.name = "session_init.rollout",
             session_init.ephemeral = config.ephemeral,
+            session_init.materialize_ephemeral_rollout = materialize_ephemeral_rollout,
         ));
 
         let is_subagent = matches!(
