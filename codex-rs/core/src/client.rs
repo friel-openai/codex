@@ -24,6 +24,7 @@
 //! fails, normal stream retry/fallback logic handles recovery on the same turn.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
@@ -84,6 +85,8 @@ use http::StatusCode as HttpStatusCode;
 use reqwest::StatusCode;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::oneshot::error::TryRecvError;
@@ -129,6 +132,7 @@ const RESPONSES_WEBSOCKETS_V2_BETA_HEADER_VALUE: &str = "responses_websockets=20
 const RESPONSES_ENDPOINT: &str = "/responses";
 const RESPONSES_COMPACT_ENDPOINT: &str = "/responses/compact";
 const MEMORIES_SUMMARIZE_ENDPOINT: &str = "/memories/trace_summarize";
+const CODEX_RESPONSES_REQUEST_DUMP_DIR_ENV: &str = "CODEX_RESPONSES_REQUEST_DUMP_DIR";
 #[cfg(test)]
 pub(crate) const WEBSOCKET_CONNECT_TIMEOUT: Duration =
     Duration::from_millis(DEFAULT_WEBSOCKET_CONNECT_TIMEOUT_MS);
@@ -1254,6 +1258,15 @@ impl ModelClientSession {
             }
 
             let ws_request = self.prepare_websocket_request(ws_payload, &request);
+            maybe_dump_responses_request(
+                &self.client.state.conversation_id,
+                &self.client.state.session_source,
+                "websocket",
+                &serde_json::json!({
+                    "request": request,
+                    "ws_request": ws_request,
+                }),
+            );
             self.websocket_session.last_request = Some(request);
             let stream_result = self.websocket_session.connection.as_ref().ok_or_else(|| {
                 map_api_error(ApiError::Stream(
@@ -1430,6 +1443,44 @@ impl ModelClientSession {
             .force_http_fallback(session_telemetry, model_info);
         self.websocket_session = WebsocketSession::default();
         activated
+    }
+}
+
+fn maybe_dump_responses_request(
+    conversation_id: &ThreadId,
+    session_source: &SessionSource,
+    transport: &str,
+    payload: &serde_json::Value,
+) {
+    let Some(base_dir) = std::env::var_os(CODEX_RESPONSES_REQUEST_DUMP_DIR_ENV) else {
+        return;
+    };
+
+    let dump_dir = PathBuf::from(base_dir);
+    if let Err(err) = std::fs::create_dir_all(&dump_dir) {
+        warn!(
+            "failed to create responses request dump dir {}: {err}",
+            dump_dir.display()
+        );
+        return;
+    }
+
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    let source_label = session_source.to_string().replace('/', "_");
+    let dump_path = dump_dir.join(format!(
+        "{nanos}-{conversation_id}-{source_label}-{transport}.json"
+    ));
+    let Ok(text) = serde_json::to_string_pretty(payload) else {
+        return;
+    };
+    if let Err(err) = std::fs::write(&dump_path, text) {
+        warn!(
+            "failed to write responses request dump {}: {err}",
+            dump_path.display()
+        );
     }
 }
 
