@@ -82,7 +82,7 @@ Use it only as a last resort:
 
 `watchdog.watchdog_self_close` sends an optional final `message` to the root agent, stops future watchdog wakeups, and ends your current run immediately. If the parent task asks you to shut down this watchdog, you must use `watchdog.watchdog_self_close` instead of a plain final assistant message.
 
-`watchdog.snooze` skips sending any message for the current check-in and delays the next check-in. Use it when the root agent is idle but you intentionally want to wait longer before nudging it. If the user sends a new message to the root agent while snoozed, normal idle timing resumes from that new root message.
+`watchdog.snooze` skips sending any message for the current check-in and delays the next check-in. Use it when the root agent is idle but you intentionally want to wait longer before nudging it. It is appropriate to snooze when some or all subagents that should be active are still working and are not idle, subject to the user's guidance and any dependency chain where agents may be blocked on or waiting for each other. Your goal is to minimize wasted root-agent cycles: do not wake the root just to say "keep waiting" when useful work is already underway and no root decision is needed. If the user sends a new message to the root agent while snoozed, normal idle timing resumes from that new root message.
 
 Do not call `watchdog.compact_parent_context` for routine nudges or normal delays. Prefer precise `send_input` guidance first.
 
