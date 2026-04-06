@@ -470,6 +470,25 @@ async fn send_input_resets_watchdog_owner_idle_state() {
         .await
         .expect("watchdog registration should succeed");
 
+    let helper_thread_id = ThreadId::new();
+    harness
+        .control
+        .set_watchdog_active_helper_for_tests(target_thread_id, helper_thread_id)
+        .await;
+    harness
+        .control
+        .snooze_watchdog_helper(helper_thread_id, Some(60))
+        .await
+        .expect("watchdog helper should snooze");
+
+    assert_eq!(
+        harness
+            .control
+            .watchdog_snoozed_until_is_none_for_tests(target_thread_id)
+            .await,
+        Some(false)
+    );
+
     assert_eq!(
         harness
             .control
@@ -488,6 +507,13 @@ async fn send_input_resets_watchdog_owner_idle_state() {
         harness
             .control
             .watchdog_owner_idle_since_is_none_for_tests(target_thread_id)
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        harness
+            .control
+            .watchdog_snoozed_until_is_none_for_tests(target_thread_id)
             .await,
         Some(true)
     );
@@ -512,6 +538,17 @@ async fn note_owner_input_resets_watchdog_owner_idle_state() {
         .await
         .expect("watchdog registration should succeed");
 
+    let helper_thread_id = ThreadId::new();
+    harness
+        .control
+        .set_watchdog_active_helper_for_tests(target_thread_id, helper_thread_id)
+        .await;
+    harness
+        .control
+        .snooze_watchdog_helper(helper_thread_id, Some(60))
+        .await
+        .expect("watchdog helper should snooze");
+
     assert_eq!(
         harness
             .control
@@ -526,6 +563,13 @@ async fn note_owner_input_resets_watchdog_owner_idle_state() {
         harness
             .control
             .watchdog_owner_idle_since_is_none_for_tests(target_thread_id)
+            .await,
+        Some(true)
+    );
+    assert_eq!(
+        harness
+            .control
+            .watchdog_snoozed_until_is_none_for_tests(target_thread_id)
             .await,
         Some(true)
     );
@@ -1199,7 +1243,7 @@ async fn watchdog_fork_injects_boot_context_after_parent_fork_items() {
             .iter()
             .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
             .collect::<Vec<_>>(),
-        vec!["compact_parent_context", "watchdog_self_close"]
+        vec!["compact_parent_context", "snooze", "watchdog_self_close"],
     );
 
     let list_payload: serde_json::Value =

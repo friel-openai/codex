@@ -123,6 +123,7 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         let spec = create_watchdog_tools_namespace(vec![
             create_compact_parent_context_tool(),
             create_watchdog_self_close_tool(),
+            create_watchdog_snooze_tool(),
         ]);
         expected.insert(spec.name().to_string(), spec);
     }
@@ -372,13 +373,14 @@ fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
     assert_contains_namespace_tool_names(
         &tools,
         "watchdog",
-        &["compact_parent_context", "watchdog_self_close"],
+        &["compact_parent_context", "watchdog_self_close", "snooze"],
     );
     assert_contains_handler_names(
         &handlers,
         &[
             "watchdog:compact_parent_context",
             "watchdog:watchdog_self_close",
+            "watchdog:snooze",
         ],
     );
 }
