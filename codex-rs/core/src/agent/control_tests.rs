@@ -585,7 +585,7 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 }
 
 #[tokio::test]
-async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+async fn spawn_agent_can_fork_parent_thread_history() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
@@ -654,23 +654,18 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .expect("child thread should be registered");
     assert_ne!(child_thread_id, parent_thread_id);
-    let history = child_thread.codex.session.clone_history().await;
-    let expected_history = [
-        ResponseItem::Message {
-            id: None,
-            role: "user".to_string(),
-            content: vec![ContentItem::InputText {
-                text: "parent seed context".to_string(),
-            }],
-            end_turn: None,
-            phase: None,
-        },
-        assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
-    ];
     assert_eq!(
-        history.raw_items(),
-        &expected_history,
-        "forked child history should keep only parent user messages and assistant final answers"
+        child_thread.codex.session.prompt_cache_key(),
+        parent_thread.codex.session.prompt_cache_key(),
+    );
+    assert!(Arc::ptr_eq(
+        &child_thread.codex.session.services.mcp_connection_manager,
+        &parent_thread.codex.session.services.mcp_connection_manager,
+    ));
+    let history = child_thread.codex.session.clone_history().await;
+    assert!(
+        history_contains_text(history.raw_items(), "parent seed context"),
+        "forked child history should include parent context"
     );
 
     let expected = (
@@ -1572,6 +1567,7 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
             description: Some("Research role".to_string()),
             config_file: None,
             nickname_candidates: Some(vec!["Atlas".to_string()]),
+            fork_context: None,
         },
     );
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;

@@ -19,10 +19,12 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 fn test_model_client(session_source: SessionSource) -> ModelClient {
+    let conversation_id = ThreadId::new();
     let provider = create_oss_provider_with_base_url("https://example.com/v1", WireApi::Responses);
     ModelClient::new(
         /*auth_manager*/ None,
-        ThreadId::new(),
+        conversation_id,
+        conversation_id,
         provider,
         session_source,
         /*model_verbosity*/ None,

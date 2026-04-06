@@ -249,6 +249,8 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*auth_manager*/ None,
         ThreadId::try_from("00000000-0000-4000-8000-000000000001")
             .expect("test thread id should be valid"),
+        ThreadId::try_from("00000000-0000-4000-8000-000000000001")
+            .expect("test thread id should be valid"),
         ModelProviderInfo::create_openai_provider(/* base_url */ /*base_url*/ None),
         codex_protocol::protocol::SessionSource::Exec,
         /*model_verbosity*/ None,
@@ -1838,9 +1840,11 @@ async fn set_rate_limits_retains_previous_credits() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     };
 
@@ -1940,9 +1944,11 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     };
 
@@ -2289,9 +2295,11 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     }
 }
@@ -2396,6 +2404,7 @@ enabled = false
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
+            fork_context: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -2555,9 +2564,11 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     };
 
@@ -2656,9 +2667,11 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     };
     let per_turn_config = Session::build_per_turn_config(&session_configuration);
@@ -2726,6 +2739,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         state_db: None,
         model_client: ModelClient::new(
             Some(auth_manager.clone()),
+            conversation_id,
             conversation_id,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
@@ -3496,9 +3510,11 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         app_server_client_name: None,
         app_server_client_version: None,
         session_source: SessionSource::Exec,
+        prompt_cache_key: None,
         dynamic_tools,
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        inherited_mcp_connection_manager: None,
         user_shell_override: None,
     };
     let per_turn_config = Session::build_per_turn_config(&session_configuration);
@@ -3566,6 +3582,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         state_db: None,
         model_client: ModelClient::new(
             Some(Arc::clone(&auth_manager)),
+            conversation_id,
             conversation_id,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
