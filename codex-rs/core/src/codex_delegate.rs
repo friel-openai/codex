@@ -93,6 +93,7 @@ pub(crate) async fn run_codex_thread_interactive(
         user_shell_override: None,
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
+        inherited_thread_state: Default::default(),
         parent_trace: None,
         environments: parent_ctx
             .environments
