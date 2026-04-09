@@ -39,6 +39,7 @@ mod git_info_tests;
 mod goals;
 mod guardian;
 mod hook_runtime;
+mod inherited_thread_state;
 mod installation_id;
 pub(crate) mod landlock;
 pub use landlock::spawn_command_under_linux_sandbox;
