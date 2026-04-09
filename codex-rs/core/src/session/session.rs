@@ -620,6 +620,7 @@ impl Session {
             )
         });
         let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
+        let mcp_tool_snapshot = inherited_thread_state.mcp_tool_snapshot();
         let services = SessionServices {
             // Initialize the MCP connection manager with an uninitialized
             // instance. It will be replaced with one created via
@@ -664,6 +665,7 @@ impl Session {
             network_approval: Arc::clone(&network_approval),
             state_db: state_db_ctx.clone(),
             thread_store: LocalThreadStore::new(RolloutConfig::from_view(config.as_ref())),
+            mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
             model_client: ModelClient::new(
                 Some(Arc::clone(&auth_manager)),
                 conversation_id,

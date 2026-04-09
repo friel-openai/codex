@@ -218,8 +218,12 @@ impl Session {
             *guard = cancel_token;
         }
 
-        let mut manager = self.services.mcp_connection_manager.write().await;
-        *manager = refreshed_manager;
+        {
+            let mut manager = self.services.mcp_connection_manager.write().await;
+            *manager = refreshed_manager;
+        }
+        let mut snapshot = self.services.mcp_tool_snapshot.lock().await;
+        *snapshot = None;
     }
 
     pub(crate) async fn refresh_mcp_servers_if_requested(&self, turn_context: &TurnContext) {
