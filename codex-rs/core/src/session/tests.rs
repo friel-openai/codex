@@ -3461,6 +3461,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             &config.permissions.approval_policy,
             &config.permissions.permission_profile,
         ))),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -4857,6 +4858,7 @@ where
             &config.permissions.approval_policy,
             &config.permissions.permission_profile,
         ))),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,

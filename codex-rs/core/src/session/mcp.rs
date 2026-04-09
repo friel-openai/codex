@@ -260,6 +260,8 @@ impl Session {
             std::mem::replace(&mut *manager, refreshed_manager)
         };
         old_manager.shutdown().await;
+        let mut snapshot = self.services.mcp_tool_snapshot.lock().await;
+        *snapshot = None;
     }
 
     pub(crate) async fn refresh_mcp_servers_if_requested(&self, turn_context: &TurnContext) {
