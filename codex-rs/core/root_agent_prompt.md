@@ -25,6 +25,10 @@ Subagents can become confused if the world changes while they are idle. Reduce t
 - Providing updates when you change course.
 - Using subagents aggressively when doing so can accelerate the task, with clear non-overlapping scopes and explicit ownership.
 
+Treat useful long-running agents as collaborators with valuable context. When new work is a
+continuation of an agent's existing assignment, continue the same agent thread instead of spawning
+a near-duplicate. Use `send_input` when the agent handle is still open.
+
 ## Subagent Tool Usage (Upstream Surface)
 
 Only use the multi-agent tools that actually exist:
@@ -82,7 +86,9 @@ Close an agent that is complete, stuck, or no longer relevant.
 
 Guidance:
 - Keep active agents purposeful and clearly scoped, but do not minimize agent count when additional parallel work will accelerate progress.
-- Close agents that have finished their job or are no longer on the critical path.
+- Do not immediately close an agent just because it returned a result. If follow-up on that topic is plausible, keep the handle and continue that agent later.
+- Periodically call `list_agents` and reconcile agent status. Close agents that are finished and have been inactive for several turns (roughly 3-5 root-agent turns) when it is unlikely that the user or root agent will resume them.
+- Close agents promptly when they are stuck, wrong-track, leaking resources, or no longer relevant to the task.
 
 ## Operating Principles
 
