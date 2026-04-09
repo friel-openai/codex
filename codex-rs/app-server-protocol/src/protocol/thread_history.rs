@@ -20,6 +20,9 @@ use crate::protocol::v2::UserInput;
 use crate::protocol::v2::WebSearchAction;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AGENT_INBOX_KIND;
+use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::AgentReasoningEvent;
 use codex_protocol::protocol::AgentReasoningRawContentEvent;
 use codex_protocol::protocol::AgentStatus;
@@ -212,6 +215,10 @@ impl ThreadHistoryBuilder {
     }
 
     fn handle_response_item(&mut self, item: &codex_protocol::models::ResponseItem) {
+        if self.handle_agent_inbox_response_item(item) {
+            return;
+        }
+
         let codex_protocol::models::ResponseItem::Message {
             role, content, id, ..
         } = item
@@ -235,6 +242,29 @@ impl ThreadHistoryBuilder {
                 .map(crate::protocol::v2::HookPromptFragment::from)
                 .collect(),
         });
+    }
+
+    fn handle_agent_inbox_response_item(&mut self, item: &ResponseItem) -> bool {
+        let ResponseItem::FunctionCallOutput { output, .. } = item else {
+            return false;
+        };
+        let Some(text) = output.body.to_text() else {
+            return false;
+        };
+        let Ok(payload) = serde_json::from_str::<AgentInboxPayload>(&text) else {
+            return false;
+        };
+        if !payload.injected || payload.kind != AGENT_INBOX_KIND || payload.message.is_empty() {
+            return false;
+        }
+
+        let id = self.next_item_id();
+        self.ensure_turn().items.push(ThreadItem::AgentInbox {
+            id,
+            sender_thread_id: payload.sender_thread_id.to_string(),
+            message: payload.message,
+        });
+        true
     }
 
     fn handle_user_message(&mut self, payload: &UserMessageEvent) {
@@ -1408,6 +1438,34 @@ mod tests {
                 phase: Some(MessagePhase::FinalAnswer),
                 memory_citation: None,
             }
+        );
+    }
+
+    #[test]
+    fn replays_agent_inbox_function_outputs_into_turn_history() {
+        let sender_thread_id = ThreadId::new();
+        let output = serde_json::to_string(&AgentInboxPayload::new(
+            sender_thread_id,
+            "ping 73 (73)".to_string(),
+        ))
+        .expect("agent inbox payload should serialize");
+        let items = vec![RolloutItem::ResponseItem(
+            ResponseItem::FunctionCallOutput {
+                call_id: "agent_inbox_call".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(output),
+            },
+        )];
+
+        let turns = build_turns_from_rollout_items(&items);
+
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![ThreadItem::AgentInbox {
+                id: "item-1".to_string(),
+                sender_thread_id: sender_thread_id.to_string(),
+                message: "ping 73 (73)".to_string(),
+            }]
         );
     }
 

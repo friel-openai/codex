@@ -6159,6 +6159,17 @@ impl ChatWidget {
                     }),
                 });
             }
+            ThreadItem::AgentInbox {
+                sender_thread_id,
+                message,
+                ..
+            } => {
+                self.add_to_history(history_cell::new_info_event(
+                    format!("Agent message: {message}"),
+                    Some(format!("from {sender_thread_id}")),
+                ));
+                self.request_redraw();
+            }
             ThreadItem::Plan { text, .. } => self.on_plan_item_completed(text),
             ThreadItem::Reasoning {
                 summary, content, ..

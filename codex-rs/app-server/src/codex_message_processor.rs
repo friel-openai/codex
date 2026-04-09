@@ -266,6 +266,9 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AGENT_INBOX_KIND;
+use codex_protocol::protocol::AGENT_INBOX_MESSAGE_PREFIX;
+use codex_protocol::protocol::AgentInboxPayload;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::ConversationAudioParams;
 use codex_protocol::protocol::ConversationStartParams;
@@ -7406,7 +7409,10 @@ impl CodexMessageProcessor {
                         let subscribed_connection_ids = thread_state_manager
                             .subscribed_connection_ids(conversation_id)
                             .await;
-                        if let EventMsg::RawResponseItem(_) = &event.msg && !raw_events_enabled {
+                        if should_drop_raw_response_item_for_subscriber(
+                            &event.msg,
+                            raw_events_enabled,
+                        ) {
                             continue;
                         }
 
@@ -7805,6 +7811,43 @@ impl CodexMessageProcessor {
             Ok(conv) => conv.rollout_path(),
             Err(_) => None,
         }
+    }
+}
+
+fn should_drop_raw_response_item_for_subscriber(
+    event: &EventMsg,
+    raw_events_enabled: bool,
+) -> bool {
+    if raw_events_enabled {
+        return false;
+    }
+
+    let EventMsg::RawResponseItem(event) = event else {
+        return false;
+    };
+
+    !is_agent_inbox_response_item(&event.item)
+}
+
+fn is_agent_inbox_response_item(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            let Some(text) = output.body.to_text() else {
+                return false;
+            };
+            let Ok(payload) = serde_json::from_str::<AgentInboxPayload>(&text) else {
+                return false;
+            };
+            payload.injected && payload.kind == AGENT_INBOX_KIND
+        }
+        ResponseItem::Message { content, .. } => content.iter().any(|item| match item {
+            codex_protocol::models::ContentItem::InputText { text }
+            | codex_protocol::models::ContentItem::OutputText { text } => {
+                text.starts_with(AGENT_INBOX_MESSAGE_PREFIX)
+            }
+            _ => false,
+        }),
+        _ => false,
     }
 }
 
@@ -9030,6 +9073,45 @@ mod tests {
     use serde_json::json;
     use std::path::PathBuf;
     use tempfile::TempDir;
+
+    #[test]
+    fn raw_response_filter_preserves_agent_inbox_without_raw_events() {
+        let sender_thread_id = ThreadId::new();
+        let payload = serde_json::to_string(&AgentInboxPayload::new(
+            sender_thread_id,
+            "watchdog update".to_string(),
+        ))
+        .expect("agent inbox payload should serialize");
+        let event = EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+            item: ResponseItem::FunctionCallOutput {
+                call_id: "agent_inbox_call".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(payload),
+            },
+        });
+
+        assert!(!should_drop_raw_response_item_for_subscriber(
+            &event, /*raw_events_enabled*/ false
+        ));
+    }
+
+    #[test]
+    fn raw_response_filter_still_drops_regular_raw_items_without_raw_events() {
+        let event = EventMsg::RawResponseItem(codex_protocol::protocol::RawResponseItemEvent {
+            item: ResponseItem::FunctionCallOutput {
+                call_id: "regular_call".to_string(),
+                output: codex_protocol::models::FunctionCallOutputPayload::from_text(
+                    "regular output".to_string(),
+                ),
+            },
+        });
+
+        assert!(should_drop_raw_response_item_for_subscriber(
+            &event, /*raw_events_enabled*/ false
+        ));
+        assert!(!should_drop_raw_response_item_for_subscriber(
+            &event, /*raw_events_enabled*/ true
+        ));
+    }
 
     #[test]
     fn validate_dynamic_tools_rejects_unsupported_input_schema() {

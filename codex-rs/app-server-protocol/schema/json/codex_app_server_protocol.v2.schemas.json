@@ -10510,6 +10510,34 @@
           "type": "object"
         },
         {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "message": {
+              "type": "string"
+            },
+            "senderThreadId": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "agentInbox"
+              ],
+              "title": "AgentInboxThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "message",
+            "senderThreadId",
+            "type"
+          ],
+          "title": "AgentInboxThreadItem",
+          "type": "object"
+        },
+        {
           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
           "properties": {
             "id": {
