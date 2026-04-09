@@ -223,6 +223,7 @@ impl Session {
         skills_watcher: Arc<SkillsWatcher>,
         agent_control: AgentControl,
         environment: Option<Arc<Environment>>,
+        inherited_thread_state: InheritedThreadState,
         analytics_events_client: Option<AnalyticsEventsClient>,
     ) -> anyhow::Result<Arc<Self>> {
         debug!(
@@ -618,6 +619,7 @@ impl Session {
                 config.analytics_enabled,
             )
         });
+        let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
         let services = SessionServices {
             // Initialize the MCP connection manager with an uninitialized
             // instance. It will be replaced with one created via
@@ -666,6 +668,7 @@ impl Session {
                 Some(Arc::clone(&auth_manager)),
                 conversation_id,
                 installation_id,
+                prompt_cache_key_override,
                 session_configuration.provider.clone(),
                 session_configuration.session_source.clone(),
                 config.model_verbosity,

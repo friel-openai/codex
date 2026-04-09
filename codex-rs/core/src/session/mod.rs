@@ -22,6 +22,7 @@ use crate::config::ManagedFeatures;
 use crate::connectors;
 use crate::default_skill_metadata_budget;
 use crate::exec_policy::ExecPolicyManager;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::installation_id::resolve_installation_id;
 use crate::parse_turn_item;
 use crate::path_utils::normalize_for_native_workdir;
@@ -390,6 +391,7 @@ pub(crate) struct CodexSpawnArgs {
     pub(crate) metrics_service_name: Option<String>,
     pub(crate) inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
     pub(crate) inherited_exec_policy: Option<Arc<ExecPolicyManager>>,
+    pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
     pub(crate) analytics_events_client: Option<AnalyticsEventsClient>,
@@ -445,6 +447,7 @@ impl Codex {
             inherited_shell_snapshot,
             user_shell_override,
             inherited_exec_policy,
+            inherited_thread_state,
             parent_trace: _,
             analytics_events_client,
         } = args;
@@ -642,6 +645,7 @@ impl Codex {
             skills_watcher,
             agent_control,
             environment,
+            inherited_thread_state,
             analytics_events_client,
         )
         .await
@@ -1109,6 +1113,10 @@ impl Session {
 
     pub(crate) fn state_db(&self) -> Option<state_db::StateDbHandle> {
         self.services.state_db.clone()
+    }
+
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.services.model_client.prompt_cache_key()
     }
 
     /// Flush rollout writes and return the final durability-barrier result.
