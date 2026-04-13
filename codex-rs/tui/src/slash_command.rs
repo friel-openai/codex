@@ -136,6 +136,7 @@ impl SlashCommand {
             self,
             SlashCommand::Review
                 | SlashCommand::Rename
+                | SlashCommand::Fork
                 | SlashCommand::Plan
                 | SlashCommand::Fast
                 | SlashCommand::Mcp
