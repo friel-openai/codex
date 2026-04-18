@@ -1,6 +1,8 @@
 use crate::shell::Shell;
 use crate::shell::ShellType;
 use crate::tools::handlers::agent_jobs::BatchJobHandler;
+use crate::tools::handlers::multi_agents::WatchdogSelfCloseHandler;
+use crate::tools::handlers::multi_agents::WatchdogSnoozeHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
@@ -295,6 +297,12 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::WaitAgentV2 => {
                 builder.register_handler(handler.name, Arc::new(WaitAgentHandlerV2));
+            }
+            ToolHandlerKind::WatchdogSelfClose => {
+                builder.register_handler(handler.name, Arc::new(WatchdogSelfCloseHandler));
+            }
+            ToolHandlerKind::WatchdogSnooze => {
+                builder.register_handler(handler.name, Arc::new(WatchdogSnoozeHandler));
             }
         }
     }

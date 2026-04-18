@@ -1,4 +1,6 @@
 use crate::JsonSchema;
+use crate::ResponsesApiNamespace;
+use crate::ResponsesApiNamespaceTool;
 use crate::ResponsesApiTool;
 use crate::ToolSpec;
 use codex_protocol::openai_models::ModelPreset;
@@ -255,6 +257,95 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
         defer_loading: None,
         parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
         output_schema: Some(close_agent_output_schema()),
+    })
+}
+
+pub fn create_watchdog_self_close_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "message".to_string(),
+        JsonSchema::string(Some(
+            "Optional final message to send to the parent/root thread before closing this watchdog handle and ending this check-in immediately."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "watchdog_self_close".to_string(),
+        description: "Watchdog-only: send an optional final message to the parent/root thread, close this watchdog's persistent handle, and end this check-in immediately."
+            .to_string(),
+        strict: false,
+        defer_loading: Some(true),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(close_agent_output_schema()),
+    })
+}
+
+pub fn create_watchdog_snooze_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "delay_seconds".to_string(),
+            JsonSchema::number(Some(
+                "Optional snooze delay in seconds. If omitted, the watchdog uses its configured interval."
+                    .to_string(),
+            )),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Optional short reason for snoozing this check-in.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "snooze".to_string(),
+        description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup."
+            .to_string(),
+        strict: false,
+        defer_loading: Some(true),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(watchdog_snooze_output_schema()),
+    })
+}
+
+pub fn create_watchdog_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Freeform(_)
+            | ToolSpec::ImageGeneration { .. }
+            | ToolSpec::LocalShell { .. }
+            | ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::WebSearch { .. } => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "watchdog".to_string(),
+        description:
+            "Watchdog-only tools for parent-thread recovery and watchdog check-in lifecycle control."
+                .to_string(),
+        tools,
+    })
+}
+
+fn watchdog_snooze_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "target_thread_id": {
+                "type": "string",
+                "description": "Watchdog handle that was snoozed."
+            },
+            "delay_seconds": {
+                "type": "number",
+                "description": "Effective snooze delay in seconds."
+            }
+        },
+        "required": ["target_thread_id", "delay_seconds"],
+        "additionalProperties": false
     })
 }
 

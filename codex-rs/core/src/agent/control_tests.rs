@@ -60,6 +60,31 @@ async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
 }
 
+fn mcp_server_config(command: &str) -> McpServerConfig {
+    McpServerConfig {
+        transport: McpServerTransportConfig::Stdio {
+            command: command.to_string(),
+            args: Vec::new(),
+            env: None,
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        experimental_environment: None,
+        enabled: true,
+        required: false,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: None,
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth_resource: None,
+        tools: std::collections::HashMap::new(),
+    }
+}
+
 fn text_input(text: &str) -> Op {
     vec![UserInput::Text {
         text: text.to_string(),
@@ -402,6 +427,291 @@ async fn resume_agent_errors_when_manager_dropped() {
 }
 
 #[tokio::test]
+async fn watchdog_spawns_helper_after_owner_completes() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let helper_spawned = harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("check in"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            });
+            if helper_spawned {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper after the owner turn completes");
+}
+
+#[tokio::test]
+async fn watchdog_helper_forks_owner_history() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .mcp_servers
+        .set(std::collections::HashMap::from([(
+            "slow".to_string(),
+            mcp_server_config("missing-watchdog-mcp"),
+        )]))
+        .expect("test config should allow MCP servers");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .record_conversation_items(
+            owner_turn.as_ref(),
+            &[assistant_message(
+                "previous owner response: pong 81 (118)",
+                Some(MessagePhase::FinalAnswer),
+            )],
+        )
+        .await;
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let helper_thread_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("check in"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper");
+
+    let helper_thread = harness
+        .manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("helper thread should be registered");
+    let history_items = helper_thread
+        .codex
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
+    assert!(history_contains_text(
+        &history_items,
+        "previous owner response: pong 81 (118)"
+    ));
+    assert!(
+        !helper_thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .has_servers(),
+        "watchdog helpers should not start their own MCP clients"
+    );
+}
+
+#[tokio::test]
+async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 3600,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let helper_thread_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("check in"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper");
+
+    let helper_thread = harness
+        .manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("helper thread should be registered");
+    let helper_turn = helper_thread.codex.session.new_default_turn().await;
+    helper_thread
+        .codex
+        .session
+        .send_event(
+            helper_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: helper_turn.sub_id.clone(),
+                last_agent_message: Some("ping 5 (5)".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ping 5 (5)".to_string(),
+        /*trigger_turn*/ true,
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let captured = harness.manager.captured_ops().into_iter().any(|entry| {
+                entry
+                    == (
+                        owner_thread_id,
+                        Op::InterAgentCommunication {
+                            communication: expected.clone(),
+                        },
+                    )
+            });
+            if captured {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should forward completed helper output without interval delay");
+}
+
+#[tokio::test]
 async fn send_input_errors_when_thread_missing() {
     let harness = AgentControlHarness::new().await;
     let thread_id = ThreadId::new();
@@ -559,6 +869,105 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
         &history_items,
         &communication
     ));
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_queues_mailbox_message_for_root() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, "Watchdog report: checks are green.".to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(!submission_id.is_empty());
+
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "Watchdog report: checks are green.".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let captured = harness.manager.captured_ops().into_iter().find(|entry| {
+        *entry
+            == (
+                thread_id,
+                Op::InterAgentCommunication {
+                    communication: expected.clone(),
+                },
+            )
+    });
+    assert_eq!(
+        captured,
+        Some((
+            thread_id,
+            Op::InterAgentCommunication {
+                communication: expected,
+            },
+        ))
+    );
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_strips_helper_prompt_scaffold() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+    let message = "# You are a Subagent\n\n\
+        More importantly, you are a **watchdog check-in agent**.\n\
+        Keep the root agent unblocked.\n\n\
+        Target agent id: 019cc0e8-38b6-7493-8e31-73a64c5843b6\n\n\
+        AUTOPLAN_WATCHDOG_REPORT\n\
+        required_action: rerun CI";
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, message.to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(!submission_id.is_empty());
+
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "AUTOPLAN_WATCHDOG_REPORT\nrequired_action: rerun CI".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let captured = harness.manager.captured_ops().into_iter().any(|entry| {
+        entry
+            == (
+                thread_id,
+                Op::InterAgentCommunication {
+                    communication: expected.clone(),
+                },
+            )
+    });
+    assert!(captured);
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_ignores_scaffold_without_report() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+    let message = "# You are a Subagent\n\n\
+        More importantly, you are a **watchdog check-in agent**.\n\
+        Target agent id: 019cc0e8-38b6-7493-8e31-73a64c5843b6";
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, message.to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(submission_id.is_empty());
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(id, op)| id == thread_id && matches!(op, Op::InterAgentCommunication { .. }))
+    );
 }
 
 #[tokio::test]
@@ -747,7 +1156,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1069,7 +1477,6 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1179,7 +1586,6 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::LastNTurns(2)),
                 ..Default::default()
             },
@@ -1782,6 +2188,7 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
             description: Some("Research role".to_string()),
             config_file: None,
             nickname_candidates: Some(vec!["Atlas".to_string()]),
+            watchdog_interval_s: None,
         },
     );
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;
