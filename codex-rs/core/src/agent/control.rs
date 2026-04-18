@@ -1,4 +1,7 @@
 use crate::agent::AgentStatus;
+use crate::agent::RemovedWatchdog;
+use crate::agent::WatchdogManager;
+use crate::agent::WatchdogRegistration;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
@@ -133,21 +136,48 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
 /// An `AgentControl` instance is intended to be created at most once per root thread/session
 /// tree. That same `AgentControl` is then shared with every sub-agent spawned from that root,
 /// which keeps the registry scoped to that root thread rather than the entire `ThreadManager`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AgentControl {
     /// Weak handle back to the global thread registry/state.
     /// This is `Weak` to avoid reference cycles and shadow persistence of the form
     /// `ThreadManagerState -> CodexThread -> Session -> SessionServices -> ThreadManagerState`.
     manager: Weak<ThreadManagerState>,
     state: Arc<AgentRegistry>,
+    watchdogs: Option<Arc<WatchdogManager>>,
+}
+
+impl Default for AgentControl {
+    fn default() -> Self {
+        Self {
+            manager: Weak::new(),
+            state: Arc::new(AgentRegistry::default()),
+            watchdogs: None,
+        }
+    }
 }
 
 impl AgentControl {
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
     pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
+        let state = Arc::new(AgentRegistry::default());
+        let watchdogs = WatchdogManager::new(manager.clone(), Arc::clone(&state));
+        watchdogs.start();
         Self {
             manager,
-            ..Default::default()
+            state,
+            watchdogs: Some(watchdogs),
+        }
+    }
+
+    pub(crate) fn from_parts(
+        manager: Weak<ThreadManagerState>,
+        state: Arc<AgentRegistry>,
+        watchdogs: Arc<WatchdogManager>,
+    ) -> Self {
+        Self {
+            manager,
+            state,
+            watchdogs: Some(watchdogs),
         }
     }
 
@@ -706,6 +736,36 @@ impl AgentControl {
         let _ = state.remove_thread(&agent_id).await;
         self.state.release_spawned_thread(agent_id);
         result
+    }
+
+    pub(crate) async fn register_watchdog(
+        &self,
+        registration: WatchdogRegistration,
+    ) -> CodexResult<Vec<RemovedWatchdog>> {
+        self.watchdog_manager()?.register(registration).await
+    }
+
+    pub(crate) async fn unregister_watchdogs_for_owner(
+        &self,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RemovedWatchdog> {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return Vec::new();
+        };
+        watchdogs.unregister_for_owner(owner_thread_id).await
+    }
+
+    pub(crate) async fn is_watchdog_handle(&self, target_thread_id: ThreadId) -> bool {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return false;
+        };
+        watchdogs.is_watchdog_handle(target_thread_id).await
+    }
+
+    fn watchdog_manager(&self) -> CodexResult<&Arc<WatchdogManager>> {
+        self.watchdogs.as_ref().ok_or_else(|| {
+            CodexErr::UnsupportedOperation("watchdog manager unavailable".to_string())
+        })
     }
 
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the

@@ -58,6 +58,31 @@ impl ToolHandler for Handler {
                 agent_role: agent_metadata.agent_role,
             });
         }
+        let mut watchdog_statuses = HashMap::new();
+        for receiver_thread_id in &receiver_thread_ids {
+            if session
+                .services
+                .agent_control
+                .is_watchdog_handle(*receiver_thread_id)
+                .await
+            {
+                watchdog_statuses.insert(
+                    *receiver_thread_id,
+                    session
+                        .services
+                        .agent_control
+                        .get_status(*receiver_thread_id)
+                        .await,
+                );
+            }
+        }
+        if watchdog_statuses.len() == receiver_thread_ids.len() {
+            let agent_statuses = build_wait_agent_statuses(&watchdog_statuses, &receiver_agents);
+            let content = serde_json::to_string(&agent_statuses).unwrap_or_default();
+            return Err(FunctionCallError::RespondToModel(format!(
+                "wait_agent cannot be used to wait for watchdog check-ins. You passed only watchdog handle ids. Watchdog check-ins only happen after the current turn ends and the owner thread is idle for at least watchdog_interval_s. `wait_agent` on a watchdog handle is status-only and cannot confirm a new check-in. Current watchdog handle statuses: {content}"
+            )));
+        }
 
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
         let timeout_ms = match timeout_ms {

@@ -354,7 +354,8 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
     let provider_info =
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["ollama"].clone();
@@ -637,6 +638,54 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
     assert!(result.get("task_name").is_none());
     assert!(result.get("nickname").is_some());
     assert_eq!(success, Some(true));
+}
+
+#[tokio::test]
+async fn spawn_agent_watchdog_role_returns_inert_handle() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "check in later",
+                "agent_type": "watchdog"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = parse_agent_id(
+        result["agent_id"]
+            .as_str()
+            .expect("spawn_agent result should include agent_id"),
+    );
+
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        agent_control.get_status(agent_id).await,
+        AgentStatus::PendingInit
+    );
+    let ops_for_agent = manager
+        .captured_ops()
+        .into_iter()
+        .filter_map(|(thread_id, op)| (thread_id == agent_id).then_some(op))
+        .collect::<Vec<_>>();
+    assert_eq!(ops_for_agent, vec![Op::Interrupt]);
+    assert!(agent_control.is_watchdog_handle(agent_id).await);
 }
 
 #[tokio::test]
@@ -2634,6 +2683,60 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
         }
     );
     assert_eq!(success, None);
+}
+
+#[tokio::test]
+async fn wait_agent_rejects_only_watchdog_handles() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let output = SpawnAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "check in later",
+                "agent_type": "watchdog"
+            })),
+        ))
+        .await
+        .expect("spawn_agent should succeed");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = result["agent_id"]
+        .as_str()
+        .expect("spawn_agent result should include agent_id");
+
+    let Err(err) = WaitAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "wait_agent",
+            function_payload(json!({
+                "targets": [agent_id],
+                "timeout_ms": 1000
+            })),
+        ))
+        .await
+    else {
+        panic!("wait_agent should reject watchdog-only targets");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected model-facing error");
+    };
+    assert!(message.contains("watchdog handle ids"));
+    assert!(message.contains("pending_init"));
 }
 
 #[tokio::test]

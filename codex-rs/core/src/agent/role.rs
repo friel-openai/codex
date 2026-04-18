@@ -128,6 +128,10 @@ pub(crate) fn resolve_role_config<'a>(
         .or_else(|| built_in::configs().get(role_name))
 }
 
+pub(crate) fn watchdog_interval_for_role(_config: &Config, role_name: Option<&str>) -> Option<i64> {
+    matches!(role_name, Some("watchdog")).then_some(60)
+}
+
 fn preservation_policy(config: &Config, role_layer_toml: &TomlValue) -> (bool, bool) {
     let role_selects_provider = role_layer_toml.get("model_provider").is_some();
     let role_selects_profile = role_layer_toml.get("profile").is_some();
@@ -390,6 +394,17 @@ Typical tasks:
 Rules:
 - Explicitly assign **ownership** of the task (files / responsibility). When the subtask involves code changes, you should clearly specify which files or modules the worker is responsible for. This helps avoid merge conflicts and ensures accountability. For example, you can say "Worker 1 is responsible for updating the authentication module, while Worker 2 will handle the database layer." By defining clear ownership, you can delegate more effectively and reduce coordination overhead.
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
+                        config_file: None,
+                        nickname_candidates: None,
+                    }
+                ),
+                (
+                    "watchdog".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Creates an idle-time watchdog handle instead of a normal worker."
+                                .to_string(),
+                        ),
                         config_file: None,
                         nickname_candidates: None,
                     }
