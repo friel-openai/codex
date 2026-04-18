@@ -707,6 +707,27 @@ impl AgentControl {
         result
     }
 
+    pub(crate) async fn send_watchdog_wakeup(
+        &self,
+        owner_thread_id: ThreadId,
+        message: String,
+    ) -> CodexResult<String> {
+        let Some(message) = sanitize_watchdog_wakeup_message(message) else {
+            return Ok(String::new());
+        };
+        self.send_inter_agent_communication(
+            owner_thread_id,
+            InterAgentCommunication::new(
+                AgentPath::try_from("/root/watchdog").expect("valid watchdog path"),
+                AgentPath::root(),
+                Vec::new(),
+                message,
+                /*trigger_turn*/ true,
+            ),
+        )
+        .await
+    }
+
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
@@ -1256,6 +1277,44 @@ fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<Threa
         }) => Some(*parent_thread_id),
         _ => None,
     }
+}
+
+fn sanitize_watchdog_wakeup_message(message: String) -> Option<String> {
+    let Some(stripped_message) = strip_leading_watchdog_prompt_scaffold(&message) else {
+        let message = message.trim();
+        return (!message.is_empty()).then(|| message.to_string());
+    };
+
+    let stripped_message = stripped_message.trim();
+    (!stripped_message.is_empty()).then(|| stripped_message.to_string())
+}
+
+fn strip_leading_watchdog_prompt_scaffold(message: &str) -> Option<&str> {
+    let mut lines = message.split_inclusive('\n').scan(0, |offset, line| {
+        let line_start = *offset;
+        *offset += line.len();
+        Some((line_start, line))
+    });
+
+    let mut saw_watchdog_scaffold = false;
+    let mut report_start = None;
+    for (line_start, line) in &mut lines {
+        let trimmed = line.trim();
+        if trimmed.contains("watchdog check-in agent")
+            || trimmed.starts_with("Read AGENTS.watchdog.md")
+            || trimmed.starts_with("Target agent id:")
+        {
+            saw_watchdog_scaffold = true;
+        }
+        if trimmed.starts_with("AUTOPLAN_WATCHDOG_REPORT")
+            || trimmed.starts_with("Watchdog report:")
+        {
+            report_start = Some(line_start);
+            break;
+        }
+    }
+
+    saw_watchdog_scaffold.then(|| &message[report_start.unwrap_or(message.len())..])
 }
 
 fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> bool {
