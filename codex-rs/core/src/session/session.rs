@@ -6,6 +6,15 @@ use codex_protocol::permissions::FileSystemSpecialPath;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use tokio::sync::Semaphore;
 
+const CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+
+fn materialize_ephemeral_rollouts_for_debug() -> bool {
+    std::env::var(CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV).is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 /// Context for an initialized model agent
 ///
 /// A session has at most 1 running task at a time, and can be interrupted by user input.
@@ -382,8 +391,9 @@ impl Session {
         // - initialize thread persistence with new or resumed session info
         // - perform default shell discovery
         // - load history metadata (skipped for subagents)
+        let materialize_ephemeral_rollout = materialize_ephemeral_rollouts_for_debug();
         let thread_persistence_fut = async {
-            if config.ephemeral {
+            if config.ephemeral && !materialize_ephemeral_rollout {
                 Ok::<_, anyhow::Error>(None)
             } else {
                 let live_thread = match &initial_history {
@@ -442,6 +452,7 @@ impl Session {
             "session_init.thread_persistence",
             otel.name = "session_init.thread_persistence",
             session_init.ephemeral = config.ephemeral,
+            session_init.materialize_ephemeral_rollout = materialize_ephemeral_rollout,
         ));
         let state_db_fut = async {
             if config.ephemeral {

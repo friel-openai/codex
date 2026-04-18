@@ -1706,15 +1706,17 @@ async fn parent_mcp_tool_snapshot_for_source(
 }
 
 fn fork_previous_response_id_enabled() -> bool {
-    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
-        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+    let value = std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV).ok();
+    fork_previous_response_id_value_enabled(value.as_deref())
 }
 
-fn fork_previous_response_id_value_enabled(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+fn fork_previous_response_id_value_enabled(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 async fn parent_response_continuation_for_source(

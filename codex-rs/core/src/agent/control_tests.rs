@@ -108,17 +108,22 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
 fn fork_previous_response_id_env_value_parses_truthy_values() {
     for value in ["1", "true", "TRUE", "yes", "on"] {
         assert!(
-            fork_previous_response_id_value_enabled(value),
+            fork_previous_response_id_value_enabled(Some(value)),
             "{value} should enable previous response forking"
         );
     }
 
     for value in ["", "0", "false", "off", "no", "enabled"] {
         assert!(
-            !fork_previous_response_id_value_enabled(value),
+            !fork_previous_response_id_value_enabled(Some(value)),
             "{value} should not enable previous response forking"
         );
     }
+}
+
+#[test]
+fn fork_previous_response_id_is_enabled_by_default() {
+    assert!(fork_previous_response_id_value_enabled(/*value*/ None));
 }
 
 #[tokio::test]

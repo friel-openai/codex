@@ -9,6 +9,9 @@ use super::*;
 use crate::app_event::ThreadGoalSetMode;
 use crate::bottom_pane::prompt_args::parse_slash_name;
 use crate::bottom_pane::slash_commands;
+use crate::terminal_multiplexer::fork_command_usage;
+use crate::terminal_multiplexer::fork_pane_options;
+use crate::terminal_multiplexer::parse_fork_pane_placement;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SlashCommandDispatchSource {
@@ -145,7 +148,8 @@ impl ChatWidget {
                 self.app_event_tx.send(AppEvent::OpenResumePicker);
             }
             SlashCommand::Fork => {
-                self.app_event_tx.send(AppEvent::ForkCurrentSession);
+                let terminal_info = terminal_info();
+                self.dispatch_fork_command(terminal_info.multiplexer.as_ref());
             }
             SlashCommand::Init => {
                 let init_target = self.config.cwd.join(DEFAULT_AGENTS_MD_FILENAME);
@@ -722,6 +726,18 @@ impl ChatWidget {
                 self.app_event_tx
                     .send(AppEvent::ResumeSessionByIdOrName(args));
             }
+            SlashCommand::Fork => {
+                let mut parts = trimmed.split_whitespace();
+                let placement = parts.next().and_then(parse_fork_pane_placement);
+                if placement.is_none() || parts.next().is_some() {
+                    self.add_error_message(fork_command_usage(
+                        terminal_info().multiplexer.as_ref(),
+                    ));
+                } else {
+                    self.app_event_tx
+                        .send(AppEvent::ForkCurrentSession { placement });
+                }
+            }
             SlashCommand::SandboxReadRoot if !trimmed.is_empty() => {
                 self.app_event_tx
                     .send(AppEvent::BeginWindowsSandboxGrantReadRoot { path: args });
@@ -810,6 +826,43 @@ impl ChatWidget {
             },
         );
         self.queued_command_drain_result(cmd)
+    }
+
+    pub(super) fn dispatch_fork_command(&mut self, multiplexer: Option<&Multiplexer>) {
+        if let Some(multiplexer) = multiplexer {
+            self.open_fork_popup(multiplexer);
+        } else {
+            self.app_event_tx
+                .send(AppEvent::ForkCurrentSession { placement: None });
+        }
+    }
+
+    fn open_fork_popup(&mut self, multiplexer: &Multiplexer) {
+        let items = fork_pane_options(multiplexer)
+            .iter()
+            .map(|option| {
+                let placement = option.placement;
+                let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                    tx.send(AppEvent::ForkCurrentSession {
+                        placement: Some(placement),
+                    });
+                })];
+                SelectionItem {
+                    name: format!("/fork {}", option.name),
+                    description: Some(option.description.to_string()),
+                    actions,
+                    dismiss_on_select: true,
+                    ..Default::default()
+                }
+            })
+            .collect();
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Fork into a new pane".to_string()),
+            subtitle: Some("Choose where to open the fork.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
+            items,
+            ..Default::default()
+        });
     }
 
     fn builtin_command_flags(&self) -> slash_commands::BuiltinCommandFlags {
