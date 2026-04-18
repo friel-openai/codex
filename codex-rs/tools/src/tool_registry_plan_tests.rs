@@ -187,6 +187,53 @@ fn test_build_specs_collab_tools_enabled() {
 }
 
 #[test]
+fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
+    let model_info = model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    features.enable(Feature::AgentWatchdog);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    assert_contains_tool_names(&tools, &["watchdog"]);
+    assert_eq!(
+        namespace_function_names(&tools, "watchdog"),
+        vec!["watchdog_self_close".to_string(), "snooze".to_string()]
+    );
+    let snooze = find_namespace_function_tool(&tools, "watchdog", "snooze");
+    assert_eq!(snooze.defer_loading, Some(true));
+    let self_close = find_namespace_function_tool(&tools, "watchdog", "watchdog_self_close");
+    assert_eq!(self_close.defer_loading, Some(true));
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::new(Some("watchdog".to_string()), "snooze".to_string())
+            && handler.kind == ToolHandlerKind::WatchdogSnooze
+    }));
+    assert!(handlers.iter().any(|handler| {
+        handler.name
+            == ToolName::new(
+                Some("watchdog".to_string()),
+                "watchdog_self_close".to_string(),
+            )
+            && handler.kind == ToolHandlerKind::WatchdogSelfClose
+    }));
+}
+
+#[test]
 fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     let model_info = model_info();
     let mut features = Features::with_defaults();

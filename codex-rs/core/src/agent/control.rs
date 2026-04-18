@@ -707,10 +707,13 @@ impl AgentControl {
         let Some(message) = sanitize_watchdog_wakeup_message(message) else {
             return Ok(String::new());
         };
+        let watchdog_path = AgentPath::root()
+            .join("watchdog")
+            .unwrap_or_else(|_| AgentPath::root());
         self.send_inter_agent_communication(
             owner_thread_id,
             InterAgentCommunication::new(
-                AgentPath::try_from("/root/watchdog").expect("valid watchdog path"),
+                watchdog_path,
                 AgentPath::root(),
                 Vec::new(),
                 message,
@@ -776,11 +779,72 @@ impl AgentControl {
         watchdogs.unregister_for_owner(owner_thread_id).await
     }
 
+    pub(crate) async fn unregister_watchdog_handle(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> Option<RemovedWatchdog> {
+        let watchdogs = self.watchdogs.as_ref()?;
+        watchdogs.unregister_handle(target_thread_id).await
+    }
+
     pub(crate) async fn is_watchdog_handle(&self, target_thread_id: ThreadId) -> bool {
         let Some(watchdogs) = self.watchdogs.as_ref() else {
             return false;
         };
         watchdogs.is_watchdog_handle(target_thread_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_watchdog_active_helper_for_tests(
+        &self,
+        target_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+    ) {
+        if let Some(watchdogs) = self.watchdogs.as_ref() {
+            watchdogs
+                .set_active_helper_for_tests(target_thread_id, helper_thread_id)
+                .await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn watchdog_helper_is_suppressed_for_tests(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> bool {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return false;
+        };
+        watchdogs
+            .helper_is_suppressed_for_tests(helper_thread_id)
+            .await
+    }
+
+    pub(crate) async fn watchdog_owner_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let watchdogs = self.watchdogs.as_ref()?;
+        watchdogs.owner_for_active_helper(helper_thread_id).await
+    }
+
+    pub(crate) async fn watchdog_target_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let watchdogs = self.watchdogs.as_ref()?;
+        watchdogs.target_for_active_helper(helper_thread_id).await
+    }
+
+    pub(crate) async fn snooze_watchdog_helper(
+        &self,
+        helper_thread_id: ThreadId,
+        delay_seconds: Option<u64>,
+    ) -> Option<crate::agent::watchdog::WatchdogSnoozeResult> {
+        let watchdogs = self.watchdogs.as_ref()?;
+        watchdogs
+            .snooze_active_helper(helper_thread_id, delay_seconds)
+            .await
     }
 
     fn watchdog_manager(&self) -> CodexResult<&Arc<WatchdogManager>> {
@@ -793,6 +857,11 @@ impl AgentControl {
     /// agent and any live descendants reached from the in-memory tree.
     pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
+        if let Some(removed_watchdog) = self.unregister_watchdog_handle(agent_id).await
+            && let Some(helper_id) = removed_watchdog.active_helper_id
+        {
+            let _ = self.shutdown_live_agent(helper_id).await;
+        }
         if let Ok(thread) = state.get_thread(agent_id).await
             && let Some(state_db_ctx) = thread.state_db()
             && let Err(err) = state_db_ctx
