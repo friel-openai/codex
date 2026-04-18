@@ -503,6 +503,105 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 }
 
 #[tokio::test]
+async fn send_watchdog_wakeup_queues_mailbox_message_for_root() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, "Watchdog report: checks are green.".to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(!submission_id.is_empty());
+
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "Watchdog report: checks are green.".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let captured = harness.manager.captured_ops().into_iter().find(|entry| {
+        *entry
+            == (
+                thread_id,
+                Op::InterAgentCommunication {
+                    communication: expected.clone(),
+                },
+            )
+    });
+    assert_eq!(
+        captured,
+        Some((
+            thread_id,
+            Op::InterAgentCommunication {
+                communication: expected,
+            },
+        ))
+    );
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_strips_helper_prompt_scaffold() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+    let message = "# You are a Subagent\n\n\
+        More importantly, you are a **watchdog check-in agent**.\n\
+        Keep the root agent unblocked.\n\n\
+        Target agent id: 019cc0e8-38b6-7493-8e31-73a64c5843b6\n\n\
+        AUTOPLAN_WATCHDOG_REPORT\n\
+        required_action: rerun CI";
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, message.to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(!submission_id.is_empty());
+
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "AUTOPLAN_WATCHDOG_REPORT\nrequired_action: rerun CI".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let captured = harness.manager.captured_ops().into_iter().any(|entry| {
+        entry
+            == (
+                thread_id,
+                Op::InterAgentCommunication {
+                    communication: expected.clone(),
+                },
+            )
+    });
+    assert!(captured);
+}
+
+#[tokio::test]
+async fn send_watchdog_wakeup_ignores_scaffold_without_report() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, _thread) = harness.start_thread().await;
+    let message = "# You are a Subagent\n\n\
+        More importantly, you are a **watchdog check-in agent**.\n\
+        Target agent id: 019cc0e8-38b6-7493-8e31-73a64c5843b6";
+
+    let submission_id = harness
+        .control
+        .send_watchdog_wakeup(thread_id, message.to_string())
+        .await
+        .expect("send_watchdog_wakeup should succeed");
+    assert!(submission_id.is_empty());
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(id, op)| id == thread_id && matches!(op, Op::InterAgentCommunication { .. }))
+    );
+}
+
+#[tokio::test]
 async fn append_message_records_assistant_message() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, thread) = harness.start_thread().await;
