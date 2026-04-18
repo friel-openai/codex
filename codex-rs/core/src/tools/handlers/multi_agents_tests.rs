@@ -1,5 +1,6 @@
 use super::*;
 use crate::ThreadManager;
+use crate::agent::WatchdogRegistration;
 use crate::config::AgentRoleConfig;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
@@ -572,6 +573,186 @@ async fn spawn_agent_watchdog_role_returns_inert_handle() {
         .collect::<Vec<_>>();
     assert_eq!(ops_for_agent, vec![Op::Interrupt]);
     assert!(agent_control.is_watchdog_handle(agent_id).await);
+}
+
+#[tokio::test]
+async fn watchdog_snooze_rejects_non_watchdog_thread() {
+    let (session, turn) = make_session_and_context().await;
+
+    let err = WatchdogSnoozeHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "snooze",
+            function_payload(json!({"delay_seconds": 60})),
+        ))
+        .await
+        .expect_err("non-watchdog thread should not snooze");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "watchdog.snooze is only available in watchdog check-in threads.".to_string(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    let owner = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("owner thread should start");
+    let target = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog handle should start");
+    let helper_thread_id = session.conversation_id;
+    session.services.agent_control = agent_control.clone();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config.clone());
+
+    agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id: owner.thread_id,
+            target_thread_id: target.thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+    agent_control
+        .set_watchdog_active_helper_for_tests(target.thread_id, helper_thread_id)
+        .await;
+
+    let output = WatchdogSnoozeHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "snooze",
+            function_payload(json!({"delay_seconds": 5})),
+        ))
+        .await
+        .expect("watchdog helper should snooze");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("snooze result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result["target_thread_id"], target.thread_id.to_string());
+    assert_eq!(result["delay_seconds"], 30);
+    assert_eq!(
+        agent_control
+            .watchdog_target_for_active_helper(helper_thread_id)
+            .await,
+        None
+    );
+    assert!(
+        agent_control
+            .watchdog_helper_is_suppressed_for_tests(helper_thread_id)
+            .await
+    );
+}
+
+#[tokio::test]
+async fn watchdog_self_close_rejects_non_watchdog_thread() {
+    let (session, turn) = make_session_and_context().await;
+
+    let err = WatchdogSelfCloseHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "watchdog_self_close",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect_err("non-watchdog thread should not self-close");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "watchdog_self_close is only available in watchdog check-in threads.".to_string(),
+        )
+    );
+}
+
+#[tokio::test]
+async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    let owner = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("owner thread should start");
+    let target = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog handle should start");
+    let helper_thread_id = session.conversation_id;
+    session.services.agent_control = agent_control.clone();
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config.clone());
+
+    agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id: owner.thread_id,
+            target_thread_id: target.thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+    agent_control
+        .set_watchdog_active_helper_for_tests(target.thread_id, helper_thread_id)
+        .await;
+
+    let output = WatchdogSelfCloseHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "watchdog_self_close",
+            function_payload(json!({"message": "watchdog done"})),
+        ))
+        .await
+        .expect("watchdog helper should self-close");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("self-close result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result["previous_status"], json!("pending_init"));
+    assert!(!agent_control.is_watchdog_handle(target.thread_id).await);
+    assert_eq!(
+        agent_control.get_status(target.thread_id).await,
+        AgentStatus::NotFound
+    );
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "watchdog done".to_string(),
+        /*trigger_turn*/ true,
+    );
+    assert!(manager.captured_ops().into_iter().any(|(thread_id, op)| {
+        thread_id == owner.thread_id
+            && matches!(op, Op::InterAgentCommunication { communication } if communication == expected)
+    }));
 }
 
 #[tokio::test]
