@@ -248,6 +248,17 @@ impl WatchdogManager {
             if !is_final(&helper_status) {
                 return;
             }
+            if let AgentStatus::Completed(Some(message)) = helper_status
+                && let Err(err) = control_for_spawn
+                    .send_watchdog_wakeup(snapshot.owner_thread_id, message)
+                    .await
+            {
+                warn!(
+                    helper_id = %helper_id,
+                    owner_thread_id = %snapshot.owner_thread_id,
+                    "watchdog helper forward failed: {err}"
+                );
+            }
             let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
             self.update_after_spawn(target_thread_id, generation, now, None)
                 .await;
@@ -267,12 +278,13 @@ impl WatchdogManager {
         });
         let mut helper_config = snapshot.config.clone();
         helper_config.ephemeral = true;
+        let helper_prompt = watchdog_helper_prompt(snapshot.owner_thread_id, &snapshot.prompt);
         let spawn_result = control_for_spawn
             .spawn_agent_with_metadata(
                 helper_config,
                 Op::UserInput {
                     items: vec![UserInput::Text {
-                        text: snapshot.prompt,
+                        text: helper_prompt,
                         text_elements: Vec::new(),
                     }],
                     final_output_json_schema: None,
@@ -422,4 +434,27 @@ fn interval_duration(interval_s: i64) -> CodexResult<Duration> {
 
 fn tick_duration() -> Duration {
     Duration::from_secs(WATCHDOG_TICK_SECONDS as u64)
+}
+
+fn watchdog_helper_prompt(owner_thread_id: ThreadId, prompt: &str) -> String {
+    if prompt.trim().is_empty() {
+        format!("Target agent id: {owner_thread_id}")
+    } else {
+        format!("Target agent id: {owner_thread_id}\n\n{prompt}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::watchdog_helper_prompt;
+    use codex_protocol::ThreadId;
+
+    #[test]
+    fn watchdog_helper_prompt_includes_owner_and_task() {
+        let owner_thread_id = ThreadId::default();
+        assert_eq!(
+            watchdog_helper_prompt(owner_thread_id, "check in"),
+            format!("Target agent id: {owner_thread_id}\n\ncheck in")
+        );
+    }
 }
