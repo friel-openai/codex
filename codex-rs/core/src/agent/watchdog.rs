@@ -13,6 +13,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
@@ -24,6 +25,8 @@ use tokio::time::Instant;
 use tracing::warn;
 
 const WATCHDOG_TICK_SECONDS: i64 = 1;
+const WATCHDOG_MIN_SNOOZE_SECONDS: u64 = 30;
+const WATCHDOG_MAX_SNOOZE_SECONDS: u64 = 60 * 60;
 
 #[derive(Clone)]
 pub(crate) struct WatchdogRegistration {
@@ -46,6 +49,7 @@ struct WatchdogEntry {
     interval: Duration,
     last_trigger: Instant,
     active_helper_id: Option<ThreadId>,
+    snoozed_until: Option<Instant>,
     owner_idle_since: Option<Instant>,
     owner_was_running: bool,
     force_due_once: bool,
@@ -56,6 +60,7 @@ pub(crate) struct WatchdogManager {
     manager: Weak<ThreadManagerState>,
     state: Arc<AgentRegistry>,
     registrations: Mutex<HashMap<ThreadId, WatchdogEntry>>,
+    suppressed_helpers: Mutex<HashSet<ThreadId>>,
     started: AtomicBool,
     next_generation: AtomicI64,
 }
@@ -66,6 +71,7 @@ impl WatchdogManager {
             manager,
             state,
             registrations: Mutex::new(HashMap::new()),
+            suppressed_helpers: Mutex::new(HashSet::new()),
             started: AtomicBool::new(false),
             next_generation: AtomicI64::new(1),
         })
@@ -108,6 +114,7 @@ impl WatchdogManager {
             interval,
             last_trigger: now,
             active_helper_id: None,
+            snoozed_until: None,
             owner_idle_since: Some(now),
             owner_was_running: false,
             force_due_once: false,
@@ -126,6 +133,9 @@ impl WatchdogManager {
         let mut superseded = Vec::new();
         for superseded_target in superseded_targets {
             if let Some(removed) = registrations.remove(&superseded_target) {
+                if let Some(helper_id) = removed.active_helper_id {
+                    self.suppressed_helpers.lock().await.remove(&helper_id);
+                }
                 superseded.push(RemovedWatchdog {
                     target_thread_id: superseded_target,
                     active_helper_id: removed.active_helper_id,
@@ -141,23 +151,32 @@ impl WatchdogManager {
         owner_thread_id: ThreadId,
     ) -> Vec<RemovedWatchdog> {
         let mut registrations = self.registrations.lock().await;
-        let targets = registrations
-            .iter()
-            .filter_map(|(target_thread_id, entry)| {
-                (entry.registration.owner_thread_id == owner_thread_id).then_some(*target_thread_id)
+        let mut removed = Vec::new();
+        registrations.retain(|target_thread_id, entry| {
+            if entry.registration.owner_thread_id == owner_thread_id {
+                removed.push(RemovedWatchdog {
+                    target_thread_id: *target_thread_id,
+                    active_helper_id: entry.active_helper_id,
+                });
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    pub(crate) async fn unregister_handle(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> Option<RemovedWatchdog> {
+        let mut registrations = self.registrations.lock().await;
+        registrations
+            .remove(&target_thread_id)
+            .map(|removed| RemovedWatchdog {
+                target_thread_id,
+                active_helper_id: removed.active_helper_id,
             })
-            .collect::<Vec<_>>();
-        targets
-            .into_iter()
-            .filter_map(|target_thread_id| {
-                registrations
-                    .remove(&target_thread_id)
-                    .map(|removed| RemovedWatchdog {
-                        target_thread_id,
-                        active_helper_id: removed.active_helper_id,
-                    })
-            })
-            .collect()
     }
 
     pub(crate) async fn is_watchdog_handle(&self, target_thread_id: ThreadId) -> bool {
@@ -165,6 +184,38 @@ impl WatchdogManager {
             .lock()
             .await
             .contains_key(&target_thread_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_active_helper_for_tests(
+        &self,
+        target_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+    ) {
+        if let Some(entry) = self.registrations.lock().await.get_mut(&target_thread_id) {
+            entry.active_helper_id = Some(helper_thread_id);
+        }
+    }
+
+    pub(crate) async fn owner_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let registrations = self.registrations.lock().await;
+        registrations.values().find_map(|entry| {
+            (entry.active_helper_id == Some(helper_thread_id))
+                .then_some(entry.registration.owner_thread_id)
+        })
+    }
+
+    pub(crate) async fn target_for_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let registrations = self.registrations.lock().await;
+        registrations.iter().find_map(|(target_thread_id, entry)| {
+            (entry.active_helper_id == Some(helper_thread_id)).then_some(*target_thread_id)
+        })
     }
 
     async fn run_loop(self: Arc<Self>) {
@@ -248,7 +299,9 @@ impl WatchdogManager {
             if !is_final(&helper_status) {
                 return;
             }
+            let helper_suppressed = self.take_suppressed_helper(helper_id).await;
             if let AgentStatus::Completed(Some(message)) = helper_status
+                && !helper_suppressed
                 && let Err(err) = control_for_spawn
                     .send_watchdog_wakeup(snapshot.owner_thread_id, message)
                     .await
@@ -260,9 +313,22 @@ impl WatchdogManager {
                 );
             }
             let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
-            self.update_after_spawn(target_thread_id, generation, now, None)
-                .await;
+            self.update_after_spawn(
+                target_thread_id,
+                generation,
+                now,
+                /*active_helper_id*/ None,
+            )
+            .await;
             return;
+        }
+
+        if let Some(snoozed_until) = snapshot.snoozed_until {
+            if now < snoozed_until {
+                return;
+            }
+            self.clear_snooze_if_generation(target_thread_id, generation)
+                .await;
         }
 
         if !force_due && now.duration_since(snapshot.last_trigger) < snapshot.interval {
@@ -302,8 +368,13 @@ impl WatchdogManager {
             }
             Err(err) => {
                 warn!("watchdog spawn failed for target {target_thread_id}: {err}");
-                self.update_after_spawn(target_thread_id, generation, now, None)
-                    .await;
+                self.update_after_spawn(
+                    target_thread_id,
+                    generation,
+                    now,
+                    /*active_helper_id*/ None,
+                )
+                .await;
             }
         }
     }
@@ -326,6 +397,7 @@ impl WatchdogManager {
             interval: entry.interval,
             last_trigger: entry.last_trigger,
             active_helper_id: entry.active_helper_id,
+            snoozed_until: entry.snoozed_until,
             owner_idle_since: entry.owner_idle_since,
         })
     }
@@ -344,6 +416,7 @@ impl WatchdogManager {
         }
         if owner_running {
             entry.owner_idle_since = None;
+            entry.snoozed_until = None;
             entry.owner_was_running = true;
             return None;
         }
@@ -370,6 +443,59 @@ impl WatchdogManager {
         true
     }
 
+    async fn clear_snooze_if_generation(&self, target_thread_id: ThreadId, generation: i64) {
+        let mut registrations = self.registrations.lock().await;
+        let Some(entry) = registrations.get_mut(&target_thread_id) else {
+            return;
+        };
+        if entry.generation == generation {
+            entry.snoozed_until = None;
+        }
+    }
+
+    pub(crate) async fn take_suppressed_helper(&self, helper_thread_id: ThreadId) -> bool {
+        self.suppressed_helpers
+            .lock()
+            .await
+            .remove(&helper_thread_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn helper_is_suppressed_for_tests(&self, helper_thread_id: ThreadId) -> bool {
+        self.suppressed_helpers
+            .lock()
+            .await
+            .contains(&helper_thread_id)
+    }
+
+    pub(crate) async fn snooze_active_helper(
+        &self,
+        helper_thread_id: ThreadId,
+        requested_delay_seconds: Option<u64>,
+    ) -> Option<WatchdogSnoozeResult> {
+        let mut registrations = self.registrations.lock().await;
+        let (target_thread_id, entry) =
+            registrations
+                .iter_mut()
+                .find_map(|(target_thread_id, entry)| {
+                    (entry.active_helper_id == Some(helper_thread_id))
+                        .then_some((*target_thread_id, entry))
+                })?;
+        let delay_seconds = requested_delay_seconds
+            .map(|seconds| seconds.clamp(WATCHDOG_MIN_SNOOZE_SECONDS, WATCHDOG_MAX_SNOOZE_SECONDS))
+            .unwrap_or_else(|| entry.interval.as_secs().max(1));
+        entry.snoozed_until = Some(Instant::now() + Duration::from_secs(delay_seconds));
+        entry.active_helper_id = None;
+        self.suppressed_helpers
+            .lock()
+            .await
+            .insert(helper_thread_id);
+        Some(WatchdogSnoozeResult {
+            target_thread_id,
+            delay_seconds,
+        })
+    }
+
     async fn update_after_spawn(
         &self,
         target_thread_id: ThreadId,
@@ -387,7 +513,14 @@ impl WatchdogManager {
         entry.last_trigger = now;
         entry.active_helper_id = active_helper_id;
         entry.owner_idle_since = Some(now);
+        entry.snoozed_until = None;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct WatchdogSnoozeResult {
+    pub(crate) target_thread_id: ThreadId,
+    pub(crate) delay_seconds: u64,
 }
 
 #[derive(Clone)]
@@ -399,6 +532,7 @@ struct WatchdogSnapshot {
     interval: Duration,
     last_trigger: Instant,
     active_helper_id: Option<ThreadId>,
+    snoozed_until: Option<Instant>,
     owner_idle_since: Option<Instant>,
 }
 
