@@ -542,13 +542,7 @@ fn is_running(status: &AgentStatus) -> bool {
 }
 
 fn is_watchdog_terminated(status: &AgentStatus) -> bool {
-    matches!(
-        status,
-        AgentStatus::Completed(_)
-            | AgentStatus::Errored(_)
-            | AgentStatus::Shutdown
-            | AgentStatus::NotFound
-    )
+    matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound)
 }
 
 async fn get_status(manager_state: &Arc<ThreadManagerState>, thread_id: ThreadId) -> AgentStatus {
@@ -591,5 +585,24 @@ mod tests {
             watchdog_helper_prompt(owner_thread_id, "check in"),
             format!("Target agent id: {owner_thread_id}\n\ncheck in")
         );
+    }
+
+    #[test]
+    fn owner_completed_status_does_not_terminate_watchdog() {
+        assert!(!super::is_watchdog_terminated(
+            &codex_protocol::protocol::AgentStatus::Completed(None)
+        ));
+        assert!(!super::is_watchdog_terminated(
+            &codex_protocol::protocol::AgentStatus::Interrupted
+        ));
+        assert!(!super::is_watchdog_terminated(
+            &codex_protocol::protocol::AgentStatus::Errored("turn failed".to_string())
+        ));
+        assert!(super::is_watchdog_terminated(
+            &codex_protocol::protocol::AgentStatus::Shutdown
+        ));
+        assert!(super::is_watchdog_terminated(
+            &codex_protocol::protocol::AgentStatus::NotFound
+        ));
     }
 }
