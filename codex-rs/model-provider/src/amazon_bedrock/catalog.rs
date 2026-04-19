@@ -57,6 +57,7 @@ fn bundled_gpt_5_4_model() -> ModelInfo {
 fn bedrock_model(slug: &str, display_name: &str, priority: i32) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
+        request_model: None,
         display_name: display_name.to_string(),
         description: Some(display_name.to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),

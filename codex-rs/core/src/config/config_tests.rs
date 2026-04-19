@@ -12,6 +12,7 @@ use codex_config::config_toml::AgentRoleToml;
 use codex_config::config_toml::AgentsToml;
 use codex_config::config_toml::AutoReviewToml;
 use codex_config::config_toml::ConfigToml;
+use codex_config::config_toml::CustomModelToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::config_toml::RealtimeAudioConfig;
 use codex_config::config_toml::RealtimeConfig;
@@ -4977,6 +4978,71 @@ async fn model_catalog_json_loads_from_path() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn custom_models_load_from_config_toml() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        custom_models: vec![CustomModelToml {
+            name: "frontier-local".to_string(),
+            model: "gpt-5.4".to_string(),
+            model_context_window: Some(123_456),
+            model_auto_compact_token_limit: Some(100_000),
+        }],
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    let custom = config
+        .custom_models
+        .get("frontier-local")
+        .expect("custom alias should load");
+    assert_eq!(custom.model, "gpt-5.4");
+    assert_eq!(custom.model_context_window, Some(123_456));
+    assert_eq!(custom.model_auto_compact_token_limit, Some(100_000));
+    Ok(())
+}
+
+#[tokio::test]
+async fn custom_models_reject_duplicate_aliases() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        custom_models: vec![
+            CustomModelToml {
+                name: "alias".to_string(),
+                model: "gpt-5.4".to_string(),
+                ..Default::default()
+            },
+            CustomModelToml {
+                name: "alias".to_string(),
+                model: "gpt-5.3".to_string(),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("duplicate custom aliases should fail config load");
+
+    assert_eq!(err.kind(), ErrorKind::InvalidInput);
+    assert!(
+        err.to_string()
+            .contains("duplicate custom model alias: alias")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let catalog_path = codex_home.path().join("catalog.json");
@@ -5198,6 +5264,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             model_reasoning_summary: Some(ReasoningSummary::Detailed),
             model_supports_reasoning_summaries: None,
             model_catalog: None,
+            custom_models: HashMap::new(),
             model_verbosity: None,
             personality: Some(Personality::Pragmatic),
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5395,6 +5462,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        custom_models: HashMap::new(),
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5546,6 +5614,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         model_reasoning_summary: None,
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        custom_models: HashMap::new(),
         model_verbosity: None,
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
@@ -5682,6 +5751,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         model_reasoning_summary: Some(ReasoningSummary::Detailed),
         model_supports_reasoning_summaries: None,
         model_catalog: None,
+        custom_models: HashMap::new(),
         model_verbosity: Some(Verbosity::High),
         personality: Some(Personality::Pragmatic),
         chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
