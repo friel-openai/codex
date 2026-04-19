@@ -519,6 +519,59 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
 }
 
 #[tokio::test]
+async fn subagent_panel_mounts_watchdog_spawn() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("watch-buildpando-rpc-context-tracing-spike".to_string()),
+        Some("watchdog".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some(
+                    "Watch /build/pando-rpc-context-tracing-spike work on Pando RPC accounting tracing spike. Goal: end-to-end no-explicit...".to_string(),
+                ),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("subagent_panel_mounts_watchdog_spawn", screen);
+}
+
+#[tokio::test]
 async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
