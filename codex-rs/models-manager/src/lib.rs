@@ -10,6 +10,7 @@ pub use codex_login::AuthManager;
 pub use codex_login::CodexAuth;
 pub use codex_model_provider_info::ModelProviderInfo;
 pub use codex_model_provider_info::WireApi;
+pub use config::CustomModelConfig;
 pub use config::ModelsManagerConfig;
 
 /// Load the bundled model catalog shipped with `codex-models-manager`.

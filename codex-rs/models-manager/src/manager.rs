@@ -1,6 +1,7 @@
 use super::cache::ModelsCacheManager;
 use crate::collaboration_mode_presets::CollaborationModesConfig;
 use crate::collaboration_mode_presets::builtin_collaboration_mode_presets;
+use crate::config::CustomModelConfig;
 use crate::config::ModelsManagerConfig;
 use crate::model_info;
 use codex_api::ModelsClient;
@@ -30,6 +31,8 @@ use codex_protocol::openai_models::ModelsResponse;
 use codex_response_debug_context::extract_response_debug_context;
 use codex_response_debug_context::telemetry_transport_error_message;
 use http::HeaderMap;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -177,6 +180,7 @@ enum CatalogMode {
 #[derive(Debug)]
 pub struct ModelsManager {
     remote_models: RwLock<Vec<ModelInfo>>,
+    custom_models: HashMap<String, CustomModelConfig>,
     catalog_mode: CatalogMode,
     collaboration_modes_config: CollaborationModesConfig,
     etag: RwLock<Option<String>>,
@@ -216,6 +220,24 @@ impl ModelsManager {
         collaboration_modes_config: CollaborationModesConfig,
         provider_info: ModelProviderInfo,
     ) -> Self {
+        Self::new_with_provider_and_custom_models(
+            codex_home,
+            auth_manager,
+            model_catalog,
+            HashMap::new(),
+            collaboration_modes_config,
+            provider_info,
+        )
+    }
+
+    pub fn new_with_provider_and_custom_models(
+        codex_home: PathBuf,
+        auth_manager: Arc<AuthManager>,
+        model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
+        collaboration_modes_config: CollaborationModesConfig,
+        provider_info: ModelProviderInfo,
+    ) -> Self {
         let model_provider = create_model_provider(provider_info, Some(auth_manager));
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
@@ -229,6 +251,7 @@ impl ModelsManager {
             .unwrap_or_else(|| Self::load_remote_models_from_file().unwrap_or_default());
         Self {
             remote_models: RwLock::new(remote_models),
+            custom_models,
             catalog_mode,
             collaboration_modes_config,
             etag: RwLock::new(None),
@@ -314,7 +337,7 @@ impl ModelsManager {
     #[instrument(level = "info", skip(self, config), fields(model = model))]
     pub async fn get_model_info(&self, model: &str, config: &ModelsManagerConfig) -> ModelInfo {
         let remote_models = self.get_remote_models().await;
-        Self::construct_model_info_from_candidates(model, &remote_models, config)
+        self.construct_model_info_from_candidates(model, &remote_models, config)
     }
 
     fn find_model_by_longest_prefix(model: &str, candidates: &[ModelInfo]) -> Option<ModelInfo> {
@@ -354,10 +377,42 @@ impl ModelsManager {
     }
 
     fn construct_model_info_from_candidates(
+        &self,
         model: &str,
         candidates: &[ModelInfo],
         config: &ModelsManagerConfig,
     ) -> ModelInfo {
+        let custom_model = config
+            .custom_models
+            .get(model)
+            .or_else(|| self.custom_models.get(model));
+        Self::construct_model_info_from_candidates_with_custom(
+            model,
+            candidates,
+            config,
+            custom_model,
+        )
+    }
+
+    fn construct_model_info_from_candidates_with_custom(
+        model: &str,
+        candidates: &[ModelInfo],
+        config: &ModelsManagerConfig,
+        custom_model: Option<&CustomModelConfig>,
+    ) -> ModelInfo {
+        if let Some(custom_model) = custom_model {
+            let mut config = config.clone();
+            config.model_context_window = custom_model
+                .model_context_window
+                .or(config.model_context_window);
+            config.model_auto_compact_token_limit = custom_model
+                .model_auto_compact_token_limit
+                .or(config.model_auto_compact_token_limit);
+            let model_info =
+                Self::construct_model_info_for_custom_alias(model, custom_model, candidates);
+            return model_info::with_config_overrides(model_info, &config);
+        }
+
         // First use the normal longest-prefix match. If that misses, allow a narrowly scoped
         // retry for namespaced slugs like `custom/gpt-5.3-codex`.
         let remote = Self::find_model_by_longest_prefix(model, candidates)
@@ -365,6 +420,7 @@ impl ModelsManager {
         let model_info = if let Some(remote) = remote {
             ModelInfo {
                 slug: model.to_string(),
+                request_model: None,
                 used_fallback_model_metadata: false,
                 ..remote
             }
@@ -372,6 +428,30 @@ impl ModelsManager {
             model_info::model_info_from_slug(model)
         };
         model_info::with_config_overrides(model_info, config)
+    }
+
+    fn construct_model_info_for_custom_alias(
+        alias: &str,
+        custom_model: &CustomModelConfig,
+        candidates: &[ModelInfo],
+    ) -> ModelInfo {
+        let remote = Self::find_model_by_longest_prefix(&custom_model.model, candidates)
+            .or_else(|| Self::find_model_by_namespaced_suffix(&custom_model.model, candidates));
+        if let Some(remote) = remote {
+            ModelInfo {
+                slug: alias.to_string(),
+                request_model: Some(custom_model.model.clone()),
+                display_name: alias.to_string(),
+                used_fallback_model_metadata: false,
+                ..remote
+            }
+        } else {
+            let mut fallback_model = model_info::model_info_from_slug(&custom_model.model);
+            fallback_model.slug = alias.to_string();
+            fallback_model.request_model = Some(custom_model.model.clone());
+            fallback_model.display_name = alias.to_string();
+            fallback_model
+        }
     }
 
     /// Refresh models if the provided ETag differs from the cached ETag.
@@ -525,7 +605,20 @@ impl ModelsManager {
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
         remote_models.sort_by(|a, b| a.priority.cmp(&b.priority));
 
-        let mut presets: Vec<ModelPreset> = remote_models.into_iter().map(Into::into).collect();
+        let mut presets: Vec<ModelPreset> = remote_models.iter().cloned().map(Into::into).collect();
+        let mut existing_models: HashSet<String> =
+            presets.iter().map(|preset| preset.model.clone()).collect();
+        let mut custom_presets = self
+            .custom_models
+            .iter()
+            .filter(|&(alias, _custom_model)| existing_models.insert(alias.clone()))
+            .map(|(alias, custom_model)| {
+                Self::construct_model_info_for_custom_alias(alias, custom_model, &remote_models)
+                    .into()
+            })
+            .collect::<Vec<ModelPreset>>();
+        custom_presets.sort_by(|left, right| left.model.cmp(&right.model));
+        presets.extend(custom_presets);
         let auth_mode = self
             .provider
             .auth_manager()
@@ -587,7 +680,12 @@ impl ModelsManager {
         } else {
             &[]
         };
-        Self::construct_model_info_from_candidates(model, candidates, config)
+        Self::construct_model_info_from_candidates_with_custom(
+            model,
+            candidates,
+            config,
+            config.custom_models.get(model),
+        )
     }
 }
 

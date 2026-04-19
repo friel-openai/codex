@@ -250,10 +250,11 @@ impl ThreadManager {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
                 thread_created_tx,
-                models_manager: Arc::new(ModelsManager::new_with_provider(
+                models_manager: Arc::new(ModelsManager::new_with_provider_and_custom_models(
                     codex_home.to_path_buf(),
                     auth_manager.clone(),
                     config.model_catalog.clone(),
+                    config.custom_models.clone(),
                     collaboration_modes_config,
                     openai_models_provider,
                 )),

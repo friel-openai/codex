@@ -303,6 +303,52 @@ async fn get_model_info_uses_custom_catalog() {
 }
 
 #[tokio::test]
+async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+    let codex_home = tempdir().expect("temp dir");
+    let mut custom_models = HashMap::new();
+    custom_models.insert(
+        "frontier-local".to_string(),
+        CustomModelConfig {
+            model: "gpt-real-preview".to_string(),
+            model_context_window: Some(123_456),
+            model_auto_compact_token_limit: Some(100_000),
+        },
+    );
+    let remote = remote_model("gpt-real", "Real", /*priority*/ 0);
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
+    let manager = ModelsManager::new_with_provider_and_custom_models(
+        codex_home.path().to_path_buf(),
+        auth_manager,
+        Some(ModelsResponse {
+            models: vec![remote],
+        }),
+        custom_models,
+        CollaborationModesConfig::default(),
+        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
+    );
+    let config = ModelsManagerConfig::default();
+
+    let model_info = manager.get_model_info("frontier-local", &config).await;
+
+    assert_eq!(model_info.slug, "frontier-local");
+    assert_eq!(
+        model_info.request_model.as_deref(),
+        Some("gpt-real-preview")
+    );
+    assert_eq!(model_info.display_name, "frontier-local");
+    assert_eq!(model_info.context_window, Some(123_456));
+    assert_eq!(model_info.auto_compact_token_limit, Some(100_000));
+    assert!(!model_info.used_fallback_model_metadata);
+
+    let available = manager.list_models(RefreshStrategy::Offline).await;
+    assert!(
+        available
+            .iter()
+            .any(|preset| preset.model == "frontier-local")
+    );
+}
+
+#[tokio::test]
 async fn get_model_info_matches_namespaced_suffix() {
     let codex_home = tempdir().expect("temp dir");
     let config = ModelsManagerConfig::default();
