@@ -117,7 +117,7 @@ impl WatchdogManager {
             snoozed_until: None,
             owner_idle_since: Some(now),
             owner_was_running: false,
-            force_due_once: false,
+            force_due_once: true,
             generation,
         };
 
@@ -276,16 +276,16 @@ impl WatchdogManager {
             return;
         }
 
-        let force_due = self
-            .take_force_due_if_generation(target_thread_id, generation)
-            .await;
-        let owner_running = is_running(&owner_status) && !force_due;
+        let owner_running = is_running(&owner_status);
         let owner_idle_since = self
             .update_owner_idle_state_if_generation(target_thread_id, generation, owner_running, now)
             .await;
         if owner_running {
             return;
         }
+        let force_due = self
+            .take_force_due_if_generation(target_thread_id, generation)
+            .await;
         let owner_idle_since = owner_idle_since.or(snapshot.owner_idle_since);
         let Some(owner_idle_since) = owner_idle_since else {
             return;
