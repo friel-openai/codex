@@ -13370,6 +13370,30 @@
           "type": "object"
         },
         {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "item": {
+              "$ref": "#/definitions/ResponseItem"
+            },
+            "type": {
+              "enum": [
+                "rawResponseItem"
+              ],
+              "title": "RawResponseItemThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "item",
+            "type"
+          ],
+          "title": "RawResponseItemThreadItem",
+          "type": "object"
+        },
+        {
           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
           "properties": {
             "id": {

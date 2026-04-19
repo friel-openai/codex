@@ -37,6 +37,7 @@ use codex_protocol::protocol::GuardianAssessmentEvent;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
 use codex_protocol::protocol::McpToolCallBeginEvent;
@@ -244,6 +245,13 @@ impl ThreadHistoryBuilder {
         };
 
         if role != "user" {
+            if InterAgentCommunication::is_message_content(content) {
+                let id = id.clone().unwrap_or_else(|| self.next_item_id());
+                self.ensure_turn().items.push(ThreadItem::RawResponseItem {
+                    id,
+                    item: item.clone(),
+                });
+            }
             return;
         }
 
@@ -1191,6 +1199,7 @@ impl From<&PendingTurn> for Turn {
 mod tests {
     use super::*;
     use crate::protocol::v2::CommandExecutionSource;
+    use codex_protocol::AgentPath;
     use codex_protocol::ThreadId;
     use codex_protocol::dynamic_tools::DynamicToolCallOutputContentItem as CoreDynamicToolCallOutputContentItem;
     use codex_protocol::items::HookPromptFragment as CoreHookPromptFragment;
@@ -1210,6 +1219,7 @@ mod tests {
     use codex_protocol::protocol::DynamicToolCallResponseEvent;
     use codex_protocol::protocol::ExecCommandEndEvent;
     use codex_protocol::protocol::ExecCommandSource;
+    use codex_protocol::protocol::InterAgentCommunication;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::McpToolCallEndEvent;
@@ -2825,6 +2835,99 @@ mod tests {
                 .into_iter()
                 .collect(),
             }
+        );
+    }
+
+    #[test]
+    fn reconstructs_inter_agent_raw_response_item_between_watchdog_spawn_and_close() {
+        let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let watchdog_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
+            .expect("valid watchdog thread id");
+        let communication = InterAgentCommunication::new(
+            AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+            AgentPath::root(),
+            Vec::new(),
+            "goodbye".to_string(),
+            /*trigger_turn*/ true,
+        );
+        let response_item: codex_protocol::models::ResponseItem =
+            communication.to_response_input_item().into();
+        let items = vec![
+            RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(
+                codex_protocol::protocol::CollabAgentSpawnEndEvent {
+                    call_id: "spawn-watchdog".into(),
+                    sender_thread_id,
+                    new_thread_id: Some(watchdog_thread_id),
+                    new_agent_nickname: Some("Boyle".into()),
+                    new_agent_role: Some("watchdog".into()),
+                    prompt: "Every time you start, respond with goodbye.".into(),
+                    model: "arcanine 1m".into(),
+                    reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
+                    status: AgentStatus::PendingInit,
+                },
+            )),
+            RolloutItem::ResponseItem(response_item.clone()),
+            RolloutItem::EventMsg(EventMsg::CollabCloseEnd(
+                codex_protocol::protocol::CollabCloseEndEvent {
+                    call_id: "watchdog-close".into(),
+                    sender_thread_id,
+                    receiver_thread_id: watchdog_thread_id,
+                    receiver_agent_nickname: Some("Boyle".into()),
+                    receiver_agent_role: Some("watchdog".into()),
+                    status: AgentStatus::Completed(Some("goodbye".into())),
+                },
+            )),
+        ];
+
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(
+            turns[0].items,
+            vec![
+                ThreadItem::CollabAgentToolCall {
+                    id: "spawn-watchdog".into(),
+                    tool: CollabAgentTool::SpawnAgent,
+                    status: CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                    prompt: Some("Every time you start, respond with goodbye.".into()),
+                    model: Some("arcanine 1m".into()),
+                    reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                    agents_states: [(
+                        watchdog_thread_id.to_string(),
+                        CollabAgentState {
+                            status: crate::protocol::v2::CollabAgentStatus::PendingInit,
+                            message: None,
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+                ThreadItem::RawResponseItem {
+                    id: "item-1".into(),
+                    item: response_item,
+                },
+                ThreadItem::CollabAgentToolCall {
+                    id: "watchdog-close".into(),
+                    tool: CollabAgentTool::CloseAgent,
+                    status: CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                    prompt: None,
+                    model: None,
+                    reasoning_effort: None,
+                    agents_states: [(
+                        watchdog_thread_id.to_string(),
+                        CollabAgentState {
+                            status: crate::protocol::v2::CollabAgentStatus::Completed,
+                            message: Some("goodbye".into()),
+                        },
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            ],
         );
     }
 

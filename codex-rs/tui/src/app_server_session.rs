@@ -1187,7 +1187,8 @@ fn thread_start_params_from_config(
         config: config_request_overrides_from_config(config),
         ephemeral: Some(config.ephemeral),
         session_start_source,
-        persist_extended_history: false,
+        experimental_raw_events: true,
+        persist_extended_history: true,
         ..ThreadStartParams::default()
     }
 }
@@ -1550,6 +1551,7 @@ mod tests {
                 .map(permissions_selection_from_active_profile)
         );
         assert_eq!(params.model_provider, Some(config.model_provider_id));
+        assert!(params.experimental_raw_events);
     }
 
     #[tokio::test]

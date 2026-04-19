@@ -77,6 +77,7 @@ use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
+use crate::subagent_panel::SubagentPanelRegistry;
 use crate::terminal_title::SetTerminalTitleResult;
 use crate::terminal_title::clear_terminal_title;
 use crate::terminal_title::set_terminal_title;
@@ -89,6 +90,8 @@ use codex_app_server_protocol::AddCreditsNudgeEmailStatus;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::CodexErrorInfo as AppServerCodexErrorInfo;
+use codex_app_server_protocol::CollabAgentState;
+use codex_app_server_protocol::CollabAgentStatus;
 use codex_app_server_protocol::CollabAgentTool;
 use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
@@ -141,6 +144,7 @@ use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_plugin::PluginCapabilitySummary;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::account::PlanType;
 use codex_protocol::approvals::GuardianAssessmentAction;
 use codex_protocol::approvals::GuardianAssessmentDecisionSource;
@@ -157,10 +161,13 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as UpdatePlanItemStatus;
+use codex_protocol::protocol::InterAgentCommunication;
+
 use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
@@ -204,6 +211,23 @@ const PLAN_MODE_REASONING_SCOPE_PLAN_ONLY: &str = "Apply to Plan mode override";
 const PLAN_MODE_REASONING_SCOPE_ALL_MODES: &str = "Apply to global default and Plan mode override";
 const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
+
+fn app_server_collab_state_to_core(state: &CollabAgentState) -> AgentStatus {
+    match state.status {
+        CollabAgentStatus::PendingInit => AgentStatus::PendingInit,
+        CollabAgentStatus::Running => AgentStatus::Running,
+        CollabAgentStatus::Interrupted => AgentStatus::Interrupted,
+        CollabAgentStatus::Completed => AgentStatus::Completed(state.message.clone()),
+        CollabAgentStatus::Errored => AgentStatus::Errored(
+            state
+                .message
+                .clone()
+                .unwrap_or_else(|| "Agent failed".to_string()),
+        ),
+        CollabAgentStatus::Shutdown => AgentStatus::Shutdown,
+        CollabAgentStatus::NotFound => AgentStatus::NotFound,
+    }
+}
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -428,6 +452,14 @@ fn is_unified_exec_source(source: ExecCommandSource) -> bool {
         source,
         ExecCommandSource::UnifiedExecStartup | ExecCommandSource::UnifiedExecInteraction
     )
+}
+
+fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
+    let ResponseItem::Message { content, .. } = item else {
+        return None;
+    };
+    let communication = InterAgentCommunication::from_message_content(content)?;
+    Some((communication.author.to_string(), communication.content))
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
@@ -737,6 +769,7 @@ pub(crate) struct ChatWidget {
     codex_op_target: CodexOpTarget,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
+    subagent_panel: Option<history_cell::SubagentStatusCell>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     ///
     /// The transcript overlay appends a cached "live tail" for the current active cell. Most
@@ -806,6 +839,7 @@ pub(crate) struct ChatWidget {
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, AgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
+    subagent_panel_registry: SubagentPanelRegistry,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
@@ -1011,6 +1045,7 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_display: Option<UserMessageDisplay>,
+    last_replayed_inter_agent_message: Option<(String, String)>,
     last_non_retry_error: Option<(String, String)>,
 }
 
@@ -1570,6 +1605,10 @@ impl ThreadItemRenderSource {
             Self::Live => None,
             Self::Replay(replay_kind) => Some(replay_kind),
         }
+    }
+
+    fn should_update_subagent_panel(self) -> bool {
+        !matches!(self, Self::Replay(ReplayKind::ResumeInitialMessages))
     }
 }
 
@@ -3952,7 +3991,38 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
+    fn refresh_subagent_panel(&mut self) {
+        self.subagent_panel = self.subagent_panel_registry.rebuild_panel();
+        self.request_redraw();
+    }
+
+    fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
+        let Some((sender, message)) = inter_agent_message_from_item(&item) else {
+            if from_replay {
+                self.last_replayed_inter_agent_message = None;
+            }
+            return;
+        };
+
+        let replay_key = (sender.clone(), message.clone());
+        if from_replay {
+            if self.last_replayed_inter_agent_message.as_ref() == Some(&replay_key) {
+                return;
+            }
+            self.last_replayed_inter_agent_message = Some(replay_key);
+        } else {
+            self.last_replayed_inter_agent_message = None;
+        }
+
+        let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
+        self.add_to_history(history_cell::new_info_event(
+            format!("Agent message: {message}"),
+            hint,
+        ));
+        self.request_redraw();
+    }
+
+    fn on_collab_agent_tool_call(&mut self, item: ThreadItem, update_subagent_panel: bool) {
         let ThreadItem::CollabAgentToolCall {
             id, tool, status, ..
         } = &item
@@ -3980,6 +4050,74 @@ impl ChatWidget {
             |thread_id| self.collab_agent_metadata(thread_id),
         ) {
             self.on_collab_event(cell);
+        }
+
+        if matches!(status, CollabAgentToolCallStatus::InProgress) {
+            return;
+        }
+
+        let ThreadItem::CollabAgentToolCall {
+            receiver_thread_ids,
+            prompt,
+            agents_states,
+            ..
+        } = &item
+        else {
+            return;
+        };
+        let first_receiver = receiver_thread_ids
+            .first()
+            .and_then(|thread_id| ThreadId::from_string(thread_id).ok());
+
+        match tool {
+            CollabAgentTool::SpawnAgent => {
+                if update_subagent_panel && let Some(receiver_thread_id) = first_receiver {
+                    let metadata = self.collab_agent_metadata(receiver_thread_id);
+                    let status = agents_states
+                        .get(&receiver_thread_id.to_string())
+                        .map(app_server_collab_state_to_core)
+                        .unwrap_or(AgentStatus::PendingInit);
+                    self.subagent_panel_registry.on_spawn(
+                        receiver_thread_id,
+                        metadata.agent_nickname,
+                        metadata.agent_role,
+                        prompt.as_deref().unwrap_or_default(),
+                        status,
+                    );
+                    self.refresh_subagent_panel();
+                }
+            }
+            CollabAgentTool::SendInput | CollabAgentTool::ResumeAgent => {
+                if update_subagent_panel && let Some(receiver_thread_id) = first_receiver {
+                    let status = agents_states
+                        .get(&receiver_thread_id.to_string())
+                        .map(app_server_collab_state_to_core)
+                        .unwrap_or_else(|| AgentStatus::Errored("Agent interaction failed".into()));
+                    self.subagent_panel_registry
+                        .update_status(receiver_thread_id, status);
+                    self.refresh_subagent_panel();
+                }
+            }
+            CollabAgentTool::Wait => {
+                if update_subagent_panel {
+                    for receiver_thread_id in receiver_thread_ids {
+                        if let Ok(thread_id) = ThreadId::from_string(receiver_thread_id)
+                            && let Some(status) = agents_states
+                                .get(receiver_thread_id)
+                                .map(app_server_collab_state_to_core)
+                        {
+                            self.subagent_panel_registry.update_status(thread_id, status);
+                        }
+                    }
+                    self.refresh_subagent_panel();
+                }
+            }
+            CollabAgentTool::CloseAgent => {
+                if update_subagent_panel && let Some(receiver_thread_id) = first_receiver {
+                    self.subagent_panel_registry.close(receiver_thread_id);
+                    self.refresh_subagent_panel();
+                }
+            }
         }
     }
 
@@ -4832,6 +4970,7 @@ impl ChatWidget {
             &chat_keymap.edit_queued_message,
             current_terminal_info,
         );
+        let animations_enabled = config.animations;
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -4847,6 +4986,7 @@ impl ChatWidget {
                 skills: None,
             }),
             active_cell,
+            subagent_panel: None,
             active_cell_revision: 0,
             config,
             effective_service_tier,
@@ -4878,6 +5018,7 @@ impl ChatWidget {
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
+            subagent_panel_registry: SubagentPanelRegistry::new(animations_enabled),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -4979,6 +5120,7 @@ impl ChatWidget {
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
             last_rendered_user_message_display: None,
+            last_replayed_inter_agent_message: None,
             last_non_retry_error: None,
         };
 
@@ -5999,6 +6141,9 @@ impl ChatWidget {
                     }),
                 });
             }
+            ThreadItem::RawResponseItem { item, .. } => {
+                self.on_raw_response_item(item, from_replay);
+            }
             ThreadItem::Plan { text, .. } => self.on_plan_item_completed(text),
             ThreadItem::Reasoning {
                 summary, content, ..
@@ -6067,17 +6212,20 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    agents_states,
+                },
+                render_source.should_update_subagent_panel(),
+            ),
             ThreadItem::DynamicToolCall { .. } => {}
         }
 
@@ -6191,6 +6339,9 @@ impl ChatWidget {
             }
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
+            }
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                self.on_raw_response_item(notification.item, from_replay);
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.on_agent_message_delta(notification.delta);
@@ -6342,7 +6493,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::FileChangePatchUpdated(_)
             | ServerNotification::McpToolCallProgress(_)
@@ -6439,17 +6589,20 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    agents_states,
+                },
+                !from_replay,
+            ),
             ThreadItem::EnteredReviewMode { review, .. } => {
                 if !from_replay {
                     self.enter_review_mode_with_hint(review, /*from_replay*/ false);
@@ -6541,6 +6694,8 @@ impl ChatWidget {
             action: action.into(),
         });
     }
+
+
 
     fn enter_review_mode_with_hint(&mut self, hint: String, from_replay: bool) {
         if self.pre_review_token_info.is_none() {
@@ -10790,9 +10945,16 @@ impl ChatWidget {
             }
             _ => RenderableItem::Owned(Box::new(())),
         };
+        let subagent_panel_renderable = match &self.subagent_panel {
+            Some(panel) => RenderableItem::Borrowed(panel).inset(Insets::tlbr(
+                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+            )),
+            None => RenderableItem::Owned(Box::new(())),
+        };
         let mut flex = FlexRenderable::new();
         flex.push(/*flex*/ 1, active_cell_renderable);
         flex.push(/*flex*/ 0, active_hook_cell_renderable);
+        flex.push(/*flex*/ 0, subagent_panel_renderable);
         flex.push(
             /*flex*/ 0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(

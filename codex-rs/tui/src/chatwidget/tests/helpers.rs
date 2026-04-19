@@ -183,11 +183,13 @@ pub(super) async fn make_chatwidget_manual(
     let current_collaboration_mode = base_mode;
     let active_collaboration_mask = collaboration_modes::default_mask(model_catalog.as_ref());
     let effective_service_tier = cfg.service_tier;
+    let animations_enabled = cfg.animations;
     let mut widget = ChatWidget {
         app_event_tx,
         codex_op_target: super::CodexOpTarget::Direct(op_tx),
         bottom_pane: bottom,
         active_cell: None,
+        subagent_panel: None,
         active_cell_revision: 0,
         config: cfg,
         effective_service_tier,
@@ -226,6 +228,9 @@ pub(super) async fn make_chatwidget_manual(
         running_commands: HashMap::new(),
         collab_agent_metadata: HashMap::new(),
         pending_collab_spawn_requests: HashMap::new(),
+        subagent_panel_registry: crate::subagent_panel::SubagentPanelRegistry::new(
+            animations_enabled,
+        ),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
         skills_initial_state: None,
@@ -321,6 +326,7 @@ pub(super) async fn make_chatwidget_manual(
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
         last_rendered_user_message_display: None,
+        last_replayed_inter_agent_message: None,
         last_non_retry_error: None,
     };
     widget.set_model(&resolved_model);
