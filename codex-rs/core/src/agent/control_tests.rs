@@ -343,6 +343,69 @@ async fn resume_agent_errors_when_manager_dropped() {
 }
 
 #[tokio::test]
+async fn watchdog_spawns_helper_after_owner_completes() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let helper_spawned = harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("check in"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            });
+            if helper_spawned {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper after the owner turn completes");
+}
+
+#[tokio::test]
 async fn send_input_errors_when_thread_missing() {
     let harness = AgentControlHarness::new().await;
     let thread_id = ThreadId::new();
