@@ -74,6 +74,7 @@ use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
+use crate::subagent_panel::SubagentPanelRegistry;
 use crate::terminal_title::SetTerminalTitleResult;
 use crate::terminal_title::clear_terminal_title;
 use crate::terminal_title::set_terminal_title;
@@ -804,6 +805,7 @@ pub(crate) struct ChatWidget {
     codex_op_target: CodexOpTarget,
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
+    subagent_panel: Option<history_cell::SubagentStatusCell>,
     /// Monotonic-ish counter used to invalidate transcript overlay caching.
     ///
     /// The transcript overlay appends a cached "live tail" for the current active cell. Most
@@ -872,6 +874,7 @@ pub(crate) struct ChatWidget {
     running_commands: HashMap<String, RunningCommand>,
     collab_agent_metadata: HashMap<ThreadId, CollabAgentMetadata>,
     pending_collab_spawn_requests: HashMap<String, multi_agents::SpawnRequestSummary>,
+    subagent_panel_registry: SubagentPanelRegistry,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
     skills_initial_state: Option<HashMap<AbsolutePathBuf, bool>>,
@@ -4520,6 +4523,11 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn refresh_subagent_panel(&mut self) {
+        self.subagent_panel = self.subagent_panel_registry.rebuild_panel();
+        self.request_redraw();
+    }
+
     fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
         let ThreadItem::CollabAgentToolCall {
             id,
@@ -4557,6 +4565,7 @@ impl ChatWidget {
                 }
 
                 if !matches!(status, CollabAgentToolCallStatus::InProgress) {
+                    let prompt_text = prompt.unwrap_or_default();
                     let spawn_request =
                         self.pending_collab_spawn_requests.remove(&id).or_else(|| {
                             model
@@ -4579,7 +4588,7 @@ impl ChatWidget {
                             new_agent_role: first_receiver_metadata
                                 .as_ref()
                                 .and_then(|metadata| metadata.agent_role.clone()),
-                            prompt: prompt.unwrap_or_default(),
+                            prompt: prompt_text.clone(),
                             model: String::new(),
                             reasoning_effort: ReasoningEffortConfig::Medium,
                             status: first_receiver
@@ -4592,12 +4601,34 @@ impl ChatWidget {
                         },
                         spawn_request.as_ref(),
                     ));
+                    if let Some(receiver_thread_id) = first_receiver {
+                        self.subagent_panel_registry.on_spawn(
+                            receiver_thread_id,
+                            first_receiver_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.agent_nickname.clone()),
+                            first_receiver_metadata
+                                .as_ref()
+                                .and_then(|metadata| metadata.agent_role.clone()),
+                            prompt_text.as_str(),
+                            agents_states
+                                .get(&receiver_thread_id.to_string())
+                                .map(app_server_collab_state_to_core)
+                                .unwrap_or(AgentStatus::PendingInit),
+                        );
+                        self.refresh_subagent_panel();
+                    }
                 }
             }
             CollabAgentTool::SendInput => {
                 if let Some(receiver_thread_id) = first_receiver
                     && !matches!(status, CollabAgentToolCallStatus::InProgress)
                 {
+                    let receiver_status = receiver_thread_ids
+                        .iter()
+                        .find_map(|thread_id| agents_states.get(thread_id))
+                        .map(app_server_collab_state_to_core)
+                        .unwrap_or_else(|| AgentStatus::Errored("Agent interaction failed".into()));
                     self.on_collab_event(multi_agents::interaction_end(
                         codex_protocol::protocol::CollabAgentInteractionEndEvent {
                             call_id: id,
@@ -4610,15 +4641,12 @@ impl ChatWidget {
                                 .as_ref()
                                 .and_then(|metadata| metadata.agent_role.clone()),
                             prompt: prompt.unwrap_or_default(),
-                            status: receiver_thread_ids
-                                .iter()
-                                .find_map(|thread_id| agents_states.get(thread_id))
-                                .map(app_server_collab_state_to_core)
-                                .unwrap_or_else(|| {
-                                    AgentStatus::Errored("Agent interaction failed".into())
-                                }),
+                            status: receiver_status.clone(),
                         },
                     ));
+                    self.subagent_panel_registry
+                        .update_status(receiver_thread_id, receiver_status);
+                    self.refresh_subagent_panel();
                 }
             }
             CollabAgentTool::ResumeAgent => {
@@ -4638,6 +4666,11 @@ impl ChatWidget {
                             },
                         ));
                     } else {
+                        let receiver_status = receiver_thread_ids
+                            .iter()
+                            .find_map(|thread_id| agents_states.get(thread_id))
+                            .map(app_server_collab_state_to_core)
+                            .unwrap_or_else(|| AgentStatus::Errored("Agent resume failed".into()));
                         self.on_collab_event(multi_agents::resume_end(
                             codex_protocol::protocol::CollabResumeEndEvent {
                                 call_id: id,
@@ -4649,15 +4682,12 @@ impl ChatWidget {
                                 receiver_agent_role: first_receiver_metadata
                                     .as_ref()
                                     .and_then(|metadata| metadata.agent_role.clone()),
-                                status: receiver_thread_ids
-                                    .iter()
-                                    .find_map(|thread_id| agents_states.get(thread_id))
-                                    .map(app_server_collab_state_to_core)
-                                    .unwrap_or_else(|| {
-                                        AgentStatus::Errored("Agent resume failed".into())
-                                    }),
+                                status: receiver_status.clone(),
                             },
                         ));
+                        self.subagent_panel_registry
+                            .update_status(receiver_thread_id, receiver_status);
+                        self.refresh_subagent_panel();
                     }
                 }
             }
@@ -4685,6 +4715,7 @@ impl ChatWidget {
                         &agents_states,
                         &self.collab_agent_metadata,
                     );
+                    let agent_status_updates = agent_statuses.clone();
                     self.on_collab_event(multi_agents::waiting_end(
                         codex_protocol::protocol::CollabWaitingEndEvent {
                             sender_thread_id,
@@ -4693,12 +4724,22 @@ impl ChatWidget {
                             statuses,
                         },
                     ));
+                    for status_entry in agent_status_updates {
+                        self.subagent_panel_registry
+                            .update_status(status_entry.thread_id, status_entry.status);
+                    }
+                    self.refresh_subagent_panel();
                 }
             }
             CollabAgentTool::CloseAgent => {
                 if let Some(receiver_thread_id) = first_receiver
                     && !matches!(status, CollabAgentToolCallStatus::InProgress)
                 {
+                    let receiver_status = receiver_thread_ids
+                        .iter()
+                        .find_map(|thread_id| agents_states.get(thread_id))
+                        .map(app_server_collab_state_to_core)
+                        .unwrap_or_else(|| AgentStatus::Errored("Agent close failed".into()));
                     self.on_collab_event(multi_agents::close_end(
                         codex_protocol::protocol::CollabCloseEndEvent {
                             call_id: id,
@@ -4710,15 +4751,11 @@ impl ChatWidget {
                             receiver_agent_role: first_receiver_metadata
                                 .as_ref()
                                 .and_then(|metadata| metadata.agent_role.clone()),
-                            status: receiver_thread_ids
-                                .iter()
-                                .find_map(|thread_id| agents_states.get(thread_id))
-                                .map(app_server_collab_state_to_core)
-                                .unwrap_or_else(|| {
-                                    AgentStatus::Errored("Agent close failed".into())
-                                }),
+                            status: receiver_status,
                         },
                     ));
+                    self.subagent_panel_registry.close(receiver_thread_id);
+                    self.refresh_subagent_panel();
                 }
             }
         }
@@ -5527,6 +5564,7 @@ impl ChatWidget {
             &chat_keymap.edit_queued_message,
             current_terminal_info,
         );
+        let animations_enabled = config.animations;
         let mut widget = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
@@ -5542,6 +5580,7 @@ impl ChatWidget {
                 skills: None,
             }),
             active_cell,
+            subagent_panel: None,
             active_cell_revision: 0,
             config,
             effective_service_tier,
@@ -5572,6 +5611,7 @@ impl ChatWidget {
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
+            subagent_panel_registry: SubagentPanelRegistry::new(animations_enabled),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -12202,9 +12242,16 @@ impl ChatWidget {
             }
             _ => RenderableItem::Owned(Box::new(())),
         };
+        let subagent_panel_renderable = match &self.subagent_panel {
+            Some(panel) => RenderableItem::Borrowed(panel).inset(Insets::tlbr(
+                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
+            )),
+            None => RenderableItem::Owned(Box::new(())),
+        };
         let mut flex = FlexRenderable::new();
         flex.push(/*flex*/ 1, active_cell_renderable);
         flex.push(/*flex*/ 0, active_hook_cell_renderable);
+        flex.push(/*flex*/ 0, subagent_panel_renderable);
         flex.push(
             /*flex*/ 0,
             RenderableItem::Borrowed(&self.bottom_pane).inset(Insets::tlbr(
