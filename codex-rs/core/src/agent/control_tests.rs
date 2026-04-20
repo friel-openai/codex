@@ -8,6 +8,8 @@ use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
 use assert_matches::assert_matches;
+use codex_config::types::McpServerConfig;
+use codex_config::types::McpServerTransportConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
@@ -49,6 +51,31 @@ async fn test_config_with_cli_overrides(
 
 async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
+}
+
+fn mcp_server_config(command: &str) -> McpServerConfig {
+    McpServerConfig {
+        transport: McpServerTransportConfig::Stdio {
+            command: command.to_string(),
+            args: Vec::new(),
+            env: None,
+            env_vars: Vec::new(),
+            cwd: None,
+        },
+        experimental_environment: None,
+        enabled: true,
+        required: false,
+        supports_parallel_tool_calls: false,
+        disabled_reason: None,
+        startup_timeout_sec: None,
+        tool_timeout_sec: None,
+        default_tools_approval_mode: None,
+        enabled_tools: None,
+        disabled_tools: None,
+        scopes: None,
+        oauth_resource: None,
+        tools: std::collections::HashMap::new(),
+    }
 }
 
 fn text_input(text: &str) -> Op {
@@ -415,6 +442,13 @@ async fn watchdog_helper_forks_owner_history() {
         .features
         .enable(Feature::AgentWatchdog)
         .expect("test config should allow feature update");
+    config
+        .mcp_servers
+        .set(std::collections::HashMap::from([(
+            "slow".to_string(),
+            mcp_server_config("missing-watchdog-mcp"),
+        )]))
+        .expect("test config should allow MCP servers");
 
     let owner_turn = owner_thread.codex.session.new_default_turn().await;
     owner_thread
@@ -496,6 +530,17 @@ async fn watchdog_helper_forks_owner_history() {
         &history_items,
         "previous owner response: pong 81 (118)"
     ));
+    assert!(
+        !helper_thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .has_servers(),
+        "watchdog helpers should not start their own MCP clients"
+    );
 }
 
 #[tokio::test]
