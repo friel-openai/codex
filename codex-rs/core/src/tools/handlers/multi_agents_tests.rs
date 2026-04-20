@@ -120,6 +120,7 @@ model_reasoning_effort = "minimal"
             description: Some("Role with model overrides".to_string()),
             config_file: Some(role_config_path),
             nickname_candidates: None,
+            watchdog_interval_s: None,
         },
     );
     turn.config = Arc::new(config);

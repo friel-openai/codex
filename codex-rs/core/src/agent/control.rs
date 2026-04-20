@@ -55,7 +55,6 @@ pub(crate) enum SpawnAgentForkMode {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
-    pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
 }
 
@@ -345,7 +344,9 @@ impl AgentControl {
 
         self.send_input(new_thread.thread_id, initial_operation)
             .await?;
-        if !new_thread.thread.enabled(Feature::MultiAgentV2) {
+        if !new_thread.thread.enabled(Feature::MultiAgentV2)
+            && !matches!(agent_metadata.agent_role.as_deref(), Some("watchdog"))
+        {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -377,11 +378,6 @@ impl AgentControl {
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         inherited_thread_state: InheritedThreadState,
     ) -> CodexResult<crate::thread_manager::NewThread> {
-        if options.fork_parent_spawn_call_id.is_none() {
-            return Err(CodexErr::Fatal(
-                "spawn_agent fork requires a parent spawn call id".to_string(),
-            ));
-        }
         let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),

@@ -136,10 +136,7 @@ impl ToolHandler for Handler {
                     (_, initial_operation) => initial_operation,
                 },
                 Some(spawn_source),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                    fork_mode,
-                },
+                SpawnAgentOptions { fork_mode },
             )
             .await
             .map_err(collab_spawn_error);

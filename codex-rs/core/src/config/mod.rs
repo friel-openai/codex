@@ -1181,6 +1181,8 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+    /// If set, this role creates an idle-time watchdog with this interval in seconds.
+    pub watchdog_interval_s: Option<i64>,
 }
 
 fn resolve_tool_suggest_config(config_toml: &ConfigToml) -> ToolSuggestConfig {
