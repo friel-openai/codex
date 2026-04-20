@@ -1,5 +1,0 @@
----
-source: tui/src/chatwidget/tests/app_server.rs
-expression: rendered
----
-• Agent message: ping 44 (121) from 019da80f-0535-7500-ad56-56ba1c79f815
