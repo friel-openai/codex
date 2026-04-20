@@ -499,37 +499,12 @@ fn is_unified_exec_source(source: ExecCommandSource) -> bool {
     )
 }
 
-fn agent_inbox_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
-    match item {
-        ResponseItem::Message { content, .. } => {
-            if let Some(communication) = InterAgentCommunication::from_message_content(content) {
-                return Some((communication.author.to_string(), communication.content));
-            }
-
-            let text = content.iter().find_map(|item| match item {
-                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                    Some(text.as_str())
-                }
-                ContentItem::InputImage { .. } => None,
-            })?;
-            let rest = text.strip_prefix("[agent_inbox:")?;
-            let (sender, message) = rest.split_once(']')?;
-            Some((sender.trim().to_string(), message.trim_start().to_string()))
-        }
-        ResponseItem::FunctionCallOutput { output, .. } => {
-            let text = output.body.to_text()?;
-            let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
-            if payload.get("injected").and_then(serde_json::Value::as_bool) != Some(true)
-                || payload.get("kind").and_then(serde_json::Value::as_str) != Some("agent_inbox")
-            {
-                return None;
-            }
-            let sender = payload.get("sender_thread_id")?.as_str()?.to_string();
-            let message = payload.get("message")?.as_str()?.to_string();
-            Some((sender, message))
-        }
-        _ => None,
-    }
+fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
+    let ResponseItem::Message { content, .. } = item else {
+        return None;
+    };
+    let communication = InterAgentCommunication::from_message_content(content)?;
+    Some((communication.author.to_string(), communication.content))
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
@@ -1113,7 +1088,7 @@ pub(crate) struct ChatWidget {
     goal_status_active_turn_started_at: Option<Instant>,
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
-    last_replayed_agent_inbox_message: Option<(String, String)>,
+    last_replayed_inter_agent_message: Option<(String, String)>,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
     last_non_retry_error: Option<(String, String)>,
 }
@@ -4566,21 +4541,21 @@ impl ChatWidget {
     }
 
     fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
-        let Some((sender, message)) = agent_inbox_message_from_item(&item) else {
+        let Some((sender, message)) = inter_agent_message_from_item(&item) else {
             if from_replay {
-                self.last_replayed_agent_inbox_message = None;
+                self.last_replayed_inter_agent_message = None;
             }
             return;
         };
 
         let replay_key = (sender.clone(), message.clone());
         if from_replay {
-            if self.last_replayed_agent_inbox_message.as_ref() == Some(&replay_key) {
+            if self.last_replayed_inter_agent_message.as_ref() == Some(&replay_key) {
                 return;
             }
-            self.last_replayed_agent_inbox_message = Some(replay_key);
+            self.last_replayed_inter_agent_message = Some(replay_key);
         } else {
-            self.last_replayed_agent_inbox_message = None;
+            self.last_replayed_inter_agent_message = None;
         }
 
         let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
@@ -5774,7 +5749,7 @@ impl ChatWidget {
             goal_status_active_turn_started_at: None,
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
-            last_replayed_agent_inbox_message: None,
+            last_replayed_inter_agent_message: None,
             last_rendered_user_message_event: None,
             last_non_retry_error: None,
         };
@@ -7694,7 +7669,7 @@ impl ChatWidget {
             self.restore_retry_status_header_if_present();
         }
         if !from_replay || !matches!(&msg, EventMsg::RawResponseItem(_)) {
-            self.last_replayed_agent_inbox_message = None;
+            self.last_replayed_inter_agent_message = None;
         }
 
         match msg {

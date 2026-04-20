@@ -322,7 +322,7 @@ pub(super) async fn make_chatwidget_manual(
         goal_status_active_turn_started_at: None,
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
-        last_replayed_agent_inbox_message: None,
+        last_replayed_inter_agent_message: None,
         last_rendered_user_message_event: None,
         last_non_retry_error: None,
     };
