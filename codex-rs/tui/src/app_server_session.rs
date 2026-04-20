@@ -957,6 +957,7 @@ fn thread_start_params_from_config(
         config: config_request_overrides_from_config(config),
         ephemeral: Some(config.ephemeral),
         session_start_source,
+        experimental_raw_events: true,
         persist_extended_history: true,
         ..ThreadStartParams::default()
     }
@@ -1276,6 +1277,7 @@ mod tests {
 
         assert_eq!(params.cwd, Some(config.cwd.to_string_lossy().to_string()));
         assert_eq!(params.model_provider, Some(config.model_provider_id));
+        assert!(params.experimental_raw_events);
     }
 
     #[tokio::test]

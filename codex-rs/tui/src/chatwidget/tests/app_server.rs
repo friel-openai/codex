@@ -1,4 +1,9 @@
 use super::*;
+use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_protocol::AgentPath;
+use codex_protocol::models::FunctionCallOutputPayload;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::InterAgentCommunication;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -42,6 +47,72 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
     assert!(
         rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
         "expected spawn line to include agent metadata and requested model, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_raw_inter_agent_message_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ping 21 (21)".to_string(),
+        /*trigger_turn*/ true,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_raw_inter_agent_message_renders_agent_message_cell",
+        rendered
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_legacy_agent_inbox_output_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let payload = json!({
+        "injected": true,
+        "kind": "agent_inbox",
+        "sender_thread_id": "019da80f-0535-7500-ad56-56ba1c79f815",
+        "message": "ping 44 (121)",
+    });
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: ResponseItem::FunctionCallOutput {
+                call_id: "agent_inbox_call".to_string(),
+                output: FunctionCallOutputPayload::from_text(payload.to_string()),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_legacy_agent_inbox_output_renders_agent_message_cell",
+        rendered
     );
 }
 
