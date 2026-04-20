@@ -139,7 +139,6 @@ impl ToolHandler for Handler {
                 input_items,
                 Some(spawn_source),
                 SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
                     fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
                     environments: Some(
                         turn.environments

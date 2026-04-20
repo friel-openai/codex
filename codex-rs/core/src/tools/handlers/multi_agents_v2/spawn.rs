@@ -116,7 +116,6 @@ impl ToolHandler for Handler {
                 },
                 Some(spawn_source),
                 SpawnAgentOptions {
-                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
                     fork_mode,
                     environments: Some(
                         turn.environments

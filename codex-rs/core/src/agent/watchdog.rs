@@ -1,4 +1,6 @@
 use super::control::AgentControl;
+use super::control::SpawnAgentForkMode;
+use super::control::SpawnAgentOptions;
 use super::registry::AgentRegistry;
 use super::registry::exceeds_thread_spawn_depth_limit;
 use super::status::is_final;
@@ -283,16 +285,10 @@ impl WatchdogManager {
         if owner_running {
             return;
         }
-        let force_due = self
-            .take_force_due_if_generation(target_thread_id, generation)
-            .await;
         let owner_idle_since = owner_idle_since.or(snapshot.owner_idle_since);
         let Some(owner_idle_since) = owner_idle_since else {
             return;
         };
-        if !force_due && now.duration_since(owner_idle_since) < snapshot.interval {
-            return;
-        }
 
         if let Some(helper_id) = snapshot.active_helper_id {
             let helper_status = get_status(manager_state, helper_id).await;
@@ -320,6 +316,13 @@ impl WatchdogManager {
                 /*active_helper_id*/ None,
             )
             .await;
+            return;
+        }
+
+        let force_due = self
+            .take_force_due_if_generation(target_thread_id, generation)
+            .await;
+        if !force_due && now.duration_since(owner_idle_since) < snapshot.interval {
             return;
         }
 
@@ -358,7 +361,10 @@ impl WatchdogManager {
                     responsesapi_client_metadata: None,
                 },
                 Some(session_source),
-                Default::default(),
+                SpawnAgentOptions {
+                    fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                    environments: None,
+                },
             )
             .await;
 
