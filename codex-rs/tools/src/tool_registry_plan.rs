@@ -57,7 +57,7 @@ use crate::create_view_image_tool;
 use crate::create_wait_agent_tool_v1;
 use crate::create_wait_agent_tool_v2;
 use crate::create_wait_tool;
-use crate::create_watchdog_self_close_tool;
+use crate::create_watchdog_close_self_tool;
 use crate::create_watchdog_snooze_tool;
 use crate::create_watchdog_tools_namespace;
 use crate::create_web_search_tool;
@@ -500,14 +500,14 @@ pub fn build_tool_registry_plan(
     if config.agent_watchdog {
         plan.push_spec(
             create_watchdog_tools_namespace(vec![
-                create_watchdog_self_close_tool(),
+                create_watchdog_close_self_tool(),
                 create_watchdog_snooze_tool(),
             ]),
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         plan.register_handler(
-            crate::ToolName::namespaced("watchdog", "watchdog_self_close"),
+            crate::ToolName::namespaced("watchdog", "close_self"),
             ToolHandlerKind::WatchdogSelfClose,
         );
         plan.register_handler(

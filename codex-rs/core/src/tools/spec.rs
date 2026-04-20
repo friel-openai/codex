@@ -1,6 +1,7 @@
 use crate::shell::Shell;
 use crate::shell::ShellType;
 use crate::tools::handlers::agent_jobs::BatchJobHandler;
+use crate::tools::handlers::multi_agents::CompactParentContextHandler;
 use crate::tools::handlers::multi_agents::WatchdogSelfCloseHandler;
 use crate::tools::handlers::multi_agents::WatchdogSnoozeHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
@@ -215,6 +216,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
             }
             ToolHandlerKind::CodeModeWait => {
                 builder.register_handler(handler.name, code_mode_wait_handler.clone());
+            }
+            ToolHandlerKind::CompactParentContext => {
+                builder.register_handler(handler.name, Arc::new(CompactParentContextHandler));
             }
             ToolHandlerKind::DynamicTool => {
                 builder.register_handler(handler.name, dynamic_tool_handler.clone());

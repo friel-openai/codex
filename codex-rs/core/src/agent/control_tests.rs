@@ -461,6 +461,7 @@ async fn watchdog_spawns_helper_after_owner_completes() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -543,6 +544,7 @@ async fn watchdog_helper_forks_owner_history() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -587,6 +589,29 @@ async fn watchdog_helper_forks_owner_history() {
         &history_items,
         "previous owner response: pong 81 (118)"
     ));
+    assert!(history_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
+            if call_id == "synthetic_watchdog_tool_search"
+    )));
+    assert!(history_items.iter().any(|item| match item {
+        ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            tools,
+            ..
+        } if call_id == "synthetic_watchdog_tool_search" => {
+            let rendered = serde_json::to_string(tools).expect("tools should serialize");
+            rendered.contains("compact_parent_context")
+                && rendered.contains("close_self")
+                && rendered.contains("snooze")
+        }
+        _ => false,
+    }));
+    assert!(history_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::FunctionCall { name, call_id, .. }
+            if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
+    )));
     assert!(
         !helper_thread
             .codex
@@ -635,6 +660,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -679,6 +705,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("ping 5 (5)".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -709,6 +736,226 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
     })
     .await
     .expect("watchdog should forward completed helper output without interval delay");
+}
+
+#[tokio::test]
+async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 1,
+            prompt: "snooze scheduling check".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let first_helper_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper before snooze");
+
+    let result = harness
+        .control
+        .snooze_watchdog_helper(first_helper_id, /*delay_seconds*/ None)
+        .await
+        .expect("active helper should snooze its watchdog");
+    assert_eq!(result.target_thread_id, target_thread_id);
+    assert_eq!(result.delay_seconds, 1);
+    harness
+        .control
+        .finish_watchdog_helper_thread(first_helper_id)
+        .await
+        .expect("snoozed helper should finish");
+
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && thread_id != first_helper_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            }),
+        "watchdog should not spawn another helper before the snooze delay elapses"
+    );
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && thread_id != first_helper_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should resume spawning helpers after the snooze delay");
+}
+
+#[tokio::test]
+async fn watchdog_plain_goodbye_final_message_closes_handle() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let helper_thread_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("check in"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper");
+
+    let helper_thread = harness
+        .manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("helper thread should be registered");
+    let helper_turn = helper_thread.codex.session.new_default_turn().await;
+    helper_thread
+        .codex
+        .session
+        .send_event(
+            helper_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: helper_turn.sub_id.clone(),
+                last_agent_message: Some("goodbye".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if !harness.control.is_watchdog_handle(target_thread_id).await {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("plain goodbye final message should close the watchdog handle");
 }
 
 #[tokio::test]
@@ -1062,6 +1309,37 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 }
 
 #[tokio::test]
+async fn spawn_agent_fork_rejects_missing_parent_spawn_call_id_for_non_watchdogs() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+
+    let err = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("forked worker spawns should require the parent spawn call id");
+
+    assert_eq!(
+        err.to_string(),
+        "Fatal error: spawn_agent fork requires a parent spawn call id"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
@@ -1156,6 +1434,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1477,6 +1756,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1586,6 +1866,7 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::LastNTurns(2)),
                 ..Default::default()
             },

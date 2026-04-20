@@ -128,7 +128,8 @@ pub fn create_send_message_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Relative or canonical task name to message (from spawn_agent).".to_string(),
+                "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned non-watchdog agent."
+                    .to_string(),
             )),
         ),
         (
@@ -159,7 +160,8 @@ pub fn create_followup_task_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Agent id or canonical task name to message (from spawn_agent).".to_string(),
+                "Agent id or canonical task name to message (from spawn_agent), or `parent` from a watchdog check-in."
+                    .to_string(),
             )),
         ),
         (
@@ -172,7 +174,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "followup_task".to_string(),
-        description: "Send a message to an existing non-root target agent and trigger a turn in that target. If the target is currently mid-turn, the message is queued and will be used to start the target's next turn, after the current turn completes."
+        description: "Send a string message to an existing non-root agent and trigger a turn in the target. Watchdog check-ins may use target `parent`. Use interrupt=true to redirect work immediately. If interrupt=false and the target's turn has not completed, the message is queued and starts the target's next turn after the current turn completes."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -260,23 +262,50 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
     })
 }
 
-pub fn create_watchdog_self_close_tool() -> ToolSpec {
+pub fn create_watchdog_close_self_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "message".to_string(),
         JsonSchema::string(Some(
-            "Optional final message to send to the parent/root thread before closing this watchdog handle and ending this check-in immediately."
+            "Optional final message sent to the parent agent before closing this watchdog."
                 .to_string(),
         )),
     )]);
 
     ToolSpec::Function(ResponsesApiTool {
-        name: "watchdog_self_close".to_string(),
-        description: "Watchdog-only: send an optional final message to the parent/root thread, close this watchdog's persistent handle, and end this check-in immediately."
+        name: "close_self".to_string(),
+        description: "Watchdog-only: send an optional final message to the parent agent, stop future wakeups for this watchdog, and end the current check-in immediately. Use this tool, not a final assistant message, when the watchdog must shut down."
             .to_string(),
         strict: false,
         defer_loading: Some(true),
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(close_agent_output_schema()),
+    })
+}
+
+pub fn create_compact_parent_context_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Short reason why the parent/root thread should be compacted.".to_string(),
+            )),
+        ),
+        (
+            "evidence".to_string(),
+            JsonSchema::string(Some(
+                "Specific observation that the parent/root thread is idle or stuck.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Watchdog-only: request compaction for this watchdog helper's parent/root thread when it is idle and appears stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: Some(true),
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: None,
     })
 }
 

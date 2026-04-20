@@ -801,6 +801,20 @@ async fn watchdog_role_uses_builtin_interval() {
 }
 
 #[tokio::test]
+async fn watchdog_role_uses_top_level_interval() {
+    let (_home, config) = test_config_with_cli_overrides(vec![(
+        "watchdog_interval_s".to_string(),
+        TomlValue::Integer(3),
+    )])
+    .await;
+
+    assert_eq!(
+        watchdog_interval_for_role(&config, Some("watchdog")),
+        Some(3)
+    );
+}
+
+#[tokio::test]
 async fn custom_role_can_define_watchdog_interval() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     config.agent_roles.insert(

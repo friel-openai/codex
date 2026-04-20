@@ -27,7 +27,7 @@ impl ToolHandler for Handler {
             .await
         else {
             return Err(FunctionCallError::RespondToModel(
-                "watchdog_self_close is only available in watchdog check-in threads.".to_string(),
+                "watchdog.close_self is only available in watchdog check-in threads.".to_string(),
             ));
         };
         let Some(target_thread_id) = session
@@ -37,7 +37,7 @@ impl ToolHandler for Handler {
             .await
         else {
             return Err(FunctionCallError::RespondToModel(
-                "watchdog_self_close is only available in watchdog check-in threads.".to_string(),
+                "watchdog.close_self is only available in watchdog check-in threads.".to_string(),
             ));
         };
 
@@ -45,6 +45,23 @@ impl ToolHandler for Handler {
             .services
             .agent_control
             .get_status(target_thread_id)
+            .await;
+        let receiver_agent = session
+            .services
+            .agent_control
+            .get_agent_metadata(target_thread_id)
+            .unwrap_or_default();
+
+        let _ = session
+            .services
+            .agent_control
+            .send_watchdog_close_event(
+                owner_thread_id,
+                target_thread_id,
+                receiver_agent.agent_nickname,
+                receiver_agent.agent_role,
+                status.clone(),
+            )
             .await;
 
         if let Some(message) = args.message
@@ -82,7 +99,7 @@ pub(crate) struct WatchdogSelfCloseResult {
 
 impl ToolOutput for WatchdogSelfCloseResult {
     fn log_preview(&self) -> String {
-        tool_output_json_text(self, "watchdog_self_close")
+        tool_output_json_text(self, "close_self")
     }
 
     fn success_for_logging(&self) -> bool {
@@ -90,10 +107,10 @@ impl ToolOutput for WatchdogSelfCloseResult {
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
-        tool_output_response_item(call_id, payload, self, Some(true), "watchdog_self_close")
+        tool_output_response_item(call_id, payload, self, Some(true), "close_self")
     }
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
-        tool_output_code_mode_result(self, "watchdog_self_close")
+        tool_output_code_mode_result(self, "close_self")
     }
 }
