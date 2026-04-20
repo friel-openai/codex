@@ -31,6 +31,7 @@ pub use agent_tool::SpawnAgentToolOptions;
 pub use agent_tool::WaitAgentTimeoutOptions;
 pub use agent_tool::create_close_agent_tool_v1;
 pub use agent_tool::create_close_agent_tool_v2;
+pub use agent_tool::create_compact_parent_context_tool;
 pub use agent_tool::create_followup_task_tool;
 pub use agent_tool::create_list_agents_tool;
 pub use agent_tool::create_resume_agent_tool;

@@ -23,6 +23,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
@@ -35,16 +36,24 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::state_db;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
+use codex_tools::create_compact_parent_context_tool;
+use codex_tools::create_watchdog_self_close_tool;
+use codex_tools::create_watchdog_snooze_tool;
+use codex_tools::create_watchdog_tools_namespace;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
 use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID: &str = "synthetic_watchdog_tool_search";
+const WATCHDOG_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_watchdog_list_agents";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -70,6 +79,18 @@ pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WatchdogParentCompactionResult {
+    NotWatchdogHelper,
+    ParentBusy {
+        parent_thread_id: ThreadId,
+    },
+    Submitted {
+        parent_thread_id: ThreadId,
+        submission_id: String,
+    },
 }
 
 fn default_agent_nickname_list() -> Vec<&'static str> {
@@ -124,6 +145,80 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
         RolloutItem::TurnContext(_) => false,
         RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
     }
+}
+
+fn is_watchdog_helper_source(session_source: &SessionSource) -> bool {
+    matches!(
+        session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) if agent_role == "watchdog"
+    )
+}
+
+fn unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn synthetic_watchdog_tool_search_items() -> Vec<RolloutItem> {
+    let namespace = create_watchdog_tools_namespace(vec![
+        create_compact_parent_context_tool(),
+        create_watchdog_self_close_tool(),
+        create_watchdog_snooze_tool(),
+    ]);
+    let Ok(namespace) = serde_json::to_value(namespace) else {
+        return Vec::new();
+    };
+
+    vec![
+        RolloutItem::ResponseItem(ResponseItem::ToolSearchCall {
+            id: None,
+            call_id: Some(WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID.to_string()),
+            status: Some("completed".to_string()),
+            execution: "client".to_string(),
+            arguments: serde_json::json!({
+                "query": "watchdog namespace tools",
+            }),
+        }),
+        RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput {
+            call_id: Some(WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID.to_string()),
+            status: "completed".to_string(),
+            execution: "client".to_string(),
+            tools: vec![namespace],
+        }),
+    ]
+}
+
+fn synthetic_watchdog_list_agents_items(
+    owner_thread_id: ThreadId,
+    agents: Vec<ListedAgent>,
+) -> Vec<RolloutItem> {
+    let envelope = serde_json::json!({
+        "source": "pre_injected_agents_list",
+        "generated_at": unix_timestamp_seconds(),
+        "owner_thread_id": owner_thread_id.to_string(),
+        "agents": agents,
+    });
+    let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
+    output.success = Some(true);
+
+    vec![
+        RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+            id: None,
+            name: "list_agents".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+        }),
+        RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
+            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+            output,
+        }),
+    ]
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -447,6 +542,12 @@ impl AgentControl {
 
             keep_forked_rollout_item(item)
         });
+        if is_watchdog_helper_source(&session_source) {
+            forked_rollout_items.extend(
+                self.watchdog_boot_context_items(state, parent_thread_id)
+                    .await,
+            );
+        }
 
         state
             .fork_thread_with_source(
@@ -1064,6 +1165,69 @@ impl AgentControl {
         }
 
         Ok(agents)
+    }
+
+    pub(crate) async fn compact_parent_for_watchdog_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> CodexResult<WatchdogParentCompactionResult> {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return Ok(WatchdogParentCompactionResult::NotWatchdogHelper);
+        };
+        let Some(parent_thread_id) = watchdogs.owner_for_active_helper(helper_thread_id).await
+        else {
+            return Ok(WatchdogParentCompactionResult::NotWatchdogHelper);
+        };
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        if parent_thread
+            .codex
+            .session
+            .active_turn
+            .lock()
+            .await
+            .is_some()
+        {
+            return Ok(WatchdogParentCompactionResult::ParentBusy { parent_thread_id });
+        }
+
+        state
+            .send_op(parent_thread_id, Op::Compact)
+            .await
+            .map(|submission_id| WatchdogParentCompactionResult::Submitted {
+                parent_thread_id,
+                submission_id,
+            })
+    }
+
+    async fn watchdog_boot_context_items(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RolloutItem> {
+        let owner_source = match state.get_thread(owner_thread_id).await {
+            Ok(owner_thread) => {
+                owner_thread
+                    .codex
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
+            Err(_) => SessionSource::Cli,
+        };
+        self.register_session_root(owner_thread_id, &owner_source);
+        let agents = self
+            .list_agents(&owner_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+
+        synthetic_watchdog_tool_search_items()
+            .into_iter()
+            .chain(synthetic_watchdog_list_agents_items(
+                owner_thread_id,
+                agents,
+            ))
+            .collect()
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.

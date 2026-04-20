@@ -577,6 +577,57 @@ async fn spawn_agent_watchdog_role_returns_inert_handle() {
 }
 
 #[tokio::test]
+async fn compact_parent_context_submits_compaction_for_idle_parent() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    let owner = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("owner thread should start");
+    let target = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog handle should start");
+    let helper_thread_id = ThreadId::new();
+    agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id: owner.thread_id,
+            target_thread_id: target.thread_id,
+            child_depth: 1,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config: (*turn.config).clone(),
+        })
+        .await
+        .expect("watchdog registration should succeed");
+    agent_control
+        .set_watchdog_active_helper_for_tests(target.thread_id, helper_thread_id)
+        .await;
+    session.conversation_id = helper_thread_id;
+
+    let output = CompactParentContextHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "compact_parent_context",
+            function_payload(json!({"reason": "root is idle"})),
+        ))
+        .await
+        .expect("watchdog helper should request parent compaction");
+    let (content, success) = expect_text_output(output);
+
+    assert_eq!(success, Some(true));
+    assert!(content.contains("submitted"));
+    let captured = manager
+        .captured_ops()
+        .into_iter()
+        .find(|(thread_id, op)| *thread_id == owner.thread_id && matches!(op, Op::Compact));
+    assert_eq!(captured, Some((owner.thread_id, Op::Compact)));
+}
+
+#[tokio::test]
 async fn watchdog_snooze_rejects_non_watchdog_thread() {
     let (session, turn) = make_session_and_context().await;
 
