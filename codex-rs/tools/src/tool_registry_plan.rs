@@ -24,6 +24,7 @@ use crate::create_apply_patch_json_tool;
 use crate::create_close_agent_tool_v1;
 use crate::create_close_agent_tool_v2;
 use crate::create_code_mode_tool;
+use crate::create_compact_parent_context_tool;
 use crate::create_exec_command_tool;
 use crate::create_followup_task_tool;
 use crate::create_image_generation_tool;
@@ -481,11 +482,16 @@ pub fn build_tool_registry_plan(
     if config.agent_watchdog {
         plan.push_spec(
             create_watchdog_tools_namespace(vec![
+                create_compact_parent_context_tool(),
                 create_watchdog_self_close_tool(),
                 create_watchdog_snooze_tool(),
             ]),
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
+        );
+        plan.register_handler(
+            crate::ToolName::namespaced("watchdog", "compact_parent_context"),
+            ToolHandlerKind::CompactParentContext,
         );
         plan.register_handler(
             crate::ToolName::namespaced("watchdog", "watchdog_self_close"),

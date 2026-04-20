@@ -530,6 +530,29 @@ async fn watchdog_helper_forks_owner_history() {
         &history_items,
         "previous owner response: pong 81 (118)"
     ));
+    assert!(history_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
+            if call_id == "synthetic_watchdog_tool_search"
+    )));
+    assert!(history_items.iter().any(|item| match item {
+        ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            tools,
+            ..
+        } if call_id == "synthetic_watchdog_tool_search" => {
+            let rendered = serde_json::to_string(tools).expect("tools should serialize");
+            rendered.contains("compact_parent_context")
+                && rendered.contains("watchdog_self_close")
+                && rendered.contains("snooze")
+        }
+        _ => false,
+    }));
+    assert!(history_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::FunctionCall { name, call_id, .. }
+            if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
+    )));
     assert!(
         !helper_thread
             .codex
