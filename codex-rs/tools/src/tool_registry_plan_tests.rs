@@ -132,6 +132,15 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         expected.insert(spec.name().to_string(), spec);
     }
 
+    if config.agent_watchdog {
+        let spec = create_watchdog_tools_namespace(vec![
+            create_compact_parent_context_tool(),
+            create_watchdog_self_close_tool(),
+            create_watchdog_snooze_tool(),
+        ]);
+        expected.insert(spec.name().to_string(), spec);
+    }
+
     assert_eq!(
         actual.keys().collect::<Vec<_>>(),
         expected.keys().collect::<Vec<_>>(),
@@ -213,12 +222,26 @@ fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
     assert_contains_tool_names(&tools, &["watchdog"]);
     assert_eq!(
         namespace_function_names(&tools, "watchdog"),
-        vec!["watchdog_self_close".to_string(), "snooze".to_string()]
+        vec![
+            "compact_parent_context".to_string(),
+            "watchdog_self_close".to_string(),
+            "snooze".to_string(),
+        ]
     );
+    let compact = find_namespace_function_tool(&tools, "watchdog", "compact_parent_context");
+    assert_eq!(compact.defer_loading, Some(true));
     let snooze = find_namespace_function_tool(&tools, "watchdog", "snooze");
     assert_eq!(snooze.defer_loading, Some(true));
     let self_close = find_namespace_function_tool(&tools, "watchdog", "watchdog_self_close");
     assert_eq!(self_close.defer_loading, Some(true));
+    assert!(handlers.iter().any(|handler| {
+        handler.name
+            == ToolName::new(
+                Some("watchdog".to_string()),
+                "compact_parent_context".to_string(),
+            )
+            && handler.kind == ToolHandlerKind::CompactParentContext
+    }));
     assert!(handlers.iter().any(|handler| {
         handler.name == ToolName::new(Some("watchdog".to_string()), "snooze".to_string())
             && handler.kind == ToolHandlerKind::WatchdogSnooze
