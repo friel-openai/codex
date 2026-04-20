@@ -347,6 +347,20 @@ impl WatchdogManager {
         });
         let mut helper_config = snapshot.config.clone();
         helper_config.ephemeral = true;
+        if let Err(err) = helper_config.mcp_servers.set(HashMap::new()) {
+            warn!(
+                target_thread_id = %target_thread_id,
+                "watchdog helper MCP server clearing failed: {err}"
+            );
+            self.update_after_spawn(
+                target_thread_id,
+                generation,
+                now,
+                /*active_helper_id*/ None,
+            )
+            .await;
+            return;
+        }
         let helper_prompt = watchdog_helper_prompt(snapshot.owner_thread_id, &snapshot.prompt);
         let spawn_result = control_for_spawn
             .spawn_agent_with_metadata(
