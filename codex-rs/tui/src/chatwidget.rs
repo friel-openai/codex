@@ -139,7 +139,9 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::UserMessageItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::models::local_image_label_text;
 use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
@@ -186,6 +188,7 @@ use codex_protocol::protocol::GuardianAssessmentEvent;
 use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::ImageGenerationBeginEvent;
 use codex_protocol::protocol::ImageGenerationEndEvent;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ListSkillsResponseEvent;
 #[cfg(test)]
 use codex_protocol::protocol::McpListToolsResponseEvent;
@@ -468,6 +471,39 @@ fn is_unified_exec_source(source: ExecCommandSource) -> bool {
         source,
         ExecCommandSource::UnifiedExecStartup | ExecCommandSource::UnifiedExecInteraction
     )
+}
+
+fn agent_inbox_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
+    match item {
+        ResponseItem::Message { content, .. } => {
+            if let Some(communication) = InterAgentCommunication::from_message_content(content) {
+                return Some((communication.author.to_string(), communication.content));
+            }
+
+            let text = content.iter().find_map(|item| match item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    Some(text.as_str())
+                }
+                ContentItem::InputImage { .. } => None,
+            })?;
+            let rest = text.strip_prefix("[agent_inbox:")?;
+            let (sender, message) = rest.split_once(']')?;
+            Some((sender.trim().to_string(), message.trim_start().to_string()))
+        }
+        ResponseItem::FunctionCallOutput { output, .. } => {
+            let text = output.body.to_text()?;
+            let payload: serde_json::Value = serde_json::from_str(&text).ok()?;
+            if payload.get("injected").and_then(serde_json::Value::as_bool) != Some(true)
+                || payload.get("kind").and_then(serde_json::Value::as_str) != Some("agent_inbox")
+            {
+                return None;
+            }
+            let sender = payload.get("sender_thread_id")?.as_str()?.to_string();
+            let message = payload.get("message")?.as_str()?.to_string();
+            Some((sender, message))
+        }
+        _ => None,
+    }
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
@@ -1031,6 +1067,7 @@ pub(crate) struct ChatWidget {
     status_line_branch_lookup_complete: bool,
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
+    last_replayed_agent_inbox_message: Option<(String, String)>,
     last_rendered_user_message_event: Option<RenderedUserMessageEvent>,
     last_non_retry_error: Option<(String, String)>,
 }
@@ -4180,6 +4217,32 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
+        let Some((sender, message)) = agent_inbox_message_from_item(&item) else {
+            if from_replay {
+                self.last_replayed_agent_inbox_message = None;
+            }
+            return;
+        };
+
+        let replay_key = (sender.clone(), message.clone());
+        if from_replay {
+            if self.last_replayed_agent_inbox_message.as_ref() == Some(&replay_key) {
+                return;
+            }
+            self.last_replayed_agent_inbox_message = Some(replay_key);
+        } else {
+            self.last_replayed_agent_inbox_message = None;
+        }
+
+        let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
+        self.add_to_history(history_cell::new_info_event(
+            format!("Agent message: {message}"),
+            hint,
+        ));
+        self.request_redraw();
+    }
+
     fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
         let ThreadItem::CollabAgentToolCall {
             id,
@@ -5341,6 +5404,7 @@ impl ChatWidget {
             status_line_branch_lookup_complete: false,
             external_editor_state: ExternalEditorState::Closed,
             realtime_conversation: RealtimeConversationUiState::default(),
+            last_replayed_agent_inbox_message: None,
             last_rendered_user_message_event: None,
             last_non_retry_error: None,
         };
@@ -6606,6 +6670,9 @@ impl ChatWidget {
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
             }
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                self.on_raw_response_item(notification.item, from_replay);
+            }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.on_agent_message_delta(notification.delta);
             }
@@ -6794,7 +6861,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::FileChangePatchUpdated(_)
             | ServerNotification::McpToolCallProgress(_)
@@ -7113,6 +7179,9 @@ impl ChatWidget {
         if !is_resume_initial_replay && !is_stream_error {
             self.restore_retry_status_header_if_present();
         }
+        if !from_replay || !matches!(&msg, EventMsg::RawResponseItem(_)) {
+            self.last_replayed_agent_inbox_message = None;
+        }
 
         match msg {
             EventMsg::AgentMessageDelta(_)
@@ -7341,8 +7410,8 @@ impl ChatWidget {
                     });
                 }
             }
-            EventMsg::RawResponseItem(_)
-            | EventMsg::ItemStarted(_)
+            EventMsg::RawResponseItem(event) => self.on_raw_response_item(event.item, from_replay),
+            EventMsg::ItemStarted(_)
             | EventMsg::AgentMessageContentDelta(_)
             | EventMsg::PatchApplyUpdated(_)
             | EventMsg::ReasoningContentDelta(_)

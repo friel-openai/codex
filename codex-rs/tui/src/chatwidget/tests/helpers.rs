@@ -311,6 +311,7 @@ pub(super) async fn make_chatwidget_manual(
         status_line_branch_lookup_complete: false,
         external_editor_state: ExternalEditorState::Closed,
         realtime_conversation: RealtimeConversationUiState::default(),
+        last_replayed_agent_inbox_message: None,
         last_rendered_user_message_event: None,
         last_non_retry_error: None,
     };
