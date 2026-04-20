@@ -167,6 +167,7 @@ fn merge_missing_role_fields(role: &mut AgentRoleConfig, fallback: &AgentRoleCon
         .nickname_candidates
         .clone()
         .or(fallback.nickname_candidates.clone());
+    role.watchdog_interval_s = role.watchdog_interval_s.or(fallback.watchdog_interval_s);
 }
 
 fn agents_toml_from_layer(layer_toml: &TomlValue) -> std::io::Result<Option<AgentsToml>> {
@@ -205,6 +206,7 @@ async fn agent_role_config_from_toml(
         description,
         config_file: config_file.map(AbsolutePathBuf::into_path_buf),
         nickname_candidates,
+        watchdog_interval_s: role.watchdog_interval_s,
     })
 }
 
@@ -214,6 +216,7 @@ struct RawAgentRoleFileToml {
     name: Option<String>,
     description: Option<String>,
     nickname_candidates: Option<Vec<String>>,
+    watchdog_interval_s: Option<i64>,
     #[serde(flatten)]
     config: ConfigToml,
 }
@@ -223,6 +226,7 @@ pub(crate) struct ResolvedAgentRoleFile {
     pub(crate) role_name: String,
     pub(crate) description: Option<String>,
     pub(crate) nickname_candidates: Option<Vec<String>>,
+    pub(crate) watchdog_interval_s: Option<i64>,
     pub(crate) config: TomlValue,
 }
 
@@ -299,11 +303,13 @@ pub(crate) fn parse_agent_role_file_contents(
     config_table.remove("name");
     config_table.remove("description");
     config_table.remove("nickname_candidates");
+    config_table.remove("watchdog_interval_s");
 
     Ok(ResolvedAgentRoleFile {
         role_name,
         description,
         nickname_candidates,
+        watchdog_interval_s: parsed.watchdog_interval_s,
         config,
     })
 }
@@ -502,6 +508,7 @@ async fn discover_agent_roles_in_dir(
                 description: parsed_file.description,
                 config_file: Some(agent_file.to_path_buf()),
                 nickname_candidates: parsed_file.nickname_candidates,
+                watchdog_interval_s: parsed_file.watchdog_interval_s,
             },
         );
     }

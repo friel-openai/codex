@@ -597,6 +597,9 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// If set, this role creates an idle-time watchdog with this interval in seconds.
+    pub watchdog_interval_s: Option<i64>,
 }
 
 impl From<ToolsToml> for Tools {

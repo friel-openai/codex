@@ -27,6 +27,11 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "watchdog_interval_s": {
+          "description": "If set, this role creates an idle-time watchdog with this interval in seconds.",
+          "format": "int64",
+          "type": "integer"
         }
       },
       "type": "object"

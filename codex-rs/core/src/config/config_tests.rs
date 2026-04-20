@@ -3948,6 +3948,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -4801,6 +4802,45 @@ model = "gpt-5-mini"
 }
 
 #[tokio::test]
+async fn load_config_reads_agent_role_watchdog_interval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        agents: Some(AgentsToml {
+            max_threads: None,
+            max_depth: None,
+            job_max_runtime_seconds: None,
+            roles: BTreeMap::from([(
+                "slow_watch".to_string(),
+                AgentRoleToml {
+                    description: Some("Slow watchdog".to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                    watchdog_interval_s: Some(300),
+                },
+            )]),
+        }),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config
+            .agent_roles
+            .get("slow_watch")
+            .and_then(|role| role.watchdog_interval_s),
+        Some(300)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
@@ -4817,6 +4857,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -4856,6 +4897,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -4892,6 +4934,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -4928,6 +4971,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
