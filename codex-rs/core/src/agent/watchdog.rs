@@ -296,19 +296,32 @@ impl WatchdogManager {
                 return;
             }
             let helper_suppressed = self.take_suppressed_helper(helper_id).await;
+            let mut close_watchdog_handle = false;
             if let AgentStatus::Completed(Some(message)) = helper_status
                 && !helper_suppressed
-                && let Err(err) = control_for_spawn
+            {
+                close_watchdog_handle = final_message_requests_watchdog_close(&message);
+                if let Err(err) = control_for_spawn
                     .send_watchdog_wakeup(snapshot.owner_thread_id, message)
                     .await
-            {
-                warn!(
-                    helper_id = %helper_id,
-                    owner_thread_id = %snapshot.owner_thread_id,
-                    "watchdog helper forward failed: {err}"
-                );
+                {
+                    warn!(
+                        helper_id = %helper_id,
+                        owner_thread_id = %snapshot.owner_thread_id,
+                        "watchdog helper forward failed: {err}"
+                    );
+                }
             }
             let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
+            if close_watchdog_handle {
+                let _ = control_for_spawn
+                    .unregister_watchdog_handle(target_thread_id)
+                    .await;
+                let _ = control_for_spawn
+                    .shutdown_live_agent(target_thread_id)
+                    .await;
+                return;
+            }
             self.update_after_spawn(
                 target_thread_id,
                 generation,
@@ -563,6 +576,10 @@ fn is_running(status: &AgentStatus) -> bool {
 
 fn is_watchdog_terminated(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound)
+}
+
+fn final_message_requests_watchdog_close(message: &str) -> bool {
+    message.trim().eq_ignore_ascii_case("goodbye")
 }
 
 async fn get_status(manager_state: &Arc<ThreadManagerState>, thread_id: ThreadId) -> AgentStatus {
