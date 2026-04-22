@@ -1,0 +1,9 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: screen
+---
+
+
+› Ask Codex to do anything
+
+  gpt-5.3-codex default · /tmp/project
