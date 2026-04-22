@@ -144,6 +144,8 @@ pub enum Feature {
     MultiAgentV2,
     /// Enable idle-time watchdog handles for root agents.
     AgentWatchdog,
+    /// Enable root/subagent/watchdog developer prompt injection.
+    AgentPromptInjection,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
     /// Enable apps.
@@ -823,6 +825,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::AgentWatchdog,
         key: "agent_watchdog",
+        stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::AgentPromptInjection,
+        key: "agent_prompt_injection",
         stage: Stage::Stable,
         default_enabled: true,
     },

@@ -46,6 +46,23 @@ impl ToolHandler for Handler {
             .agent_control
             .get_status(target_thread_id)
             .await;
+        let receiver_agent = session
+            .services
+            .agent_control
+            .get_agent_metadata(target_thread_id)
+            .unwrap_or_default();
+
+        let _ = session
+            .services
+            .agent_control
+            .send_watchdog_close_event(
+                owner_thread_id,
+                target_thread_id,
+                receiver_agent.agent_nickname,
+                receiver_agent.agent_role,
+                status.clone(),
+            )
+            .await;
 
         if let Some(message) = args.message
             && !message.trim().is_empty()

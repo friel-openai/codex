@@ -1036,6 +1036,41 @@ async fn direct_mcp_tools_register_namespaced_handlers() {
 }
 
 #[tokio::test]
+async fn watchdog_tools_register_namespaced_and_flattened_handlers() {
+    let config = test_config().await;
+    let model_info = construct_model_info_offline("gpt-5-codex", &config);
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Collab);
+    features.enable(Feature::AgentWatchdog);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let (_, registry) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    )
+    .build();
+
+    assert!(registry.has_handler(&ToolName::namespaced("watchdog", "compact_parent_context")));
+    assert!(registry.has_handler(&ToolName::plain("watchdogcompact_parent_context")));
+    assert!(registry.has_handler(&ToolName::namespaced("watchdog", "snooze")));
+    assert!(registry.has_handler(&ToolName::plain("watchdogsnooze")));
+    assert!(registry.has_handler(&ToolName::namespaced("watchdog", "watchdog_self_close")));
+    assert!(registry.has_handler(&ToolName::plain("watchdogwatchdog_self_close")));
+}
+
+#[tokio::test]
 async fn unavailable_mcp_tools_are_exposed_as_dummy_function_tools() {
     let config = test_config().await;
     let model_info = construct_model_info_offline("gpt-5.4", &config);

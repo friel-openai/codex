@@ -496,13 +496,22 @@ pub fn build_tool_registry_plan(
             ToolHandlerKind::CompactParentContext,
         );
         plan.register_handler(
+            "watchdogcompact_parent_context",
+            ToolHandlerKind::CompactParentContext,
+        );
+        plan.register_handler(
             crate::ToolName::namespaced("watchdog", "watchdog_self_close"),
+            ToolHandlerKind::WatchdogSelfClose,
+        );
+        plan.register_handler(
+            "watchdogwatchdog_self_close",
             ToolHandlerKind::WatchdogSelfClose,
         );
         plan.register_handler(
             crate::ToolName::namespaced("watchdog", "snooze"),
             ToolHandlerKind::WatchdogSnooze,
         );
+        plan.register_handler("watchdogsnooze", ToolHandlerKind::WatchdogSnooze);
     }
 
     if config.agent_jobs_tools {

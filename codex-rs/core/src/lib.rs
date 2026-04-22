@@ -174,6 +174,7 @@ pub use rollout::find_thread_path_by_id_str;
 pub use rollout::parse_cursor;
 pub use rollout::read_head_for_summary;
 pub use rollout::read_session_meta_line;
+pub use rollout::resolve_fork_reference_rollout_path;
 pub use rollout::rollout_date_parts;
 mod function_tool;
 mod state;

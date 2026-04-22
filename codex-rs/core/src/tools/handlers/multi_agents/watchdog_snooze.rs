@@ -30,6 +30,11 @@ impl ToolHandler for Handler {
             ));
         };
         let _ = args.reason;
+        let _ = session
+            .services
+            .agent_control
+            .finish_watchdog_helper_thread(session.conversation_id)
+            .await;
         Ok(WatchdogSnoozeResult {
             target_thread_id: result.target_thread_id.to_string(),
             delay_seconds: result.delay_seconds,

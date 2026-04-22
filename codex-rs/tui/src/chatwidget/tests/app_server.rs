@@ -607,6 +607,106 @@ async fn subagent_panel_mounts_watchdog_spawn() {
 }
 
 #[tokio::test]
+async fn watchdog_goodbye_message_closes_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("Boyle".to_string()),
+        Some("watchdog".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some(
+                    "Every time you start, respond with exactly `ping $RANDOM ($SUM)`.".to_string(),
+                ),
+                model: Some("arcanine 1m".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "watchdog-close".to_string(),
+                tool: AppServerCollabAgentTool::CloseAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Completed,
+                        message: Some("goodbye".to_string()),
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("watchdog_goodbye_message_inserts_close_history", inserted);
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("watchdog_goodbye_message_closes_subagent_panel_row", screen);
+}
+
+#[tokio::test]
 async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 

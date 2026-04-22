@@ -7,6 +7,8 @@ use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
+use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
+use crate::rollout::RolloutRecorder;
 use assert_matches::assert_matches;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
@@ -30,6 +32,7 @@ use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ThreadStore;
 use pretty_assertions::assert_eq;
+use std::path::PathBuf;
 use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
@@ -96,6 +99,63 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
         end_turn: None,
         phase,
     }
+}
+
+#[test]
+fn full_history_fork_reference_items_omits_copied_parent_items() {
+    let rollout_path = PathBuf::from("/tmp/parent-rollout.jsonl");
+    let items = full_history_fork_reference_items(
+        rollout_path.clone(),
+        vec![RolloutItem::ResponseItem(assistant_message(
+            "parent history should stay in parent",
+            /*phase*/ None,
+        ))],
+    );
+
+    assert_eq!(items.len(), 1);
+    match &items[0] {
+        RolloutItem::ForkReference(reference) => {
+            assert_eq!(reference.rollout_path, rollout_path);
+            assert_eq!(reference.nth_user_message, usize::MAX);
+        }
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => panic!("expected only a fork reference"),
+    }
+}
+
+#[test]
+fn watchdog_boot_list_agents_redacts_non_root_task_messages() {
+    let agents = sanitize_watchdog_boot_list_agents(vec![
+        ListedAgent {
+            agent_name: AgentPath::root().to_string(),
+            agent_status: AgentStatus::Completed(Some("root done".to_string())),
+            last_task_message: Some("Main thread".to_string()),
+        },
+        ListedAgent {
+            agent_name: "019db21c-95ee-7561-905d-eb01e02525e0".to_string(),
+            agent_status: AgentStatus::PendingInit,
+            last_task_message: Some("Every time you start, respond with ping".to_string()),
+        },
+    ]);
+
+    assert_eq!(
+        agents,
+        vec![
+            ListedAgent {
+                agent_name: AgentPath::root().to_string(),
+                agent_status: AgentStatus::Completed(Some("root done".to_string())),
+                last_task_message: Some("Main thread".to_string()),
+            },
+            ListedAgent {
+                agent_name: "019db21c-95ee-7561-905d-eb01e02525e0".to_string(),
+                agent_status: AgentStatus::PendingInit,
+                last_task_message: None,
+            },
+        ]
+    );
 }
 
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
@@ -166,6 +226,28 @@ fn history_contains_text(history_items: &[ResponseItem], needle: &str) -> bool {
         let ResponseItem::Message { content, .. } = item else {
             return false;
         };
+        content.iter().any(|content_item| match content_item {
+            ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                text.contains(needle)
+            }
+            ContentItem::InputImage { .. } => false,
+        })
+    })
+}
+
+fn history_contains_role_text(history_items: &[ResponseItem], role: &str, needle: &str) -> bool {
+    history_items.iter().any(|item| {
+        let ResponseItem::Message {
+            role: item_role,
+            content,
+            ..
+        } = item
+        else {
+            return false;
+        };
+        if item_role != role {
+            return false;
+        }
         content.iter().any(|content_item| match content_item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => {
                 text.contains(needle)
@@ -379,6 +461,10 @@ async fn watchdog_spawns_helper_after_owner_completes() {
         .features
         .enable(Feature::AgentWatchdog)
         .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should allow feature update");
 
     harness
         .control
@@ -433,6 +519,87 @@ async fn watchdog_spawns_helper_after_owner_completes() {
 }
 
 #[tokio::test]
+async fn close_watchdog_handle_closes_active_helper_thread() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    let target_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("watchdog handle"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: owner_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("Sagan".to_string()),
+                agent_role: Some("watchdog".to_string()),
+            })),
+        )
+        .await
+        .expect("watchdog handle should spawn");
+    let helper_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("watchdog helper"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: owner_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            })),
+        )
+        .await
+        .expect("watchdog helper should spawn");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 1,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+    harness
+        .control
+        .set_watchdog_active_helper_for_tests(target_thread_id, helper_thread_id)
+        .await;
+    wait_for_live_thread_spawn_children(
+        &harness.control,
+        owner_thread_id,
+        &[target_thread_id, helper_thread_id],
+    )
+    .await;
+
+    harness
+        .control
+        .close_agent(target_thread_id)
+        .await
+        .expect("watchdog handle should close");
+
+    wait_for_live_thread_spawn_children(&harness.control, owner_thread_id, &[]).await;
+    assert_eq!(
+        harness.control.get_status(target_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        harness.control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+}
+
+#[tokio::test]
 async fn watchdog_helper_forks_owner_history() {
     let harness = AgentControlHarness::new().await;
     let (owner_thread_id, owner_thread) = harness.start_thread().await;
@@ -441,6 +608,10 @@ async fn watchdog_helper_forks_owner_history() {
     config
         .features
         .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
         .expect("test config should allow feature update");
     config
         .mcp_servers
@@ -462,6 +633,17 @@ async fn watchdog_helper_forks_owner_history() {
             )],
         )
         .await;
+    owner_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    owner_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("owner rollout should flush");
 
     harness
         .control
@@ -519,17 +701,190 @@ async fn watchdog_helper_forks_owner_history() {
         .get_thread(helper_thread_id)
         .await
         .expect("helper thread should be registered");
-    let history_items = helper_thread
+    helper_thread
         .codex
         .session
-        .clone_history()
+        .ensure_rollout_materialized()
+        .await;
+    let helper_rollout_path = helper_thread
+        .codex
+        .session
+        .current_rollout_path()
         .await
-        .raw_items()
-        .to_vec();
+        .expect("watchdog helper should have a rollout path");
+    let history_items = timeout(Duration::from_secs(5), async {
+        loop {
+            let history_items = helper_thread
+                .codex
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+                .to_vec();
+            if history_contains_role_text(&history_items, "developer", "# You are a Subagent") {
+                break history_items;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("helper should record inline role prompt");
     assert!(history_contains_text(
         &history_items,
         "previous owner response: pong 81 (118)"
     ));
+    assert!(history_contains_role_text(
+        &history_items,
+        "developer",
+        "# You are a Subagent"
+    ));
+    assert!(history_contains_role_text(
+        &history_items,
+        "developer",
+        "More importantly, you are a **watchdog**"
+    ));
+    assert!(history_contains_role_text(
+        &history_items,
+        "developer",
+        "Evidence-Based Supervision"
+    ));
+    assert!(history_contains_role_text(
+        &history_items,
+        "developer",
+        "watchdog.snooze"
+    ));
+    let helper_prompt = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(thread_id, op)| {
+            if thread_id != helper_thread_id {
+                return None;
+            }
+            if let Op::UserInput { items, .. } = op {
+                items.into_iter().find_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                })
+            } else {
+                None
+            }
+        })
+        .expect("helper prompt should be submitted");
+    assert!(helper_prompt.contains("Target agent id:"));
+    assert!(!helper_prompt.contains("# You are a Subagent"));
+    assert!(!helper_prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(!helper_prompt.contains("Evidence-Based Supervision"));
+    assert!(!helper_prompt.contains("watchdog.snooze"));
+    assert!(helper_prompt.contains("Watchdog check-in facts:"));
+    assert!(helper_prompt.contains("current_utc:"));
+    assert!(helper_prompt.contains("owner_idle_for_seconds:"));
+    assert!(helper_prompt.contains("watchdog_interval_seconds: 60"));
+
+    let rollout_items = timeout(Duration::from_secs(5), async {
+        loop {
+            helper_thread
+                .codex
+                .session
+                .flush_rollout()
+                .await
+                .expect("watchdog helper rollout should flush");
+            let (rollout_items, _, _) = RolloutRecorder::load_rollout_items(&helper_rollout_path)
+                .await
+                .expect("watchdog helper rollout should load");
+            if rollout_items.iter().any(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
+                        if role == "user"
+                            && content.iter().any(|content_item| matches!(
+                                content_item,
+                                ContentItem::InputText { text } if text.contains("Watchdog check-in facts:")
+                            ))
+                )
+            }) {
+                break rollout_items;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("helper rollout should include watchdog check-in task");
+    let owner_rollout_path = owner_thread
+        .codex
+        .session
+        .current_rollout_path()
+        .await
+        .expect("owner rollout path");
+    assert!(rollout_items.iter().any(|item| matches!(
+        item,
+        RolloutItem::ForkReference(reference)
+            if reference.rollout_path == owner_rollout_path
+                && reference.nth_user_message == usize::MAX
+    )));
+    let fork_reference_idx = rollout_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::ForkReference(reference)
+                    if reference.rollout_path == owner_rollout_path
+                        && reference.nth_user_message == usize::MAX
+            )
+        })
+        .expect("helper rollout should include fork reference");
+    let role_prompt_idx = rollout_items
+        .iter()
+        .position(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
+                if role == "developer"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text.contains("More importantly, you are a **watchdog**")
+                    ))
+        ))
+        .expect("helper rollout should include watchdog developer prompt");
+    let task_prompt_idx = rollout_items
+        .iter()
+        .position(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
+                if role == "user"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text.contains("Watchdog check-in facts:")
+                    ))
+        ))
+        .expect("helper rollout should include watchdog check-in task");
+    assert!(
+        fork_reference_idx < role_prompt_idx,
+        "role prompt must be after fork reference"
+    );
+    assert!(
+        role_prompt_idx < task_prompt_idx,
+        "role prompt must be before watchdog task"
+    );
+    assert!(!rollout_items.iter().any(|item| match item {
+        RolloutItem::ResponseItem(ResponseItem::Message { content, .. }) => {
+            content.iter().any(|content_item| match content_item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    text.contains("previous owner response: pong 81 (118)")
+                }
+                ContentItem::InputImage { .. } => false,
+            })
+        }
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::ResponseItem(_) => false,
+    }));
     assert!(history_items.iter().any(|item| matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
@@ -770,6 +1125,26 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
     })
     .await
     .expect("plain goodbye final message should close the watchdog handle");
+
+    let close_event = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = owner_thread
+                .next_event()
+                .await
+                .expect("owner event channel should stay open");
+            if let EventMsg::CollabCloseEnd(close) = event.msg {
+                break close;
+            }
+        }
+    })
+    .await
+    .expect("plain goodbye should publish a close event for the watchdog handle");
+    assert_eq!(close_event.sender_thread_id, owner_thread_id);
+    assert_eq!(close_event.receiver_thread_id, target_thread_id);
+    assert_eq!(
+        close_event.status,
+        AgentStatus::Completed(Some("goodbye".to_string()))
+    );
 }
 
 #[tokio::test]

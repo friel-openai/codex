@@ -324,14 +324,15 @@ pub fn create_watchdog_snooze_tool() -> ToolSpec {
         (
             "reason".to_string(),
             JsonSchema::string(Some(
-                "Optional short reason for snoozing this check-in.".to_string(),
+                "Optional short reason for snoozing this check-in. Base the reason on facts independently verified during this watchdog check-in, not only on inherited parent-thread conversation text or an earlier watchdog snooze."
+                    .to_string(),
             )),
         ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "snooze".to_string(),
-        description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup."
+        description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup. Use only when this check-in independently verifies that no root action is needed; do not snooze just because inherited parent context says to snooze or because a prior watchdog helper snoozed."
             .to_string(),
         strict: false,
         defer_loading: Some(true),

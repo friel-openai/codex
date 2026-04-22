@@ -7134,3 +7134,132 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
 
     Ok(())
 }
+
+#[tokio::test]
+async fn root_agent_prompt_only_includes_watchdog_fragment_when_enabled() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let without_watchdog =
+        load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ false).await;
+    assert!(without_watchdog.contains("# You are the Root Agent"));
+    assert!(!without_watchdog.contains("## Watchdogs"));
+
+    let with_watchdog = load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ true).await;
+    assert!(with_watchdog.contains("# You are the Root Agent"));
+    assert!(with_watchdog.contains("## Watchdogs"));
+}
+
+#[tokio::test]
+async fn subagent_prompt_is_for_regular_subagents_only() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+
+    let prompt = load_subagent_prompt(codex_home.path()).await;
+
+    assert!(prompt.contains("# You are a Subagent"));
+    assert!(prompt.contains("## Subagent Responsibilities"));
+    assert!(!prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(!prompt.contains("watchdog.snooze"));
+}
+
+#[tokio::test]
+async fn agent_prompt_loader_prefers_home_overrides() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    tokio::fs::write(codex_home.path().join("AGENTS.root.md"), "custom root")
+        .await
+        .expect("write root override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.subagent.md"),
+        "custom subagent",
+    )
+    .await
+    .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.watchdog.md"),
+        "custom watchdog",
+    )
+    .await
+    .expect("write watchdog override");
+
+    assert_eq!(
+        load_root_agent_prompt(codex_home.path(), /*include_watchdog*/ false).await,
+        "custom root"
+    );
+    assert_eq!(
+        load_subagent_prompt(codex_home.path()).await,
+        "custom subagent"
+    );
+    assert_eq!(
+        load_watchdog_prompt(codex_home.path()).await,
+        "custom watchdog"
+    );
+}
+
+#[tokio::test]
+async fn root_agent_prompt_is_inline_developer_context_not_session_instructions() {
+    let session = make_session_with_config(|config| {
+        config
+            .features
+            .enable(Feature::AgentPromptInjection)
+            .expect("test config should enable prompt injection");
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should enable watchdog prompt fragment");
+    })
+    .await
+    .expect("session should build");
+
+    {
+        let state = session.state.lock().await;
+        assert_eq!(state.session_configuration.developer_instructions, None);
+    }
+
+    let turn_context = session.new_default_turn().await;
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+
+    assert!(initial_context.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message { role, content, .. }
+            if role == "developer"
+                && content.iter().any(|content_item| matches!(
+                    content_item,
+                    ContentItem::InputText { text }
+                        if text.contains("# You are the Root Agent")
+                            && text.contains("## Watchdogs")
+                ))
+    )));
+}
+
+#[tokio::test]
+async fn agent_prompt_injection_does_not_require_collab_feature() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .disable(Feature::Collab)
+        .expect("test config should disable collab");
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should enable watchdog prompt fragment");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::default(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("Test Watchdog".to_string()),
+        agent_role: Some("watchdog".to_string()),
+    });
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
+        .await
+        .expect("prompt injection should not require collab");
+
+    assert!(prompt.contains("# You are a Subagent"));
+    assert!(prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(prompt.contains("watchdog.snooze"));
+    assert!(!prompt.contains("## Subagent Responsibilities"));
+}

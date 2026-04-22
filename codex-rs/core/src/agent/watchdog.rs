@@ -6,6 +6,8 @@ use super::registry::exceeds_thread_spawn_depth_limit;
 use super::status::is_final;
 use crate::config::Config;
 use crate::thread_manager::ThreadManagerState;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
@@ -297,31 +299,37 @@ impl WatchdogManager {
             }
             let helper_suppressed = self.take_suppressed_helper(helper_id).await;
             let mut close_watchdog_handle = false;
+            let mut close_watchdog_message = None;
             if let AgentStatus::Completed(Some(message)) = helper_status
                 && !helper_suppressed
             {
                 close_watchdog_handle = final_message_requests_watchdog_close(&message);
-                if let Err(err) = control_for_spawn
-                    .send_watchdog_wakeup(snapshot.owner_thread_id, message)
-                    .await
-                {
-                    warn!(
-                        helper_id = %helper_id,
-                        owner_thread_id = %snapshot.owner_thread_id,
-                        "watchdog helper forward failed: {err}"
-                    );
-                }
+                close_watchdog_message = Some(message);
             }
-            let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
             if close_watchdog_handle {
+                let receiver_agent = control_for_spawn
+                    .get_agent_metadata(target_thread_id)
+                    .unwrap_or_default();
+                let _ = control_for_spawn.close_agent(target_thread_id).await;
                 let _ = control_for_spawn
-                    .unregister_watchdog_handle(target_thread_id)
+                    .send_watchdog_close_event(
+                        snapshot.owner_thread_id,
+                        target_thread_id,
+                        receiver_agent.agent_nickname,
+                        receiver_agent.agent_role,
+                        AgentStatus::Completed(close_watchdog_message.clone()),
+                    )
                     .await;
-                let _ = control_for_spawn
-                    .shutdown_live_agent(target_thread_id)
-                    .await;
+                if let Some(message) = close_watchdog_message {
+                    let _ = control_for_spawn
+                        .send_watchdog_wakeup(snapshot.owner_thread_id, message)
+                        .await;
+                }
                 return;
             }
+            let _ = control_for_spawn
+                .close_live_agent_without_watchdog_unregister(helper_id)
+                .await;
             self.update_after_spawn(
                 target_thread_id,
                 generation,
@@ -329,6 +337,17 @@ impl WatchdogManager {
                 /*active_helper_id*/ None,
             )
             .await;
+            if let Some(message) = close_watchdog_message
+                && let Err(err) = control_for_spawn
+                    .send_watchdog_wakeup(snapshot.owner_thread_id, message)
+                    .await
+            {
+                warn!(
+                    helper_id = %helper_id,
+                    owner_thread_id = %snapshot.owner_thread_id,
+                    "watchdog helper forward failed: {err}"
+                );
+            }
             return;
         }
 
@@ -359,7 +378,6 @@ impl WatchdogManager {
             agent_role: Some("watchdog".to_string()),
         });
         let mut helper_config = snapshot.config.clone();
-        helper_config.ephemeral = true;
         if let Err(err) = helper_config.mcp_servers.set(HashMap::new()) {
             warn!(
                 target_thread_id = %target_thread_id,
@@ -374,7 +392,23 @@ impl WatchdogManager {
             .await;
             return;
         }
-        let helper_prompt = watchdog_helper_prompt(snapshot.owner_thread_id, &snapshot.prompt);
+        let current_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
+        let owner_idle_for_seconds = now.duration_since(owner_idle_since).as_secs();
+        let check_in_facts = format!(
+            "Watchdog check-in facts:\n- current_utc: {current_utc}\n- owner_idle_for_seconds: {owner_idle_for_seconds}\n- watchdog_interval_seconds: {}\n- watchdog_was_due: true",
+            snapshot.interval.as_secs()
+        );
+        let helper_prompt = if snapshot.prompt.trim().is_empty() {
+            format!(
+                "Target agent id: {}\n\n{}",
+                snapshot.owner_thread_id, check_in_facts
+            )
+        } else {
+            format!(
+                "Target agent id: {}\n\n{}\n\n{}",
+                snapshot.owner_thread_id, check_in_facts, snapshot.prompt
+            )
+        };
         let spawn_result = control_for_spawn
             .spawn_agent_with_metadata(
                 helper_config,
@@ -530,6 +564,22 @@ impl WatchdogManager {
         })
     }
 
+    pub(crate) async fn finish_active_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let mut registrations = self.registrations.lock().await;
+        let Some(entry) = registrations
+            .values_mut()
+            .find(|entry| entry.active_helper_id == Some(helper_thread_id))
+        else {
+            return false;
+        };
+        entry.active_helper_id = None;
+        self.suppressed_helpers
+            .lock()
+            .await
+            .insert(helper_thread_id);
+        true
+    }
+
     async fn update_after_spawn(
         &self,
         target_thread_id: ThreadId,
@@ -546,7 +596,6 @@ impl WatchdogManager {
         }
         entry.last_trigger = now;
         entry.active_helper_id = active_helper_id;
-        entry.owner_idle_since = Some(now);
         entry.snoozed_until = None;
     }
 }
@@ -602,28 +651,8 @@ fn tick_duration() -> Duration {
     Duration::from_secs(WATCHDOG_TICK_SECONDS as u64)
 }
 
-fn watchdog_helper_prompt(owner_thread_id: ThreadId, prompt: &str) -> String {
-    if prompt.trim().is_empty() {
-        format!("Target agent id: {owner_thread_id}")
-    } else {
-        format!("Target agent id: {owner_thread_id}\n\n{prompt}")
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::watchdog_helper_prompt;
-    use codex_protocol::ThreadId;
-
-    #[test]
-    fn watchdog_helper_prompt_includes_owner_and_task() {
-        let owner_thread_id = ThreadId::default();
-        assert_eq!(
-            watchdog_helper_prompt(owner_thread_id, "check in"),
-            format!("Target agent id: {owner_thread_id}\n\ncheck in")
-        );
-    }
-
     #[test]
     fn owner_completed_status_does_not_terminate_watchdog() {
         assert!(!super::is_watchdog_terminated(
