@@ -24,15 +24,86 @@ Responsible agent: release-doc-coverage worker.
 
 Worktree or branch: `/build/frodex-worktrees/test-audit/release-doc-coverage` on `audit/release-doc-coverage`.
 
-Audit table:
+### Per-Commit Coverage Checklist
 
-| Commit | Behavior under audit | Existing coverage | Disposition |
-|---|---|---|---|
-| `c85dc2884d` | `codex exec --fork` test callsites use exact `/*path*/ None` literal annotation for `thread_fork_params_from_config`. | `just argument-comment-lint` is the repository-wide focused check for opaque literal argument comments. The touched file is under `codex-rs/`, so normal Rust CI also routes it through `argument_comment_lint_prebuilt`. | covered |
-| `52ad779fe0` | CLI tests annotate `format_exit_messages` color booleans and remote/auth optional literals with exact parameter names. | `just argument-comment-lint` covers the changed callsites; `rust-ci.yml` runs the prebuilt lint for `codex-rs/*` changes and workflow changes. | covered |
-| `75318ecaba` | Frodex release workflow exists, runs on `frodex-v*` tags and manual dispatch, builds `codex` release archives for supported macOS and Linux targets, uploads artifacts, and publishes a prerelease. | Source inspection of `.github/workflows/frodex-release.yml`: trigger includes `frodex-v*` and `workflow_dispatch`; matrix includes `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`; each matrix row stages `frodex-${{ matrix.target }}.tar.gz`; release job downloads merged artifacts and passes `dist/**` to `softprops/action-gh-release`. | covered |
-| `d952829ad3` | Release builds use Cargo's git CLI fetch path on release runners. | Source inspection of `.github/workflows/frodex-release.yml`: build job env sets `CARGO_NET_GIT_FETCH_WITH_CLI: "true"` next to `CARGO_PROFILE_RELEASE_LTO`. | covered |
-| `docs/frodex-feature-retention.md` | Future stack reconstruction preserves release workflow assets, argument-comment lint cleanup, and non-code feature assets. | Added `Release Stack Retention Gates` naming the workflow asset, release triggers, supported targets, Cargo git CLI fetch mode, argument-comment lint validation, and ledger mapping requirement. Existing prompt-injection RCAs already capture non-code prompt asset retention and release-binary verification expectations. | new-doc-added |
+- [x] `c85dc2884d` - Annotate `codex exec --fork` test literals
+  - [x] Code paths read:
+    `codex-rs/exec/tests/suite/fork.rs`,
+    `codex-rs/exec/src/cli_tests.rs`,
+    `codex-rs/exec/src/main_tests.rs`,
+    `codex-rs/argument-comment-lint`.
+  - [x] Behavior protected:
+    `codex exec --fork` tests keep exact `/*path*/ None` callsite annotations for opaque positional arguments, so future changes cannot silently reintroduce ambiguous literals around fork parameter construction.
+  - [x] Regression/conformance tests:
+    `just argument-comment-lint` is the focused repository check for this behavior; `codex-rs/exec/tests/suite/fork.rs` also remains covered by `cargo test -p codex-exec fork_option` and `cargo test -p codex-exec exec_fork_by_id_creates_new_session_with_copied_history` from the fork/cache/exec workstream.
+  - [x] Boundary reached:
+    source-lint boundary. Responses API/item format is not relevant to this commit because it changes only test callsite annotations.
+  - [x] Validation command/result:
+    `just argument-comment-lint` - passed after rerun with escalated filesystem access for Bazel cache writes.
+  - [x] Remaining gap:
+    no hard-test gap for the annotation behavior; the meaningful enforcement is the lint itself.
+
+- [x] `52ad779fe0` - Annotate CLI remote and color literals
+  - [x] Code paths read:
+    `codex-rs/cli/src/lib.rs`,
+    `codex-rs/cli/src/tests.rs`,
+    `codex-rs/argument-comment-lint`.
+  - [x] Behavior protected:
+    CLI tests keep exact argument comments for `format_exit_messages` color booleans and remote/auth optional literals, preserving readability and satisfying the repository-wide opaque literal lint.
+  - [x] Regression/conformance tests:
+    `just argument-comment-lint` covers the changed callsites and is also run by Rust CI for `codex-rs/*` changes.
+  - [x] Boundary reached:
+    source-lint boundary. Responses API/item format is not relevant because this commit changes only test annotation text.
+  - [x] Validation command/result:
+    `just argument-comment-lint` - passed after rerun with escalated filesystem access for Bazel cache writes.
+  - [x] Remaining gap:
+    no hard-test gap for the annotation behavior.
+
+- [x] `75318ecaba` - Restore Frodex release workflow
+  - [x] Code paths read:
+    `.github/workflows/frodex-release.yml`,
+    `docs/frodex-feature-retention.md`.
+  - [x] Behavior protected:
+    the Frodex release workflow exists, runs on `frodex-v*` tags and manual dispatch, builds `codex` release archives for supported macOS and Linux targets, uploads artifacts, and publishes a prerelease.
+  - [x] Regression/conformance tests:
+    static workflow inspection recorded here; `docs/frodex-feature-retention.md` now includes release-stack retention gates requiring the workflow asset, tag trigger, target matrix, artifact naming, and prerelease publishing path to be preserved during future stack reconstruction.
+  - [x] Boundary reached:
+    GitHub Actions workflow-source boundary. Responses API/item format is not relevant to release packaging.
+  - [x] Validation command/result:
+    `git diff --check` - passed in worker validation.
+  - [x] Remaining gap:
+    no local unit test can prove GitHub's hosted release runner will publish a prerelease. A real `frodex-v*` tag workflow run remains the production validator.
+
+- [x] `d952829ad3` - Use Cargo git CLI fetches in Frodex release builds
+  - [x] Code paths read:
+    `.github/workflows/frodex-release.yml`,
+    `docs/frodex-feature-retention.md`.
+  - [x] Behavior protected:
+    release builds set `CARGO_NET_GIT_FETCH_WITH_CLI: "true"` in the build job environment so Cargo dependency git fetches use the git CLI path on release runners.
+  - [x] Regression/conformance tests:
+    static workflow inspection recorded here; `docs/frodex-feature-retention.md` now names `CARGO_NET_GIT_FETCH_WITH_CLI=true` as a required release-stack retention check.
+  - [x] Boundary reached:
+    GitHub Actions workflow-source boundary. Responses API/item format is not relevant.
+  - [x] Validation command/result:
+    `git diff --check` - passed in worker validation.
+  - [x] Remaining gap:
+    no local unit test executes a GitHub-hosted release job. The workflow source and retention checklist are the durable local protection; a real release run is the production validator.
+
+- [x] `docs/frodex-feature-retention.md` - Preserve non-code release-stack assets
+  - [x] Code paths read:
+    `docs/frodex-feature-retention.md`,
+    `docs/autoplan-frodex-release-test-audit.md`,
+    `docs/loop-ledger-frodex-release-test-audit.md`.
+  - [x] Behavior protected:
+    future stack reconstruction must preserve release workflow assets, argument-comment lint cleanup, prompt files, feature defaults, and release-binary verification evidence instead of treating code diffs as the complete feature inventory.
+  - [x] Regression/conformance tests:
+    documentation checklist added in `docs/frodex-feature-retention.md` under `Release Stack Retention Gates`; the root AutoPlan now requires each future audited commit to have code-read evidence, behavior evidence, test names, boundary level, validation, and remaining-gap disposition.
+  - [x] Boundary reached:
+    process-documentation boundary. Responses API/item format is only relevant to runtime feature commits and is covered in the other workstream ledgers.
+  - [x] Validation command/result:
+    `git diff --check` - passed in worker validation.
+  - [x] Remaining gap:
+    process docs still depend on future agents following them; this audit makes that requirement explicit and reviewable.
 
 Validation:
 
