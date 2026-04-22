@@ -40,6 +40,14 @@ Deterministic. Evidence is source inspection, focused unit/integration tests, sn
 ## Acceptance Evidence
 
 - Each commit above is mapped to one or more behaviors in a workstream ledger.
+- Each commit has a checklist entry, not only a paragraph summary.
+- Each commit checklist has sub-checks for:
+  - code paths read by an agent,
+  - behavior protected,
+  - regression or conformance test names and file paths,
+  - whether the strongest relevant test reaches the Responses API request, rollout item, app-server event, or TUI snapshot boundary,
+  - validator command and result,
+  - remaining gap, if any.
 - Each behavior is marked `covered`, `new-test-added`, or `not-testable-here` with a concrete reason.
 - For any new code changes, targeted crate tests pass.
 - For TUI-visible changes, snapshot coverage is present or explicitly justified.
@@ -78,11 +86,11 @@ Run all five active workstreams in parallel where possible. The root should reco
 
 | Workstream | Status | Responsible agent | Dependency / blocker | Plan | Ledger | Worktree / branch | Next step | Latest disposition |
 |---|---|---|---|---|---|---|---|---|
-| Fork/cache/exec | active | unassigned | none | `docs/workstreams/active/fork-cache-exec/plan.md` | `docs/workstreams/active/fork-cache-exec/ledger.md` | pending | Audit commits 1, 2, 6, 9 and add item-format tests if missing. | pending |
-| Watchdog runtime/tools | active | unassigned | none | `docs/workstreams/active/watchdog-runtime-tools/plan.md` | `docs/workstreams/active/watchdog-runtime-tools/ledger.md` | pending | Audit commits 3, 4, 5, 14, 15, 18, 19, 20, 21. | pending |
-| Prompt/config/models | active | unassigned | none | `docs/workstreams/active/prompt-config-models/plan.md` | `docs/workstreams/active/prompt-config-models/ledger.md` | pending | Audit commits 13 and 22 plus prompt docs. | pending |
-| TUI agent surface | active | unassigned | none | `docs/workstreams/active/tui-agent-surface/plan.md` | `docs/workstreams/active/tui-agent-surface/ledger.md` | pending | Audit commits 12, 16, 17 and snapshot coverage. | pending |
-| Release/doc coverage | active | unassigned | none | `docs/workstreams/active/release-doc-coverage/plan.md` | `docs/workstreams/active/release-doc-coverage/ledger.md` | pending | Audit commits 7, 8, 10, 11 and docs retention process. | pending |
+| Fork/cache/exec | active | Helmholtz (`019db628-d1a4-7650-ba0e-30483538f682`) | none | `docs/workstreams/active/fork-cache-exec/plan.md` | `docs/workstreams/active/fork-cache-exec/ledger.md` | `/build/frodex-worktrees/test-audit/fork-cache-exec` / `audit/fork-cache-exec` | Audit commits 1, 2, 6, 9 and add item-format tests if missing. | advance |
+| Watchdog runtime/tools | active | Volta (`019db628-d120-7c60-8209-cefb03bd9121`) | none | `docs/workstreams/active/watchdog-runtime-tools/plan.md` | `docs/workstreams/active/watchdog-runtime-tools/ledger.md` | `/build/frodex-worktrees/test-audit/watchdog-runtime-tools` / `audit/watchdog-runtime-tools` | Audit commits 3, 4, 5, 14, 15, 18, 19, 20, 21. | advance |
+| Prompt/config/models | active | Franklin (`019db628-d2eb-7720-a4ee-8a77ee52c997`) | none | `docs/workstreams/active/prompt-config-models/plan.md` | `docs/workstreams/active/prompt-config-models/ledger.md` | `/build/frodex-worktrees/test-audit/prompt-config-models` / `audit/prompt-config-models` | Audit commits 13 and 22 plus prompt docs. | advance |
+| TUI agent surface | active | Ptolemy (`019db628-d478-7543-b7d9-3ea444162ef1`) | none | `docs/workstreams/active/tui-agent-surface/plan.md` | `docs/workstreams/active/tui-agent-surface/ledger.md` | `/build/frodex-worktrees/test-audit/tui-agent-surface` / `audit/tui-agent-surface` | Audit commits 12, 16, 17 and snapshot coverage. | advance |
+| Release/doc coverage | active | Noether (`019db628-d57f-79f1-85d1-ac0c0ce82428`) | none | `docs/workstreams/active/release-doc-coverage/plan.md` | `docs/workstreams/active/release-doc-coverage/ledger.md` | `/build/frodex-worktrees/test-audit/release-doc-coverage` / `audit/release-doc-coverage` | Audit commits 7, 8, 10, 11 and docs retention process. | advance |
 
 ## Pivot Rules
 
