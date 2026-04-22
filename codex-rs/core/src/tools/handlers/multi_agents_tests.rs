@@ -732,7 +732,21 @@ async fn compact_parent_context_submits_compaction_for_idle_parent() {
     let (content, success) = expect_text_output(output);
 
     assert_eq!(success, Some(true));
-    assert!(content.contains("submitted"));
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("compact_parent_context result should be json");
+    let submission_id = result
+        .get("submission_id")
+        .and_then(|value| value.as_str())
+        .expect("submitted compaction should include a submission id");
+    assert!(!submission_id.is_empty());
+    assert_eq!(
+        result,
+        json!({
+            "kind": "submitted",
+            "parent_thread_id": owner.thread_id.to_string(),
+            "submission_id": submission_id,
+        })
+    );
     let captured = manager
         .captured_ops()
         .into_iter()
