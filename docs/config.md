@@ -56,6 +56,46 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 When Codex knows which client started the turn, the legacy notify JSON payload also includes a top-level `client` field. The TUI reports `codex-tui`, and the app server reports the `clientInfo.name` value from `initialize`.
 
+## Custom Models
+
+Use `custom_models` to add model aliases to the model picker while keeping a
+different provider-facing model slug on API requests. Each entry needs a
+user-facing `name` and a request `model`; optional token limits override the
+metadata Codex would otherwise infer for that model.
+
+```toml
+[[custom_models]]
+name = "frontier-local"
+model = "gpt-5.4"
+model_context_window = 123456
+model_auto_compact_token_limit = 100000
+```
+
+Custom model names must be unique. When an alias is selected, Codex displays the
+alias but sends the configured `model` value to the provider.
+
+## Agent Roles
+
+Use `[agents.<role>]` tables to define extra roles for spawned agents. A role
+can provide a description, a role-specific config layer, nickname candidates, or
+`watchdog_interval_s`.
+
+```toml
+[agents.researcher]
+description = "Research role"
+config_file = "./agents/researcher.toml"
+nickname_candidates = ["Hypatia", "Noether"]
+
+[agents.slow_watch]
+description = "Slow watchdog"
+watchdog_interval_s = 300
+```
+
+`watchdog_interval_s` turns that role into an idle-time watchdog instead of a
+normal worker. The built-in `watchdog` role uses 60 seconds; custom watchdog
+roles can set a different interval in seconds, and the value must be greater
+than zero.
+
 ## JSON Schema
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.

@@ -50,7 +50,7 @@ You can enable notifications by configuring a script that is run whenever the ag
 
 ### `codex exec` to run Codex programmatically/non-interactively
 
-To run Codex non-interactively, run `codex exec PROMPT` (you can also pass the prompt via `stdin`) and Codex will work on your task until it decides that it is done and exits. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
+To run Codex non-interactively, run `codex exec PROMPT` and Codex will work on your task until it decides that it is done and exits. If you pipe non-empty stdin while also passing `PROMPT`, Codex appends the stdin content as additional context inside a `<stdin>` block. If you pass `-` as the prompt, or omit the prompt argument, stdin becomes the primary prompt instead. Output is printed to the terminal directly. You can set the `RUST_LOG` environment variable to see more about what's going on.
 Use `codex exec --fork <SESSION_ID> PROMPT` to fork an existing session without launching the interactive picker/UI.
 Use `codex exec --ephemeral ...` to run without persisting session rollout files to disk.
 

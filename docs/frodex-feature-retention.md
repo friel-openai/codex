@@ -1,6 +1,6 @@
 # Frodex Feature Retention
 
-This document records feature-retention checks for the Frodex branch stack. Use it during rebases, release-branch reconstruction, and binary cuts.
+This document records feature-retention checks for the Frodex branch stack. Use it during rebases, release-branch reconstruction, and release cuts.
 
 ## Required Checks For Every Stacked Feature
 
@@ -9,7 +9,7 @@ This document records feature-retention checks for the Frodex branch stack. Use 
 - Name the config flag, default, or binary override that enables the behavior.
 - Name the tests that fail if the behavior is dropped.
 - Check for non-Rust assets that are part of the feature, including Markdown prompts, schemas, snapshots, config examples, and generated files.
-- Verify the built `frodex` binary, not only unit tests.
+- Verify the release artifact or runtime behavior, not only unit tests. For the current release workflow, this means the `frodex-*` archives contain the built `codex` binary.
 
 ## Release Stack Retention Gates
 
@@ -19,7 +19,7 @@ Apply these gates before cutting any `frodex-v*` tag from a reconstructed stack:
 - Confirm the release workflow builds and uploads one archive for each supported target: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`.
 - Confirm release builds set `CARGO_NET_GIT_FETCH_WITH_CLI=true` so Cargo git fetches use the GitHub CLI path on release runners.
 - For commits that only satisfy the literal argument-comment convention, run `just argument-comment-lint` or record the exact reason it could not run locally.
-- Record the coverage mapping in the active workstream ledger before tagging, including which workflow, lint, unit, snapshot, or binary-level check protects each retained behavior.
+- Record the coverage mapping in the active workstream ledger before tagging, including which workflow, lint, unit, snapshot, artifact-level, or runtime check protects each retained behavior.
 
 ## RCA: Agent Prompt Injection Dropped During Stack Reconstruction
 
@@ -37,7 +37,7 @@ Follow-up correction: prompt injection must not mutate `SessionConfiguration.dev
 
 Additional prompt recovery: two April 6 watchdog prompt edits diverged. The recovered default now combines the evidence-based supervision guidance from `670b2e4fb77443950bbb8a2b1d0a26430102507f` with the later `watchdog.snooze` guidance from `88145c13a5c4c15093a7ffd6e9a98ec44a22a8da`.
 
-Prevention: every branch checklist must include prompt assets and other non-code feature assets. For prompt features, tests must assert both the default fallback content and user override behavior. Release validation must include a binary-level smoke test or request-body inspection that proves the role prompt appears in the effective thread instructions.
+Prevention: every branch checklist must include prompt assets and other non-code feature assets. For prompt features, tests must assert both the default fallback content and user override behavior. Release validation must include an artifact-level smoke test or request-body inspection that proves the role prompt appears in the effective thread instructions.
 
 ## RCA: Prompt Injection Incorrectly Depended On Collab
 
@@ -51,4 +51,4 @@ Why it slipped: the prompt-injection tests enabled `Collab`, which matched the o
 
 Fix: make prompt injection depend on `agent_prompt_injection` itself, not on `Collab`. Add a regression test that disables `Collab`, enables `agent_prompt_injection` and `agent_watchdog`, builds an explicit watchdog `SessionSource`, and asserts the loaded prompt is the watchdog role prompt with `watchdog.snooze` guidance, not the regular subagent prompt.
 
-Prevention: every feature branch that survives a stack rebase needs at least one test that uses the release-binary feature combination, not only the historical branch combination. When a feature moves from one tool/runtime path to another, remove stale feature dependencies or add tests that prove the old dependency is still required.
+Prevention: every feature branch that survives a stack rebase needs at least one test that uses the release configuration, not only the historical branch combination. When a feature moves from one tool/runtime path to another, remove stale feature dependencies or add tests that prove the old dependency is still required.

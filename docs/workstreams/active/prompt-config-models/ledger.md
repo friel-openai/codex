@@ -27,6 +27,7 @@ Start commit: `83d6ddb19a`.
 Commits audited:
 
 - [x] `4430b27c39` - Restore Frodex watchdog defaults and custom models.
+
   - [x] Code paths read:
     - `codex-rs/features/src/lib.rs`
     - `codex-rs/features/src/tests.rs`
@@ -59,7 +60,7 @@ Commits audited:
     - `cargo test -p codex-models-manager custom_model_alias_uses_backing_model_metadata_and_request_model` - passed.
     - `cargo test -p codex-core custom_model_alias_uses_backing_model_in_responses_request` - passed.
   - [x] Remaining gap:
-    - No binary-level `frodex` smoke test was added in this workstream; coverage is config/manager/request-level Rust tests.
+    - No release-artifact smoke test was added in this workstream; coverage is config/manager/request-level Rust tests.
 
 - [x] `83d6ddb19a` - Restore Frodex watchdog and prompt behavior.
   - [x] Code paths read:
