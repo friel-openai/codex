@@ -1303,6 +1303,10 @@ impl ThreadItemRenderSource {
             Self::Replay(replay_kind) => Some(replay_kind),
         }
     }
+
+    fn should_update_subagent_panel(self) -> bool {
+        !matches!(self, Self::Replay(ReplayKind::ResumeInitialMessages))
+    }
 }
 
 fn thread_session_state_to_legacy_event(
@@ -3872,7 +3876,7 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    fn on_collab_agent_tool_call(&mut self, item: ThreadItem) {
+    fn on_collab_agent_tool_call(&mut self, item: ThreadItem, update_subagent_panel: bool) {
         let ThreadItem::CollabAgentToolCall {
             id,
             tool,
@@ -3945,7 +3949,7 @@ impl ChatWidget {
                         },
                         spawn_request.as_ref(),
                     ));
-                    if let Some(receiver_thread_id) = first_receiver {
+                    if update_subagent_panel && let Some(receiver_thread_id) = first_receiver {
                         self.subagent_panel_registry.on_spawn(
                             receiver_thread_id,
                             first_receiver_metadata
@@ -3988,9 +3992,11 @@ impl ChatWidget {
                             status: receiver_status.clone(),
                         },
                     ));
-                    self.subagent_panel_registry
-                        .update_status(receiver_thread_id, receiver_status);
-                    self.refresh_subagent_panel();
+                    if update_subagent_panel {
+                        self.subagent_panel_registry
+                            .update_status(receiver_thread_id, receiver_status);
+                        self.refresh_subagent_panel();
+                    }
                 }
             }
             CollabAgentTool::ResumeAgent => {
@@ -4029,9 +4035,11 @@ impl ChatWidget {
                                 status: receiver_status.clone(),
                             },
                         ));
-                        self.subagent_panel_registry
-                            .update_status(receiver_thread_id, receiver_status);
-                        self.refresh_subagent_panel();
+                        if update_subagent_panel {
+                            self.subagent_panel_registry
+                                .update_status(receiver_thread_id, receiver_status);
+                            self.refresh_subagent_panel();
+                        }
                     }
                 }
             }
@@ -4068,11 +4076,13 @@ impl ChatWidget {
                             statuses,
                         },
                     ));
-                    for status_entry in agent_status_updates {
-                        self.subagent_panel_registry
-                            .update_status(status_entry.thread_id, status_entry.status);
+                    if update_subagent_panel {
+                        for status_entry in agent_status_updates {
+                            self.subagent_panel_registry
+                                .update_status(status_entry.thread_id, status_entry.status);
+                        }
+                        self.refresh_subagent_panel();
                     }
-                    self.refresh_subagent_panel();
                 }
             }
             CollabAgentTool::CloseAgent => {
@@ -4098,8 +4108,10 @@ impl ChatWidget {
                             status: receiver_status,
                         },
                     ));
-                    self.subagent_panel_registry.close(receiver_thread_id);
-                    self.refresh_subagent_panel();
+                    if update_subagent_panel {
+                        self.subagent_panel_registry.close(receiver_thread_id);
+                        self.refresh_subagent_panel();
+                    }
                 }
             }
         }
@@ -6079,17 +6091,20 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    agents_states,
+                },
+                render_source.should_update_subagent_panel(),
+            ),
             ThreadItem::DynamicToolCall { .. } => {}
         }
 
@@ -6545,17 +6560,20 @@ impl ChatWidget {
                 model,
                 reasoning_effort,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    agents_states,
+                },
+                !from_replay,
+            ),
             ThreadItem::EnteredReviewMode { review, .. } => {
                 if !from_replay {
                     self.enter_review_mode_with_hint(review, /*from_replay*/ false);
