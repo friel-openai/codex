@@ -11,6 +11,16 @@ This document records feature-retention checks for the Frodex branch stack. Use 
 - Check for non-Rust assets that are part of the feature, including Markdown prompts, schemas, snapshots, config examples, and generated files.
 - Verify the built `frodex` binary, not only unit tests.
 
+## Release Stack Retention Gates
+
+Apply these gates before cutting any `frodex-v*` tag from a reconstructed stack:
+
+- Treat `.github/workflows/frodex-release.yml` as a retained release asset. A stack audit must confirm the workflow still runs on `frodex-v*` tags and `workflow_dispatch`.
+- Confirm the release workflow builds and uploads one archive for each supported target: `aarch64-apple-darwin`, `x86_64-apple-darwin`, `x86_64-unknown-linux-gnu`, and `aarch64-unknown-linux-gnu`.
+- Confirm release builds set `CARGO_NET_GIT_FETCH_WITH_CLI=true` so Cargo git fetches use the GitHub CLI path on release runners.
+- For commits that only satisfy the literal argument-comment convention, run `just argument-comment-lint` or record the exact reason it could not run locally.
+- Record the coverage mapping in the active workstream ledger before tagging, including which workflow, lint, unit, snapshot, or binary-level check protects each retained behavior.
+
 ## RCA: Agent Prompt Injection Dropped During Stack Reconstruction
 
 Date: 2026-04-22.
