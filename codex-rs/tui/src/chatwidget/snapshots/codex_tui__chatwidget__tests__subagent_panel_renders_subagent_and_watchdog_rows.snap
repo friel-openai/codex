@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: screen
+---
+
+• Subagents (0s • 2 subagents, 1 running • esc to interrupt)
+• [#1] Explorer running — Audit the TUI app-server event flow and report visible regressions.
+• [#2] [watchdog] Watcher idle — Watch the worker for stalled progress.
+
+
+› Ask Codex to do anything
+
+  gpt-5.3-codex default · /tmp/project
