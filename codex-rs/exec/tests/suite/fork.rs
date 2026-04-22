@@ -82,15 +82,25 @@ fn extract_forked_from_id(path: &std::path::Path) -> Option<String> {
 }
 
 fn rollout_contains_fork_reference(path: &std::path::Path) -> bool {
+    extract_fork_reference(path).is_some()
+}
+
+fn extract_fork_reference(path: &std::path::Path) -> Option<(String, usize)> {
     let Ok(content) = std::fs::read_to_string(path) else {
-        return false;
+        return None;
     };
-    content.lines().skip(1).any(|line| {
-        serde_json::from_str::<Value>(line)
-            .ok()
-            .and_then(|item| item.get("type").and_then(Value::as_str).map(str::to_string))
-            .as_deref()
-            == Some("fork_reference")
+    content.lines().skip(1).find_map(|line| {
+        let item = serde_json::from_str::<Value>(line).ok()?;
+        if item.get("type").and_then(Value::as_str) != Some("fork_reference") {
+            return None;
+        }
+        let payload = item.get("payload")?;
+        let rollout_path = payload.get("rollout_path")?.as_str()?.to_string();
+        let nth_user_message = payload
+            .get("nth_user_message")?
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())?;
+        Some((rollout_path, nth_user_message))
     })
 }
 
@@ -145,10 +155,11 @@ fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Result<(
         extract_forked_from_id(&forked_path).as_deref(),
         Some(session_id.as_str())
     );
-    assert!(
-        forked_content.contains(&marker) || rollout_contains_fork_reference(&forked_path),
-        "forked rollout should either inline parent history or record a fork reference"
-    );
+    let fork_reference =
+        extract_fork_reference(&forked_path).context("forked rollout should record a reference")?;
+    assert_eq!(fork_reference.0, original_path.to_string_lossy().as_ref());
+    assert_eq!(fork_reference.1, usize::MAX);
+    assert!(rollout_contains_fork_reference(&forked_path));
     assert!(forked_content.contains(&marker2));
 
     let original_content = std::fs::read_to_string(&original_path)?;
