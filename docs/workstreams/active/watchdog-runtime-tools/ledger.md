@@ -58,9 +58,9 @@ Expected artifacts: commit coverage checklist, new tests where gaps existed, val
 
 - [x] `8476e9427c` Fork watchdog check-in helpers
   - Code paths read: `codex-rs/core/src/agent/watchdog.rs`, `codex-rs/core/src/agent/control.rs`, `codex-rs/core/src/session/tests.rs`, `codex-rs/core/src/agent/role.rs`, `codex-rs/core/src/agent/control_tests.rs`.
-  - Behavior protected: watchdog helpers are full-history forks of current owner state, use the watchdog role prompt, record fork references rather than copying parent items into helper rollout, and each later check-in uses a fresh helper thread.
+  - Behavior protected: watchdog helpers are spawned from current owner state, use the watchdog role prompt, and each later check-in uses a fresh helper thread. Fork-reference replay/materialization itself is attributed to `83d6ddb19a`, not this watchdog-helper commit.
   - Tests: enhanced `codex-rs/core/src/agent/control_tests.rs::watchdog_helper_forks_owner_history`; new `codex-rs/core/src/agent/control_tests.rs::watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork`; existing fork baseline `codex-rs/core/src/agent/control_tests.rs::spawn_agent_can_fork_parent_thread_history_with_sanitized_items`; role interval tests `codex-rs/core/src/agent/role_tests.rs::watchdog_role_uses_builtin_interval` and `custom_role_can_define_watchdog_interval`.
-  - Responses/request/item format level: yes where relevant. `watchdog_helper_forks_owner_history` inspects helper rollout items for `RolloutItem::ForkReference`, developer prompt ordering, synthetic tool/search entries, and absence of copied parent assistant content.
+  - Responses/request/item format level: yes where relevant. `watchdog_helper_forks_owner_history` inspects helper rollout ordering around `RolloutItem::ForkReference`, developer prompt ordering, synthetic tool/search entries, and absence of copied parent assistant content, while attributing the fork-reference materialization contract to `83d6ddb19a`.
   - Validation: `cargo test -p codex-core watchdog_ -- --nocapture` passed.
   - Remaining gap: none for core fork behavior. Backend Responses request-body inspection is not necessary here because the durable fork shape is persisted and asserted at rollout-item level.
 
@@ -101,3 +101,8 @@ Expected artifacts: commit coverage checklist, new tests where gaps existed, val
 ### Disposition
 
 Covered with new and strengthened core tests. No remaining hard-test gaps for the assigned watchdog runtime/tools commits inside this workstream. Remaining UI-only close/list rendering validation belongs to the `tui-agent-surface` workstream.
+
+## 2026-04-22T18:43:34Z - Second-pass attribution correction
+
+- Corrected `8476e9427c` coverage text so watchdog helper spawning remains attributed there, while fork-reference replay/materialization is attributed to `83d6ddb19a`.
+- The new request-boundary watchdog helper ordering test is tracked under the prompt/config/models ledger because it covers `83d6ddb19a` prompt and fork-reference materialization behavior.

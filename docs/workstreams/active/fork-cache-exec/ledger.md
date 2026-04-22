@@ -43,9 +43,10 @@ Start commit: `83d6ddb19a`
     forked subagent sessions can carry the parent prompt cache key into the model client so the first backend Responses request uses the inherited `prompt_cache_key`, not the child thread id.
   - [x] Regression/conformance tests:
     existing `spawn_agent_can_fork_parent_thread_history_with_sanitized_items` in `codex-rs/core/src/agent/control_tests.rs` verifies the child session inherits the parent prompt-cache key in memory;
+    new second-pass `forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot` drives the actual `AgentControl::spawn_agent_with_metadata` full-history fork path to the child thread's first mocked Responses request and verifies the inherited `prompt_cache_key`;
     new `inherited_thread_state_shapes_first_responses_request` in `codex-rs/core/src/session/tests.rs` verifies the actual mocked Responses body contains the inherited `prompt_cache_key`.
   - [x] Responses API/request/item-format level:
-    yes. The new test captures a mocked Responses request with `ResponseMock::single_request().body_json()` and asserts `body["prompt_cache_key"]`.
+    yes. The session-level test captures a mocked Responses request with `ResponseMock::single_request().body_json()` and asserts `body["prompt_cache_key"]`; the second-pass spawn-path test proves the same request field after real fork/spawn inheritance.
   - [x] Validation command/result:
     `cargo test -p codex-core inherited_thread_state_shapes_first_responses_request` - passed.
     `just fix -p codex-core` - passed.
@@ -68,9 +69,10 @@ Start commit: `83d6ddb19a`
     inherited MCP tool snapshots can provide model-visible MCP tools for a forked session's first turn even when the child session has no live MCP servers configured.
   - [x] Regression/conformance tests:
     existing `spawn_agent_can_fork_parent_thread_history_with_sanitized_items` in `codex-rs/core/src/agent/control_tests.rs` verifies the child receives an MCP snapshot matching the parent's tool names;
+    new second-pass `forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot` seeds a parent fake stdio MCP tool, drives `AgentControl::spawn_agent_with_metadata` with `FullHistory`, and asserts the child thread's first mocked Responses request exposes `mcp__rmcp__/echo`;
     new `inherited_thread_state_shapes_first_responses_request` in `codex-rs/core/src/session/tests.rs` seeds an inherited `McpToolSnapshot` and asserts the first mocked Responses request exposes `mcp__snapshot__/echo`.
   - [x] Responses API/request/item-format level:
-    yes. The new test inspects the actual mocked Responses body and uses `namespace_child_tool(&body, "mcp__snapshot__", "echo")` to prove the inherited snapshot reaches request tool shape.
+    yes. The session-level test inspects the actual mocked Responses body and uses `namespace_child_tool(&body, "mcp__snapshot__", "echo")`; the second-pass spawn-path test uses the same request-boundary assertion for the actual fork/spawn route with `mcp__rmcp__/echo`.
   - [x] Validation command/result:
     `cargo test -p codex-core inherited_thread_state_shapes_first_responses_request` - passed.
     `just fix -p codex-core` - passed.
@@ -94,9 +96,9 @@ Start commit: `83d6ddb19a`
   - [x] Regression/conformance tests:
     existing `fork_option_parses_prompt` and `fork_option_conflicts_with_subcommands` in `codex-rs/exec/src/cli_tests.rs`;
     existing `top_cli_parses_fork_option_with_root_config` in `codex-rs/exec/src/main_tests.rs`;
-    strengthened `exec_fork_by_id_creates_new_session_with_copied_history` in `codex-rs/exec/tests/suite/fork.rs` to assert the forked rollout records a `fork_reference` item with the original rollout path and `nth_user_message == usize::MAX`.
+    strengthened `exec_fork_by_id_creates_new_session_with_copied_history` in `codex-rs/exec/tests/suite/fork.rs` to assert the exec fork creates a new session with copied history. Fork-reference replay/materialization behavior is attributed to `83d6ddb19a`, not this CLI commit.
   - [x] Responses API/request/item-format level:
-    rollout item-format level, not Responses API level. This behavior affects app-server thread/fork bootstrap and rollout fork shape; the strengthened test reads the JSONL rollout and asserts `fork_reference` payload shape.
+    rollout item-format level, not Responses API level. This behavior affects app-server thread/fork bootstrap and copied-history fork shape; fork-reference payload replay/materialization coverage belongs to `83d6ddb19a`.
   - [x] Validation command/result:
     `cargo test -p codex-exec fork_option` - passed.
     `cargo test -p codex-exec exec_fork_by_id_creates_new_session_with_copied_history` - passed.
@@ -132,7 +134,7 @@ Start commit: `83d6ddb19a`
   - Added `inherited_thread_state_shapes_first_responses_request`.
   - Added a test helper path for constructing sessions with explicit inherited thread state.
 - `codex-rs/exec/tests/suite/fork.rs`
-  - Strengthened fork coverage to assert `fork_reference` rollout payload shape.
+  - Strengthened exec fork coverage without attributing fork-reference replay/materialization to `f6320c8885`; that behavior belongs to `83d6ddb19a`.
 
 ### Validators Run
 
@@ -150,3 +152,9 @@ Note: an initial run of `just fmt` and `cargo fmt` failed before escalation beca
 ### Disposition
 
 Complete. All assigned commits are mapped to behavior-level coverage. Missing request/item-format checks were added for inherited prompt cache/MCP snapshot request shape and fork rollout item shape. Focused validators and required lint/format checks passed. No blockers remain.
+
+## 2026-04-22T18:43:34Z - Second-pass request-boundary fixes
+
+- Added `codex-rs/core/src/agent/control_tests.rs::forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot`.
+- Coverage: drives the actual `AgentControl::spawn_agent_with_metadata` `FullHistory` path from a parent with live MCP tools to the child thread's first mocked Responses request, proving the inherited `prompt_cache_key` and inherited MCP snapshot tool shape at request boundary.
+- Validators: `cargo test -p codex-core forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot -- --nocapture` passed; `just fix -p codex-core` passed; `just fmt` passed; `just argument-comment-lint` passed.

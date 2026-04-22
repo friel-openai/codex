@@ -30,6 +30,12 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ThreadStore;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::namespace_child_tool;
+use core_test_support::responses::sse;
+use core_test_support::responses::start_mock_server;
 use pretty_assertions::assert_eq;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -981,6 +987,179 @@ async fn watchdog_helper_forks_owner_history() {
             .has_servers(),
         "watchdog helpers should not start their own MCP clients"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() -> anyhow::Result<()>
+{
+    let server = start_mock_server().await;
+    let helper_response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let (_home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should allow feature update");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
+            /*exec_server_url*/ None,
+        )),
+    );
+    let control = manager.agent_control();
+    let owner = manager.start_thread(config.clone()).await?;
+    let owner_thread_id = owner.thread_id;
+    let target = manager.start_thread(config.clone()).await?;
+    let target_thread_id = target.thread_id;
+
+    owner
+        .thread
+        .inject_user_message_without_turn("owner seed before watchdog".to_string())
+        .await;
+    let owner_turn = owner.thread.codex.session.new_default_turn().await;
+    owner
+        .thread
+        .codex
+        .session
+        .record_conversation_items(
+            owner_turn.as_ref(),
+            &[assistant_message(
+                "owner final before watchdog",
+                Some(MessagePhase::FinalAnswer),
+            )],
+        )
+        .await;
+    owner
+        .thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    owner.thread.codex.session.flush_rollout().await?;
+
+    control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "watch the owner".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    owner
+        .thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("owner idle".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let helper_thread_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) =
+                manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                                UserInput::Text { text, .. } => text.contains("Watchdog check-in facts:"),
+                                UserInput::Image { .. }
+                                | UserInput::LocalImage { .. }
+                                | UserInput::Skill { .. }
+                                | UserInput::Mention { .. } => false,
+                                _ => false,
+                            }))
+                    })
+            {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper");
+    let helper_thread = manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("helper thread should be registered");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = helper_thread
+                .next_event()
+                .await
+                .expect("helper event channel should stay open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("helper turn should complete");
+
+    let input = helper_response_mock.single_request().input();
+    let message_position = |role: &str, needle: &str| {
+        input
+            .iter()
+            .position(|item| {
+                item.get("type").and_then(serde_json::Value::as_str) == Some("message")
+                    && item.get("role").and_then(serde_json::Value::as_str) == Some(role)
+                    && item
+                        .get("content")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|content| {
+                            content.iter().any(|content_item| {
+                                content_item
+                                    .get("text")
+                                    .and_then(serde_json::Value::as_str)
+                                    .is_some_and(|text| text.contains(needle))
+                            })
+                        })
+            })
+            .unwrap_or_else(|| panic!("{role} message containing {needle:?} not found: {input:#?}"))
+    };
+    let owner_seed_idx = message_position("user", "owner seed before watchdog");
+    let owner_final_idx = message_position("assistant", "owner final before watchdog");
+    let watchdog_prompt_idx =
+        message_position("developer", "More importantly, you are a **watchdog**");
+    let watchdog_task_idx = message_position("user", "Watchdog check-in facts:");
+
+    assert!(owner_seed_idx < watchdog_prompt_idx);
+    assert!(owner_final_idx < watchdog_prompt_idx);
+    assert!(watchdog_prompt_idx < watchdog_task_idx);
+    assert!(
+        input.iter().any(|item| {
+            item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
+                && item.get("call_id").and_then(serde_json::Value::as_str)
+                    == Some("synthetic_watchdog_list_agents")
+        }),
+        "first watchdog helper request should include pre-injected list_agents output: {input:#?}"
+    );
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -2068,6 +2247,203 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .submit(Op::Shutdown {})
         .await
         .expect("parent shutdown should submit");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let child_response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let (_home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let mcp_server_path = config.codex_home.join("fake_mcp_server.py");
+    std::fs::write(
+        &mcp_server_path,
+        r#"import json
+import sys
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+def write_message(message):
+    body = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "fake-mcp", "version": "1.0.0"},
+            },
+        })
+    elif method == "tools/list":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo from fake MCP",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }],
+            },
+        })
+    else:
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "method not found"},
+        })
+"#,
+    )?;
+    config
+        .mcp_servers
+        .set(std::collections::HashMap::from([(
+            "rmcp".to_string(),
+            McpServerConfig {
+                transport: McpServerTransportConfig::Stdio {
+                    command: "python3".to_string(),
+                    args: vec![mcp_server_path.to_string_lossy().to_string()],
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                experimental_environment: None,
+                enabled: true,
+                required: false,
+                supports_parallel_tool_calls: false,
+                disabled_reason: None,
+                startup_timeout_sec: Some(Duration::from_secs(5)),
+                tool_timeout_sec: None,
+                default_tools_approval_mode: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                scopes: None,
+                oauth_resource: None,
+                tools: std::collections::HashMap::new(),
+            },
+        )]))
+        .expect("test config should allow MCP servers");
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
+            /*exec_server_url*/ None,
+        )),
+    );
+    let control = manager.agent_control();
+    let parent = manager.start_thread(config.clone()).await?;
+    let parent_thread_id = parent.thread_id;
+    let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
+    let parent_mcp_tools = parent
+        .thread
+        .codex
+        .session
+        .services
+        .mcp_connection_manager
+        .read()
+        .await
+        .list_all_tools()
+        .await;
+    let startup_failures = parent
+        .thread
+        .codex
+        .session
+        .services
+        .mcp_connection_manager
+        .read()
+        .await
+        .required_startup_failures(&["rmcp".to_string()])
+        .await;
+    assert!(
+        parent_mcp_tools.contains_key("mcp__rmcp__echo"),
+        "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}; failures={startup_failures:#?}"
+    );
+    parent
+        .thread
+        .inject_user_message_without_turn("parent seed".to_string())
+        .await;
+    parent
+        .thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent.thread.codex.session.flush_rollout().await?;
+
+    let child_thread_id = control
+        .spawn_agent_with_metadata(
+            config,
+            text_input("child request boundary"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("worker".to_string()),
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+            },
+        )
+        .await?
+        .thread_id;
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread
+                .next_event()
+                .await
+                .expect("child event channel should stay open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("child turn should complete");
+    let body = child_response_mock.single_request().body_json();
+    let expected_prompt_cache_key = parent_prompt_cache_key.to_string();
+    assert_eq!(
+        body["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+    assert!(
+        namespace_child_tool(&body, "mcp__rmcp__", "echo").is_some(),
+        "first forked child request should expose parent MCP snapshot tools: {body:#}"
+    );
+
+    Ok(())
 }
 
 #[tokio::test]

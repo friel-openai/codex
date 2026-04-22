@@ -84,7 +84,7 @@ Commits audited:
     - Role prompts are represented as developer-role conversation items and are not folded into durable `developer_instructions`.
     - Root, normal subagent, and watchdog sessions put role prompts before the task user message in the mocked Responses request.
     - Normal subagents receive `subagent_prompt.md` guidance only; watchdog subagents receive watchdog guidance including `watchdog.snooze` and not regular subagent responsibilities.
-    - Watchdog helper rollout ordering still places the watchdog developer prompt after the fork reference and before the watchdog task.
+    - Watchdog helper request ordering places materialized owner context before the watchdog developer prompt, and the watchdog developer prompt before the watchdog task. Fork-reference replay/materialization behavior is attributed to this commit (`83d6ddb19a`), not `f6320c8885` or `8476e9427c`.
     - Prompt injection does not depend on legacy `Collab`.
   - [x] Regression/conformance tests:
     - `codex-rs/features/src/tests.rs::agent_prompt_injection_is_stable_and_enabled_by_default`
@@ -94,10 +94,11 @@ Commits audited:
     - `codex-rs/core/src/session/tests.rs::root_agent_prompt_is_inline_developer_context_not_session_instructions`
     - `codex-rs/core/src/session/tests.rs::agent_prompt_injection_does_not_require_collab_feature`
     - `codex-rs/core/src/agent/control_tests.rs::watchdog_helper_forks_owner_history`
+    - `codex-rs/core/src/agent/control_tests.rs::watchdog_helper_first_request_orders_owner_context_prompt_and_task`
     - `codex-rs/core/tests/suite/prompt_config_models.rs::root_subagent_and_watchdog_prompts_are_developer_items_in_responses_requests`
   - [x] Responses API/request/item format reach:
     - Yes: `root_subagent_and_watchdog_prompts_are_developer_items_in_responses_requests` constructs `ThreadManager` instances for `SessionSource::Exec`, normal `SubAgent(ThreadSpawn { agent_role: None })`, and watchdog `SubAgent(ThreadSpawn { agent_role: Some("watchdog") })`, captures mocked Responses requests, and asserts role prompt content is in developer messages before user task messages and absent from top-level `instructions`.
-    - Existing hard fork-order coverage is rollout-level, not Responses request-level: `watchdog_helper_forks_owner_history` asserts the watchdog prompt item lands after the fork reference and before the watchdog task in the helper rollout.
+    - Yes for the watchdog-helper path: `watchdog_helper_first_request_orders_owner_context_prompt_and_task` drives watchdog registration and helper spawn to the first mocked Responses request, then asserts materialized owner context precedes the watchdog prompt and the watchdog task follows it.
   - [x] Validation command/result:
     - `cargo test -p codex-features agent_prompt_injection_is_stable_and_enabled_by_default` - passed.
     - `cargo test -p codex-core root_agent_prompt_only_includes_watchdog_fragment_when_enabled` - passed.
@@ -108,7 +109,7 @@ Commits audited:
     - `cargo test -p codex-core watchdog_helper_forks_owner_history` - passed.
     - `cargo test -p codex-core root_subagent_and_watchdog_prompts_are_developer_items_in_responses_requests` - passed.
   - [x] Remaining gap:
-    - The request-level prompt test covers explicit root/subagent/watchdog session sources with new thread history. Fork-reference temporal placement remains covered by rollout assertions rather than a mocked Responses request containing reconstructed fork history.
+    - The explicit root/subagent/watchdog request-level prompt test covers new thread history. The second-pass watchdog-helper test now covers reconstructed fork history in the first mocked helper Responses request.
 
 Files changed:
 
@@ -127,3 +128,10 @@ Notes:
 
 - A first `cargo test -p codex-core role_prompts_are_ordered_developer_items_in_responses_requests` attempt failed to compile because it tried to mix internal `codex-core` unit-test private APIs with the integration test harness crate types. The request-level prompt coverage was moved to `codex-rs/core/tests/suite/prompt_config_models.rs` and passed there.
 - `cargo test -p codex-core custom_models_load_from_config_toml custom_models_reject_duplicate_aliases` was an invalid Cargo invocation because Cargo accepts one test filter; the two filters were rerun separately and both passed.
+
+## 2026-04-22T18:43:34Z - Second-pass request-boundary fixes
+
+- Added `codex-rs/core/src/agent/control_tests.rs::watchdog_helper_first_request_orders_owner_context_prompt_and_task`.
+- Coverage: drives watchdog registration, owner completion, helper spawn, and helper turn execution to the helper's first mocked Responses request. The request proves materialized owner context appears before the watchdog developer prompt, and the watchdog task appears after that prompt.
+- Attribution correction: fork-reference replay/materialization behavior belongs to `83d6ddb19a`, not `f6320c8885` or `8476e9427c`.
+- Validators: `cargo test -p codex-core watchdog_helper_first_request_orders_owner_context_prompt_and_task -- --nocapture` passed; `just fix -p codex-core` passed; `just fmt` passed; `just argument-comment-lint` passed.
