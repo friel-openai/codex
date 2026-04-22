@@ -866,6 +866,60 @@ async fn resume_replay_does_not_resurrect_closed_watchdog_panel_row() {
 }
 
 #[tokio::test]
+async fn resume_replay_does_not_resurrect_open_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001012").expect("valid thread id");
+    let subagent_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001013").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        subagent_thread_id,
+        Some("Avicenna".to_string()),
+        Some("fast-worker".to_string()),
+    );
+    let turns = build_turns_from_rollout_items(&[RolloutItem::EventMsg(
+        EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-subagent".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(subagent_thread_id),
+            new_agent_nickname: Some("Avicenna".to_string()),
+            new_agent_role: Some("fast-worker".to_string()),
+            prompt: "Compute the exact value.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Medium,
+            status: AgentStatus::Running,
+        }),
+    )]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let replayed_history = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "resume_replay_open_subagent_history_cells",
+        replayed_history
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "resume_replay_does_not_resurrect_open_subagent_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
 async fn live_app_server_failed_turn_does_not_duplicate_error_history() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
