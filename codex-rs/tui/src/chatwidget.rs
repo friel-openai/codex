@@ -6808,6 +6808,9 @@ impl ChatWidget {
                     }),
                 });
             }
+            ThreadItem::RawResponseItem { item, .. } => {
+                self.on_raw_response_item(item, from_replay);
+            }
             ThreadItem::Plan { text, .. } => self.on_plan_item_completed(text),
             ThreadItem::Reasoning {
                 summary, content, ..
