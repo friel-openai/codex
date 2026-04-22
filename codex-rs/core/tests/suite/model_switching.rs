@@ -2,6 +2,7 @@ use anyhow::Result;
 use codex_config::types::Personality;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
@@ -32,6 +33,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
 use wiremock::MockServer;
@@ -341,6 +343,47 @@ async fn flex_service_tier_is_applied_to_http_turn() -> Result<()> {
     let request = resp_mock.single_request();
     let body = request.body_json();
     assert_eq!(body["service_tier"].as_str(), Some("flex"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let resp_mock = mount_sse_once(&server, sse_completed("resp-1")).await;
+    let mut custom_models = HashMap::new();
+    custom_models.insert(
+        "frontier-local".to_string(),
+        CustomModelConfig {
+            model: "gpt-real-preview".to_string(),
+            model_context_window: Some(123_456),
+            model_auto_compact_token_limit: Some(100_000),
+        },
+    );
+    let remote_model = test_model_info(
+        "gpt-real",
+        "Real",
+        "backing custom model metadata",
+        default_input_modalities(),
+    );
+
+    let test = test_codex()
+        .with_config(move |config| {
+            config.model = Some("frontier-local".to_string());
+            config.model_catalog = Some(ModelsResponse {
+                models: vec![remote_model],
+            });
+            config.custom_models = custom_models;
+        })
+        .build(&server)
+        .await?;
+
+    test.submit_turn("custom model turn").await?;
+
+    let body = resp_mock.single_request().body_json();
+    assert_eq!(body["model"].as_str(), Some("gpt-real-preview"));
 
     Ok(())
 }
