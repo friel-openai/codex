@@ -6,7 +6,7 @@ Audit commits `4430b27c39` and `83d6ddb19a`, plus the restored checked-in prompt
 
 Expected behaviors:
 
-- Frodex binary defaults enable `agent_watchdog` and `agent_prompt_injection`.
+- Frodex-packaged Codex defaults enable `agent_watchdog` and `agent_prompt_injection`.
 - Custom model support remains present and test-covered.
 - Root, subagent, and watchdog role prompts load from user overrides or checked-in defaults.
 - Prompt injection does not mutate durable `developer_instructions`; role prompts are represented as developer-role conversation items at temporally coherent positions.
