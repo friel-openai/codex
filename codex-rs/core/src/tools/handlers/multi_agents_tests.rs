@@ -844,6 +844,17 @@ async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
             .watchdog_helper_is_suppressed_for_tests(helper_thread_id)
             .await
     );
+    assert_eq!(
+        agent_control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        !manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown)),
+        "snooze should finish the helper turn without a shutdown op"
+    );
 }
 
 #[tokio::test]
@@ -1678,6 +1689,113 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     assert_eq!(
         result.agents[0].last_task_message.as_deref(),
         Some("Main thread")
+    );
+}
+
+#[tokio::test]
+async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let spawn_output = SpawnAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "check this branch periodically",
+                "agent_type": "watchdog"
+            })),
+        ))
+        .await
+        .expect("watchdog spawn should succeed");
+    let (spawn_content, spawn_success) = expect_text_output(spawn_output);
+    let spawn_result: serde_json::Value =
+        serde_json::from_str(&spawn_content).expect("watchdog spawn result should be json");
+    let watchdog_id = parse_agent_id(
+        spawn_result["agent_id"]
+            .as_str()
+            .expect("watchdog spawn result should include agent_id"),
+    );
+    assert_eq!(spawn_success, Some(true));
+    assert!(agent_control.is_watchdog_handle(watchdog_id).await);
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should include the watchdog handle");
+    let (list_content, list_success) = expect_text_output(list_output);
+    let list_result: ListAgentsResult =
+        serde_json::from_str(&list_content).expect("list_agents result should be json");
+    assert_eq!(list_success, Some(true));
+    let watchdog_listing = list_result
+        .agents
+        .iter()
+        .find(|agent| agent.agent_name == watchdog_id.to_string())
+        .expect("list_agents should include the watchdog handle");
+    assert_eq!(watchdog_listing.agent_status, json!("pending_init"));
+
+    let close_output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"target": watchdog_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should close the watchdog handle");
+    let (close_content, close_success) = expect_text_output(close_output);
+    let close_result: close_agent::CloseAgentResult =
+        serde_json::from_str(&close_content).expect("close_agent result should be json");
+    assert_eq!(close_success, Some(true));
+    assert_eq!(close_result.previous_status, AgentStatus::PendingInit);
+    assert!(!agent_control.is_watchdog_handle(watchdog_id).await);
+    assert_eq!(
+        agent_control.get_status(watchdog_id).await,
+        AgentStatus::NotFound
+    );
+
+    let list_after_close_output = ListAgentsHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should omit the closed watchdog handle");
+    let (list_after_close_content, _) = expect_text_output(list_after_close_output);
+    let list_after_close_result: ListAgentsResult = serde_json::from_str(&list_after_close_content)
+        .expect("list_agents result after close should be json");
+    assert!(
+        !list_after_close_result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == watchdog_id.to_string())
     );
 }
 

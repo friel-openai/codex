@@ -17,6 +17,7 @@ use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::ErrorEvent;
@@ -753,6 +754,17 @@ async fn watchdog_helper_forks_owner_history() {
         "developer",
         "watchdog.snooze"
     ));
+    assert!(
+        helper_thread
+            .codex
+            .session
+            .services
+            .mcp_tool_snapshot
+            .lock()
+            .await
+            .is_some(),
+        "watchdog helper should inherit a parent MCP tool snapshot"
+    );
     let helper_prompt = harness
         .manager
         .captured_ops()
@@ -908,6 +920,57 @@ async fn watchdog_helper_forks_owner_history() {
         ResponseItem::FunctionCall { name, call_id, .. }
             if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
     )));
+    assert!(rollout_items.iter().any(|item| matches!(
+        item,
+        RolloutItem::ResponseItem(ResponseItem::ToolSearchCall { call_id: Some(call_id), .. })
+            if call_id == "synthetic_watchdog_tool_search"
+    )));
+    assert!(rollout_items.iter().any(|item| match item {
+        RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput {
+            call_id: Some(call_id),
+            tools,
+            ..
+        }) if call_id == "synthetic_watchdog_tool_search" => {
+            let rendered = serde_json::to_string(tools).expect("tools should serialize");
+            rendered.contains("watchdog_self_close")
+                && rendered.contains("snooze")
+                && rendered.contains("compact_parent_context")
+        }
+        _ => false,
+    }));
+    let list_agents_bootstrap = rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output })
+                if call_id == "synthetic_watchdog_list_agents" =>
+            {
+                Some(output)
+            }
+            _ => None,
+        })
+        .expect("helper rollout should include synthetic list_agents output");
+    let FunctionCallOutputBody::Text(list_agents_bootstrap_body) = &list_agents_bootstrap.body
+    else {
+        panic!("synthetic list_agents output should be text JSON");
+    };
+    let list_agents_bootstrap_json: serde_json::Value =
+        serde_json::from_str(list_agents_bootstrap_body)
+            .expect("synthetic list_agents output should parse as JSON");
+    assert_eq!(
+        list_agents_bootstrap_json["source"],
+        "pre_injected_agents_list"
+    );
+    assert_eq!(
+        list_agents_bootstrap_json["owner_thread_id"],
+        owner_thread_id.to_string()
+    );
+    assert!(
+        list_agents_bootstrap_json["agents"]
+            .as_array()
+            .expect("agents should be an array")
+            .iter()
+            .any(|agent| agent["agent_name"] == "/root")
+    );
     assert!(
         !helper_thread
             .codex
@@ -919,6 +982,243 @@ async fn watchdog_helper_forks_owner_history() {
             .has_servers(),
         "watchdog helpers should not start their own MCP clients"
     );
+}
+
+#[tokio::test]
+async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .record_conversation_items(
+            owner_turn.as_ref(),
+            &[assistant_message(
+                "owner marker before first helper",
+                Some(MessagePhase::FinalAnswer),
+            )],
+        )
+        .await;
+    owner_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    owner_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("owner rollout should flush");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 1,
+            prompt: "repeat check".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let first_helper_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("repeat check"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn first helper");
+
+    let first_helper_thread = harness
+        .manager
+        .get_thread(first_helper_id)
+        .await
+        .expect("first helper thread should exist");
+    let first_helper_turn = first_helper_thread.codex.session.new_default_turn().await;
+    first_helper_thread
+        .codex
+        .session
+        .send_event(
+            first_helper_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: first_helper_turn.sub_id.clone(),
+                last_agent_message: Some("first helper report".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let expected_first_report = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("watchdog path"),
+        AgentPath::root(),
+        Vec::new(),
+        "first helper report".to_string(),
+        /*trigger_turn*/ true,
+    );
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.manager.captured_ops().into_iter().any(|entry| {
+                entry
+                    == (
+                        owner_thread_id,
+                        Op::InterAgentCommunication {
+                            communication: expected_first_report.clone(),
+                        },
+                    )
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should forward first helper report");
+
+    let owner_update_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .record_conversation_items(
+            owner_update_turn.as_ref(),
+            &[assistant_message(
+                "owner marker before second helper",
+                Some(MessagePhase::FinalAnswer),
+            )],
+        )
+        .await;
+    owner_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    owner_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("owner rollout update should flush");
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_update_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_update_turn.sub_id.clone(),
+                last_agent_message: Some("root done again".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let second_helper_id = timeout(Duration::from_secs(6), async {
+        loop {
+            let mut helper_ids = harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .filter_map(|(thread_id, op)| {
+                    (thread_id != owner_thread_id
+                        && thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("repeat check"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        })))
+                    .then_some(thread_id)
+                })
+                .collect::<Vec<_>>();
+            helper_ids.sort_by_key(ToString::to_string);
+            helper_ids.dedup();
+            if let Some(thread_id) = helper_ids
+                .into_iter()
+                .find(|thread_id| *thread_id != first_helper_id)
+            {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a fresh second helper");
+
+    assert_ne!(first_helper_id, second_helper_id);
+    assert!(harness.control.is_watchdog_handle(target_thread_id).await);
+    let second_helper_thread = harness
+        .manager
+        .get_thread(second_helper_id)
+        .await
+        .expect("second helper thread should exist");
+    let second_history = timeout(Duration::from_secs(5), async {
+        loop {
+            let history_items = second_helper_thread
+                .codex
+                .session
+                .clone_history()
+                .await
+                .raw_items()
+                .to_vec();
+            if history_contains_text(&history_items, "owner marker before second helper") {
+                break history_items;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("fresh helper fork should include latest owner rollout");
+    assert!(history_contains_text(
+        &second_history,
+        "owner marker before first helper"
+    ));
+    assert!(history_contains_text(
+        &second_history,
+        "owner marker before second helper"
+    ));
 }
 
 #[tokio::test]
