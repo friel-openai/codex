@@ -16,6 +16,7 @@ use core_test_support::PathBufExt;
 use core_test_support::PathExt;
 use core_test_support::responses::mount_models_once;
 use pretty_assertions::assert_eq;
+use std::path::Path;
 use std::time::Duration;
 use tempfile::tempdir;
 use wiremock::MockServer;
@@ -43,8 +44,24 @@ fn assistant_msg(text: &str) -> ResponseItem {
     }
 }
 
-#[test]
-fn truncates_before_requested_user_message() {
+fn fork_references(items: &[RolloutItem]) -> Vec<(&std::path::Path, usize)> {
+    items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::ForkReference(reference) => {
+                Some((reference.rollout_path.as_path(), reference.nth_user_message))
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn truncates_before_requested_user_message() {
     let items = [
         user_msg("u1"),
         assistant_msg("a1"),
@@ -75,6 +92,7 @@ fn truncates_before_requested_user_message() {
         .map(RolloutItem::ResponseItem)
         .collect();
     let truncated = truncate_before_nth_user_message(
+        Path::new("/tmp"),
         InitialHistory::Forked(initial),
         /*n*/ 1,
         &SnapshotTurnState {
@@ -82,7 +100,8 @@ fn truncates_before_requested_user_message() {
             active_turn_id: None,
             active_turn_start_index: None,
         },
-    );
+    )
+    .await;
     let got_items = truncated.get_rollout_items();
     let expected_items = vec![
         RolloutItem::ResponseItem(items[0].clone()),
@@ -100,6 +119,7 @@ fn truncates_before_requested_user_message() {
         .map(RolloutItem::ResponseItem)
         .collect();
     let truncated2 = truncate_before_nth_user_message(
+        Path::new("/tmp"),
         InitialHistory::Forked(initial2.clone()),
         /*n*/ 2,
         &SnapshotTurnState {
@@ -107,15 +127,16 @@ fn truncates_before_requested_user_message() {
             active_turn_id: None,
             active_turn_start_index: None,
         },
-    );
+    )
+    .await;
     assert_eq!(
         serde_json::to_value(truncated2.get_rollout_items()).unwrap(),
         serde_json::to_value(initial2).unwrap()
     );
 }
 
-#[test]
-fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
+#[tokio::test]
+async fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
     let items = vec![
         RolloutItem::ResponseItem(user_msg("u1")),
         RolloutItem::ResponseItem(assistant_msg("a1")),
@@ -124,6 +145,7 @@ fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
     ];
 
     let truncated = truncate_before_nth_user_message(
+        Path::new("/tmp"),
         InitialHistory::Forked(items.clone()),
         usize::MAX,
         &SnapshotTurnState {
@@ -131,7 +153,8 @@ fn out_of_range_truncation_drops_only_unfinished_suffix_mid_turn() {
             active_turn_id: None,
             active_turn_start_index: None,
         },
-    );
+    )
+    .await;
 
     assert_eq!(
         serde_json::to_value(truncated.get_rollout_items()).unwrap(),
@@ -158,8 +181,8 @@ fn fork_thread_accepts_legacy_usize_snapshot_argument() {
     let _: fn(&ThreadManager, Config, std::path::PathBuf) = assert_legacy_snapshot_callsite;
 }
 
-#[test]
-fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
+#[tokio::test]
+async fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
     let items = vec![
         RolloutItem::ResponseItem(user_msg("u1")),
         RolloutItem::ResponseItem(assistant_msg("a1")),
@@ -184,10 +207,12 @@ fn out_of_range_truncation_drops_pre_user_active_turn_prefix() {
     );
 
     let truncated = truncate_before_nth_user_message(
+        Path::new("/tmp"),
         InitialHistory::Forked(items.clone()),
         usize::MAX,
         &snapshot_state,
-    );
+    )
+    .await;
 
     assert_eq!(
         serde_json::to_value(truncated.get_rollout_items()).unwrap(),
@@ -211,6 +236,7 @@ async fn ignores_session_prefix_messages_when_truncating() {
         .collect();
 
     let truncated = truncate_before_nth_user_message(
+        Path::new("/tmp"),
         InitialHistory::Forked(rollout_items),
         /*n*/ 1,
         &SnapshotTurnState {
@@ -218,7 +244,8 @@ async fn ignores_session_prefix_messages_when_truncating() {
             active_turn_id: None,
             active_turn_start_index: None,
         },
-    );
+    )
+    .await;
     let got_items = truncated.get_rollout_items();
 
     let expected: Vec<RolloutItem> = vec![
@@ -469,7 +496,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .fork_thread(
             ForkSnapshot::Interrupted,
             config,
-            source_path,
+            source_path.clone(),
             /*persist_extended_history*/ false,
             /*parent_trace*/ None,
         )
@@ -483,6 +510,9 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .await
         .expect("read forked rollout history");
     assert!(!snapshot_turn_state(&history).ends_mid_turn);
+    let history_items = history.get_rollout_items();
+    let references = fork_references(&history_items);
+    assert_eq!(references, vec![(source_path.as_path(), usize::MAX)]);
     let rollout_items: Vec<_> = history
         .get_rollout_items()
         .into_iter()
@@ -583,7 +613,7 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
         .fork_thread(
             ForkSnapshot::Interrupted,
             config,
-            source_path,
+            source_path.clone(),
             /*persist_extended_history*/ false,
             /*parent_trace*/ None,
         )
@@ -596,6 +626,9 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
     let history = RolloutRecorder::get_rollout_history(&forked_path)
         .await
         .expect("read forked rollout history");
+    let history_items = history.get_rollout_items();
+    let references = fork_references(&history_items);
+    assert_eq!(references, vec![(source_path.as_path(), usize::MAX)]);
     let rollout_items: Vec<_> = history
         .get_rollout_items()
         .into_iter()
@@ -663,7 +696,7 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .fork_thread(
             ForkSnapshot::Interrupted,
             config.clone(),
-            source_path,
+            source_path.clone(),
             /*persist_extended_history*/ false,
             /*parent_trace*/ None,
         )
@@ -677,6 +710,9 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .await
         .expect("read forked rollout history");
     assert!(!snapshot_turn_state(&history).ends_mid_turn);
+    let history_items = history.get_rollout_items();
+    let references = fork_references(&history_items);
+    assert_eq!(references, vec![(source_path.as_path(), usize::MAX)]);
 
     let forked_rollout_items: Vec<_> = history
         .get_rollout_items()
@@ -715,6 +751,9 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
     let reforked_history = RolloutRecorder::get_rollout_history(&reforked_path)
         .await
         .expect("read re-forked rollout history");
+    let reforked_items = reforked_history.get_rollout_items();
+    let references = fork_references(&reforked_items);
+    assert_eq!(references, vec![(source_path.as_path(), usize::MAX)]);
     let reforked_rollout_items: Vec<_> = reforked_history
         .get_rollout_items()
         .into_iter()

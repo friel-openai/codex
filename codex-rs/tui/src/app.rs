@@ -3616,7 +3616,7 @@ impl App {
     async fn replace_chat_widget_with_app_server_thread(
         &mut self,
         tui: &mut tui::Tui,
-        app_server: &mut AppServerSession,
+        _app_server: &mut AppServerSession,
         started: AppServerStartedThread,
         initial_user_message: Option<crate::chatwidget::UserMessage>,
     ) -> Result<()> {
@@ -3632,16 +3632,16 @@ impl App {
         self.replace_chat_widget(ChatWidget::new_with_app_event(init));
         self.enqueue_primary_thread_session(started.session, started.turns)
             .await?;
-        self.backfill_loaded_subagent_threads(app_server).await;
         Ok(())
     }
 
     /// Fetches all loaded threads from the app server and registers descendants of the primary
     /// thread in the navigation cache and chat widget metadata.
     ///
-    /// Called after `replace_chat_widget_with_app_server_thread` during resume, fork, and new
-    /// thread creation so that the `/agent` picker and keyboard navigation are pre-populated even
-    /// if the TUI did not witness the original spawn events.
+    /// This is used only as a best-effort metadata refresh while the current TUI session is
+    /// already tracking subagents. It must not run during primary thread resume: subagent runtime
+    /// handles are not retained across close/resume, so resurrecting them from old session files
+    /// would make the Subagents panel show stale agents.
     ///
     /// The loaded-thread list is fetched in full (no pagination) and the spawn tree is walked
     /// by `find_loaded_subagent_threads_for_primary`. Each discovered subagent is registered via

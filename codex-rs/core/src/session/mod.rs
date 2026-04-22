@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -156,6 +157,7 @@ use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::environment_context::EnvironmentContext;
 use crate::thread_rollout_truncation::initial_history_has_prior_user_turns;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use codex_config::CONFIG_TOML_FILE;
 use codex_config::types::McpServerConfig;
 use codex_config::types::ShellEnvironmentPolicy;
@@ -192,6 +194,115 @@ use self::turn_context::TurnContext;
 use self::turn_context::TurnSkillsContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
+
+const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
+const ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK: &str =
+    include_str!("../../root_agent_watchdog_prompt.md");
+const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+const WATCHDOG_PROMPT_FALLBACK: &str = include_str!("../../watchdog_agent_prompt.md");
+
+async fn load_agent_prompt_fallback(
+    codex_home: &Path,
+    fallback: &str,
+    override_filename: &str,
+) -> String {
+    let override_path = codex_home.join(override_filename);
+    if let Ok(contents) = tokio::fs::read_to_string(&override_path).await
+        && !contents.trim().is_empty()
+    {
+        return contents;
+    }
+
+    fallback.to_string()
+}
+
+async fn maybe_load_agent_prompt_fragment(
+    codex_home: &Path,
+    fallback: &str,
+    override_filename: &str,
+    enabled: bool,
+) -> Option<String> {
+    if !enabled {
+        return None;
+    }
+    let fragment = load_agent_prompt_fallback(codex_home, fallback, override_filename).await;
+    if fragment.trim().is_empty() {
+        None
+    } else {
+        Some(fragment)
+    }
+}
+
+pub(crate) async fn load_root_agent_prompt(codex_home: &Path, include_watchdog: bool) -> String {
+    let mut prompt =
+        load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await;
+    if let Some(fragment) = maybe_load_agent_prompt_fragment(
+        codex_home,
+        ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK,
+        "AGENTS.root.watchdog.md",
+        include_watchdog,
+    )
+    .await
+    {
+        prompt.push_str("\n\n");
+        prompt.push_str(fragment.trim());
+    }
+    prompt
+}
+
+pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_watchdog_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(codex_home, WATCHDOG_PROMPT_FALLBACK, "AGENTS.watchdog.md").await
+}
+
+pub(crate) async fn load_agent_role_prompt(
+    config: &Config,
+    session_source: &SessionSource,
+) -> Option<String> {
+    if !config.features.enabled(Feature::AgentPromptInjection) {
+        return None;
+    }
+
+    let include_watchdog = config.features.enabled(Feature::AgentWatchdog);
+    let role_prompt = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) if agent_role == "watchdog" => load_watchdog_prompt(&config.codex_home).await,
+        SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Unknown => {
+            load_root_agent_prompt(
+                &config.codex_home,
+                /*include_watchdog*/ include_watchdog,
+            )
+            .await
+        }
+    };
+
+    if role_prompt.trim().is_empty() {
+        None
+    } else {
+        Some(role_prompt)
+    }
+}
+
+pub(crate) async fn load_agent_role_prompt_item(
+    config: &Config,
+    session_source: &SessionSource,
+) -> Option<ResponseItem> {
+    load_agent_role_prompt(config, session_source)
+        .await
+        .map(DeveloperInstructions::new)
+        .map(ResponseItem::from)
+}
 
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
@@ -1257,7 +1368,16 @@ impl Session {
                     .await;
             }
             InitialHistory::Resumed(resumed_history) => {
-                let rollout_items = resumed_history.history;
+                let mut rollout_items = resumed_history.history;
+                if rollout_items
+                    .iter()
+                    .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+                {
+                    let codex_home = self.codex_home().await;
+                    rollout_items =
+                        materialize_rollout_items_for_replay(codex_home.as_path(), &rollout_items)
+                            .await;
+                }
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
@@ -1296,23 +1416,42 @@ impl Session {
                 }
             }
             InitialHistory::Forked(rollout_items) => {
-                self.apply_rollout_reconstruction(&turn_context, &rollout_items)
+                let mut materialized_rollout_items = rollout_items.clone();
+                if materialized_rollout_items
+                    .iter()
+                    .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+                {
+                    let codex_home = self.codex_home().await;
+                    materialized_rollout_items = materialize_rollout_items_for_replay(
+                        codex_home.as_path(),
+                        &materialized_rollout_items,
+                    )
+                    .await;
+                }
+
+                self.apply_rollout_reconstruction(&turn_context, &materialized_rollout_items)
                     .await;
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&materialized_rollout_items)
+                {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
 
-                // If persisting, persist all rollout items as-is (recorder filters)
-                if !rollout_items.is_empty() {
-                    self.persist_rollout_items(&rollout_items).await;
-                }
-
                 // Forked threads should remain file-backed immediately after startup.
                 self.ensure_rollout_materialized().await;
+
+                // If persisting, keep forked rollout storage compact. The source SessionMeta is
+                // only present in memory so startup can derive `forked_from_id`.
+                if !rollout_items.is_empty() {
+                    let persist_items: Vec<RolloutItem> = rollout_items
+                        .into_iter()
+                        .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                        .collect();
+                    self.persist_rollout_items(&persist_items).await;
+                }
 
                 // Flush after seeding history and any persisted rollout copy.
                 if !is_subagent {
@@ -2349,6 +2488,11 @@ impl Session {
             )
         {
             developer_sections.push(model_switch_message.into_text());
+        }
+        if let Some(role_prompt) =
+            load_agent_role_prompt(&turn_context.config, &session_source).await
+        {
+            developer_sections.push(role_prompt);
         }
         if turn_context.config.include_permissions_instructions {
             developer_sections.push(

@@ -36,6 +36,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
@@ -51,6 +52,7 @@ use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -672,26 +674,51 @@ impl ThreadManager {
         S: Into<ForkSnapshot>,
     {
         let snapshot = snapshot.into();
-        let history = RolloutRecorder::get_rollout_history(&path).await?;
+        let history = RolloutRecorder::get_fork_history(&path).await?;
         let snapshot_state = snapshot_turn_state(&history);
-        let history = match snapshot {
+        let mut history = match snapshot {
             ForkSnapshot::TruncateBeforeNthUserMessage(nth_user_message) => {
-                truncate_before_nth_user_message(history, nth_user_message, &snapshot_state)
+                truncate_before_nth_user_message(
+                    config.codex_home.as_path(),
+                    history,
+                    nth_user_message,
+                    &snapshot_state,
+                )
+                .await
             }
-            ForkSnapshot::Interrupted => {
-                let history = match history {
-                    InitialHistory::New => InitialHistory::New,
-                    InitialHistory::Cleared => InitialHistory::Cleared,
-                    InitialHistory::Forked(history) => InitialHistory::Forked(history),
-                    InitialHistory::Resumed(resumed) => InitialHistory::Forked(resumed.history),
-                };
-                if snapshot_state.ends_mid_turn {
-                    append_interrupted_boundary(history, snapshot_state.active_turn_id)
-                } else {
-                    history
-                }
-            }
+            ForkSnapshot::Interrupted => history,
         };
+        if let InitialHistory::Forked(items) = &mut history
+            && !items
+                .iter()
+                .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+        {
+            let source_session_meta = items.iter().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta_line) => Some(meta_line.clone()),
+                RolloutItem::ForkReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            });
+            let nth_user_message = match snapshot {
+                ForkSnapshot::TruncateBeforeNthUserMessage(nth_user_message) => nth_user_message,
+                ForkSnapshot::Interrupted => usize::MAX,
+            };
+            *items = source_session_meta
+                .into_iter()
+                .map(RolloutItem::SessionMeta)
+                .chain(std::iter::once(RolloutItem::ForkReference(
+                    ForkReferenceItem {
+                        rollout_path: path.clone(),
+                        nth_user_message,
+                    },
+                )))
+                .collect();
+        }
+        if matches!(snapshot, ForkSnapshot::Interrupted) && snapshot_state.ends_mid_turn {
+            history = append_interrupted_boundary(history, snapshot_state.active_turn_id);
+        }
         Box::pin(self.state.spawn_thread(
             config,
             history,
@@ -1009,12 +1036,19 @@ impl ThreadManagerState {
 /// when the source thread is currently mid-turn they fall back to cutting
 /// before the active turn's opening boundary so the fork omits the unfinished
 /// suffix entirely.
-fn truncate_before_nth_user_message(
+async fn truncate_before_nth_user_message(
+    codex_home: &Path,
     history: InitialHistory,
     n: usize,
     snapshot_state: &SnapshotTurnState,
 ) -> InitialHistory {
-    let items: Vec<RolloutItem> = history.get_rollout_items();
+    let mut items: Vec<RolloutItem> = history.get_rollout_items();
+    if items
+        .iter()
+        .any(|item| matches!(item, RolloutItem::ForkReference(_)))
+    {
+        items = truncation::materialize_rollout_items_for_replay(codex_home, &items).await;
+    }
     let user_positions = truncation::user_message_positions_in_rollout(&items);
     let rolled = if snapshot_state.ends_mid_turn && n >= user_positions.len() {
         if let Some(cut_idx) = snapshot_state

@@ -13,6 +13,7 @@ use crate::find_thread_path_by_id_str;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout::RolloutRecorder;
 use crate::session::emit_subagent_session_started;
+use crate::session::load_agent_role_prompt_item;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
@@ -27,6 +28,9 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -44,6 +48,7 @@ use codex_tools::create_watchdog_tools_namespace;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::SystemTime;
@@ -143,6 +148,7 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
         ) => false,
         RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
+        | RolloutItem::ForkReference(_)
         | RolloutItem::SessionMeta(_)
         | RolloutItem::TurnContext(_) => true,
     }
@@ -156,6 +162,30 @@ fn is_watchdog_helper_source(session_source: &SessionSource) -> bool {
             ..
         }) if agent_role == "watchdog"
     )
+}
+
+fn full_history_fork_reference_items(
+    rollout_path: PathBuf,
+    source_items: Vec<RolloutItem>,
+) -> Vec<RolloutItem> {
+    let source_session_meta = source_items.into_iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta),
+        RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    source_session_meta
+        .into_iter()
+        .map(RolloutItem::SessionMeta)
+        .chain(std::iter::once(RolloutItem::ForkReference(
+            ForkReferenceItem {
+                rollout_path,
+                nth_user_message: usize::MAX,
+            },
+        )))
+        .collect()
 }
 
 fn unix_timestamp_seconds() -> u64 {
@@ -220,6 +250,18 @@ fn synthetic_watchdog_list_agents_items(
             output,
         }),
     ]
+}
+
+fn sanitize_watchdog_boot_list_agents(agents: Vec<ListedAgent>) -> Vec<ListedAgent> {
+    agents
+        .into_iter()
+        .map(|mut agent| {
+            if agent.agent_name != AgentPath::root().to_string() {
+                agent.last_task_message = None;
+            }
+            agent
+        })
+        .collect()
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -514,19 +556,32 @@ impl AgentControl {
                 ))
             })?;
 
-        let mut forked_rollout_items = RolloutRecorder::get_rollout_history(&rollout_path)
-            .await?
-            .get_rollout_items();
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
-        }
+        let is_watchdog_helper = is_watchdog_helper_source(&session_source);
+        let mut forked_rollout_items =
+            if is_watchdog_helper && matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
+                let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+                    .await?
+                    .get_rollout_items();
+                full_history_fork_reference_items(rollout_path.clone(), source_items)
+            } else {
+                let mut items = RolloutRecorder::get_rollout_history(&rollout_path)
+                    .await?
+                    .get_rollout_items();
+                if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
+                    items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
+                }
+                items
+            };
         forked_rollout_items.retain(keep_forked_rollout_item);
-        if is_watchdog_helper_source(&session_source) {
+        if is_watchdog_helper {
             forked_rollout_items.extend(
                 self.watchdog_boot_context_items(state, parent_thread_id)
                     .await,
             );
+        }
+        if let Some(role_prompt_item) = load_agent_role_prompt_item(&config, &session_source).await
+        {
+            forked_rollout_items.push(RolloutItem::ResponseItem(role_prompt_item));
         }
 
         state
@@ -805,6 +860,35 @@ impl AgentControl {
         .await
     }
 
+    pub(crate) async fn send_watchdog_close_event(
+        &self,
+        owner_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        receiver_agent_nickname: Option<String>,
+        receiver_agent_role: Option<String>,
+        status: AgentStatus,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let owner_thread = state.get_thread(owner_thread_id).await?;
+        owner_thread
+            .codex
+            .session
+            .send_event_raw(Event {
+                id: format!("watchdog-close-{target_thread_id}"),
+                msg: CollabCloseEndEvent {
+                    call_id: format!("watchdog-close-{target_thread_id}"),
+                    sender_thread_id: owner_thread_id,
+                    receiver_thread_id: target_thread_id,
+                    receiver_agent_nickname,
+                    receiver_agent_role,
+                    status,
+                }
+                .into(),
+            })
+            .await;
+        Ok(())
+    }
+
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
@@ -929,6 +1013,13 @@ impl AgentControl {
             .await
     }
 
+    pub(crate) async fn finish_watchdog_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return false;
+        };
+        watchdogs.finish_active_helper(helper_thread_id).await
+    }
+
     fn watchdog_manager(&self) -> CodexResult<&Arc<WatchdogManager>> {
         self.watchdogs.as_ref().ok_or_else(|| {
             CodexErr::UnsupportedOperation("watchdog manager unavailable".to_string())
@@ -942,8 +1033,42 @@ impl AgentControl {
         if let Some(removed_watchdog) = self.unregister_watchdog_handle(agent_id).await
             && let Some(helper_id) = removed_watchdog.active_helper_id
         {
-            let _ = self.shutdown_live_agent(helper_id).await;
+            let _ = self
+                .close_live_agent_without_watchdog_unregister(helper_id)
+                .await;
         }
+        self.mark_thread_spawn_edge_closed(&state, agent_id).await;
+        self.shutdown_agent_tree(agent_id).await
+    }
+
+    pub(crate) async fn close_live_agent_without_watchdog_unregister(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<String> {
+        let state = self.upgrade()?;
+        self.mark_thread_spawn_edge_closed(&state, agent_id).await;
+        self.shutdown_agent_tree(agent_id).await
+    }
+
+    pub(crate) async fn finish_watchdog_helper_thread(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        self.mark_thread_spawn_edge_closed(&state, agent_id).await;
+        if let Ok(thread) = state.get_thread(agent_id).await {
+            thread.codex.session.flush_rollout().await?;
+        }
+        let _ = state.remove_thread(&agent_id).await;
+        self.state.release_spawned_thread(agent_id);
+        Ok(())
+    }
+
+    async fn mark_thread_spawn_edge_closed(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        agent_id: ThreadId,
+    ) {
         if let Ok(thread) = state.get_thread(agent_id).await
             && let Some(state_db_ctx) = thread.state_db()
             && let Err(err) = state_db_ctx
@@ -952,7 +1077,6 @@ impl AgentControl {
         {
             warn!("failed to persist thread-spawn edge status for {agent_id}: {err}");
         }
-        self.shutdown_agent_tree(agent_id).await
     }
 
     /// Shut down `agent_id` and any live descendants reachable from the in-memory spawn tree.
@@ -1207,6 +1331,7 @@ impl AgentControl {
             .list_agents(&owner_source, /*path_prefix*/ None)
             .await
             .unwrap_or_default();
+        let agents = sanitize_watchdog_boot_list_agents(agents);
 
         synthetic_watchdog_tool_search_items()
             .into_iter()

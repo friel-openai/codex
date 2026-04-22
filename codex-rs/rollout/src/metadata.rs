@@ -72,6 +72,7 @@ pub fn builder_from_items(
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
         RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
+        | RolloutItem::ForkReference(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
     }) && let Some(builder) = builder_from_session_meta(session_meta, rollout_path)
@@ -126,6 +127,7 @@ pub async fn extract_metadata_from_rollout(
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
             RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
+            | RolloutItem::ForkReference(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::EventMsg(_) => None,
         }),

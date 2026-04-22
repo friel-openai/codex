@@ -738,6 +738,23 @@ async fn compact_parent_context_submits_compaction_for_idle_parent() {
         .into_iter()
         .find(|(thread_id, op)| *thread_id == owner.thread_id && matches!(op, Op::Compact));
     assert_eq!(captured, Some((owner.thread_id, Op::Compact)));
+    assert_eq!(
+        agent_control
+            .watchdog_target_for_active_helper(helper_thread_id)
+            .await,
+        None
+    );
+    assert!(
+        agent_control
+            .watchdog_helper_is_suppressed_for_tests(helper_thread_id)
+            .await
+    );
+    assert!(
+        !manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown))
+    );
 }
 
 #[tokio::test]
@@ -907,6 +924,21 @@ async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
         agent_control.get_status(target.thread_id).await,
         AgentStatus::NotFound
     );
+    let ops = manager.captured_ops();
+    let target_shutdown_index = ops
+        .iter()
+        .position(|(thread_id, op)| thread_id == &target.thread_id && matches!(op, Op::Shutdown))
+        .expect("watchdog handle should be shut down");
+    let wakeup_index = ops
+        .iter()
+        .position(|(thread_id, op)| {
+            thread_id == &owner.thread_id && matches!(op, Op::InterAgentCommunication { .. })
+        })
+        .expect("watchdog self-close message should wake owner");
+    assert!(
+        wakeup_index < target_shutdown_index,
+        "watchdog self-close must queue the final wakeup before closing the active helper"
+    );
     let expected = InterAgentCommunication::new(
         AgentPath::try_from("/root/watchdog").expect("watchdog path"),
         AgentPath::root(),
@@ -914,10 +946,27 @@ async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
         "watchdog done".to_string(),
         /*trigger_turn*/ true,
     );
-    assert!(manager.captured_ops().into_iter().any(|(thread_id, op)| {
+    assert!(ops.into_iter().any(|(thread_id, op)| {
         thread_id == owner.thread_id
             && matches!(op, Op::InterAgentCommunication { communication } if communication == expected)
     }));
+
+    let close_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = owner
+                .thread
+                .next_event()
+                .await
+                .expect("owner event channel should stay open");
+            if let EventMsg::CollabCloseEnd(close) = event.msg {
+                break close;
+            }
+        }
+    })
+    .await
+    .expect("watchdog self-close should publish a close event for the handle");
+    assert_eq!(close_event.sender_thread_id, owner.thread_id);
+    assert_eq!(close_event.receiver_thread_id, target.thread_id);
 }
 
 #[tokio::test]

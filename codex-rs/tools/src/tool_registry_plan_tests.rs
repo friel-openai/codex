@@ -254,6 +254,60 @@ fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
             )
             && handler.kind == ToolHandlerKind::WatchdogSelfClose
     }));
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::plain("watchdogcompact_parent_context")
+            && handler.kind == ToolHandlerKind::CompactParentContext
+    }));
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::plain("watchdogsnooze")
+            && handler.kind == ToolHandlerKind::WatchdogSnooze
+    }));
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::plain("watchdogwatchdog_self_close")
+            && handler.kind == ToolHandlerKind::WatchdogSelfClose
+    }));
+}
+
+#[test]
+fn agent_watchdog_handlers_do_not_require_collab_tools() {
+    let model_info = model_info();
+    let mut features = Features::with_defaults();
+    features.disable(Feature::Collab);
+    features.enable(Feature::AgentWatchdog);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: codex_protocol::ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: Some("watchdog".to_string()),
+        }),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    assert_lacks_tool_name(&tools, "spawn_agent");
+    assert_contains_tool_names(&tools, &["watchdog"]);
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::new(Some("watchdog".to_string()), "snooze".to_string())
+            && handler.kind == ToolHandlerKind::WatchdogSnooze
+    }));
+    assert!(handlers.iter().any(|handler| {
+        handler.name == ToolName::plain("watchdogsnooze")
+            && handler.kind == ToolHandlerKind::WatchdogSnooze
+    }));
 }
 
 #[test]
