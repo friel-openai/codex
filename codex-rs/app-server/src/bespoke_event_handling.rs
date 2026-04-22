@@ -3005,6 +3005,7 @@ mod tests {
     use codex_app_server_protocol::TurnPlanStepStatus;
     use codex_login::AuthManager;
     use codex_login::CodexAuth;
+    use codex_protocol::AgentPath;
     use codex_protocol::items::HookPromptFragment;
     use codex_protocol::items::build_hook_prompt_message;
     use codex_protocol::mcp::CallToolResult;
@@ -3017,6 +3018,7 @@ mod tests {
     use codex_protocol::protocol::CreditsSnapshot;
     use codex_protocol::protocol::GuardianAssessmentEvent;
     use codex_protocol::protocol::GuardianAssessmentStatus;
+    use codex_protocol::protocol::InterAgentCommunication;
     use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
@@ -4650,6 +4652,50 @@ mod tests {
                         ],
                     }
                 );
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_inter_agent_raw_response_emits_raw_response_item_completed() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let conversation_id = ThreadId::new();
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let communication = InterAgentCommunication::new(
+            AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+            AgentPath::root(),
+            Vec::new(),
+            "ping 21 (21)".to_string(),
+            /*trigger_turn*/ true,
+        );
+        let item: codex_protocol::models::ResponseItem =
+            communication.to_response_input_item().into();
+
+        maybe_emit_raw_response_item_completed(
+            ApiVersion::V2,
+            conversation_id,
+            "turn-1",
+            item.clone(),
+            &outgoing,
+        )
+        .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(
+                ServerNotification::RawResponseItemCompleted(notification),
+            ) => {
+                assert_eq!(notification.thread_id, conversation_id.to_string());
+                assert_eq!(notification.turn_id, "turn-1");
+                assert_eq!(notification.item, item);
             }
             other => bail!("unexpected message: {other:?}"),
         }

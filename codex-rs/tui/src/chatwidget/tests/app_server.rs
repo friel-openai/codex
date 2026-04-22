@@ -1,7 +1,10 @@
 use super::*;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_protocol::AgentPath;
+use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutItem;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -784,53 +787,36 @@ async fn resume_replay_does_not_resurrect_closed_watchdog_panel_row() {
         Some("Boyle".to_string()),
         Some("watchdog".to_string()),
     );
-    chat.replay_thread_turns(
-        vec![AppServerTurn {
-            id: "turn-1".to_string(),
-            items: vec![
-                AppServerThreadItem::CollabAgentToolCall {
-                    id: "spawn-watchdog".to_string(),
-                    tool: AppServerCollabAgentTool::SpawnAgent,
-                    status: AppServerCollabAgentToolCallStatus::Completed,
-                    sender_thread_id: sender_thread_id.to_string(),
-                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                    prompt: Some("Every time you start, respond with goodbye.".to_string()),
-                    model: Some("arcanine 1m".to_string()),
-                    reasoning_effort: Some(ReasoningEffortConfig::Low),
-                    agents_states: HashMap::from([(
-                        watchdog_thread_id.to_string(),
-                        AppServerCollabAgentState {
-                            status: AppServerCollabAgentStatus::PendingInit,
-                            message: None,
-                        },
-                    )]),
-                },
-                AppServerThreadItem::CollabAgentToolCall {
-                    id: "watchdog-close".to_string(),
-                    tool: AppServerCollabAgentTool::CloseAgent,
-                    status: AppServerCollabAgentToolCallStatus::Completed,
-                    sender_thread_id: sender_thread_id.to_string(),
-                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                    prompt: None,
-                    model: None,
-                    reasoning_effort: None,
-                    agents_states: HashMap::from([(
-                        watchdog_thread_id.to_string(),
-                        AppServerCollabAgentState {
-                            status: AppServerCollabAgentStatus::Completed,
-                            message: Some("goodbye".to_string()),
-                        },
-                    )]),
-                },
-            ],
-            status: AppServerTurnStatus::Completed,
-            error: None,
-            started_at: None,
-            completed_at: Some(0),
-            duration_ms: None,
-        }],
-        ReplayKind::ResumeInitialMessages,
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
     );
+    let turns = build_turns_from_rollout_items(&[
+        RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-watchdog".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(watchdog_thread_id),
+            new_agent_nickname: Some("Boyle".to_string()),
+            new_agent_role: Some("watchdog".to_string()),
+            prompt: "Every time you start, respond with goodbye.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Low,
+            status: AgentStatus::PendingInit,
+        })),
+        RolloutItem::ResponseItem(communication.to_response_input_item().into()),
+        RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+            call_id: "watchdog-close".to_string(),
+            sender_thread_id,
+            receiver_thread_id: watchdog_thread_id,
+            receiver_agent_nickname: Some("Boyle".to_string()),
+            receiver_agent_role: Some("watchdog".to_string()),
+            status: AgentStatus::Completed(Some("goodbye".to_string())),
+        })),
+    ]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
 
     let replayed_history = drain_insert_history(&mut rx)
         .into_iter()
