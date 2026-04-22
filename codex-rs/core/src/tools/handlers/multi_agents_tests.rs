@@ -816,6 +816,27 @@ async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
         thread_id == owner.thread_id
             && matches!(op, Op::InterAgentCommunication { communication } if communication == expected)
     }));
+<<<<<<< HEAD
+=======
+
+    let close_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = owner
+                .thread
+                .next_event()
+                .await
+                .expect("owner event channel should stay open");
+            if let EventMsg::CollabCloseEnd(close) = event.msg {
+                break close;
+            }
+        }
+    })
+    .await
+    .expect("watchdog self-close should publish a close event for the handle");
+    assert_eq!(close_event.sender_thread_id, owner.thread_id);
+    assert_eq!(close_event.receiver_thread_id, target.thread_id);
+    assert_eq!(close_event.status, AgentStatus::PendingInit);
+>>>>>>> 75399ed115 (test watchdog boundary behavior)
 }
 
 #[tokio::test]
@@ -1548,6 +1569,7 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
         .features
         .enable(Feature::MultiAgentV2)
         .expect("test config should allow feature update");
+    let enabled_config = config.clone();
     turn.config = Arc::new(config);
 
     let session = Arc::new(session);
@@ -1575,6 +1597,28 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
     assert_eq!(spawn_success, Some(true));
     assert!(agent_control.is_watchdog_handle(watchdog_id).await);
 
+    let helper_id = agent_control
+        .spawn_agent(
+            enabled_config,
+            vec![UserInput::Text {
+                text: "watchdog helper implementation detail".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            })),
+        )
+        .await
+        .expect("watchdog helper should start");
+    agent_control
+        .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
+        .await;
+
     let list_output = ListAgentsHandlerV2
         .handle(invocation(
             session.clone(),
@@ -1594,6 +1638,13 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
         .find(|agent| agent.agent_name == watchdog_id.to_string())
         .expect("list_agents should include the watchdog handle");
     assert_eq!(watchdog_listing.agent_status, json!("pending_init"));
+    assert!(
+        !list_result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == helper_id.to_string()),
+        "active watchdog helpers should not be exposed as targetable list_agents entries"
+    );
 
     let close_output = CloseAgentHandlerV2
         .handle(invocation(
@@ -1613,6 +1664,16 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
     assert_eq!(
         agent_control.get_status(watchdog_id).await,
         AgentStatus::NotFound
+    );
+    assert_eq!(
+        agent_control.get_status(helper_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == helper_id && matches!(op, Op::Shutdown))
     );
 
     let list_after_close_output = ListAgentsHandlerV2

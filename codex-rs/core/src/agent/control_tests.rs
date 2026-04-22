@@ -677,6 +677,128 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
 }
 
 #[tokio::test]
+async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 1,
+            prompt: "snooze scheduling check".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+            }),
+        )
+        .await;
+
+    let first_helper_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn a helper before snooze");
+
+    let result = harness
+        .control
+        .snooze_watchdog_helper(first_helper_id, /*delay_seconds*/ None)
+        .await
+        .expect("active helper should snooze its watchdog");
+    assert_eq!(result.target_thread_id, target_thread_id);
+    assert_eq!(result.delay_seconds, 1);
+    harness
+        .control
+        .finish_watchdog_helper_thread(first_helper_id)
+        .await
+        .expect("snoozed helper should finish");
+
+    sleep(Duration::from_millis(300)).await;
+    assert!(
+        !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && thread_id != first_helper_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            }),
+        "watchdog should not spawn another helper before the snooze delay elapses"
+    );
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && thread_id != first_helper_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            }) {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should resume spawning helpers after the snooze delay");
+}
+
+#[tokio::test]
 async fn watchdog_plain_goodbye_final_message_closes_handle() {
     let harness = AgentControlHarness::new().await;
     let (owner_thread_id, owner_thread) = harness.start_thread().await;

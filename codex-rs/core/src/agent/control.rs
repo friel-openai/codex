@@ -1141,6 +1141,14 @@ impl AgentControl {
             let Some(thread_id) = metadata.agent_id else {
                 continue;
             };
+            if let Some(watchdogs) = self.watchdogs.as_ref()
+                && watchdogs
+                    .target_for_active_helper(thread_id)
+                    .await
+                    .is_some()
+            {
+                continue;
+            }
             if resolved_prefix
                 .as_ref()
                 .is_some_and(|prefix| !agent_matches_prefix(metadata.agent_path.as_ref(), prefix))
