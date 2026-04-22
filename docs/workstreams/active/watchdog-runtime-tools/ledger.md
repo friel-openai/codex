@@ -19,8 +19,8 @@ Expected artifacts: commit coverage checklist, new tests where gaps existed, val
 - [x] `0521ec3973` Add watchdog runtime handles
   - Code paths read: `codex-rs/core/src/agent/watchdog.rs`, `codex-rs/core/src/agent/control.rs`, `codex-rs/core/src/tools/handlers/multi_agents/spawn.rs`, `codex-rs/core/src/tools/handlers/multi_agents/wait.rs`, `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`.
   - Behavior protected: watchdog spawns return durable inert handles, helpers are separate short-lived threads, waiting on a handle is rejected, closing a handle closes any active helper.
-  - Tests: `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::spawn_agent_watchdog_role_returns_inert_handle`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::wait_agent_rejects_only_watchdog_handles`; `codex-rs/core/src/agent/control_tests.rs::close_watchdog_handle_closes_active_helper_thread`; new `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_handle_is_listed_and_close_agent_removes_it`.
-  - Responses/request/item format level: not relevant to the inert handle itself; coverage asserts externally visible tool outputs, `list_agents` JSON, `close_agent` JSON, captured `Op::Interrupt`, and `Op::Shutdown`.
+  - Tests: `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::spawn_agent_watchdog_role_returns_inert_handle`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::wait_agent_rejects_only_watchdog_handles`; `codex-rs/core/src/agent/control_tests.rs::close_watchdog_handle_closes_active_helper_thread`; strengthened `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_handle_is_listed_and_close_agent_removes_it`.
+  - Responses/request/item format level: not relevant to the inert handle itself; coverage asserts externally visible tool outputs, `list_agents` JSON, `close_agent` JSON, captured `Op::Interrupt`, and `Op::Shutdown`. The strengthened list test registers an active watchdog helper and proves only the durable handle is listed/targetable, then closing that handle shuts down the hidden helper.
   - Validation: `cargo test -p codex-core watchdog_ -- --nocapture` passed; `cargo test -p codex-core close_agent -- --nocapture` passed.
   - Remaining gap: none for core runtime/tool observability; TUI panel rendering is covered by the separate TUI workstream.
 
@@ -33,17 +33,17 @@ Expected artifacts: commit coverage checklist, new tests where gaps existed, val
   - Remaining gap: no hard gap for core delivery. The test does not drive a full model turn after the owner receives the queued input; it verifies the submitted runtime operation at the boundary used by the core thread manager.
 
 - [x] `d0c9b82cce` Add watchdog namespace tools
-  - Code paths read: `codex-rs/core/src/tools/handlers/multi_agents/watchdog_snooze.rs`, `codex-rs/core/src/tools/handlers/multi_agents/watchdog_self_close.rs`, `codex-rs/core/src/tools/handlers/multi_agents.rs`, `codex-rs/core/src/tools/spec.rs`, `codex-rs/tools/src/agent_tool.rs`, `codex-rs/tools/src/tool_registry_plan.rs`, `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`.
+  - Code paths read: `codex-rs/core/src/tools/handlers/multi_agents/watchdog_snooze.rs`, `codex-rs/core/src/tools/handlers/multi_agents/watchdog_self_close.rs`, `codex-rs/core/src/tools/handlers/multi_agents.rs`, `codex-rs/core/src/tools/spec_tests.rs`, `codex-rs/tools/src/agent_tool.rs`, `codex-rs/tools/src/tool_registry_plan.rs`, `codex-rs/tools/src/tool_registry_plan_tests.rs`, `codex-rs/core/src/tools/handlers/multi_agents_tests.rs`.
   - Behavior protected: watchdog-only tools reject non-watchdog callers; `watchdog.snooze` returns clamped delay and ends helper identity; `watchdog.watchdog_self_close` notifies owner, closes the durable handle, emits owner close event, and prevents future handle wakeups.
-  - Tests: `codex-rs/core/src/tools/spec.rs::tests::watchdog_tools_register_namespaced_and_flattened_handlers`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_snooze_rejects_non_watchdog_thread`; enhanced `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_snooze_suppresses_helper_and_clears_active_helper`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_self_close_rejects_non_watchdog_thread`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_self_close_notifies_owner_and_unregisters_handle`.
-  - Responses/request/item format level: function-call output level is covered through handler outputs parsed from `ToolOutput` text JSON; self-close and snooze tests assert JSON fields (`delay_seconds`, `target_thread_id`, `previous_status`) plus owner ops/events.
-  - Validation: `cargo test -p codex-core watchdog_ -- --nocapture` passed.
-  - Remaining gap: no hard gap. The test uses handler invocation rather than a remote Responses round trip, which is sufficient for the local function-tool contract.
+  - Tests: `codex-rs/core/src/tools/spec_tests.rs::watchdog_tools_register_namespaced_and_flattened_handlers`; `codex-rs/tools/src/tool_registry_plan_tests.rs::agent_watchdog_adds_watchdog_namespace_tools_and_handlers`; `codex-rs/tools/src/tool_registry_plan_tests.rs::agent_watchdog_handlers_do_not_require_collab_tools`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_snooze_rejects_non_watchdog_thread`; enhanced `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_snooze_suppresses_helper_and_clears_active_helper`; new `codex-rs/core/src/agent/control_tests.rs::watchdog_snooze_delays_next_helper_and_resumes_after_delay`; `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_self_close_rejects_non_watchdog_thread`; strengthened `codex-rs/core/src/tools/handlers/multi_agents_tests.rs::watchdog_self_close_notifies_owner_and_unregisters_handle`.
+  - Responses/request/item format level: function-call output level is covered through handler outputs parsed from `ToolOutput` text JSON; self-close and snooze tests assert JSON fields (`delay_seconds`, `target_thread_id`, `previous_status`) plus owner ops/events, close-event status, and scheduler delay/resume behavior.
+  - Validation: `cargo test -p codex-core watchdog_ -- --nocapture` passed; `cargo test -p codex-tools agent_watchdog -- --nocapture` passed.
+  - Remaining gap: no hard gap. The tests use handler/runtime invocation rather than a remote Responses round trip, which is sufficient for the local function-tool and watchdog scheduler contracts.
 
 - [x] `ee7700ce4d` Keep watchdogs alive after owner turns complete
   - Code paths read: `codex-rs/core/src/agent/watchdog.rs`, `codex-rs/core/src/agent/control_tests.rs`.
-  - Behavior protected: owner `Completed` status is not treated as watchdog termination; watchdogs continue to spawn helpers and forward helper results after owner turns complete.
-  - Tests: `codex-rs/core/src/agent/control_tests.rs::watchdog_spawns_helper_after_owner_completes`; `codex-rs/core/src/agent/control_tests.rs::watchdog_forwards_completed_helper_without_waiting_for_interval`; new `codex-rs/core/src/agent/control_tests.rs::watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork`.
+  - Behavior protected: owner `Completed`, `Interrupted`, and `Errored` statuses are not treated as watchdog termination; only `Shutdown` and `NotFound` terminate the watchdog. Watchdogs continue to spawn helpers and forward helper results after owner turns complete.
+  - Tests: `codex-rs/core/src/agent/watchdog.rs::tests::owner_completed_status_does_not_terminate_watchdog`; `codex-rs/core/src/agent/control_tests.rs::watchdog_spawns_helper_after_owner_completes`; `codex-rs/core/src/agent/control_tests.rs::watchdog_forwards_completed_helper_without_waiting_for_interval`; new `codex-rs/core/src/agent/control_tests.rs::watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork`.
   - Responses/request/item format level: not directly relevant; coverage asserts externally visible helper spawn `Op::UserInput` and owner `Op::InterAgentCommunication`.
   - Validation: `cargo test -p codex-core watchdog_ -- --nocapture` passed.
   - Remaining gap: none for core lifecycle. Long-running wall-clock scheduling is represented with a one-second interval to keep the regression deterministic.
@@ -91,9 +91,10 @@ Expected artifacts: commit coverage checklist, new tests where gaps existed, val
 ### Validators
 
 - `just fmt` from `codex-rs`: passed after running with elevated filesystem access for the `/build` worktree.
-- `cargo test -p codex-core watchdog_ -- --nocapture`: passed, 22 tests.
+- `cargo test -p codex-core watchdog_ -- --nocapture`: passed, 23 tests.
 - `cargo test -p codex-core list_agents -- --nocapture`: passed, 4 tests.
 - `cargo test -p codex-core close_agent -- --nocapture`: passed, 4 tests.
+- `cargo test -p codex-tools agent_watchdog -- --nocapture`: passed, 2 tests.
 - `just fix -p codex-core`: passed. Per repo instruction, tests were not rerun after this lint/fix pass.
 - `just argument-comment-lint`: passed; Bazel build completed successfully.
 
