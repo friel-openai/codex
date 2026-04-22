@@ -53,3 +53,58 @@ Action: updated the root AutoPlan acceptance evidence and sent follow-up instruc
 Validator: final reconciliation must reject generic summaries that do not satisfy this checklist shape.
 
 Disposition: advance.
+
+## 2026-04-22T17:45:00Z - Worker commits integrated
+
+Intention: bring all workstream audit evidence and new tests into `refresh/20260418/collab-stack-release`.
+
+Responsible agent: root.
+
+Integrated commits:
+
+- `6c54cb9eb8` from Helmholtz: fork/cache/exec request and rollout item tests.
+- `190ff4cd6e` from Volta: watchdog runtime/tool tests.
+- `33ce5485cd` from Franklin: prompt/config/model request-level tests.
+- `b009a0e2b7` from Ptolemy: TUI agent surface tests and snapshots.
+- `d5e06a94c8` from Noether: release/doc retention coverage.
+
+Action: cherry-picked all five workstream commits cleanly. Expanded the release/doc ledger after integration so it matches the per-commit sub-checklist standard rather than a compact table.
+
+Validator: pending integrated-tree focused tests and lint checks.
+
+Disposition: advance.
+
+## 2026-04-22T18:10:00Z - Integrated validation complete
+
+Intention: verify the integrated release branch, not only the individual worker branches.
+
+Responsible agent: root.
+
+Focused tests passed:
+
+- `cargo test -p codex-core inherited_thread_state_shapes_first_responses_request`
+- `cargo test -p codex-core watchdog_ -- --nocapture`
+- `cargo test -p codex-exec fork_option`
+- `cargo test -p codex-exec exec_fork_by_id_creates_new_session_with_copied_history`
+- `cargo test -p codex-exec prompt_stdin`
+- `cargo test -p codex-core custom_model_alias_uses_backing_model_in_responses_request`
+- `cargo test -p codex-features agent_watchdog_is_stable_and_enabled_by_default`
+- `cargo test -p codex-features agent_prompt_injection_is_stable_and_enabled_by_default`
+- `cargo test -p codex-models-manager custom_model_alias_uses_backing_model_metadata_and_request_model`
+- `cargo test -p codex-tui chatwidget::tests::app_server`
+
+Lint, formatting, and snapshot checks passed:
+
+- `just fmt`
+- `just fix -p codex-core`
+- `just fix -p codex-exec`
+- `just fix -p codex-tui`
+- `just argument-comment-lint`
+- `cargo insta pending-snapshots --manifest-path tui/Cargo.toml`
+- `git diff --check`
+
+Corrections made during root reconciliation: expanded the release/doc ledger from a compact table to per-commit sub-checklists, and corrected the TUI ledger to name `resume_replay_closed_watchdog_history_cells` as a snapshot assertion inside `resume_replay_does_not_resurrect_closed_watchdog_panel_row`, not as a standalone executable test.
+
+Remaining risks: full workspace `cargo test` was not run. Release workflow validation remains static/source-inspection plus the already completed production release run; this audit did not trigger a new `frodex-v*` release workflow.
+
+Disposition: complete.
