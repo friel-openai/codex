@@ -75,6 +75,7 @@ pub(crate) fn interrupted_turn_history_marker() -> ResponseItem {
             ),
         }],
         end_turn: None,
+        exclude_from_compaction: true,
         phase: None,
     }
 }

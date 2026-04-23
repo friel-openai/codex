@@ -129,6 +129,7 @@ mod tests {
                 text: "hello from debug prompt".to_string(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         };
         assert_eq!(input.last(), Some(&expected_user_message));

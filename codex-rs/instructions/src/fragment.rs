@@ -50,6 +50,7 @@ impl ContextualUserFragmentDefinition {
             role: "user".to_string(),
             content: vec![ContentItem::InputText { text }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         }
     }

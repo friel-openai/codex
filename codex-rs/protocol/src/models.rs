@@ -820,6 +820,7 @@ impl From<DeveloperInstructions> for ResponseItem {
                 text: di.into_text(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         }
     }

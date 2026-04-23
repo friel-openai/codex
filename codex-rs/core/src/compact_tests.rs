@@ -138,6 +138,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: String::new(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
         ResponseItem::Message {
@@ -147,6 +148,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: "repeat".to_string(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
         ResponseItem::Message {
@@ -156,6 +158,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: "repeat".to_string(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
         ResponseItem::Message {
@@ -165,6 +168,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: "keeps the next user message non-contiguous".to_string(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
         ResponseItem::Message {
@@ -174,6 +178,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: "repeat".to_string(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
         ResponseItem::Message {
@@ -183,6 +188,7 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
                 text: String::new(),
             }],
             end_turn: None,
+            exclude_from_compaction: false,
             phase: None,
         },
     ];
