@@ -670,6 +670,7 @@ pub fn user_message_item(text: &str) -> ResponseItem {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }
 }
 

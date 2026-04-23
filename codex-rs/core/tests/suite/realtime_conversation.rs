@@ -1648,6 +1648,7 @@ async fn conversation_startup_context_current_thread_selects_many_turns_by_budge
                     content: vec![ContentItem::InputText { text: user_turn }],
                     end_turn: None,
                     phase: None,
+                    exclude_from_compaction: false,
                 }),
                 RolloutItem::ResponseItem(ResponseItem::Message {
                     id: None,
@@ -1657,6 +1658,7 @@ async fn conversation_startup_context_current_thread_selects_many_turns_by_budge
                     }],
                     end_turn: None,
                     phase: None,
+                    exclude_from_compaction: false,
                 }),
             ]
         })

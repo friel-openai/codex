@@ -63,6 +63,7 @@ fn collect_user_messages_extracts_user_text_only() {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: Some("user".to_string()),
@@ -72,6 +73,7 @@ fn collect_user_messages_extracts_user_text_only() {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Other,
     ];
@@ -97,6 +99,7 @@ do things
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -106,6 +109,7 @@ do things
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -115,6 +119,7 @@ do things
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
 
@@ -286,6 +291,7 @@ async fn process_compacted_history_replaces_developer_messages() {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -295,6 +301,7 @@ async fn process_compacted_history_replaces_developer_messages() {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -304,6 +311,7 @@ async fn process_compacted_history_replaces_developer_messages() {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
     let (refreshed, mut expected) = process_compacted_history_with_test_session(
@@ -319,6 +327,7 @@ async fn process_compacted_history_replaces_developer_messages() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     });
     assert_eq!(refreshed, expected);
 }
@@ -333,6 +342,7 @@ async fn process_compacted_history_reinjects_full_initial_context() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }];
     let (refreshed, mut expected) = process_compacted_history_with_test_session(
         compacted_history,
@@ -347,7 +357,51 @@ async fn process_compacted_history_reinjects_full_initial_context() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     });
+    assert_eq!(refreshed, expected);
+}
+
+#[tokio::test]
+async fn process_compacted_history_drops_items_marked_excluded_from_compaction() {
+    let compacted_history = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "generated warning".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+            exclude_from_compaction: true,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "real user message".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+            exclude_from_compaction: false,
+        },
+    ];
+    let (refreshed, mut expected) = process_compacted_history_with_test_session(
+        compacted_history,
+        /*previous_turn_settings*/ None,
+    )
+    .await;
+    expected.push(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: "real user message".to_string(),
+        }],
+        end_turn: None,
+        phase: None,
+        exclude_from_compaction: false,
+    });
+
     assert_eq!(refreshed, expected);
 }
 
@@ -367,6 +421,7 @@ keep me updated
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -380,6 +435,7 @@ keep me updated
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -393,6 +449,7 @@ keep me updated
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -402,6 +459,7 @@ keep me updated
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -411,6 +469,7 @@ keep me updated
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
     let (refreshed, mut expected) = process_compacted_history_with_test_session(
@@ -426,6 +485,7 @@ keep me updated
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     });
     assert_eq!(refreshed, expected);
 }
@@ -441,6 +501,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -450,6 +511,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -459,6 +521,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
 
@@ -476,6 +539,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -485,6 +549,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
     expected.extend(initial_context);
@@ -496,6 +561,7 @@ async fn process_compacted_history_inserts_context_before_last_real_user_message
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     });
     assert_eq!(refreshed, expected);
 }
@@ -510,6 +576,7 @@ async fn process_compacted_history_reinjects_model_switch_message() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }];
     let previous_turn_settings = PreviousTurnSettings {
         model: "previous-regular-model".to_string(),
@@ -540,6 +607,7 @@ async fn process_compacted_history_reinjects_model_switch_message() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     });
     assert_eq!(refreshed, expected);
 }
@@ -555,6 +623,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -564,6 +633,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -573,6 +643,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
     let initial_context = vec![ResponseItem::Message {
@@ -583,6 +654,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }];
 
     let refreshed =
@@ -596,6 +668,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -605,6 +678,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -614,6 +688,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Message {
             id: None,
@@ -623,6 +698,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_summary_last() 
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
     ];
     assert_eq!(refreshed, expected);
@@ -641,6 +717,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_compaction_last
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }];
 
     let refreshed =
@@ -654,6 +731,7 @@ fn insert_initial_context_before_last_real_user_or_summary_keeps_compaction_last
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         },
         ResponseItem::Compaction {
             encrypted_content: "encrypted".to_string(),

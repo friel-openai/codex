@@ -33,6 +33,7 @@ fn parses_user_message_with_text_and_two_images() {
         ],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected user message turn item");
@@ -76,6 +77,7 @@ fn skips_local_image_label_text() {
         ],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected user message turn item");
@@ -106,6 +108,7 @@ fn parses_assistant_message_input_text_for_backward_compatibility() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected assistant message turn item");
@@ -155,6 +158,7 @@ fn skips_unnamed_image_label_text() {
         ],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected user message turn item");
@@ -185,6 +189,7 @@ fn skips_user_instructions_and_env() {
                 }],
                 end_turn: None,
             phase: None,
+                exclude_from_compaction: false,
             },
             ResponseItem::Message {
                 id: None,
@@ -194,6 +199,7 @@ fn skips_user_instructions_and_env() {
                 }],
                 end_turn: None,
             phase: None,
+                exclude_from_compaction: false,
             },
             ResponseItem::Message {
                 id: None,
@@ -203,6 +209,7 @@ fn skips_user_instructions_and_env() {
                 }],
                 end_turn: None,
             phase: None,
+                exclude_from_compaction: false,
             },
             ResponseItem::Message {
                 id: None,
@@ -213,6 +220,7 @@ fn skips_user_instructions_and_env() {
                 }],
                 end_turn: None,
             phase: None,
+                exclude_from_compaction: false,
             },
             ResponseItem::Message {
                 id: None,
@@ -222,6 +230,7 @@ fn skips_user_instructions_and_env() {
                 }],
                 end_turn: None,
             phase: None,
+                exclude_from_compaction: false,
             },
             ResponseItem::Message {
                 id: None,
@@ -238,6 +247,7 @@ fn skips_user_instructions_and_env() {
                 ],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             },
         ];
 
@@ -289,6 +299,7 @@ fn parses_hook_prompt_and_hides_other_contextual_fragments() {
         ],
         end_turn: None,
         phase: None,
+                exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected hook prompt turn item");
@@ -318,6 +329,7 @@ fn parses_agent_message() {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     };
 
     let turn_item = parse_turn_item(&item).expect("expected agent message turn item");

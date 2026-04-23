@@ -2353,6 +2353,7 @@ impl Session {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: true,
         };
 
         self.record_conversation_items(ctx, &[item]).await;

@@ -65,6 +65,7 @@ async fn build_arc_monitor_request_includes_relevant_history_and_null_policies()
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -89,6 +90,7 @@ async fn build_arc_monitor_request_includes_relevant_history_and_null_policies()
                 }],
                 end_turn: None,
                 phase: Some(MessagePhase::Commentary),
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -103,6 +105,7 @@ async fn build_arc_monitor_request_includes_relevant_history_and_null_policies()
                 }],
                 end_turn: None,
                 phase: Some(MessagePhase::FinalAnswer),
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -117,6 +120,7 @@ async fn build_arc_monitor_request_includes_relevant_history_and_null_policies()
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -272,6 +276,7 @@ async fn monitor_action_posts_expected_arc_request() {
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -353,6 +358,7 @@ async fn monitor_action_uses_env_url_and_token_overrides() {
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )
@@ -423,6 +429,7 @@ async fn monitor_action_rejects_legacy_response_fields() {
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }],
             &turn_context,
         )

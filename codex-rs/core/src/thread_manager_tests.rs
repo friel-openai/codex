@@ -30,6 +30,7 @@ fn user_msg(text: &str) -> ResponseItem {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }
 }
 fn assistant_msg(text: &str) -> ResponseItem {
@@ -41,6 +42,7 @@ fn assistant_msg(text: &str) -> ResponseItem {
         }],
         end_turn: None,
         phase: None,
+        exclude_from_compaction: false,
     }
 }
 
