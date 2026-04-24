@@ -180,6 +180,7 @@ mod tests {
             }],
             end_turn: None,
             phase: None,
+            exclude_from_compaction: false,
         });
 
         apply_rollout_item(&mut metadata, &item, "test-provider");

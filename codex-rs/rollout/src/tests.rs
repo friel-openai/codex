@@ -1172,6 +1172,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
                 }],
                 end_turn: None,
                 phase: None,
+                exclude_from_compaction: false,
             }),
         };
         writeln!(file, "{}", serde_json::to_string(&response_line)?)?;

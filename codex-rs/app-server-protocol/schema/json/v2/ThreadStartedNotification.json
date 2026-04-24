@@ -35,6 +35,7 @@
             "contextWindowExceeded",
             "usageLimitExceeded",
             "serverOverloaded",
+            "cyberPolicy",
             "internalServerError",
             "unauthorized",
             "badRequest",
@@ -953,6 +954,9 @@
                 "boolean",
                 "null"
               ]
+            },
+            "exclude_from_compaction": {
+              "type": "boolean"
             },
             "id": {
               "type": [

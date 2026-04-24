@@ -1,6 +1,8 @@
 use super::*;
 use codex_model_provider::SharedModelProvider;
 use codex_model_provider::create_model_provider;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 pub(super) fn image_generation_tool_auth_allowed(auth_manager: Option<&AuthManager>) -> bool {
     matches!(
@@ -71,6 +73,8 @@ pub(crate) struct TurnContext {
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
     pub(crate) turn_timing_state: Arc<TurnTimingState>,
+    pub(crate) server_model_warning_emitted: AtomicBool,
+    pub(crate) model_verification_emitted: AtomicBool,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -197,6 +201,12 @@ impl TurnContext {
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
             turn_timing_state: Arc::clone(&self.turn_timing_state),
+            server_model_warning_emitted: AtomicBool::new(
+                self.server_model_warning_emitted.load(Ordering::Relaxed),
+            ),
+            model_verification_emitted: AtomicBool::new(
+                self.model_verification_emitted.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -443,6 +453,8 @@ impl Session {
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
             turn_timing_state: Arc::new(TurnTimingState::default()),
+            server_model_warning_emitted: AtomicBool::new(false),
+            model_verification_emitted: AtomicBool::new(false),
         }
     }
 

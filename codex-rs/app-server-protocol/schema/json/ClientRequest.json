@@ -1745,6 +1745,9 @@
                 "null"
               ]
             },
+            "exclude_from_compaction": {
+              "type": "boolean"
+            },
             "id": {
               "type": [
                 "string",
