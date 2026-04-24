@@ -47,3 +47,22 @@ Evidence:
 - Installed `/build/frodex-rebase/frodex` and verified `codex-cli 0.0.0`.
 
 Disposition: complete
+
+## 2026-04-24T08:55:00Z - Live Watchdog TTY Validation
+
+Outcome: ran the rebuilt binary under a live TTY with `CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS=1 /build/frodex-rebase/frodex "$(cat /home/dev-user/frodex-watchdog-test.md)"`. The root created watchdog `Popper`, the TUI stayed alive while the watchdog remained active, and the watchdog self-closed on the fourth wake with `goodbye`. The root reported that the watchdog closed itself and the root did not close it.
+
+Evidence:
+
+- Root rollout: `/home/dev-user/.codex/sessions/2026/04/24/rollout-2026-04-24T08-22-46-019dbe95-92e4-7eb0-9e6e-41714254975f.jsonl`.
+- First snooze materialized rollout: `/home/dev-user/.codex/sessions/2026/04/24/rollout-2026-04-24T08-23-11-019dbe95-f448-7b71-8213-d5b4fd201fe9.jsonl`, line 12 records `watchdog.snooze`.
+- Final watchdog materialized rollout: `/home/dev-user/.codex/sessions/2026/04/24/rollout-2026-04-24T08-28-50-019dbe9b-2156-7c12-92d7-4c69a8876e21.jsonl`, line 12 records `watchdog_self_close` with `goodbye`.
+- The final synthetic status used `wait_agent` shape, not `list_agents`.
+
+Disposition: complete
+
+## 2026-04-24T09:03:00Z - Final Repo-Wide Lint
+
+Outcome: `just argument-comment-lint` passed repo-wide after granting Bazel cache access. The command emitted the existing TUI unused import warning for `codex-rs/tui/src/chatwidget.rs:142` but completed successfully.
+
+Disposition: complete
