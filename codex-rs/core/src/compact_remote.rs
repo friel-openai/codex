@@ -6,6 +6,7 @@ use crate::compact::CompactionAnalyticsAttempt;
 use crate::compact::InitialContextInjection;
 use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
+use crate::compact::is_compaction_filtered_history_item;
 use crate::context_manager::ContextManager;
 use crate::context_manager::TotalTokenUsageBreakdown;
 use crate::context_manager::estimate_response_item_model_visible_bytes;
@@ -144,8 +145,25 @@ async fn run_remote_compact_task_inner_impl(
     // This is the history selected for remote compaction, after any trimming required to fit the
     // compact endpoint. The checkpoint below records it separately from the next sampling request,
     // whose prompt will repeat current developer/context prefix items.
-    let trace_input_history = history.raw_items().to_vec();
-    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let trace_input_history = history
+        .raw_items()
+        .iter()
+        .filter(|item| !is_compaction_filtered_history_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    // Required to keep `/undo` available after compaction
+    let ghost_snapshots: Vec<ResponseItem> = history
+        .raw_items()
+        .iter()
+        .filter(|item| matches!(item, ResponseItem::GhostSnapshot { .. }))
+        .cloned()
+        .collect();
+
+    let prompt_input = history
+        .for_prompt(&turn_context.model_info.input_modalities)
+        .into_iter()
+        .filter(|item| !is_compaction_filtered_history_item(item))
+        .collect::<Vec<_>>();
     let tool_router = built_tools(
         sess.as_ref(),
         turn_context.as_ref(),
@@ -196,6 +214,9 @@ async fn run_remote_compact_task_inner_impl(
     )
     .await;
 
+    if !ghost_snapshots.is_empty() {
+        new_history.extend(ghost_snapshots);
+    }
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
         InitialContextInjection::BeforeLastUserMessage => Some(turn_context.to_turn_context_item()),
@@ -250,17 +271,21 @@ pub(crate) async fn process_compacted_history(
 /// We drop:
 /// - `developer` messages because remote output can include stale/duplicated
 ///   instruction content.
-/// - non-user-content `user` messages (session prefix/instruction wrappers),
-///   while preserving real user messages and persisted hook prompts.
+/// - non-user-content `user` messages (session prefix/instruction wrappers).
+/// - user warnings that are known to be local runtime noise and should not
+///   survive compaction.
 ///
 /// This intentionally keeps:
 /// - `assistant` messages (future remote compaction models may emit them)
-/// - `user`-role warnings and compaction-generated summary messages because
-///   they parse as `TurnItem::UserMessage`.
+/// - compaction-generated summary messages because they parse as
+///   `TurnItem::UserMessage`.
 fn should_keep_compacted_history_item(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { role, .. } if role == "developer" => false,
         ResponseItem::Message { role, .. } if role == "user" => {
+            if is_compaction_filtered_history_item(item) {
+                return false;
+            }
             matches!(
                 crate::event_mapping::parse_turn_item(item),
                 Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))

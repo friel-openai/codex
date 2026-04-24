@@ -121,6 +121,44 @@ do things
 }
 
 #[test]
+fn collect_user_messages_filters_unified_exec_process_warnings() {
+    let items = vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "before warning".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Warning: The maximum number of unified exec processes you can keep open is 5 and you currently have 5 processes open. Reuse older processes or close them to prevent automatic pruning of old processes".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "after warning".to_string(),
+            }],
+            phase: None,
+        },
+    ];
+
+    let collected = collect_user_messages(&items);
+
+    assert_eq!(
+        vec!["before warning".to_string(), "after warning".to_string()],
+        collected
+    );
+    assert!(is_compaction_filtered_history_item(&items[1]));
+}
+
+#[test]
 fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
     let items = vec![
         ResponseItem::Message {
@@ -129,7 +167,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::InputText {
                 text: String::new(),
             }],
-            end_turn: None,
             phase: None,
         },
         ResponseItem::Message {
@@ -138,7 +175,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::InputText {
                 text: "repeat".to_string(),
             }],
-            end_turn: None,
             phase: None,
         },
         ResponseItem::Message {
@@ -147,7 +183,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::InputText {
                 text: "repeat".to_string(),
             }],
-            end_turn: None,
             phase: None,
         },
         ResponseItem::Message {
@@ -156,7 +191,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::OutputText {
                 text: "keeps the next user message non-contiguous".to_string(),
             }],
-            end_turn: None,
             phase: None,
         },
         ResponseItem::Message {
@@ -165,7 +199,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::InputText {
                 text: "repeat".to_string(),
             }],
-            end_turn: None,
             phase: None,
         },
         ResponseItem::Message {
@@ -174,7 +207,6 @@ fn collect_user_messages_drops_contiguous_duplicates_and_empty_messages() {
             content: vec![ContentItem::InputText {
                 text: String::new(),
             }],
-            end_turn: None,
             phase: None,
         },
     ];
