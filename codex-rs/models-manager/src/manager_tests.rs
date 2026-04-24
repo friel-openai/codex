@@ -299,7 +299,6 @@ async fn get_model_info_uses_custom_catalog() {
 
 #[tokio::test]
 async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
-    let codex_home = tempdir().expect("temp dir");
     let mut custom_models = HashMap::new();
     custom_models.insert(
         "frontier-local".to_string(),
@@ -310,16 +309,13 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
         },
     );
     let remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("Test API Key"));
-    let manager = ModelsManager::new_with_provider_and_custom_models(
-        codex_home.path().to_path_buf(),
-        auth_manager,
-        Some(ModelsResponse {
+    let manager = StaticModelsManager::new_with_custom_models(
+        /*auth_manager*/ None,
+        ModelsResponse {
             models: vec![remote],
-        }),
+        },
         custom_models,
         CollaborationModesConfig::default(),
-        ModelProviderInfo::create_openai_provider(/*base_url*/ None),
     );
     let config = ModelsManagerConfig::default();
 
