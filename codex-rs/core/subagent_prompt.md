@@ -18,7 +18,7 @@ Term definitions in this file:
 
 ## Multi-Agent Guidance (Upstream Surface)
 
-The only multi-agent tools available in this environment are `spawn_agent`, `send_input`, `wait`, `close_agent`, and `list_agents`.
+The only multi-agent tools available in this environment are `spawn_agent`, `send_input`, `wait`, and `close_agent`.
 
 Important: to coordinate with parent/root, use `send_input`. A plain assistant message in your own thread does not reliably notify the parent.
 

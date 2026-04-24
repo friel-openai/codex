@@ -342,7 +342,6 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
             "followup_task",
             "wait_agent",
             "close_agent",
-            "list_agents",
         ],
     );
 
@@ -430,25 +429,7 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         json!("Brief wait summary without the agent's final content.")
     );
 
-    let list_agents = find_tool(&tools, "list_agents");
-    let ToolSpec::Function(ResponsesApiTool {
-        parameters,
-        output_schema,
-        ..
-    }) = &list_agents.spec
-    else {
-        panic!("list_agents should be a function tool");
-    };
-    let (properties, required) = expect_object_schema(parameters);
-    assert!(properties.contains_key("path_prefix"));
-    assert_eq!(required, None);
-    let output_schema = output_schema
-        .as_ref()
-        .expect("list_agents should define output schema");
-    assert_eq!(
-        output_schema["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status", "last_task_message"])
-    );
+    assert_lacks_tool_name(&tools, "list_agents");
     assert_lacks_tool_name(&tools, "send_input");
     assert_lacks_tool_name(&tools, "resume_agent");
 }

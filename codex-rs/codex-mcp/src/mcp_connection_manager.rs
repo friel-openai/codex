@@ -911,39 +911,62 @@ impl McpConnectionManager {
         &self,
         required_servers: &[String],
     ) -> Vec<McpStartupFailure> {
-        let mut failures = Vec::new();
-        for server_name in required_servers {
-            let Some(async_managed_client) = self.clients.get(server_name).cloned() else {
-                failures.push(McpStartupFailure {
-                    server: server_name.clone(),
-                    error: format!("required MCP server `{server_name}` was not initialized"),
-                });
-                continue;
-            };
+        self.required_startup_failures_future(required_servers)
+            .await
+    }
 
-            match async_managed_client.client().await {
-                Ok(_) => {}
-                Err(error) => failures.push(McpStartupFailure {
-                    server: server_name.clone(),
-                    error: startup_outcome_error_message(error),
-                }),
+    pub fn required_startup_failures_future(
+        &self,
+        required_servers: &[String],
+    ) -> BoxFuture<'static, Vec<McpStartupFailure>> {
+        let required_clients = required_servers
+            .iter()
+            .map(|server_name| (server_name.clone(), self.clients.get(server_name).cloned()))
+            .collect::<Vec<_>>();
+        async move {
+            let mut failures = Vec::new();
+            for (server_name, async_managed_client) in required_clients {
+                let Some(async_managed_client) = async_managed_client else {
+                    failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: format!("required MCP server `{server_name}` was not initialized"),
+                    });
+                    continue;
+                };
+
+                match async_managed_client.client().await {
+                    Ok(_) => {}
+                    Err(error) => failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: startup_outcome_error_message(error),
+                    }),
+                }
             }
+            failures
         }
-        failures
+        .boxed()
     }
 
     /// Returns a single map that contains all tools. Each key is the
     /// fully-qualified name for the tool.
     #[instrument(level = "trace", skip_all)]
     pub async fn list_all_tools(&self) -> HashMap<String, ToolInfo> {
-        let mut tools = Vec::new();
-        for managed_client in self.clients.values() {
-            let Some(server_tools) = managed_client.listed_tools().await else {
-                continue;
-            };
-            tools.extend(server_tools);
+        self.list_all_tools_future().await
+    }
+
+    pub fn list_all_tools_future(&self) -> BoxFuture<'static, HashMap<String, ToolInfo>> {
+        let clients = self.clients.values().cloned().collect::<Vec<_>>();
+        async move {
+            let mut tools = Vec::new();
+            for managed_client in clients {
+                let Some(server_tools) = managed_client.listed_tools().await else {
+                    continue;
+                };
+                tools.extend(server_tools);
+            }
+            qualify_tools(tools)
         }
-        qualify_tools(tools)
+        .boxed()
     }
 
     /// Force-refresh codex apps tools by bypassing the in-process cache.

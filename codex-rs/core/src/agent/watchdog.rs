@@ -8,14 +8,15 @@ use crate::config::Config;
 use crate::thread_manager::ThreadManagerState;
 use chrono::SecondsFormat;
 use chrono::Utc;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
-use codex_protocol::user_input::UserInput;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -125,28 +126,39 @@ impl WatchdogManager {
             generation,
         };
 
-        let mut registrations = self.registrations.lock().await;
-        let superseded_targets = registrations
-            .iter()
-            .filter_map(|(target_thread_id, existing_entry)| {
-                (existing_entry.registration.owner_thread_id == entry.registration.owner_thread_id
-                    && *target_thread_id != entry.registration.target_thread_id)
-                    .then_some(*target_thread_id)
-            })
-            .collect::<Vec<_>>();
-        let mut superseded = Vec::new();
-        for superseded_target in superseded_targets {
-            if let Some(removed) = registrations.remove(&superseded_target) {
-                if let Some(helper_id) = removed.active_helper_id {
-                    self.suppressed_helpers.lock().await.remove(&helper_id);
+        let (superseded, suppressed_helper_ids) = {
+            let mut registrations = self.registrations.lock().await;
+            let superseded_targets = registrations
+                .iter()
+                .filter_map(|(target_thread_id, existing_entry)| {
+                    (existing_entry.registration.owner_thread_id
+                        == entry.registration.owner_thread_id
+                        && *target_thread_id != entry.registration.target_thread_id)
+                        .then_some(*target_thread_id)
+                })
+                .collect::<Vec<_>>();
+            let mut superseded = Vec::new();
+            let mut suppressed_helper_ids = Vec::new();
+            for superseded_target in superseded_targets {
+                if let Some(removed) = registrations.remove(&superseded_target) {
+                    if let Some(helper_id) = removed.active_helper_id {
+                        suppressed_helper_ids.push(helper_id);
+                    }
+                    superseded.push(RemovedWatchdog {
+                        target_thread_id: superseded_target,
+                        active_helper_id: removed.active_helper_id,
+                    });
                 }
-                superseded.push(RemovedWatchdog {
-                    target_thread_id: superseded_target,
-                    active_helper_id: removed.active_helper_id,
-                });
+            }
+            registrations.insert(entry.registration.target_thread_id, entry);
+            (superseded, suppressed_helper_ids)
+        };
+        if !suppressed_helper_ids.is_empty() {
+            let mut suppressed_helpers = self.suppressed_helpers.lock().await;
+            for helper_id in suppressed_helper_ids {
+                suppressed_helpers.remove(&helper_id);
             }
         }
-        registrations.insert(entry.registration.target_thread_id, entry);
         Ok(superseded)
     }
 
@@ -394,9 +406,10 @@ impl WatchdogManager {
         }
         let current_utc = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
         let owner_idle_for_seconds = now.duration_since(owner_idle_since).as_secs();
+        let watchdog_was_due = now.duration_since(owner_idle_since) >= snapshot.interval;
         let check_in_facts = format!(
-            "Watchdog check-in facts:\n- current_utc: {current_utc}\n- owner_idle_for_seconds: {owner_idle_for_seconds}\n- watchdog_interval_seconds: {}\n- watchdog_was_due: true",
-            snapshot.interval.as_secs()
+            "Watchdog check-in facts:\n- current_utc: {current_utc}\n- owner_idle_for_seconds: {owner_idle_for_seconds}\n- watchdog_interval_seconds: {}\n- watchdog_was_due: {watchdog_was_due}",
+            snapshot.interval.as_secs(),
         );
         let helper_prompt = if snapshot.prompt.trim().is_empty() {
             format!(
@@ -412,14 +425,16 @@ impl WatchdogManager {
         let spawn_result = control_for_spawn
             .spawn_agent_with_metadata(
                 helper_config,
-                Op::UserInput {
-                    environments: None,
-                    items: vec![UserInput::Text {
-                        text: helper_prompt,
-                        text_elements: Vec::new(),
-                    }],
-                    final_output_json_schema: None,
-                    responsesapi_client_metadata: None,
+                Op::InterAgentCommunication {
+                    communication: InterAgentCommunication::new(
+                        AgentPath::root(),
+                        AgentPath::root()
+                            .join("watchdog")
+                            .unwrap_or_else(|_| AgentPath::root()),
+                        Vec::new(),
+                        helper_prompt,
+                        /*trigger_turn*/ true,
+                    ),
                 },
                 Some(session_source),
                 SpawnAgentOptions {
@@ -541,19 +556,24 @@ impl WatchdogManager {
         helper_thread_id: ThreadId,
         requested_delay_seconds: Option<u64>,
     ) -> Option<WatchdogSnoozeResult> {
-        let mut registrations = self.registrations.lock().await;
-        let (target_thread_id, entry) =
-            registrations
-                .iter_mut()
-                .find_map(|(target_thread_id, entry)| {
-                    (entry.active_helper_id == Some(helper_thread_id))
-                        .then_some((*target_thread_id, entry))
-                })?;
-        let delay_seconds = requested_delay_seconds
-            .map(|seconds| seconds.clamp(WATCHDOG_MIN_SNOOZE_SECONDS, WATCHDOG_MAX_SNOOZE_SECONDS))
-            .unwrap_or_else(|| entry.interval.as_secs().max(1));
-        entry.snoozed_until = Some(Instant::now() + Duration::from_secs(delay_seconds));
-        entry.active_helper_id = None;
+        let (target_thread_id, delay_seconds) = {
+            let mut registrations = self.registrations.lock().await;
+            let (target_thread_id, entry) =
+                registrations
+                    .iter_mut()
+                    .find_map(|(target_thread_id, entry)| {
+                        (entry.active_helper_id == Some(helper_thread_id))
+                            .then_some((*target_thread_id, entry))
+                    })?;
+            let delay_seconds = requested_delay_seconds
+                .map(|seconds| {
+                    seconds.clamp(WATCHDOG_MIN_SNOOZE_SECONDS, WATCHDOG_MAX_SNOOZE_SECONDS)
+                })
+                .unwrap_or_else(|| entry.interval.as_secs().max(1));
+            entry.snoozed_until = Some(Instant::now() + Duration::from_secs(delay_seconds));
+            entry.active_helper_id = None;
+            (target_thread_id, delay_seconds)
+        };
         self.suppressed_helpers
             .lock()
             .await
@@ -565,19 +585,22 @@ impl WatchdogManager {
     }
 
     pub(crate) async fn finish_active_helper(&self, helper_thread_id: ThreadId) -> bool {
-        let mut registrations = self.registrations.lock().await;
-        let Some(entry) = registrations
-            .values_mut()
-            .find(|entry| entry.active_helper_id == Some(helper_thread_id))
-        else {
-            return false;
+        let found = {
+            let mut registrations = self.registrations.lock().await;
+            let Some(entry) = registrations
+                .values_mut()
+                .find(|entry| entry.active_helper_id == Some(helper_thread_id))
+            else {
+                return false;
+            };
+            entry.active_helper_id = None;
+            true
         };
-        entry.active_helper_id = None;
         self.suppressed_helpers
             .lock()
             .await
             .insert(helper_thread_id);
-        true
+        found
     }
 
     async fn update_after_spawn(

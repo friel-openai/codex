@@ -25,3 +25,9 @@ Resolved `b9c11d5fa0 Restore Frodex watchdog and prompt behavior` conflicts in `
 ## 2026-04-24T07:05:00Z - Compaction Steering Applied
 
 Dropped the two rebased `exclude_from_compaction` commits by resetting the stack back to `096fceea66`. Added prefix-based compaction filtering for user messages starting `Warning: The maximum number of unified exec process`, covering local message collection and remote compaction prompt/output filtering.
+
+## 2026-04-24T08:05:00Z - Validator Repair Iteration
+
+Preregistration: repair the replayed watchdog/runtime patch after the `/build` worktree recreation. Responsible agent: root. Start commit: `b12a68754e`. Worktree: `/build/frodex-rebase/collab-stack-rebase` on `refresh/20260423/collab-stack-rebase`. Mutable surface: MCP connection-manager snapshot helpers, watchdog registration/snooze close paths, prompt-config-model tests, and tool registry exposure. Validators: `just fmt`, focused `cargo test` targets, scoped `just fix -p`, then release binary build. Expected artifacts: committed rebased stack change and `/build/frodex-rebase/frodex` binary.
+
+Disposition: advance

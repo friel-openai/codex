@@ -42,7 +42,7 @@ async fn start_thread_with_source(
         codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("dummy")),
         session_source,
         CollaborationModesConfig::default(),
-        Arc::new(EnvironmentManager::new(/*exec_server_url*/ None)),
+        Arc::new(EnvironmentManager::default_for_tests()),
         /*analytics_events_client*/ None,
     );
     let new_thread = thread_manager.start_thread(config).await?;
@@ -58,6 +58,7 @@ async fn submit_text_and_wait(thread: &CodexThread, text: &str) -> Result<()> {
             }],
             final_output_json_schema: None,
             responsesapi_client_metadata: None,
+            environments: None,
         })
         .await?;
     wait_for_event(thread, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;

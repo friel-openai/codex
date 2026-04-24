@@ -147,34 +147,42 @@ fn full_history_fork_reference_items_omits_copied_parent_items() {
 }
 
 #[test]
-fn watchdog_boot_list_agents_redacts_non_root_task_messages() {
-    let agents = sanitize_watchdog_boot_list_agents(vec![
-        ListedAgent {
-            agent_name: AgentPath::root().to_string(),
-            agent_status: AgentStatus::Completed(Some("root done".to_string())),
-            last_task_message: Some("Main thread".to_string()),
-        },
-        ListedAgent {
-            agent_name: "019db21c-95ee-7561-905d-eb01e02525e0".to_string(),
-            agent_status: AgentStatus::PendingInit,
-            last_task_message: Some("Every time you start, respond with ping".to_string()),
-        },
-    ]);
+fn watchdog_boot_agent_status_uses_wait_agent_shape() {
+    let owner_thread_id =
+        ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e0").expect("valid thread id");
+    let items = synthetic_watchdog_agent_status_items(
+        owner_thread_id,
+        vec![CollabAgentStatusEntry {
+            thread_id: owner_thread_id,
+            agent_nickname: None,
+            agent_role: None,
+            status: AgentStatus::Completed(Some("root done".to_string())),
+        }],
+    );
 
+    assert_matches!(
+        &items[0],
+        RolloutItem::ResponseItem(ResponseItem::FunctionCall { name, call_id, arguments, .. })
+            if name == "wait_agent"
+                && call_id == "synthetic_watchdog_agent_status"
+                && arguments.contains(&owner_thread_id.to_string())
+    );
+    let RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output }) = &items[1]
+    else {
+        panic!("expected synthetic status output");
+    };
+    assert_eq!(call_id, "synthetic_watchdog_agent_status");
+    let FunctionCallOutputBody::Text(body) = &output.body else {
+        panic!("synthetic status output should be text JSON");
+    };
+    let parsed: serde_json::Value =
+        serde_json::from_str(body).expect("synthetic status output should parse");
+    assert_eq!(parsed["source"], "pre_injected_agent_status");
+    assert_eq!(parsed["owner_thread_id"], owner_thread_id.to_string());
+    assert_eq!(parsed["timed_out"], false);
     assert_eq!(
-        agents,
-        vec![
-            ListedAgent {
-                agent_name: AgentPath::root().to_string(),
-                agent_status: AgentStatus::Completed(Some("root done".to_string())),
-                last_task_message: Some("Main thread".to_string()),
-            },
-            ListedAgent {
-                agent_name: "019db21c-95ee-7561-905d-eb01e02525e0".to_string(),
-                agent_status: AgentStatus::PendingInit,
-                last_task_message: None,
-            },
-        ]
+        parsed["status"][owner_thread_id.to_string()]["completed"],
+        "root done"
     );
 }
 
@@ -298,6 +306,14 @@ fn history_contains_assistant_inter_agent_communication(
             ContentItem::InputText { .. } | ContentItem::InputImage { .. } => false,
         })
     })
+}
+
+fn op_contains_inter_agent_content(op: &Op, needle: &str) -> bool {
+    matches!(
+        op,
+        Op::InterAgentCommunication { communication }
+            if communication.content.contains(needle)
+    )
 }
 
 async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> bool {
@@ -517,18 +533,16 @@ async fn watchdog_spawns_helper_after_owner_completes() {
 
     timeout(Duration::from_secs(5), async {
         loop {
-            let helper_spawned = harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
-                thread_id != owner_thread_id
-                    && thread_id != target_thread_id
-                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                        UserInput::Text { text, .. } => text.contains("check in"),
-                        UserInput::Image { .. }
-                        | UserInput::LocalImage { .. }
-                        | UserInput::Skill { .. }
-                        | UserInput::Mention { .. } => false,
-                        _ => false,
-                    }))
-            });
+            let helper_spawned =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .any(|(thread_id, op)| {
+                        thread_id != owner_thread_id
+                            && thread_id != target_thread_id
+                            && op_contains_inter_agent_content(&op, "check in")
+                    });
             if helper_spawned {
                 break;
             }
@@ -696,20 +710,17 @@ async fn watchdog_helper_forks_owner_history() {
 
     let helper_thread_id = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
-                |(thread_id, op)| {
-                    *thread_id != owner_thread_id
-                        && *thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("check in"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        }))
-                },
-            ) {
+            if let Some((thread_id, _)) =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && op_contains_inter_agent_content(op, "check in")
+                    })
+            {
                 break thread_id;
             }
             sleep(Duration::from_millis(50)).await;
@@ -733,7 +744,7 @@ async fn watchdog_helper_forks_owner_history() {
         .session
         .current_rollout_path()
         .await
-        .expect("watchdog helper rollout path should load")
+        .expect("watchdog helper rollout path lookup should succeed")
         .expect("watchdog helper should have a rollout path");
     let history_items = timeout(Duration::from_secs(5), async {
         loop {
@@ -795,17 +806,9 @@ async fn watchdog_helper_forks_owner_history() {
             if thread_id != helper_thread_id {
                 return None;
             }
-            if let Op::UserInput { items, .. } = op {
-                items.into_iter().find_map(|item| match item {
-                    UserInput::Text { text, .. } => Some(text),
-                    UserInput::Image { .. }
-                    | UserInput::LocalImage { .. }
-                    | UserInput::Skill { .. }
-                    | UserInput::Mention { .. } => None,
-                    _ => None,
-                })
-            } else {
-                None
+            match op {
+                Op::InterAgentCommunication { communication } => Some(communication.content),
+                _ => None,
             }
         })
         .expect("helper prompt should be submitted");
@@ -818,6 +821,7 @@ async fn watchdog_helper_forks_owner_history() {
     assert!(helper_prompt.contains("current_utc:"));
     assert!(helper_prompt.contains("owner_idle_for_seconds:"));
     assert!(helper_prompt.contains("watchdog_interval_seconds: 60"));
+    assert!(helper_prompt.contains("watchdog_was_due: false"));
 
     let rollout_items = timeout(Duration::from_secs(5), async {
         loop {
@@ -834,11 +838,9 @@ async fn watchdog_helper_forks_owner_history() {
                 matches!(
                     item,
                     RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
-                        if role == "user"
-                            && content.iter().any(|content_item| matches!(
-                                content_item,
-                                ContentItem::InputText { text } if text.contains("Watchdog check-in facts:")
-                            ))
+                        if role == "assistant"
+                            && InterAgentCommunication::from_message_content(content)
+                                .is_some_and(|communication| communication.content.contains("Watchdog check-in facts:"))
                 )
             }) {
                 break rollout_items;
@@ -853,8 +855,8 @@ async fn watchdog_helper_forks_owner_history() {
         .session
         .current_rollout_path()
         .await
-        .expect("owner rollout path should load")
-        .expect("owner rollout path should be materialized");
+        .expect("owner rollout path lookup should succeed")
+        .expect("owner rollout path");
     assert!(rollout_items.iter().any(|item| matches!(
         item,
         RolloutItem::ForkReference(reference)
@@ -889,11 +891,9 @@ async fn watchdog_helper_forks_owner_history() {
         .position(|item| matches!(
             item,
             RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
-                if role == "user"
-                    && content.iter().any(|content_item| matches!(
-                        content_item,
-                        ContentItem::InputText { text } if text.contains("Watchdog check-in facts:")
-                    ))
+                if role == "assistant"
+                    && InterAgentCommunication::from_message_content(content)
+                        .is_some_and(|communication| communication.content.contains("Watchdog check-in facts:"))
         ))
         .expect("helper rollout should include watchdog check-in task");
     assert!(
@@ -941,7 +941,7 @@ async fn watchdog_helper_forks_owner_history() {
     assert!(history_items.iter().any(|item| matches!(
         item,
         ResponseItem::FunctionCall { name, call_id, .. }
-            if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
+            if name == "wait_agent" && call_id == "synthetic_watchdog_agent_status"
     )));
     assert!(rollout_items.iter().any(|item| matches!(
         item,
@@ -961,38 +961,33 @@ async fn watchdog_helper_forks_owner_history() {
         }
         _ => false,
     }));
-    let list_agents_bootstrap = rollout_items
+    let status_bootstrap = rollout_items
         .iter()
         .find_map(|item| match item {
             RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output })
-                if call_id == "synthetic_watchdog_list_agents" =>
+                if call_id == "synthetic_watchdog_agent_status" =>
             {
                 Some(output)
             }
             _ => None,
         })
-        .expect("helper rollout should include synthetic list_agents output");
-    let FunctionCallOutputBody::Text(list_agents_bootstrap_body) = &list_agents_bootstrap.body
-    else {
-        panic!("synthetic list_agents output should be text JSON");
+        .expect("helper rollout should include synthetic agent status output");
+    let FunctionCallOutputBody::Text(status_bootstrap_body) = &status_bootstrap.body else {
+        panic!("synthetic agent status output should be text JSON");
     };
-    let list_agents_bootstrap_json: serde_json::Value =
-        serde_json::from_str(list_agents_bootstrap_body)
-            .expect("synthetic list_agents output should parse as JSON");
+    let status_bootstrap_json: serde_json::Value = serde_json::from_str(status_bootstrap_body)
+        .expect("synthetic agent status output should parse as JSON");
+    assert_eq!(status_bootstrap_json["source"], "pre_injected_agent_status");
     assert_eq!(
-        list_agents_bootstrap_json["source"],
-        "pre_injected_agents_list"
-    );
-    assert_eq!(
-        list_agents_bootstrap_json["owner_thread_id"],
+        status_bootstrap_json["owner_thread_id"],
         owner_thread_id.to_string()
     );
     assert!(
-        list_agents_bootstrap_json["agents"]
+        status_bootstrap_json["agent_statuses"]
             .as_array()
-            .expect("agents should be an array")
+            .expect("agent_statuses should be an array")
             .iter()
-            .any(|agent| agent["agent_name"] == "/root")
+            .any(|agent| agent["thread_id"] == owner_thread_id.to_string())
     );
     assert!(
         !helper_thread
@@ -1096,21 +1091,15 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
     let helper_thread_id = timeout(Duration::from_secs(5), async {
         loop {
             if let Some((thread_id, _)) =
-                manager
-                    .captured_ops()
-                    .into_iter()
-                    .find(|(thread_id, op)| {
-                        *thread_id != owner_thread_id
-                            && *thread_id != target_thread_id
-                            && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                                UserInput::Text { text, .. } => text.contains("Watchdog check-in facts:"),
-                                UserInput::Image { .. }
-                                | UserInput::LocalImage { .. }
-                                | UserInput::Skill { .. }
-                                | UserInput::Mention { .. } => false,
-                                _ => false,
-                            }))
-                    })
+                manager.captured_ops().into_iter().find(|(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(
+                            op,
+                            Op::InterAgentCommunication { communication }
+                                if communication.content.contains("Watchdog check-in facts:")
+                        )
+                })
             {
                 break thread_id;
             }
@@ -1162,7 +1151,7 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
     let owner_final_idx = message_position("assistant", "owner final before watchdog");
     let watchdog_prompt_idx =
         message_position("developer", "More importantly, you are a **watchdog**");
-    let watchdog_task_idx = message_position("user", "Watchdog check-in facts:");
+    let watchdog_task_idx = message_position("assistant", "Watchdog check-in facts:");
 
     assert!(owner_seed_idx < watchdog_prompt_idx);
     assert!(owner_final_idx < watchdog_prompt_idx);
@@ -1171,9 +1160,9 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
         input.iter().any(|item| {
             item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
                 && item.get("call_id").and_then(serde_json::Value::as_str)
-                    == Some("synthetic_watchdog_list_agents")
+                    == Some("synthetic_watchdog_agent_status")
         }),
-        "first watchdog helper request should include pre-injected list_agents output: {input:#?}"
+        "first watchdog helper request should include pre-injected agent status output: {input:#?}"
     );
 
     Ok(())
@@ -1244,20 +1233,17 @@ async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
 
     let first_helper_id = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
-                |(thread_id, op)| {
-                    *thread_id != owner_thread_id
-                        && *thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("repeat check"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        }))
-                },
-            ) {
+            if let Some((thread_id, _)) =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && op_contains_inter_agent_content(op, "repeat check")
+                    })
+            {
                 break thread_id;
             }
             sleep(Duration::from_millis(50)).await;
@@ -1360,14 +1346,7 @@ async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
                 .filter_map(|(thread_id, op)| {
                     (thread_id != owner_thread_id
                         && thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("repeat check"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        })))
+                        && op_contains_inter_agent_content(&op, "repeat check"))
                     .then_some(thread_id)
                 })
                 .collect::<Vec<_>>();
@@ -1461,20 +1440,17 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
 
     let helper_thread_id = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
-                |(thread_id, op)| {
-                    *thread_id != owner_thread_id
-                        && *thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("check in"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        }))
-                },
-            ) {
+            if let Some((thread_id, _)) =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && op_contains_inter_agent_content(op, "check in")
+                    })
+            {
                 break thread_id;
             }
             sleep(Duration::from_millis(50)).await;
@@ -1574,20 +1550,17 @@ async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
 
     let first_helper_id = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
-                |(thread_id, op)| {
-                    *thread_id != owner_thread_id
-                        && *thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        }))
-                },
-            ) {
+            if let Some((thread_id, _)) =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && op_contains_inter_agent_content(op, "snooze scheduling check")
+                    })
+            {
                 break thread_id;
             }
             sleep(Duration::from_millis(50)).await;
@@ -1619,33 +1592,24 @@ async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
                 thread_id != owner_thread_id
                     && thread_id != target_thread_id
                     && thread_id != first_helper_id
-                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
-                        UserInput::Image { .. }
-                        | UserInput::LocalImage { .. }
-                        | UserInput::Skill { .. }
-                        | UserInput::Mention { .. } => false,
-                        _ => false,
-                    }))
+                    && op_contains_inter_agent_content(&op, "snooze scheduling check")
             }),
         "watchdog should not spawn another helper before the snooze delay elapses"
     );
 
     timeout(Duration::from_secs(5), async {
         loop {
-            if harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
-                thread_id != owner_thread_id
-                    && thread_id != target_thread_id
-                    && thread_id != first_helper_id
-                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                        UserInput::Text { text, .. } => text.contains("snooze scheduling check"),
-                        UserInput::Image { .. }
-                        | UserInput::LocalImage { .. }
-                        | UserInput::Skill { .. }
-                        | UserInput::Mention { .. } => false,
-                        _ => false,
-                    }))
-            }) {
+            if harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|(thread_id, op)| {
+                    thread_id != owner_thread_id
+                        && thread_id != target_thread_id
+                        && thread_id != first_helper_id
+                        && op_contains_inter_agent_content(&op, "snooze scheduling check")
+                })
+            {
                 break;
             }
             sleep(Duration::from_millis(50)).await;
@@ -1697,20 +1661,17 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
 
     let helper_thread_id = timeout(Duration::from_secs(5), async {
         loop {
-            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
-                |(thread_id, op)| {
-                    *thread_id != owner_thread_id
-                        && *thread_id != target_thread_id
-                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
-                            UserInput::Text { text, .. } => text.contains("check in"),
-                            UserInput::Image { .. }
-                            | UserInput::LocalImage { .. }
-                            | UserInput::Skill { .. }
-                            | UserInput::Mention { .. } => false,
-                            _ => false,
-                        }))
-                },
-            ) {
+            if let Some((thread_id, _)) =
+                harness
+                    .manager
+                    .captured_ops()
+                    .into_iter()
+                    .find(|(thread_id, op)| {
+                        *thread_id != owner_thread_id
+                            && *thread_id != target_thread_id
+                            && op_contains_inter_agent_content(op, "check in")
+                    })
+            {
                 break thread_id;
             }
             sleep(Duration::from_millis(50)).await;
@@ -1804,6 +1765,28 @@ async fn get_status_returns_pending_init_for_new_thread() {
     let (thread_id, _) = harness.start_thread().await;
     let status = harness.control.get_status(thread_id).await;
     assert_eq!(status, AgentStatus::PendingInit);
+}
+
+#[tokio::test]
+async fn get_status_reports_watchdog_handle_as_running() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, _) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config: harness.config.clone(),
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let status = harness.control.get_status(target_thread_id).await;
+    assert_eq!(status, AgentStatus::Running);
 }
 
 #[tokio::test]
@@ -2215,15 +2198,17 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .await
         .clone()
         .expect("forked child should inherit an MCP tool snapshot");
-    let parent_mcp_tools = parent_thread
-        .codex
-        .session
-        .services
-        .mcp_connection_manager
-        .read()
-        .await
-        .list_all_tools()
-        .await;
+    let parent_mcp_tools_future = {
+        parent_thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .list_all_tools_future()
+    };
+    let parent_mcp_tools = parent_mcp_tools_future.await;
     let mut snapshot_tool_names = mcp_tool_snapshot.tools.keys().cloned().collect::<Vec<_>>();
     snapshot_tool_names.sort();
     let mut parent_tool_names = parent_mcp_tools.keys().cloned().collect::<Vec<_>>();
@@ -2388,26 +2373,22 @@ while True:
     let parent = manager.start_thread(config.clone()).await?;
     let parent_thread_id = parent.thread_id;
     let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
-    let parent_mcp_tools = parent
-        .thread
-        .codex
-        .session
-        .services
-        .mcp_connection_manager
-        .read()
-        .await
-        .list_all_tools()
-        .await;
-    let startup_failures = parent
-        .thread
-        .codex
-        .session
-        .services
-        .mcp_connection_manager
-        .read()
-        .await
-        .required_startup_failures(&["rmcp".to_string()])
-        .await;
+    let (parent_mcp_tools_future, startup_failures_future) = {
+        let parent_mcp_connection_manager = parent
+            .thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await;
+        (
+            parent_mcp_connection_manager.list_all_tools_future(),
+            parent_mcp_connection_manager.required_startup_failures_future(&["rmcp".to_string()]),
+        )
+    };
+    let parent_mcp_tools = parent_mcp_tools_future.await;
+    let startup_failures = startup_failures_future.await;
     assert!(
         parent_mcp_tools.contains_key("mcp__rmcp__echo"),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}; failures={startup_failures:#?}"

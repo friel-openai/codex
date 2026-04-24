@@ -32,7 +32,6 @@ use crate::create_followup_task_tool;
 use crate::create_image_generation_tool;
 use crate::create_js_repl_reset_tool;
 use crate::create_js_repl_tool;
-use crate::create_list_agents_tool;
 use crate::create_list_dir_tool;
 use crate::create_list_mcp_resource_templates_tool;
 use crate::create_list_mcp_resources_tool;
@@ -428,17 +427,11 @@ pub fn build_tool_registry_plan(
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
             );
-            plan.push_spec(
-                create_list_agents_tool(),
-                /*supports_parallel_tool_calls*/ false,
-                config.code_mode_enabled,
-            );
             plan.register_handler("spawn_agent", ToolHandlerKind::SpawnAgentV2);
             plan.register_handler("send_message", ToolHandlerKind::SendMessageV2);
             plan.register_handler("followup_task", ToolHandlerKind::FollowupTaskV2);
             plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV2);
             plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV2);
-            plan.register_handler("list_agents", ToolHandlerKind::ListAgentsV2);
         } else {
             let agent_type_description =
                 agent_type_description(config, params.default_agent_type_description);

@@ -55,7 +55,7 @@ impl ToolHandler for Handler {
             .subscribe_status(agent_id)
             .await
         {
-            Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
+            Ok(_) => session.services.agent_control.get_status(agent_id).await,
             Err(err) => {
                 let status = session.services.agent_control.get_status(agent_id).await;
                 session

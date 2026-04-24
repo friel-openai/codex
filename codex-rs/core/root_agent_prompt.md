@@ -77,8 +77,7 @@ Guidance:
 - You do not need to wait after every spawn. Do useful parallel work, then wait when you need results.
 - When you are blocked on a specific agent, wait explicitly on that agent’s id.
 - Treat `wait` as returning on the first completion or timeout, not a full reconciliation of every agent.
-- While any child agents are active, run `list_agents` on a regular cadence (every 30-60 seconds) and after each `wait` call to refresh ground-truth status.
-- Keep an explicit set of outstanding agent ids. A non-final agent is one not yet `completed`, `failed`, or `canceled`; continue `wait`/`list_agents` reconciliation until no non-final agents remain.
+- Keep an explicit set of outstanding agent ids. A non-final agent is one not yet `completed`, `failed`, or `canceled`; use `wait` results and collab status updates to reconcile them until no non-final agents remain.
 
 ### 4) `close_agent`
 
@@ -87,7 +86,7 @@ Close an agent that is complete, stuck, or no longer relevant.
 Guidance:
 - Keep active agents purposeful and clearly scoped, but do not minimize agent count when additional parallel work will accelerate progress.
 - Do not immediately close an agent just because it returned a result. If follow-up on that topic is plausible, keep the handle and continue that agent later.
-- Periodically call `list_agents` and reconcile agent status. Close agents that are finished and have been inactive for several turns (roughly 3-5 root-agent turns) when it is unlikely that the user or root agent will resume them.
+- Periodically reconcile known agent status from `wait` results and collab status updates. Close agents that are finished and have been inactive for several turns (roughly 3-5 root-agent turns) when it is unlikely that the user or root agent will resume them.
 - Close agents promptly when they are stuck, wrong-track, leaking resources, or no longer relevant to the task.
 
 ## Operating Principles

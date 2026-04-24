@@ -45,6 +45,7 @@ use codex_app_server_protocol::ThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadUnsubscribeParams;
 use codex_app_server_protocol::ThreadUnsubscribeResponse;
 use codex_app_server_protocol::TurnInterruptParams;
@@ -759,7 +760,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         }
     });
 
-    let task_id = match initial_operation {
+    let mut task_id = match initial_operation {
         InitialOperation::UserTurn {
             items,
             output_schema,
@@ -833,6 +834,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let mut error_seen = false;
     let mut interrupt_channel_open = true;
     let primary_thread_id_for_requests = primary_thread_id.to_string();
+    let mut following_watchdog = false;
     loop {
         let server_event = tokio::select! {
             maybe_interrupt = interrupt_rx.recv(), if interrupt_channel_open => {
@@ -869,6 +871,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 handle_server_request(&client, request, &mut error_seen).await;
             }
             InProcessServerEvent::ServerNotification(mut notification) => {
+                if let ServerNotification::TurnStarted(payload) = &notification
+                    && following_watchdog
+                    && payload.thread_id == primary_thread_id_for_requests
+                {
+                    task_id = payload.turn.id.clone();
+                    exec_span.record("turn.id", task_id.as_str());
+                }
+
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
                         && payload.turn_id == task_id
@@ -904,6 +914,16 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     match event_processor.process_server_notification(notification) {
                         CodexStatus::Running => {}
                         CodexStatus::InitiateShutdown => {
+                            if primary_thread_has_live_watchdog(
+                                &client,
+                                &mut request_ids,
+                                &primary_thread_id_for_requests,
+                            )
+                            .await
+                            {
+                                following_watchdog = true;
+                                continue;
+                            }
                             if let Err(err) = request_shutdown(
                                 &client,
                                 &mut request_ids,
@@ -1105,6 +1125,7 @@ fn session_configured_from_thread_fork_response(
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
         response.sandbox.to_core(),
+        response.permission_profile.clone().map(Into::into),
         response.cwd.clone(),
         response.reasoning_effort,
     )
@@ -1218,6 +1239,65 @@ fn should_process_notification(
         }
         _ => false,
     }
+}
+
+async fn primary_thread_has_live_watchdog(
+    client: &InProcessAppServerClient,
+    request_ids: &mut RequestIdSequencer,
+    primary_thread_id: &str,
+) -> bool {
+    let response = send_request_with_response::<ThreadListResponse>(
+        client,
+        ClientRequest::ThreadList {
+            request_id: request_ids.next(),
+            params: ThreadListParams {
+                cursor: None,
+                limit: Some(100),
+                sort_key: Some(ThreadSortKey::UpdatedAt),
+                sort_direction: None,
+                model_providers: None,
+                source_kinds: Some(vec![ThreadSourceKind::SubAgentThreadSpawn]),
+                archived: Some(false),
+                cwd: None,
+                use_state_db_only: true,
+                search_term: None,
+            },
+        },
+        "thread/list",
+    )
+    .await;
+
+    match response {
+        Ok(response) => response
+            .data
+            .iter()
+            .any(|thread| thread_is_live_watchdog_child(thread, primary_thread_id)),
+        Err(err) => {
+            warn!("thread/list failed while checking live watchdogs: {err}");
+            false
+        }
+    }
+}
+
+fn thread_is_live_watchdog_child(thread: &AppServerThread, primary_thread_id: &str) -> bool {
+    if !matches!(
+        thread.status,
+        ThreadStatus::Idle | ThreadStatus::Active { .. }
+    ) {
+        return false;
+    }
+    if thread.agent_role.as_deref() != Some("watchdog") {
+        return false;
+    }
+    matches!(
+        &thread.source,
+        codex_app_server_protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                ..
+            },
+        ) if parent_thread_id.to_string() == primary_thread_id
+    )
 }
 
 async fn maybe_backfill_turn_completed_items(

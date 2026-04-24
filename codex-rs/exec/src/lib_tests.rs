@@ -302,6 +302,90 @@ fn turn_items_for_thread_returns_matching_turn_items() {
 }
 
 #[test]
+fn live_watchdog_child_matches_primary_thread() {
+    let primary_thread_id =
+        codex_protocol::ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e0")
+            .expect("valid primary thread id");
+    let watchdog_thread_id =
+        codex_protocol::ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e1")
+            .expect("valid watchdog thread id");
+    let thread = AppServerThread {
+        id: watchdog_thread_id.to_string(),
+        forked_from_id: None,
+        preview: String::new(),
+        ephemeral: false,
+        model_provider: "openai".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        status: codex_app_server_protocol::ThreadStatus::Idle,
+        path: None,
+        cwd: test_path_buf("/tmp/project").abs(),
+        cli_version: "0.0.0-test".to_string(),
+        source: codex_app_server_protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                parent_thread_id: primary_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            },
+        ),
+        agent_nickname: None,
+        agent_role: Some("watchdog".to_string()),
+        git_info: None,
+        name: None,
+        turns: Vec::new(),
+    };
+
+    assert!(thread_is_live_watchdog_child(
+        &thread,
+        &primary_thread_id.to_string()
+    ));
+}
+
+#[test]
+fn closed_watchdog_child_does_not_keep_exec_alive() {
+    let primary_thread_id =
+        codex_protocol::ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e0")
+            .expect("valid primary thread id");
+    let watchdog_thread_id =
+        codex_protocol::ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e1")
+            .expect("valid watchdog thread id");
+    let thread = AppServerThread {
+        id: watchdog_thread_id.to_string(),
+        forked_from_id: None,
+        preview: String::new(),
+        ephemeral: false,
+        model_provider: "openai".to_string(),
+        created_at: 0,
+        updated_at: 0,
+        status: codex_app_server_protocol::ThreadStatus::NotLoaded,
+        path: None,
+        cwd: test_path_buf("/tmp/project").abs(),
+        cli_version: "0.0.0-test".to_string(),
+        source: codex_app_server_protocol::SessionSource::SubAgent(
+            codex_protocol::protocol::SubAgentSource::ThreadSpawn {
+                parent_thread_id: primary_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            },
+        ),
+        agent_nickname: None,
+        agent_role: Some("watchdog".to_string()),
+        git_info: None,
+        name: None,
+        turns: Vec::new(),
+    };
+
+    assert!(!thread_is_live_watchdog_child(
+        &thread,
+        &primary_thread_id.to_string()
+    ));
+}
+
+#[test]
 fn should_backfill_turn_completed_items_skips_ephemeral_threads() {
     let notification =
         ServerNotification::TurnCompleted(codex_app_server_protocol::TurnCompletedNotification {

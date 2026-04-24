@@ -679,7 +679,7 @@ async fn spawn_agent_watchdog_role_returns_inert_handle() {
     assert_eq!(success, Some(true));
     assert_eq!(
         agent_control.get_status(agent_id).await,
-        AgentStatus::PendingInit
+        AgentStatus::Running
     );
     let ops_for_agent = manager
         .captured_ops()
@@ -944,7 +944,7 @@ async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
         serde_json::from_str(&content).expect("self-close result should be json");
 
     assert_eq!(success, Some(true));
-    assert_eq!(result["previous_status"], json!("pending_init"));
+    assert_eq!(result["previous_status"], json!("running"));
     assert!(!agent_control.is_watchdog_handle(target.thread_id).await);
     assert_eq!(
         agent_control.get_status(target.thread_id).await,
@@ -993,7 +993,7 @@ async fn watchdog_self_close_notifies_owner_and_unregisters_handle() {
     .expect("watchdog self-close should publish a close event for the handle");
     assert_eq!(close_event.sender_thread_id, owner.thread_id);
     assert_eq!(close_event.receiver_thread_id, target.thread_id);
-    assert_eq!(close_event.status, AgentStatus::PendingInit);
+    assert_eq!(close_event.status, AgentStatus::Running);
 }
 
 #[tokio::test]
@@ -1795,7 +1795,7 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
         .iter()
         .find(|agent| agent.agent_name == watchdog_id.to_string())
         .expect("list_agents should include the watchdog handle");
-    assert_eq!(watchdog_listing.agent_status, json!("pending_init"));
+    assert_eq!(watchdog_listing.agent_status, json!("running"));
     assert!(
         !list_result
             .agents
@@ -1817,7 +1817,7 @@ async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
     let close_result: close_agent::CloseAgentResult =
         serde_json::from_str(&close_content).expect("close_agent result should be json");
     assert_eq!(close_success, Some(true));
-    assert_eq!(close_result.previous_status, AgentStatus::PendingInit);
+    assert_eq!(close_result.previous_status, AgentStatus::Running);
     assert!(!agent_control.is_watchdog_handle(watchdog_id).await);
     assert_eq!(
         agent_control.get_status(watchdog_id).await,
@@ -3248,7 +3248,7 @@ async fn wait_agent_rejects_only_watchdog_handles() {
         panic!("expected model-facing error");
     };
     assert!(message.contains("watchdog handle ids"));
-    assert!(message.contains("pending_init"));
+    assert!(message.contains("running"));
 }
 
 #[tokio::test]

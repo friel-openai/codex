@@ -28,6 +28,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::ForkReferenceItem;
@@ -60,7 +61,7 @@ use tracing::warn;
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID: &str = "synthetic_watchdog_tool_search";
-const WATCHDOG_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_watchdog_list_agents";
+const WATCHDOG_BOOT_AGENT_STATUS_CALL_ID: &str = "synthetic_watchdog_agent_status";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -226,15 +227,25 @@ fn synthetic_watchdog_tool_search_items() -> Vec<RolloutItem> {
     ]
 }
 
-fn synthetic_watchdog_list_agents_items(
+fn synthetic_watchdog_agent_status_items(
     owner_thread_id: ThreadId,
-    agents: Vec<ListedAgent>,
+    agent_statuses: Vec<CollabAgentStatusEntry>,
 ) -> Vec<RolloutItem> {
+    let targets = agent_statuses
+        .iter()
+        .map(|entry| entry.thread_id.to_string())
+        .collect::<Vec<_>>();
+    let statuses = agent_statuses
+        .iter()
+        .map(|entry| (entry.thread_id.to_string(), entry.status.clone()))
+        .collect::<HashMap<_, _>>();
     let envelope = serde_json::json!({
-        "source": "pre_injected_agents_list",
+        "source": "pre_injected_agent_status",
         "generated_at": unix_timestamp_seconds(),
         "owner_thread_id": owner_thread_id.to_string(),
-        "agents": agents,
+        "agent_statuses": agent_statuses,
+        "status": statuses,
+        "timed_out": false,
     });
     let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
     output.success = Some(true);
@@ -242,28 +253,20 @@ fn synthetic_watchdog_list_agents_items(
     vec![
         RolloutItem::ResponseItem(ResponseItem::FunctionCall {
             id: None,
-            name: "list_agents".to_string(),
+            name: "wait_agent".to_string(),
             namespace: None,
-            arguments: "{}".to_string(),
-            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+            arguments: serde_json::json!({
+                "targets": targets,
+                "timeout_ms": 10_000,
+            })
+            .to_string(),
+            call_id: WATCHDOG_BOOT_AGENT_STATUS_CALL_ID.to_string(),
         }),
         RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
-            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+            call_id: WATCHDOG_BOOT_AGENT_STATUS_CALL_ID.to_string(),
             output,
         }),
     ]
-}
-
-fn sanitize_watchdog_boot_list_agents(agents: Vec<ListedAgent>) -> Vec<ListedAgent> {
-    agents
-        .into_iter()
-        .map(|mut agent| {
-            if agent.agent_name != AgentPath::root().to_string() {
-                agent.last_task_message = None;
-            }
-            agent
-        })
-        .collect()
 }
 
 /// Control-plane handle for multi-agent operations.
@@ -1116,7 +1119,8 @@ impl AgentControl {
         let Ok(thread) = state.get_thread(agent_id).await else {
             return AgentStatus::NotFound;
         };
-        thread.agent_status().await
+        self.reported_agent_status(agent_id, thread.agent_status().await)
+            .await
     }
 
     pub(crate) fn register_session_root(
@@ -1258,7 +1262,9 @@ impl AgentControl {
         {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
+                agent_status: self
+                    .reported_agent_status(root_thread_id, root_thread.agent_status().await)
+                    .await,
                 last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
             });
         }
@@ -1293,12 +1299,24 @@ impl AgentControl {
             let last_task_message = metadata.last_task_message.clone();
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status: self
+                    .reported_agent_status(thread_id, thread.agent_status().await)
+                    .await,
                 last_task_message,
             });
         }
 
         Ok(agents)
+    }
+
+    async fn reported_agent_status(&self, agent_id: ThreadId, status: AgentStatus) -> AgentStatus {
+        if matches!(status, AgentStatus::PendingInit)
+            && let Some(watchdogs) = self.watchdogs.as_ref()
+            && watchdogs.is_watchdog_handle(agent_id).await
+        {
+            return AgentStatus::Running;
+        }
+        status
     }
 
     pub(crate) async fn compact_parent_for_watchdog_helper(
@@ -1350,19 +1368,79 @@ impl AgentControl {
             Err(_) => SessionSource::Cli,
         };
         self.register_session_root(owner_thread_id, &owner_source);
-        let agents = self
-            .list_agents(&owner_source, /*path_prefix*/ None)
-            .await
-            .unwrap_or_default();
-        let agents = sanitize_watchdog_boot_list_agents(agents);
+        let agent_statuses = self
+            .watchdog_boot_agent_statuses(state, owner_thread_id)
+            .await;
 
         synthetic_watchdog_tool_search_items()
             .into_iter()
-            .chain(synthetic_watchdog_list_agents_items(
+            .chain(synthetic_watchdog_agent_status_items(
                 owner_thread_id,
-                agents,
+                agent_statuses,
             ))
             .collect()
+    }
+
+    async fn watchdog_boot_agent_statuses(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<CollabAgentStatusEntry> {
+        let mut entries = Vec::new();
+        if let Ok(owner_thread) = state.get_thread(owner_thread_id).await {
+            entries.push(CollabAgentStatusEntry {
+                thread_id: owner_thread_id,
+                agent_nickname: None,
+                agent_role: None,
+                status: self
+                    .reported_agent_status(owner_thread_id, owner_thread.agent_status().await)
+                    .await,
+            });
+        }
+
+        let mut live_agents = self.state.live_agents();
+        live_agents.sort_by(|left, right| {
+            left.agent_path
+                .as_deref()
+                .unwrap_or_default()
+                .cmp(right.agent_path.as_deref().unwrap_or_default())
+                .then_with(|| {
+                    left.agent_id
+                        .map(|id| id.to_string())
+                        .unwrap_or_default()
+                        .cmp(&right.agent_id.map(|id| id.to_string()).unwrap_or_default())
+                })
+        });
+
+        for metadata in live_agents {
+            let Some(thread_id) = metadata.agent_id else {
+                continue;
+            };
+            if thread_id == owner_thread_id {
+                continue;
+            }
+            if let Some(watchdogs) = self.watchdogs.as_ref()
+                && watchdogs
+                    .target_for_active_helper(thread_id)
+                    .await
+                    .is_some()
+            {
+                continue;
+            }
+            let Ok(thread) = state.get_thread(thread_id).await else {
+                continue;
+            };
+            entries.push(CollabAgentStatusEntry {
+                thread_id,
+                agent_nickname: metadata.agent_nickname,
+                agent_role: metadata.agent_role,
+                status: self
+                    .reported_agent_status(thread_id, thread.agent_status().await)
+                    .await,
+            });
+        }
+
+        entries
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.
@@ -1664,15 +1742,17 @@ async fn parent_mcp_tool_snapshot_for_source(
     };
 
     let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
-    let tools = parent_thread
-        .codex
-        .session
-        .services
-        .mcp_connection_manager
-        .read()
-        .await
-        .list_all_tools()
-        .await;
+    let tools_future = {
+        parent_thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .list_all_tools_future()
+    };
+    let tools = tools_future.await;
     Some(McpToolSnapshot { tools })
 }
 
