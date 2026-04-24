@@ -7,7 +7,6 @@ use crate::config::Config;
 use crate::config::ConfigBuilder;
 use crate::context::ContextualUserFragment;
 use crate::context::SubagentNotification;
-use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
 use crate::rollout::RolloutRecorder;
 use assert_matches::assert_matches;
 use codex_config::types::McpServerConfig;
@@ -61,6 +60,20 @@ async fn test_config_with_cli_overrides(
 
 async fn test_config() -> (TempDir, Config) {
     test_config_with_cli_overrides(Vec::new()).await
+}
+
+fn disabled_environment_manager_for_tests() -> Arc<codex_exec_server::EnvironmentManager> {
+    let runtime_paths = codex_exec_server::ExecServerRuntimePaths::new(
+        std::env::current_exe().expect("current exe path"),
+        /*codex_linux_sandbox_exe*/ None,
+    )
+    .expect("runtime paths");
+    Arc::new(codex_exec_server::EnvironmentManager::new(
+        codex_exec_server::EnvironmentManagerArgs {
+            exec_server_url: Some("none".to_string()),
+            local_runtime_paths: runtime_paths,
+        },
+    ))
 }
 
 fn mcp_server_config(command: &str) -> McpServerConfig {
@@ -497,6 +510,7 @@ async fn watchdog_spawns_helper_after_owner_completes() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -675,6 +689,7 @@ async fn watchdog_helper_forks_owner_history() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -718,6 +733,7 @@ async fn watchdog_helper_forks_owner_history() {
         .session
         .current_rollout_path()
         .await
+        .expect("watchdog helper rollout path should load")
         .expect("watchdog helper should have a rollout path");
     let history_items = timeout(Duration::from_secs(5), async {
         loop {
@@ -837,7 +853,8 @@ async fn watchdog_helper_forks_owner_history() {
         .session
         .current_rollout_path()
         .await
-        .expect("owner rollout path");
+        .expect("owner rollout path should load")
+        .expect("owner rollout path should be materialized");
     assert!(rollout_items.iter().any(|item| matches!(
         item,
         RolloutItem::ForkReference(reference)
@@ -1015,9 +1032,7 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
-        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
-            /*exec_server_url*/ None,
-        )),
+        disabled_environment_manager_for_tests(),
     );
     let control = manager.agent_control();
     let owner = manager.start_thread(config.clone()).await?;
@@ -1073,6 +1088,7 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
                 last_agent_message: Some("owner idle".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1221,6 +1237,7 @@ async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1265,6 +1282,7 @@ async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
                 last_agent_message: Some("first helper report".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1328,6 +1346,7 @@ async fn watchdog_repeated_checkins_use_fresh_helpers_and_current_owner_fork() {
                 last_agent_message: Some("root done again".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1435,6 +1454,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1479,6 +1499,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("ping 5 (5)".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1546,6 +1567,7 @@ async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1668,6 +1690,7 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1712,6 +1735,7 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
                 last_agent_message: Some("goodbye".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -2358,9 +2382,7 @@ while True:
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
-        std::sync::Arc::new(codex_exec_server::EnvironmentManager::new(
-            /*exec_server_url*/ None,
-        )),
+        disabled_environment_manager_for_tests(),
     );
     let control = manager.agent_control();
     let parent = manager.start_thread(config.clone()).await?;
@@ -2415,6 +2437,7 @@ while True:
             })),
             SpawnAgentOptions {
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
             },
         )
         .await?

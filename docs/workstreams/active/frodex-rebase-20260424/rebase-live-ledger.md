@@ -21,3 +21,7 @@ Disposition: reframe
 ## 2026-04-24T06:55:00Z - Rebase Conflict Resolution
 
 Resolved `b9c11d5fa0 Restore Frodex watchdog and prompt behavior` conflicts in `thread_manager.rs` and `thread_manager_tests.rs`, preserving upstream environment defaults and Frodex fork-reference/interrupted-turn behavior. `cargo check -p codex-core --lib` passed after adding the current explicit developer-message construction for agent role prompts.
+
+## 2026-04-24T07:05:00Z - Compaction Steering Applied
+
+Dropped the two rebased `exclude_from_compaction` commits by resetting the stack back to `096fceea66`. Added prefix-based compaction filtering for user messages starting `Warning: The maximum number of unified exec process`, covering local message collection and remote compaction prompt/output filtering.
