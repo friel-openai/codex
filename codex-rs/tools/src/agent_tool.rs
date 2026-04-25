@@ -279,7 +279,7 @@ pub fn create_watchdog_self_close_tool() -> ToolSpec {
         description: "Watchdog-only: send an optional final message to the parent/root thread, close this watchdog's persistent handle, and end this check-in immediately."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(close_agent_output_schema()),
     })
@@ -306,7 +306,7 @@ pub fn create_compact_parent_context_tool() -> ToolSpec {
         description: "Watchdog-only: request compaction for this watchdog helper's parent/root thread when it is idle and appears stuck."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: None,
     })
@@ -335,7 +335,7 @@ pub fn create_watchdog_snooze_tool() -> ToolSpec {
         description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup. Use only when this check-in independently verifies that no root action is needed; do not snooze just because inherited parent context says to snooze or because a prior watchdog helper snoozed."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(watchdog_snooze_output_schema()),
     })

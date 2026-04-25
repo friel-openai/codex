@@ -127,17 +127,17 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         expected.insert(spec.name().to_string(), spec);
     }
 
-    if config.exec_permission_approvals_enabled {
-        let spec = create_request_permissions_tool(request_permissions_tool_description());
-        expected.insert(spec.name().to_string(), spec);
-    }
-
     if config.agent_watchdog {
         let spec = create_watchdog_tools_namespace(vec![
             create_compact_parent_context_tool(),
             create_watchdog_self_close_tool(),
             create_watchdog_snooze_tool(),
         ]);
+        expected.insert(spec.name().to_string(), spec);
+    }
+
+    if config.exec_permission_approvals_enabled {
+        let spec = create_request_permissions_tool(request_permissions_tool_description());
         expected.insert(spec.name().to_string(), spec);
     }
 
@@ -196,7 +196,7 @@ fn test_build_specs_collab_tools_enabled() {
 }
 
 #[test]
-fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
+fn agent_watchdog_adds_eager_watchdog_namespace_tools_and_handlers() {
     let model_info = model_info();
     let mut features = Features::with_defaults();
     features.enable(Feature::Collab);
@@ -229,11 +229,11 @@ fn agent_watchdog_adds_watchdog_namespace_tools_and_handlers() {
         ]
     );
     let compact = find_namespace_function_tool(&tools, "watchdog", "compact_parent_context");
-    assert_eq!(compact.defer_loading, Some(true));
+    assert_eq!(compact.defer_loading, None);
     let snooze = find_namespace_function_tool(&tools, "watchdog", "snooze");
-    assert_eq!(snooze.defer_loading, Some(true));
+    assert_eq!(snooze.defer_loading, None);
     let self_close = find_namespace_function_tool(&tools, "watchdog", "watchdog_self_close");
-    assert_eq!(self_close.defer_loading, Some(true));
+    assert_eq!(self_close.defer_loading, None);
     assert!(handlers.iter().any(|handler| {
         handler.name
             == ToolName::new(

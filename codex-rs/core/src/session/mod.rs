@@ -615,7 +615,6 @@ impl Codex {
             && depth >= config.agent_max_depth
         {
             let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
 
         if config.features.enabled(Feature::JsRepl)
@@ -762,8 +761,12 @@ impl Codex {
             environments,
             original_config_do_not_use: Arc::clone(&config),
             metrics_service_name,
-            app_server_client_name: None,
-            app_server_client_version: None,
+            app_server_client_name: inherited_thread_state
+                .app_server_client_name()
+                .map(str::to_string),
+            app_server_client_version: inherited_thread_state
+                .app_server_client_version()
+                .map(str::to_string),
             session_source,
             dynamic_tools,
             persist_extended_history,

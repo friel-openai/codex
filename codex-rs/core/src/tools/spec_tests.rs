@@ -10,12 +10,14 @@ use codex_features::Features;
 use codex_mcp::CODEX_APPS_MCP_SERVER_NAME;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::model_info::with_config_overrides;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::openai_models::ConfigShellToolType;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_tools::AdditionalProperties;
 use codex_tools::ConfiguredToolSpec;
 use codex_tools::DiscoverableTool;
@@ -214,6 +216,21 @@ fn find_namespace_function_tool<'a>(
             _ => None,
         })
         .unwrap_or_else(|| panic!("expected tool {expected_namespace}{expected_name} in namespace"))
+}
+
+fn has_namespace_tool(specs: &[ToolSpec], expected_namespace: &str) -> bool {
+    specs.iter().any(|spec| {
+        matches!(spec, ToolSpec::Namespace(namespace) if namespace.name == expected_namespace)
+    })
+}
+
+fn visible_tool_names(router: &ToolRouter) -> Vec<String> {
+    router
+        .model_visible_specs()
+        .iter()
+        .map(ToolSpec::name)
+        .map(str::to_string)
+        .collect()
 }
 
 async fn multi_agent_v2_tools_config() -> ToolsConfig {
@@ -1068,6 +1085,124 @@ async fn watchdog_tools_register_namespaced_and_flattened_handlers() {
     assert!(registry.has_handler(&ToolName::plain("watchdogsnooze")));
     assert!(registry.has_handler(&ToolName::namespaced("watchdog", "watchdog_self_close")));
     assert!(registry.has_handler(&ToolName::plain("watchdogwatchdog_self_close")));
+}
+
+#[tokio::test]
+async fn watchdog_namespace_is_eager_and_model_visible() {
+    let model_info = search_capable_model_info().await;
+    let mut features = Features::with_defaults();
+    features.enable(Feature::AgentWatchdog);
+    features.enable(Feature::ToolSearch);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let router = ToolRouter::from_config(
+        &tools_config,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            unavailable_called_tools: Vec::new(),
+            parallel_mcp_server_names: std::collections::HashSet::new(),
+            discoverable_tools: None,
+            dynamic_tools: &[],
+        },
+    );
+
+    assert!(has_namespace_tool(&router.specs(), "watchdog"));
+    let model_visible_specs = router.model_visible_specs();
+    assert!(has_namespace_tool(&model_visible_specs, "watchdog"));
+    let watchdog = model_visible_specs
+        .iter()
+        .find_map(|spec| match spec {
+            ToolSpec::Namespace(namespace) if namespace.name == "watchdog" => Some(namespace),
+            _ => None,
+        })
+        .expect("watchdog namespace should be visible");
+    assert_eq!(
+        watchdog
+            .tools
+            .iter()
+            .map(|tool| match tool {
+                ResponsesApiNamespaceTool::Function(tool) => {
+                    (tool.name.as_str(), tool.defer_loading)
+                }
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("compact_parent_context", None),
+            ("watchdog_self_close", None),
+            ("snooze", None),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn watchdog_handlers_see_collab_tools_and_eager_watchdog_namespace() {
+    let model_info = search_capable_model_info().await;
+    let mut features = Features::with_defaults();
+    features.enable(Feature::AgentWatchdog);
+    features.enable(Feature::Collab);
+    features.enable(Feature::ToolSearch);
+    features.disable(Feature::MultiAgentV2);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::default(),
+            depth: 64,
+            agent_path: None,
+            agent_nickname: Some("Watchdog".to_string()),
+            agent_role: Some("watchdog".to_string()),
+        }),
+        sandbox_policy: &SandboxPolicy::DangerFullAccess,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+
+    let router = ToolRouter::from_config(
+        &tools_config,
+        ToolRouterParams {
+            mcp_tools: None,
+            deferred_mcp_tools: None,
+            unavailable_called_tools: Vec::new(),
+            parallel_mcp_server_names: std::collections::HashSet::new(),
+            discoverable_tools: None,
+            dynamic_tools: &[],
+        },
+    );
+    let model_visible_specs = router.model_visible_specs();
+    let tool_names = visible_tool_names(&router);
+
+    assert!(has_namespace_tool(&model_visible_specs, "watchdog"));
+    assert!(
+        !model_visible_specs
+            .iter()
+            .any(|spec| spec.name() == TOOL_SEARCH_TOOL_NAME)
+    );
+    for expected in [
+        "spawn_agent",
+        "send_input",
+        "resume_agent",
+        "wait_agent",
+        "close_agent",
+    ] {
+        assert!(
+            tool_names.iter().any(|actual| actual == expected),
+            "{expected} should be visible to watchdog handlers"
+        );
+    }
 }
 
 #[tokio::test]

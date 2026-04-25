@@ -691,6 +691,29 @@ async fn spawn_agent_watchdog_role_returns_inert_handle() {
 }
 
 #[tokio::test]
+async fn compact_parent_context_rejects_non_watchdog_thread() {
+    let (session, turn) = make_session_and_context().await;
+
+    let err = CompactParentContextHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "compact_parent_context",
+            function_payload(json!({"reason": "root is idle"})),
+        ))
+        .await
+        .expect_err("non-watchdog thread should not compact parent context");
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "watchdog.compact_parent_context is only available in watchdog check-in threads."
+                .to_string(),
+        )
+    );
+}
+
+#[tokio::test]
 async fn compact_parent_context_submits_compaction_for_idle_parent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4142,6 +4165,30 @@ async fn build_agent_spawn_config_preserves_base_user_instructions() {
     let config = build_agent_spawn_config(&base_instructions, &turn).expect("spawn config");
 
     assert_eq!(config.user_instructions, base_config.user_instructions);
+}
+
+#[tokio::test]
+async fn depth_limit_preserves_collab_prompt_surface() {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_max_depth = 1;
+    config
+        .features
+        .enable(Feature::SpawnCsv)
+        .expect("spawn csv feature should enable");
+    config
+        .features
+        .enable(Feature::Collab)
+        .expect("collab feature should enable");
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("multi-agent v2 feature should disable");
+
+    apply_spawn_agent_overrides(&mut config, /*child_depth*/ 1);
+
+    assert!(!config.features.enabled(Feature::SpawnCsv));
+    assert!(config.features.enabled(Feature::Collab));
 }
 
 #[tokio::test]

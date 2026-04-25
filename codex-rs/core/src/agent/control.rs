@@ -43,10 +43,6 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::state_db;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
-use codex_tools::create_compact_parent_context_tool;
-use codex_tools::create_watchdog_self_close_tool;
-use codex_tools::create_watchdog_snooze_tool;
-use codex_tools::create_watchdog_tools_namespace;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -60,7 +56,6 @@ use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
-const WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID: &str = "synthetic_watchdog_tool_search";
 const WATCHDOG_BOOT_AGENT_STATUS_CALL_ID: &str = "synthetic_watchdog_agent_status";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,35 +191,6 @@ fn unix_timestamp_seconds() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs())
         .unwrap_or_default()
-}
-
-fn synthetic_watchdog_tool_search_items() -> Vec<RolloutItem> {
-    let namespace = create_watchdog_tools_namespace(vec![
-        create_compact_parent_context_tool(),
-        create_watchdog_self_close_tool(),
-        create_watchdog_snooze_tool(),
-    ]);
-    let Ok(namespace) = serde_json::to_value(namespace) else {
-        return Vec::new();
-    };
-
-    vec![
-        RolloutItem::ResponseItem(ResponseItem::ToolSearchCall {
-            id: None,
-            call_id: Some(WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID.to_string()),
-            status: Some("completed".to_string()),
-            execution: "client".to_string(),
-            arguments: serde_json::json!({
-                "query": "watchdog namespace tools",
-            }),
-        }),
-        RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput {
-            call_id: Some(WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID.to_string()),
-            status: "completed".to_string(),
-            execution: "client".to_string(),
-            tools: vec![namespace],
-        }),
-    ]
 }
 
 fn synthetic_watchdog_agent_status_items(
@@ -399,14 +365,8 @@ impl AgentControl {
         // The same `AgentControl` is sent to spawn the thread.
         let new_thread = match (session_source, options.fork_mode.as_ref()) {
             (Some(session_source), Some(_)) => {
-                let inherited_thread_state = InheritedThreadState::builder()
-                    .prompt_cache_key(
-                        parent_prompt_cache_key_for_source(&state, Some(&session_source)).await,
-                    )
-                    .mcp_tool_snapshot(
-                        parent_mcp_tool_snapshot_for_source(&state, Some(&session_source)).await,
-                    )
-                    .build();
+                let inherited_thread_state =
+                    inherited_thread_state_for_source(&state, Some(&session_source)).await;
                 self.spawn_forked_thread(
                     &state,
                     config,
@@ -419,6 +379,8 @@ impl AgentControl {
                 .await?
             }
             (Some(session_source), None) => {
+                let inherited_thread_state =
+                    inherited_thread_state_for_source(&state, Some(&session_source)).await;
                 state
                     .spawn_new_thread_with_source(
                         config,
@@ -429,7 +391,7 @@ impl AgentControl {
                         inherited_shell_snapshot,
                         inherited_exec_policy,
                         options.environments.clone(),
-                        Default::default(),
+                        inherited_thread_state,
                     )
                     .await?
             }
@@ -700,7 +662,6 @@ impl AgentControl {
             && *depth >= config.agent_max_depth
         {
             let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
@@ -740,6 +701,8 @@ impl AgentControl {
         let inherited_exec_policy = self
             .inherited_exec_policy_for_source(&state, Some(&session_source), &config)
             .await;
+        let inherited_thread_state =
+            inherited_thread_state_for_source(&state, Some(&session_source)).await;
         let rollout_path =
             match find_thread_path_by_id_str(config.codex_home.as_path(), &thread_id.to_string())
                 .await?
@@ -761,7 +724,7 @@ impl AgentControl {
                 session_source,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
-                Default::default(),
+                inherited_thread_state,
             )
             .await?;
         let mut agent_metadata = agent_metadata;
@@ -1372,13 +1335,7 @@ impl AgentControl {
             .watchdog_boot_agent_statuses(state, owner_thread_id)
             .await;
 
-        synthetic_watchdog_tool_search_items()
-            .into_iter()
-            .chain(synthetic_watchdog_agent_status_items(
-                owner_thread_id,
-                agent_statuses,
-            ))
-            .collect()
+        synthetic_watchdog_agent_status_items(owner_thread_id, agent_statuses)
     }
 
     async fn watchdog_boot_agent_statuses(
@@ -1728,6 +1685,40 @@ async fn parent_prompt_cache_key_for_source(
         .await
         .ok()
         .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
+}
+
+async fn inherited_thread_state_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> InheritedThreadState {
+    let parent_metadata =
+        if let Some(parent_thread_id) = session_source.and_then(thread_spawn_parent_thread_id) {
+            match state.get_thread(parent_thread_id).await {
+                Ok(parent_thread) => Some(
+                    parent_thread
+                        .codex
+                        .session
+                        .app_server_client_metadata()
+                        .await,
+                ),
+                Err(_) => None,
+            }
+        } else {
+            None
+        };
+
+    InheritedThreadState::builder()
+        .prompt_cache_key(parent_prompt_cache_key_for_source(state, session_source).await)
+        .mcp_tool_snapshot(parent_mcp_tool_snapshot_for_source(state, session_source).await)
+        .app_server_client_metadata(
+            parent_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.client_name.clone()),
+            parent_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.client_version.clone()),
+        )
+        .build()
 }
 
 async fn parent_mcp_tool_snapshot_for_source(

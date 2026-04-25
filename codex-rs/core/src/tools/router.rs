@@ -71,23 +71,17 @@ impl ToolRouter {
             dynamic_tools,
         );
         let (specs, registry) = builder.build();
-        let model_visible_specs = if config.code_mode_only_enabled {
-            specs
-                .iter()
-                .filter_map(|configured_tool| {
-                    if !codex_code_mode::is_code_mode_nested_tool(configured_tool.name()) {
-                        Some(configured_tool.spec.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect()
-        } else {
-            specs
-                .iter()
-                .map(|configured_tool| configured_tool.spec.clone())
-                .collect()
-        };
+        let model_visible_specs = specs
+            .iter()
+            .filter_map(|configured_tool| {
+                if config.code_mode_only_enabled
+                    && codex_code_mode::is_code_mode_nested_tool(configured_tool.name())
+                {
+                    return None;
+                }
+                Some(configured_tool.spec.clone())
+            })
+            .collect();
 
         Self {
             registry,
@@ -305,6 +299,7 @@ impl ToolRouter {
         self.registry.dispatch_any(invocation).await
     }
 }
+
 #[cfg(test)]
 #[path = "router_tests.rs"]
 mod tests;

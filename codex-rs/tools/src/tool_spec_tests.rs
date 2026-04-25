@@ -220,6 +220,47 @@ fn namespace_tool_spec_serializes_expected_wire_shape() {
 }
 
 #[test]
+fn namespace_tool_spec_serializes_deferred_member_tools() {
+    assert_eq!(
+        serde_json::to_value(ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "watchdog".to_string(),
+            description: "Watchdog-only tools".to_string(),
+            tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
+                name: "snooze".to_string(),
+                description: "Delay the next watchdog check-in.".to_string(),
+                strict: false,
+                defer_loading: Some(true),
+                parameters: JsonSchema::object(
+                    BTreeMap::new(),
+                    /*required*/ None,
+                    /*additional_properties*/ None,
+                ),
+                output_schema: None,
+            })],
+        }))
+        .expect("serialize namespace tool"),
+        json!({
+            "type": "namespace",
+            "name": "watchdog",
+            "description": "Watchdog-only tools",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "snooze",
+                    "description": "Delay the next watchdog check-in.",
+                    "strict": false,
+                    "defer_loading": true,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                }
+            ],
+        })
+    );
+}
+
+#[test]
 fn web_search_tool_spec_serializes_expected_wire_shape() {
     assert_eq!(
         serde_json::to_value(ToolSpec::WebSearch {

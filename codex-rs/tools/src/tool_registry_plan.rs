@@ -285,7 +285,6 @@ pub fn build_tool_registry_plan(
                 description: Some("Tools provided by the current Codex thread.".to_string()),
             });
         }
-
         plan.push_spec(
             create_tool_search_tool(&search_source_infos, TOOL_SEARCH_DEFAULT_LIMIT),
             /*supports_parallel_tool_calls*/ true,

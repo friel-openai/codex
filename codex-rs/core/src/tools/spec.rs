@@ -126,6 +126,11 @@ pub(crate) fn build_specs_with_discoverable_tools(
             })
             .collect::<Vec<_>>()
     });
+    let deferred_dynamic_tools = dynamic_tools
+        .iter()
+        .filter(|tool| tool.defer_loading)
+        .cloned()
+        .collect::<Vec<_>>();
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let plan = build_tool_registry_plan(
@@ -161,11 +166,6 @@ pub(crate) fn build_specs_with_discoverable_tools(
     let request_user_input_handler = Arc::new(RequestUserInputHandler {
         default_mode_request_user_input: config.default_mode_request_user_input,
     });
-    let deferred_dynamic_tools = dynamic_tools
-        .iter()
-        .filter(|tool| tool.defer_loading)
-        .cloned()
-        .collect::<Vec<_>>();
     let mut tool_search_handler = None;
     let tool_suggest_handler = Arc::new(ToolSuggestHandler);
     let code_mode_handler = Arc::new(CodeModeExecuteHandler);

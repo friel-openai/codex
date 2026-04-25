@@ -6,6 +6,8 @@ use crate::state::McpToolSnapshot;
 pub(crate) struct InheritedThreadState {
     prompt_cache_key: Option<ThreadId>,
     mcp_tool_snapshot: Option<McpToolSnapshot>,
+    app_server_client_name: Option<String>,
+    app_server_client_version: Option<String>,
 }
 
 impl InheritedThreadState {
@@ -20,12 +22,22 @@ impl InheritedThreadState {
     pub(crate) fn mcp_tool_snapshot(&self) -> Option<McpToolSnapshot> {
         self.mcp_tool_snapshot.clone()
     }
+
+    pub(crate) fn app_server_client_name(&self) -> Option<&str> {
+        self.app_server_client_name.as_deref()
+    }
+
+    pub(crate) fn app_server_client_version(&self) -> Option<&str> {
+        self.app_server_client_version.as_deref()
+    }
 }
 
 #[derive(Default)]
 pub(crate) struct InheritedThreadStateBuilder {
     prompt_cache_key: Option<ThreadId>,
     mcp_tool_snapshot: Option<McpToolSnapshot>,
+    app_server_client_name: Option<String>,
+    app_server_client_version: Option<String>,
 }
 
 impl InheritedThreadStateBuilder {
@@ -39,10 +51,22 @@ impl InheritedThreadStateBuilder {
         self
     }
 
+    pub(crate) fn app_server_client_metadata(
+        mut self,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+    ) -> Self {
+        self.app_server_client_name = app_server_client_name;
+        self.app_server_client_version = app_server_client_version;
+        self
+    }
+
     pub(crate) fn build(self) -> InheritedThreadState {
         InheritedThreadState {
             prompt_cache_key: self.prompt_cache_key,
             mcp_tool_snapshot: self.mcp_tool_snapshot,
+            app_server_client_name: self.app_server_client_name,
+            app_server_client_version: self.app_server_client_version,
         }
     }
 }

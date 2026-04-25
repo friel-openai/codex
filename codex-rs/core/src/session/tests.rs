@@ -1678,6 +1678,7 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
                 inherited_tool,
             )]),
         }))
+        .app_server_client_metadata(Some("codex-tui".to_string()), Some("1.2.3".to_string()))
         .build();
     let (session, rx_event) = make_session_with_config_inherited_and_rx(
         |config| {
@@ -1692,6 +1693,10 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
     )
     .await?;
     let turn_context = session.new_default_turn().await;
+    assert_eq!(
+        turn_context.app_server_client_name.as_deref(),
+        Some("codex-tui")
+    );
 
     session
         .spawn_task(

@@ -945,21 +945,11 @@ pub(crate) fn build_prompt(
     turn_context: &TurnContext,
     base_instructions: BaseInstructions,
 ) -> Prompt {
-    let deferred_dynamic_tools = turn_context
-        .dynamic_tools
-        .iter()
-        .filter(|tool| tool.defer_loading)
-        .map(|tool| ToolName::new(tool.namespace.clone(), tool.name.clone()))
-        .collect::<HashSet<_>>();
-    let tools = if deferred_dynamic_tools.is_empty() {
-        router.model_visible_specs()
-    } else {
-        router
-            .model_visible_specs()
-            .into_iter()
-            .filter_map(|spec| filter_deferred_dynamic_tool_spec(spec, &deferred_dynamic_tools))
-            .collect()
-    };
+    let tools = router
+        .model_visible_specs()
+        .into_iter()
+        .filter_map(filter_deferred_tool_spec)
+        .collect();
 
     Prompt {
         input,
@@ -974,24 +964,18 @@ pub(crate) fn build_prompt(
     }
 }
 
-fn filter_deferred_dynamic_tool_spec(
-    spec: ToolSpec,
-    deferred_dynamic_tools: &HashSet<ToolName>,
-) -> Option<ToolSpec> {
+fn filter_deferred_tool_spec(spec: ToolSpec) -> Option<ToolSpec> {
     match spec {
         ToolSpec::Function(tool) => {
-            if deferred_dynamic_tools.contains(&ToolName::plain(tool.name.as_str())) {
+            if tool.defer_loading == Some(true) {
                 None
             } else {
                 Some(ToolSpec::Function(tool))
             }
         }
         ToolSpec::Namespace(mut namespace) => {
-            let namespace_name = namespace.name.clone();
             namespace.tools.retain(|tool| match tool {
-                ResponsesApiNamespaceTool::Function(tool) => !deferred_dynamic_tools.contains(
-                    &ToolName::namespaced(namespace_name.as_str(), tool.name.as_str()),
-                ),
+                ResponsesApiNamespaceTool::Function(tool) => tool.defer_loading != Some(true),
             });
             if namespace.tools.is_empty() {
                 None
@@ -1000,6 +984,83 @@ fn filter_deferred_dynamic_tool_spec(
             }
         }
         spec => Some(spec),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use codex_tools::JsonSchema;
+    use codex_tools::ResponsesApiNamespace;
+    use codex_tools::ResponsesApiTool;
+
+    fn function_tool(name: &str, defer_loading: Option<bool>) -> ResponsesApiTool {
+        ResponsesApiTool {
+            name: name.to_string(),
+            description: format!("{name} description"),
+            strict: false,
+            defer_loading,
+            parameters: JsonSchema::object(
+                Default::default(),
+                /*required*/ None,
+                Some(false.into()),
+            ),
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn filter_deferred_tool_spec_removes_deferred_function_tools() {
+        assert!(
+            filter_deferred_tool_spec(ToolSpec::Function(function_tool("deferred", Some(true))))
+                .is_none()
+        );
+
+        assert!(
+            filter_deferred_tool_spec(ToolSpec::Function(function_tool(
+                "eager", /*defer_loading*/ None,
+            )))
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn filter_deferred_tool_spec_removes_deferred_namespace_members() {
+        let spec = ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "watchdog".to_string(),
+            description: "Watchdog tools".to_string(),
+            tools: vec![
+                ResponsesApiNamespaceTool::Function(function_tool("snooze", Some(true))),
+                ResponsesApiNamespaceTool::Function(function_tool(
+                    "visible", /*defer_loading*/ None,
+                )),
+            ],
+        });
+
+        let Some(ToolSpec::Namespace(namespace)) = filter_deferred_tool_spec(spec) else {
+            panic!("namespace with non-deferred members should remain");
+        };
+
+        assert_eq!(
+            namespace.tools,
+            vec![ResponsesApiNamespaceTool::Function(function_tool(
+                "visible", /*defer_loading*/ None,
+            ))]
+        );
+    }
+
+    #[test]
+    fn filter_deferred_tool_spec_removes_empty_deferred_namespaces() {
+        let spec = ToolSpec::Namespace(ResponsesApiNamespace {
+            name: "watchdog".to_string(),
+            description: "Watchdog tools".to_string(),
+            tools: vec![ResponsesApiNamespaceTool::Function(function_tool(
+                "snooze",
+                Some(true),
+            ))],
+        });
+
+        assert!(filter_deferred_tool_spec(spec).is_none());
     }
 }
 

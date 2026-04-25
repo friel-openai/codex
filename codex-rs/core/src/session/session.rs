@@ -276,6 +276,16 @@ impl Session {
             session_configuration.provider
         );
         let forked_from_id = initial_history.forked_from_id();
+        if session_configuration.app_server_client_name.is_none() {
+            session_configuration.app_server_client_name = inherited_thread_state
+                .app_server_client_name()
+                .map(str::to_string);
+        }
+        if session_configuration.app_server_client_version.is_none() {
+            session_configuration.app_server_client_version = inherited_thread_state
+                .app_server_client_version()
+                .map(str::to_string);
+        }
 
         let event_persistence_mode = if session_configuration.persist_extended_history {
             ThreadEventPersistenceMode::Extended

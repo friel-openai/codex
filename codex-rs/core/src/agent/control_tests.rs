@@ -920,47 +920,31 @@ async fn watchdog_helper_forks_owner_history() {
         | RolloutItem::EventMsg(_)
         | RolloutItem::ResponseItem(_) => false,
     }));
-    assert!(history_items.iter().any(|item| matches!(
+    assert!(!history_items.iter().any(|item| matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
             if call_id == "synthetic_watchdog_tool_search"
     )));
-    assert!(history_items.iter().any(|item| match item {
-        ResponseItem::ToolSearchOutput {
-            call_id: Some(call_id),
-            tools,
-            ..
-        } if call_id == "synthetic_watchdog_tool_search" => {
-            let rendered = serde_json::to_string(tools).expect("tools should serialize");
-            rendered.contains("compact_parent_context")
-                && rendered.contains("watchdog_self_close")
-                && rendered.contains("snooze")
-        }
-        _ => false,
-    }));
+    assert!(!history_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::ToolSearchOutput { call_id: Some(call_id), .. }
+            if call_id == "synthetic_watchdog_tool_search"
+    )));
     assert!(history_items.iter().any(|item| matches!(
         item,
         ResponseItem::FunctionCall { name, call_id, .. }
             if name == "wait_agent" && call_id == "synthetic_watchdog_agent_status"
     )));
-    assert!(rollout_items.iter().any(|item| matches!(
+    assert!(!rollout_items.iter().any(|item| matches!(
         item,
         RolloutItem::ResponseItem(ResponseItem::ToolSearchCall { call_id: Some(call_id), .. })
             if call_id == "synthetic_watchdog_tool_search"
     )));
-    assert!(rollout_items.iter().any(|item| match item {
-        RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput {
-            call_id: Some(call_id),
-            tools,
-            ..
-        }) if call_id == "synthetic_watchdog_tool_search" => {
-            let rendered = serde_json::to_string(tools).expect("tools should serialize");
-            rendered.contains("watchdog_self_close")
-                && rendered.contains("snooze")
-                && rendered.contains("compact_parent_context")
-        }
-        _ => false,
-    }));
+    assert!(!rollout_items.iter().any(|item| matches!(
+        item,
+        RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput { call_id: Some(call_id), .. })
+            if call_id == "synthetic_watchdog_tool_search"
+    )));
     let status_bootstrap = rollout_items
         .iter()
         .find_map(|item| match item {
@@ -1126,7 +1110,21 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
     .await
     .expect("helper turn should complete");
 
-    let input = helper_response_mock.single_request().input();
+    let helper_request = helper_response_mock.single_request();
+    let helper_body = helper_request.body_json();
+    assert!(
+        namespace_child_tool(&helper_body, "watchdog", "snooze").is_some(),
+        "watchdog snooze should be an eager Responses API tool: {helper_body:#}"
+    );
+    assert!(
+        namespace_child_tool(&helper_body, "watchdog", "compact_parent_context").is_some(),
+        "watchdog compact tool should be an eager Responses API tool: {helper_body:#}"
+    );
+    assert!(
+        namespace_child_tool(&helper_body, "watchdog", "watchdog_self_close").is_some(),
+        "watchdog self-close should be an eager Responses API tool: {helper_body:#}"
+    );
+    let input = helper_request.input();
     let message_position = |role: &str, needle: &str| {
         input
             .iter()

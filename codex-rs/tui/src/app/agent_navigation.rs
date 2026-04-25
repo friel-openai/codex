@@ -83,6 +83,10 @@ impl AgentNavigationState {
         agent_role: Option<String>,
         is_closed: bool,
     ) {
+        if agent_role.as_deref() == Some("watchdog") {
+            self.remove(thread_id);
+            return;
+        }
         if !self.threads.contains_key(&thread_id) {
             self.order.push(thread_id);
         }
@@ -350,5 +354,33 @@ mod tests {
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
             Some("Main [default]".to_string())
         );
+    }
+
+    #[test]
+    fn watchdog_threads_are_not_tracked_for_picker_navigation() {
+        let (mut state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
+        let watchdog_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000104").expect("valid thread");
+
+        state.upsert(
+            watchdog_id,
+            Some("Newton".to_string()),
+            Some("watchdog".to_string()),
+            /*is_closed*/ false,
+        );
+        state.upsert(
+            first_agent_id,
+            Some("Aquinas".to_string()),
+            Some("watchdog".to_string()),
+            /*is_closed*/ false,
+        );
+
+        assert_eq!(state.get(&watchdog_id), None);
+        assert_eq!(state.get(&first_agent_id), None);
+        assert_eq!(
+            state.ordered_thread_ids(),
+            vec![main_thread_id, second_agent_id]
+        );
+        assert!(state.has_non_primary_thread(Some(main_thread_id)));
     }
 }

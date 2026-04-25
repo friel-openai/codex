@@ -34,6 +34,7 @@ use crate::guardian::GuardianApprovalRequest;
 use crate::guardian::new_guardian_review_id;
 use crate::guardian::routes_approval_to_guardian;
 use crate::guardian::spawn_approval_request_review;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_ACCEPT;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_ACCEPT_FOR_SESSION;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC;
@@ -72,6 +73,13 @@ pub(crate) async fn run_codex_thread_interactive(
     subagent_source: SubAgentSource,
     initial_history: Option<InitialHistory>,
 ) -> Result<Codex, CodexErr> {
+    let client_metadata = parent_session.app_server_client_metadata().await;
+    let inherited_thread_state = InheritedThreadState::builder()
+        .app_server_client_metadata(
+            client_metadata.client_name.clone(),
+            client_metadata.client_version.clone(),
+        )
+        .build();
     let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let (tx_ops, rx_ops) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
     let CodexSpawnOk { codex, .. } = Box::pin(Codex::spawn(CodexSpawnArgs {
@@ -93,7 +101,7 @@ pub(crate) async fn run_codex_thread_interactive(
         user_shell_override: None,
         inherited_exec_policy: Some(Arc::clone(&parent_session.services.exec_policy)),
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
-        inherited_thread_state: Default::default(),
+        inherited_thread_state,
         parent_trace: None,
         environments: parent_ctx
             .environments
@@ -107,7 +115,6 @@ pub(crate) async fn run_codex_thread_interactive(
     .await??;
     if parent_session.enabled(codex_features::Feature::GeneralAnalytics) {
         let thread_config = codex.thread_config_snapshot().await;
-        let client_metadata = parent_session.app_server_client_metadata().await;
         emit_subagent_session_started(
             &parent_session.services.analytics_events_client,
             client_metadata,
