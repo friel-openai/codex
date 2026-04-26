@@ -9,6 +9,7 @@
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigOverrides;
+use crate::config::DEFAULT_WATCHDOG_INTERVAL_S;
 use crate::config::agent_roles::parse_agent_role_file_contents;
 use crate::config::deserialize_config_toml_with_base;
 use crate::config_loader::ConfigLayerEntry;
@@ -350,10 +351,9 @@ pub(crate) mod spawn_tool_spec {
                 .unwrap_or_default();
             let watchdog_note = declaration
                 .watchdog_interval_s
-                .map(|interval| {
-                    format!(
-                        "\n- This role creates an idle-time watchdog with a {interval}s interval."
-                    )
+                .map(|_| {
+                    "\n- This role creates an idle-time watchdog with the configured watchdog interval."
+                        .to_string()
                 })
                 .unwrap_or_default();
             format!("{name}: {{\n{description}{locked_settings_note}{watchdog_note}\n}}")
@@ -419,7 +419,7 @@ Rules:
                         ),
                         config_file: None,
                         nickname_candidates: None,
-                        watchdog_interval_s: Some(60),
+                        watchdog_interval_s: Some(DEFAULT_WATCHDOG_INTERVAL_S),
                     }
                 ),
                 // Awaiter is temp removed

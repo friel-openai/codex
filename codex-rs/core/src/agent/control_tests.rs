@@ -146,6 +146,48 @@ fn full_history_fork_reference_items_omits_copied_parent_items() {
     }
 }
 
+#[tokio::test]
+async fn previous_response_fork_rollout_items_preserve_latest_turn_context() -> anyhow::Result<()> {
+    let (_home, config) = test_config().await;
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        disabled_environment_manager_for_tests(),
+    );
+    let owner = manager.start_thread(config).await?;
+    let owner_turn = owner.thread.codex.session.new_default_turn().await;
+    let mut first_turn_context = owner_turn.to_turn_context_item();
+    first_turn_context.model = "first-model".to_string();
+    let mut latest_turn_context = first_turn_context.clone();
+    latest_turn_context.model = "latest-model".to_string();
+
+    let baseline_item = assistant_message(
+        "parent final from previous response",
+        Some(MessagePhase::FinalAnswer),
+    );
+    let items = previous_response_fork_rollout_items(
+        vec![
+            RolloutItem::TurnContext(first_turn_context),
+            RolloutItem::ResponseItem(assistant_message(
+                "parent rollout item should not be copied",
+                Some(MessagePhase::FinalAnswer),
+            )),
+            RolloutItem::TurnContext(latest_turn_context.clone()),
+        ],
+        vec![baseline_item.clone()],
+    );
+
+    assert_eq!(items.len(), 2);
+    assert_matches!(&items[0], RolloutItem::ResponseItem(item) if *item == baseline_item);
+    assert_matches!(
+        &items[1],
+        RolloutItem::TurnContext(turn_context) if turn_context.model == latest_turn_context.model
+    );
+
+    Ok(())
+}
+
 #[test]
 fn fork_previous_response_id_env_value_parses_truthy_values() {
     for value in ["1", "true", "TRUE", "yes", "on"] {

@@ -188,6 +188,39 @@ fn full_history_fork_reference_items(
         .collect()
 }
 
+fn previous_response_fork_rollout_items(
+    source_items: Vec<RolloutItem>,
+    baseline_input: Vec<ResponseItem>,
+) -> Vec<RolloutItem> {
+    let source_session_meta = source_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+        RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let latest_turn_context = source_items.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => Some(turn_context.clone()),
+        RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::SessionMeta(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+
+    source_session_meta
+        .into_iter()
+        .map(RolloutItem::SessionMeta)
+        .chain(baseline_input.into_iter().map(RolloutItem::ResponseItem))
+        .chain(
+            latest_turn_context
+                .into_iter()
+                .map(RolloutItem::TurnContext),
+        )
+        .collect()
+}
+
 fn unix_timestamp_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -544,24 +577,10 @@ impl AgentControl {
             let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
                 .await?
                 .get_rollout_items();
-            let source_session_meta = source_items.into_iter().find_map(|item| match item {
-                RolloutItem::SessionMeta(meta) => Some(meta),
-                RolloutItem::ForkReference(_)
-                | RolloutItem::ResponseItem(_)
-                | RolloutItem::Compacted(_)
-                | RolloutItem::TurnContext(_)
-                | RolloutItem::EventMsg(_) => None,
-            });
-            source_session_meta
-                .into_iter()
-                .map(RolloutItem::SessionMeta)
-                .chain(
-                    response_continuation
-                        .fork_baseline_input()
-                        .into_iter()
-                        .map(RolloutItem::ResponseItem),
-                )
-                .collect()
+            previous_response_fork_rollout_items(
+                source_items,
+                response_continuation.fork_baseline_input(),
+            )
         } else if is_watchdog_helper && matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
             let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
                 .await?

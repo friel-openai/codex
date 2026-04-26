@@ -4841,6 +4841,57 @@ async fn load_config_reads_agent_role_watchdog_interval() -> std::io::Result<()>
 }
 
 #[tokio::test]
+async fn load_config_reads_top_level_watchdog_interval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        watchdog_interval_s: Some(3),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config
+            .agent_roles
+            .get("watchdog")
+            .and_then(|role| role.watchdog_interval_s),
+        Some(3)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_nonpositive_top_level_watchdog_interval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        watchdog_interval_s: Some(0),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("nonpositive watchdog interval should fail");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        "watchdog_interval_s must be greater than zero"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
