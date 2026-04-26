@@ -226,9 +226,10 @@ async fn inherited_response_continuation_uses_previous_response_id_on_new_websoc
         },
     }
     .for_fork();
+    let child_conversation_id = ThreadId::new();
     let client = ModelClient::new_with_response_continuation(
         /*auth_manager*/ None,
-        ThreadId::new(),
+        child_conversation_id,
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
         /*prompt_cache_key_override*/ Some(parent_prompt_cache_key),
         websocket_provider(&server),
@@ -287,6 +288,20 @@ async fn inherited_response_continuation_uses_previous_response_id_on_new_websoc
     assert_eq!(
         body["prompt_cache_key"].as_str(),
         Some(expected_prompt_cache_key.as_str())
+    );
+    let handshake = server
+        .handshakes()
+        .into_iter()
+        .next()
+        .expect("websocket handshake should be recorded");
+    assert_eq!(
+        handshake.header("session_id").as_deref(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+    let expected_child_conversation_id = child_conversation_id.to_string();
+    assert_eq!(
+        handshake.header("x-client-request-id").as_deref(),
+        Some(expected_child_conversation_id.as_str())
     );
 
     server.shutdown().await;

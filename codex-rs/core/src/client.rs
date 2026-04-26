@@ -876,6 +876,7 @@ impl ModelClient {
     ) -> ApiHeaderMap {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let conversation_id = self.state.conversation_id.to_string();
+        let prompt_cache_key = self.prompt_cache_key().to_string();
         let mut headers = build_responses_headers(
             self.state.beta_features_header.as_deref(),
             turn_state,
@@ -884,7 +885,10 @@ impl ModelClient {
         if let Ok(header_value) = HeaderValue::from_str(&conversation_id) {
             headers.insert("x-client-request-id", header_value);
         }
-        headers.extend(build_conversation_headers(Some(conversation_id)));
+        // The Responses websocket backend uses the `session_id` handshake header as the prompt
+        // cache id. Keep `x-client-request-id` on the conversation id so forked agents keep a
+        // unique request identity while sharing their parent's prompt cache id.
+        headers.extend(build_conversation_headers(Some(prompt_cache_key)));
         headers.extend(self.build_responses_identity_headers());
         headers.insert(
             OPENAI_BETA_HEADER,
@@ -1006,8 +1010,10 @@ impl ModelClientSession {
     ) -> ApiResponsesOptions {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let conversation_id = self.client.state.conversation_id.to_string();
+        let prompt_cache_key = self.client.prompt_cache_key().to_string();
         ApiResponsesOptions {
             conversation_id: Some(conversation_id),
+            prompt_cache_key: Some(prompt_cache_key),
             session_source: Some(self.client.state.session_source.clone()),
             extra_headers: {
                 let mut headers = build_responses_headers(
