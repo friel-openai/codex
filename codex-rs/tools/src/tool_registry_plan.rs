@@ -32,6 +32,7 @@ use crate::create_followup_task_tool;
 use crate::create_image_generation_tool;
 use crate::create_js_repl_reset_tool;
 use crate::create_js_repl_tool;
+use crate::create_list_agents_tool;
 use crate::create_list_dir_tool;
 use crate::create_list_mcp_resource_templates_tool;
 use crate::create_list_mcp_resources_tool;
@@ -56,7 +57,7 @@ use crate::create_view_image_tool;
 use crate::create_wait_agent_tool_v1;
 use crate::create_wait_agent_tool_v2;
 use crate::create_wait_tool;
-use crate::create_watchdog_self_close_tool;
+use crate::create_watchdog_close_self_tool;
 use crate::create_watchdog_snooze_tool;
 use crate::create_watchdog_tools_namespace;
 use crate::create_web_search_tool;
@@ -422,6 +423,11 @@ pub fn build_tool_registry_plan(
                 config.code_mode_enabled,
             );
             plan.push_spec(
+                create_list_agents_tool(),
+                /*supports_parallel_tool_calls*/ false,
+                config.code_mode_enabled,
+            );
+            plan.push_spec(
                 create_close_agent_tool_v2(),
                 /*supports_parallel_tool_calls*/ false,
                 config.code_mode_enabled,
@@ -430,6 +436,7 @@ pub fn build_tool_registry_plan(
             plan.register_handler("send_message", ToolHandlerKind::SendMessageV2);
             plan.register_handler("followup_task", ToolHandlerKind::FollowupTaskV2);
             plan.register_handler("wait_agent", ToolHandlerKind::WaitAgentV2);
+            plan.register_handler("list_agents", ToolHandlerKind::ListAgentsV2);
             plan.register_handler("close_agent", ToolHandlerKind::CloseAgentV2);
         } else {
             let agent_type_description =
@@ -477,7 +484,7 @@ pub fn build_tool_registry_plan(
         plan.push_spec(
             create_watchdog_tools_namespace(vec![
                 create_compact_parent_context_tool(),
-                create_watchdog_self_close_tool(),
+                create_watchdog_close_self_tool(),
                 create_watchdog_snooze_tool(),
             ]),
             /*supports_parallel_tool_calls*/ false,
@@ -492,13 +499,10 @@ pub fn build_tool_registry_plan(
             ToolHandlerKind::CompactParentContext,
         );
         plan.register_handler(
-            crate::ToolName::namespaced("watchdog", "watchdog_self_close"),
+            crate::ToolName::namespaced("watchdog", "close_self"),
             ToolHandlerKind::WatchdogSelfClose,
         );
-        plan.register_handler(
-            "watchdogwatchdog_self_close",
-            ToolHandlerKind::WatchdogSelfClose,
-        );
+        plan.register_handler("watchdogclose_self", ToolHandlerKind::WatchdogSelfClose);
         plan.register_handler(
             crate::ToolName::namespaced("watchdog", "snooze"),
             ToolHandlerKind::WatchdogSnooze,

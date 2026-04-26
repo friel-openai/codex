@@ -28,7 +28,6 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::CollabAgentStatusEntry;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::ForkReferenceItem;
@@ -49,14 +48,12 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
 use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
-const WATCHDOG_BOOT_AGENT_STATUS_CALL_ID: &str = "synthetic_watchdog_agent_status";
+const WATCHDOG_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_watchdog_list_agents";
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
@@ -221,32 +218,9 @@ fn previous_response_fork_rollout_items(
         .collect()
 }
 
-fn unix_timestamp_seconds() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs())
-        .unwrap_or_default()
-}
-
-fn synthetic_watchdog_agent_status_items(
-    owner_thread_id: ThreadId,
-    agent_statuses: Vec<CollabAgentStatusEntry>,
-) -> Vec<RolloutItem> {
-    let targets = agent_statuses
-        .iter()
-        .map(|entry| entry.thread_id.to_string())
-        .collect::<Vec<_>>();
-    let statuses = agent_statuses
-        .iter()
-        .map(|entry| (entry.thread_id.to_string(), entry.status.clone()))
-        .collect::<HashMap<_, _>>();
+fn synthetic_watchdog_list_agents_items(agents: Vec<ListedAgent>) -> Vec<RolloutItem> {
     let envelope = serde_json::json!({
-        "source": "pre_injected_agent_status",
-        "generated_at": unix_timestamp_seconds(),
-        "owner_thread_id": owner_thread_id.to_string(),
-        "agent_statuses": agent_statuses,
-        "status": statuses,
-        "timed_out": false,
+        "agents": agents,
     });
     let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
     output.success = Some(true);
@@ -254,17 +228,13 @@ fn synthetic_watchdog_agent_status_items(
     vec![
         RolloutItem::ResponseItem(ResponseItem::FunctionCall {
             id: None,
-            name: "wait_agent".to_string(),
+            name: "list_agents".to_string(),
             namespace: None,
-            arguments: serde_json::json!({
-                "targets": targets,
-                "timeout_ms": 10_000,
-            })
-            .to_string(),
-            call_id: WATCHDOG_BOOT_AGENT_STATUS_CALL_ID.to_string(),
+            arguments: serde_json::json!({}).to_string(),
+            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
         }),
         RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
-            call_id: WATCHDOG_BOOT_AGENT_STATUS_CALL_ID.to_string(),
+            call_id: WATCHDOG_BOOT_LIST_AGENTS_CALL_ID.to_string(),
             output,
         }),
     ]
@@ -1369,38 +1339,26 @@ impl AgentControl {
         state: &Arc<ThreadManagerState>,
         owner_thread_id: ThreadId,
     ) -> Vec<RolloutItem> {
-        let owner_source = match state.get_thread(owner_thread_id).await {
-            Ok(owner_thread) => {
-                owner_thread
-                    .codex
-                    .thread_config_snapshot()
-                    .await
-                    .session_source
-            }
-            Err(_) => SessionSource::Cli,
-        };
-        self.register_session_root(owner_thread_id, &owner_source);
-        let agent_statuses = self
-            .watchdog_boot_agent_statuses(state, owner_thread_id)
+        let agents = self
+            .watchdog_boot_listed_agents(state, owner_thread_id)
             .await;
 
-        synthetic_watchdog_agent_status_items(owner_thread_id, agent_statuses)
+        synthetic_watchdog_list_agents_items(agents)
     }
 
-    async fn watchdog_boot_agent_statuses(
+    async fn watchdog_boot_listed_agents(
         &self,
         state: &Arc<ThreadManagerState>,
         owner_thread_id: ThreadId,
-    ) -> Vec<CollabAgentStatusEntry> {
-        let mut entries = Vec::new();
+    ) -> Vec<ListedAgent> {
+        let mut agents = Vec::new();
         if let Ok(owner_thread) = state.get_thread(owner_thread_id).await {
-            entries.push(CollabAgentStatusEntry {
-                thread_id: owner_thread_id,
-                agent_nickname: None,
-                agent_role: None,
-                status: self
+            agents.push(ListedAgent {
+                agent_name: AgentPath::root().to_string(),
+                agent_status: self
                     .reported_agent_status(owner_thread_id, owner_thread.agent_status().await)
                     .await,
+                last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
             });
         }
 
@@ -1436,17 +1394,21 @@ impl AgentControl {
             let Ok(thread) = state.get_thread(thread_id).await else {
                 continue;
             };
-            entries.push(CollabAgentStatusEntry {
-                thread_id,
-                agent_nickname: metadata.agent_nickname,
-                agent_role: metadata.agent_role,
-                status: self
+            let agent_name = metadata
+                .agent_path
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| thread_id.to_string());
+            agents.push(ListedAgent {
+                agent_name,
+                agent_status: self
                     .reported_agent_status(thread_id, thread.agent_status().await)
                     .await,
+                last_task_message: metadata.last_task_message.clone(),
             });
         }
 
-        entries
+        agents
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.

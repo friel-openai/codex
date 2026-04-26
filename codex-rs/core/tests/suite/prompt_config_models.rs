@@ -133,7 +133,7 @@ async fn root_subagent_and_watchdog_prompts_are_developer_items_in_responses_req
     );
     assert!(root_developer_text.contains("## Watchdogs"));
     assert!(root_developer_text.contains("Durable developer baseline."));
-    assert!(!root_developer_text.contains("More importantly, you are a **watchdog**"));
+    assert!(!root_developer_text.contains("You are also a **watchdog**"));
     assert!(
         !root_request
             .instructions_text()
@@ -164,7 +164,7 @@ async fn root_subagent_and_watchdog_prompts_are_developer_items_in_responses_req
         "subagent task",
     );
     assert!(subagent_developer_text.contains("## Subagent Responsibilities"));
-    assert!(!subagent_developer_text.contains("More importantly, you are a **watchdog**"));
+    assert!(!subagent_developer_text.contains("You are also a **watchdog**"));
     assert!(!subagent_developer_text.contains("watchdog.snooze"));
 
     let watchdog_mock = mount_sse_once(
@@ -187,9 +187,10 @@ async fn root_subagent_and_watchdog_prompts_are_developer_items_in_responses_req
     let watchdog_request = watchdog_mock.single_request();
     let watchdog_developer_text = assert_role_prompt_is_developer_item(
         &watchdog_request,
-        "More importantly, you are a **watchdog**",
+        "# You are a Subagent",
         "watchdog task",
     );
+    assert!(watchdog_developer_text.contains("You are also a **watchdog**"));
     assert!(watchdog_developer_text.contains("watchdog.snooze"));
     assert!(!watchdog_developer_text.contains("## Subagent Responsibilities"));
 

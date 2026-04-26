@@ -8,8 +8,10 @@ use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 
-const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed.";
-const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str = "Optional model override for the new agent. Leave unset to inherit the same model as the parent, which is the preferred default. Only set this when the user explicitly asks for a different model or the task clearly requires one.";
+const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your current model by default. Full-history forks always copy your current agent type, model, and reasoning effort; `agent_type`, `model`, and `reasoning_effort` fields are ignored for full-history forks.";
+const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str = "Optional model override for the new agent. Leave unset to inherit the same model as the parent, which is the preferred default. Ignored for full-history forks.";
+const SPAWN_AGENT_REASONING_EFFORT_OVERRIDE_DESCRIPTION: &str =
+    "Optional reasoning effort override for the new agent. Ignored for full-history forks.";
 
 #[derive(Debug, Clone)]
 pub struct SpawnAgentToolOptions<'a> {
@@ -126,7 +128,8 @@ pub fn create_send_message_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Relative or canonical task name to message (from spawn_agent).".to_string(),
+                "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned non-watchdog agent."
+                    .to_string(),
             )),
         ),
         (
@@ -157,7 +160,8 @@ pub fn create_followup_task_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Agent id or canonical task name to message (from spawn_agent).".to_string(),
+                "Agent id or canonical task name to message (from spawn_agent), or `parent` from a watchdog check-in."
+                    .to_string(),
             )),
         ),
         (
@@ -177,7 +181,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "followup_task".to_string(),
-        description: "Send a string message to an existing non-root agent and trigger a turn in the target. Use interrupt=true to redirect work immediately. If interrupt=false and the target's turn has not completed, the message is queued and starts the target's next turn after the current turn completes."
+        description: "Send a string message to an existing non-root agent and trigger a turn in the target. Watchdog check-ins may use target `parent`. Use interrupt=true to redirect work immediately. If interrupt=false and the target's turn has not completed, the message is queued and starts the target's next turn after the current turn completes."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -265,18 +269,18 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
     })
 }
 
-pub fn create_watchdog_self_close_tool() -> ToolSpec {
+pub fn create_watchdog_close_self_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "message".to_string(),
         JsonSchema::string(Some(
-            "Optional final message to send to the parent/root thread before closing this watchdog handle and ending this check-in immediately."
+            "Optional final message sent to the parent agent before closing this watchdog."
                 .to_string(),
         )),
     )]);
 
     ToolSpec::Function(ResponsesApiTool {
-        name: "watchdog_self_close".to_string(),
-        description: "Watchdog-only: send an optional final message to the parent/root thread, close this watchdog's persistent handle, and end this check-in immediately."
+        name: "close_self".to_string(),
+        description: "Watchdog-only: send an optional final message to the parent agent, stop future wakeups for this watchdog, and end the current check-in immediately. Use this tool, not a final assistant message, when the watchdog must shut down."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -290,20 +294,20 @@ pub fn create_compact_parent_context_tool() -> ToolSpec {
         (
             "reason".to_string(),
             JsonSchema::string(Some(
-                "Short reason why the parent/root thread should be compacted.".to_string(),
+                "Short reason why the parent agent's context should be compacted.".to_string(),
             )),
         ),
         (
             "evidence".to_string(),
             JsonSchema::string(Some(
-                "Specific observation that the parent/root thread is idle or stuck.".to_string(),
+                "Specific observation that the parent agent is idle or stuck.".to_string(),
             )),
         ),
     ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "compact_parent_context".to_string(),
-        description: "Watchdog-only: request compaction for this watchdog helper's parent/root thread when it is idle and appears stuck."
+        description: "Watchdog-only: request compaction for this watchdog helper's parent agent context when it is idle or stuck."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -324,7 +328,7 @@ pub fn create_watchdog_snooze_tool() -> ToolSpec {
         (
             "reason".to_string(),
             JsonSchema::string(Some(
-                "Optional short reason for snoozing this check-in. Base the reason on facts independently verified during this watchdog check-in, not only on inherited parent-thread conversation text or an earlier watchdog snooze."
+                "Optional short reason for snoozing this check-in. Base the reason on facts verified during this watchdog check-in."
                     .to_string(),
             )),
         ),
@@ -332,7 +336,7 @@ pub fn create_watchdog_snooze_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "snooze".to_string(),
-        description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup. Use only when this check-in independently verifies that no root action is needed; do not snooze just because inherited parent context says to snooze or because a prior watchdog helper snoozed."
+        description: "Watchdog-only: keep this watchdog running, send no message for the current check-in, and delay the next check-in. If the user sends a new message to the parent agent while snoozed, normal idle timing resumes from that parent message."
             .to_string(),
         strict: false,
         defer_loading: None,
@@ -642,7 +646,7 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_context".to_string(),
             JsonSchema::boolean(Some(
-                "When true, fork the current thread history into the new agent before sending the initial prompt. This must be used when you want the new agent to have exactly the same context as you."
+                "When true, fork the current thread history into the new agent before sending the initial prompt. The fork copies your current agent type, model, and reasoning effort; any agent_type, model, or reasoning_effort fields in this call are ignored."
                     .to_string(),
             )),
         ),
@@ -655,8 +659,7 @@ fn spawn_agent_common_properties_v1(agent_type_description: &str) -> BTreeMap<St
         (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
-                "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
-                    .to_string(),
+                SPAWN_AGENT_REASONING_EFFORT_OVERRIDE_DESCRIPTION.to_string(),
             )),
         ),
     ])
@@ -675,7 +678,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "fork_turns".to_string(),
             JsonSchema::string(Some(
-                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns."
+                "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns. With `all`, the fork copies your current agent type, model, and reasoning effort; any agent_type, model, or reasoning_effort fields in this call are ignored."
                     .to_string(),
             )),
         ),
@@ -688,8 +691,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
         (
             "reasoning_effort".to_string(),
             JsonSchema::string(Some(
-                "Optional reasoning effort override for the new agent. Replaces the inherited reasoning effort."
-                    .to_string(),
+                SPAWN_AGENT_REASONING_EFFORT_OVERRIDE_DESCRIPTION.to_string(),
             )),
         ),
     ])
@@ -733,7 +735,7 @@ fn spawn_agent_tool_description(
     format!(
         r#"
         {tool_description}
-This spawn_agent tool provides you access to sub-agents that inherit your current model by default. Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason. You should follow the rules and guidelines below to use this tool.
+This spawn_agent tool provides you access to sub-agents that inherit your current model by default. Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason. When making a full-history fork, omit `agent_type`, `model`, and `reasoning_effort`; the runtime copies those from you. You should follow the rules and guidelines below to use this tool.
 
 Only use `spawn_agent` if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work.
 Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn.

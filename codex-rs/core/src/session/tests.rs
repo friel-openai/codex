@@ -7295,7 +7295,7 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 
     assert!(prompt.contains("# You are a Subagent"));
     assert!(prompt.contains("## Subagent Responsibilities"));
-    assert!(!prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(!prompt.contains("You are also a **watchdog**"));
     assert!(!prompt.contains("watchdog.snooze"));
 }
 
@@ -7397,7 +7397,7 @@ async fn agent_prompt_injection_does_not_require_collab_feature() {
         .expect("prompt injection should not require collab");
 
     assert!(prompt.contains("# You are a Subagent"));
-    assert!(prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(prompt.contains("You are also a **watchdog**"));
     assert!(prompt.contains("watchdog.snooze"));
     assert!(!prompt.contains("## Subagent Responsibilities"));
 }

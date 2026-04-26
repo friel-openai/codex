@@ -108,7 +108,9 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         vec![
             create_spawn_agent_tool_v2(spawn_agent_tool_options(&config)),
             create_send_message_tool(),
+            create_followup_task_tool(),
             create_wait_agent_tool_v2(wait_agent_timeout_options()),
+            create_list_agents_tool(),
             create_close_agent_tool_v2(),
         ]
     } else {
@@ -130,7 +132,7 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
     if config.agent_watchdog {
         let spec = create_watchdog_tools_namespace(vec![
             create_compact_parent_context_tool(),
-            create_watchdog_self_close_tool(),
+            create_watchdog_close_self_tool(),
             create_watchdog_snooze_tool(),
         ]);
         expected.insert(spec.name().to_string(), spec);
@@ -181,18 +183,25 @@ fn test_build_specs_collab_tools_enabled() {
 
     assert_contains_tool_names(
         &tools,
-        &["spawn_agent", "send_input", "wait_agent", "close_agent"],
+        &[
+            "spawn_agent",
+            "send_message",
+            "followup_task",
+            "wait_agent",
+            "list_agents",
+            "close_agent",
+        ],
     );
     assert_lacks_tool_name(&tools, "spawn_agents_on_csv");
-    assert_lacks_tool_name(&tools, "list_agents");
+    assert_lacks_tool_name(&tools, "send_input");
 
     let spawn_agent = find_tool(&tools, "spawn_agent");
     let ToolSpec::Function(ResponsesApiTool { parameters, .. }) = &spawn_agent.spec else {
         panic!("spawn_agent should be a function tool");
     };
     let (properties, _) = expect_object_schema(parameters);
-    assert!(properties.contains_key("fork_context"));
-    assert!(!properties.contains_key("fork_turns"));
+    assert!(!properties.contains_key("fork_context"));
+    assert!(properties.contains_key("fork_turns"));
 }
 
 #[test]
@@ -224,7 +233,7 @@ fn agent_watchdog_adds_eager_watchdog_namespace_tools_and_handlers() {
         namespace_function_names(&tools, "watchdog"),
         vec![
             "compact_parent_context".to_string(),
-            "watchdog_self_close".to_string(),
+            "close_self".to_string(),
             "snooze".to_string(),
         ]
     );
@@ -232,7 +241,7 @@ fn agent_watchdog_adds_eager_watchdog_namespace_tools_and_handlers() {
     assert_eq!(compact.defer_loading, None);
     let snooze = find_namespace_function_tool(&tools, "watchdog", "snooze");
     assert_eq!(snooze.defer_loading, None);
-    let self_close = find_namespace_function_tool(&tools, "watchdog", "watchdog_self_close");
+    let self_close = find_namespace_function_tool(&tools, "watchdog", "close_self");
     assert_eq!(self_close.defer_loading, None);
     assert!(handlers.iter().any(|handler| {
         handler.name
@@ -247,11 +256,7 @@ fn agent_watchdog_adds_eager_watchdog_namespace_tools_and_handlers() {
             && handler.kind == ToolHandlerKind::WatchdogSnooze
     }));
     assert!(handlers.iter().any(|handler| {
-        handler.name
-            == ToolName::new(
-                Some("watchdog".to_string()),
-                "watchdog_self_close".to_string(),
-            )
+        handler.name == ToolName::new(Some("watchdog".to_string()), "close_self".to_string())
             && handler.kind == ToolHandlerKind::WatchdogSelfClose
     }));
     assert!(handlers.iter().any(|handler| {
@@ -263,7 +268,7 @@ fn agent_watchdog_adds_eager_watchdog_namespace_tools_and_handlers() {
             && handler.kind == ToolHandlerKind::WatchdogSnooze
     }));
     assert!(handlers.iter().any(|handler| {
-        handler.name == ToolName::plain("watchdogwatchdog_self_close")
+        handler.name == ToolName::plain("watchdogclose_self")
             && handler.kind == ToolHandlerKind::WatchdogSelfClose
     }));
 }
@@ -429,7 +434,12 @@ fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
         json!("Brief wait summary without the agent's final content.")
     );
 
-    assert_lacks_tool_name(&tools, "list_agents");
+    let list_agents = find_tool(&tools, "list_agents");
+    let ToolSpec::Function(ResponsesApiTool { output_schema, .. }) = &list_agents.spec else {
+        panic!("list_agents should be a function tool");
+    };
+    assert!(output_schema.is_some());
+
     assert_lacks_tool_name(&tools, "send_input");
     assert_lacks_tool_name(&tools, "resume_agent");
 }
@@ -462,8 +472,10 @@ fn test_build_specs_enable_fanout_enables_agent_jobs_and_collab_tools() {
         &tools,
         &[
             "spawn_agent",
-            "send_input",
+            "send_message",
+            "followup_task",
             "wait_agent",
+            "list_agents",
             "close_agent",
             "spawn_agents_on_csv",
         ],
@@ -605,9 +617,10 @@ fn test_build_specs_agent_job_worker_tools_enabled() {
         &tools,
         &[
             "spawn_agent",
-            "send_input",
-            "resume_agent",
+            "send_message",
+            "followup_task",
             "wait_agent",
+            "list_agents",
             "close_agent",
             "spawn_agents_on_csv",
             "report_agent_job_result",

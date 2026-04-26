@@ -83,13 +83,7 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if args.fork_context {
-            reject_full_fork_spawn_overrides(
-                role_name,
-                args.model.as_deref(),
-                args.reasoning_effort,
-            )?;
-        } else {
+        if !args.fork_context {
             apply_requested_spawn_agent_model_overrides(
                 &session,
                 turn.as_ref(),

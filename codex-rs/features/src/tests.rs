@@ -265,6 +265,13 @@ fn multi_agent_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn multi_agent_v2_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::MultiAgentV2.stage(), Stage::Stable);
+    assert_eq!(Feature::MultiAgentV2.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
+}
+
+#[test]
 fn agent_watchdog_is_stable_and_enabled_by_default() {
     assert_eq!(Feature::AgentWatchdog.stage(), Stage::Stable);
     assert_eq!(Feature::AgentWatchdog.default_enabled(), true);
@@ -433,7 +440,7 @@ usage_hint_enabled = false
         FeatureOverrides::default(),
     );
 
-    assert_eq!(features.enabled(Feature::MultiAgentV2), false);
+    assert_eq!(features.enabled(Feature::MultiAgentV2), true);
     assert_eq!(features_toml.entries(), BTreeMap::new());
     assert_eq!(
         features_toml.multi_agent_v2,

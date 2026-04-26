@@ -1083,8 +1083,8 @@ async fn watchdog_tools_register_namespaced_and_flattened_handlers() {
     assert!(registry.has_handler(&ToolName::plain("watchdogcompact_parent_context")));
     assert!(registry.has_handler(&ToolName::namespaced("watchdog", "snooze")));
     assert!(registry.has_handler(&ToolName::plain("watchdogsnooze")));
-    assert!(registry.has_handler(&ToolName::namespaced("watchdog", "watchdog_self_close")));
-    assert!(registry.has_handler(&ToolName::plain("watchdogwatchdog_self_close")));
+    assert!(registry.has_handler(&ToolName::namespaced("watchdog", "close_self")));
+    assert!(registry.has_handler(&ToolName::plain("watchdogclose_self")));
 }
 
 #[tokio::test]
@@ -1139,7 +1139,7 @@ async fn watchdog_namespace_is_eager_and_model_visible() {
             .collect::<Vec<_>>(),
         vec![
             ("compact_parent_context", None),
-            ("watchdog_self_close", None),
+            ("close_self", None),
             ("snooze", None),
         ]
     );

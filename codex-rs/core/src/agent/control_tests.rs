@@ -212,42 +212,70 @@ fn fork_previous_response_id_env_value_parses_truthy_values() {
 }
 
 #[test]
-fn watchdog_boot_agent_status_uses_wait_agent_shape() {
-    let owner_thread_id =
-        ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e0").expect("valid thread id");
-    let items = synthetic_watchdog_agent_status_items(
-        owner_thread_id,
-        vec![CollabAgentStatusEntry {
-            thread_id: owner_thread_id,
-            agent_nickname: None,
-            agent_role: None,
-            status: AgentStatus::Completed(Some("root done".to_string())),
-        }],
-    );
+fn watchdog_boot_list_agents_uses_list_agents_shape() {
+    let items = synthetic_watchdog_list_agents_items(vec![ListedAgent {
+        agent_name: "/root".to_string(),
+        agent_status: AgentStatus::Completed(Some("root done".to_string())),
+        last_task_message: Some("Main thread".to_string()),
+    }]);
 
     assert_matches!(
         &items[0],
         RolloutItem::ResponseItem(ResponseItem::FunctionCall { name, call_id, arguments, .. })
-            if name == "wait_agent"
-                && call_id == "synthetic_watchdog_agent_status"
-                && arguments.contains(&owner_thread_id.to_string())
+            if name == "list_agents"
+                && call_id == "synthetic_watchdog_list_agents"
+                && arguments == "{}"
     );
     let RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output }) = &items[1]
     else {
-        panic!("expected synthetic status output");
+        panic!("expected synthetic list_agents output");
     };
-    assert_eq!(call_id, "synthetic_watchdog_agent_status");
+    assert_eq!(call_id, "synthetic_watchdog_list_agents");
     let FunctionCallOutputBody::Text(body) = &output.body else {
-        panic!("synthetic status output should be text JSON");
+        panic!("synthetic list_agents output should be text JSON");
     };
     let parsed: serde_json::Value =
-        serde_json::from_str(body).expect("synthetic status output should parse");
-    assert_eq!(parsed["source"], "pre_injected_agent_status");
-    assert_eq!(parsed["owner_thread_id"], owner_thread_id.to_string());
-    assert_eq!(parsed["timed_out"], false);
+        serde_json::from_str(body).expect("synthetic list_agents output should parse");
     assert_eq!(
-        parsed["status"][owner_thread_id.to_string()]["completed"],
+        parsed["agents"][0]["agent_status"]["completed"],
         "root done"
+    );
+    assert_eq!(parsed["agents"][0]["agent_name"], "/root");
+    assert_eq!(parsed["agents"][0]["last_task_message"], "Main thread");
+}
+
+#[tokio::test]
+async fn watchdog_boot_list_agents_does_not_register_session_root() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, _) = harness.start_thread().await;
+    let state = harness.control.upgrade().expect("agent control state");
+
+    assert_eq!(
+        harness
+            .control
+            .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+            .await
+            .expect("list_agents before bootstrap should succeed"),
+        Vec::<ListedAgent>::new()
+    );
+
+    let items = harness
+        .control
+        .watchdog_boot_context_items(&state, owner_thread_id)
+        .await;
+
+    assert!(items.iter().any(|item| matches!(
+        item,
+        RolloutItem::ResponseItem(ResponseItem::FunctionCall { name, call_id, .. })
+            if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
+    )));
+    assert_eq!(
+        harness
+            .control
+            .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+            .await
+            .expect("list_agents after bootstrap should succeed"),
+        Vec::<ListedAgent>::new()
     );
 }
 
@@ -840,12 +868,12 @@ async fn watchdog_helper_forks_owner_history() {
     assert!(history_contains_role_text(
         &history_items,
         "developer",
-        "More importantly, you are a **watchdog**"
+        "You are also a **watchdog**"
     ));
     assert!(history_contains_role_text(
         &history_items,
         "developer",
-        "Evidence-Based Supervision"
+        "Detect Looping and Reward Hacking"
     ));
     assert!(history_contains_role_text(
         &history_items,
@@ -879,7 +907,7 @@ async fn watchdog_helper_forks_owner_history() {
         .expect("helper prompt should be submitted");
     assert!(helper_prompt.contains("Target agent id:"));
     assert!(!helper_prompt.contains("# You are a Subagent"));
-    assert!(!helper_prompt.contains("More importantly, you are a **watchdog**"));
+    assert!(!helper_prompt.contains("You are also a **watchdog**"));
     assert!(!helper_prompt.contains("Evidence-Based Supervision"));
     assert!(!helper_prompt.contains("watchdog.snooze"));
     assert!(helper_prompt.contains("Watchdog check-in facts:"));
@@ -947,7 +975,7 @@ async fn watchdog_helper_forks_owner_history() {
                 if role == "developer"
                     && content.iter().any(|content_item| matches!(
                         content_item,
-                        ContentItem::InputText { text } if text.contains("More importantly, you are a **watchdog**")
+                        ContentItem::InputText { text } if text.contains("You are also a **watchdog**")
                     ))
         ))
         .expect("helper rollout should include watchdog developer prompt");
@@ -997,8 +1025,10 @@ async fn watchdog_helper_forks_owner_history() {
     )));
     assert!(history_items.iter().any(|item| matches!(
         item,
-        ResponseItem::FunctionCall { name, call_id, .. }
-            if name == "wait_agent" && call_id == "synthetic_watchdog_agent_status"
+        ResponseItem::FunctionCall { name, call_id, arguments, .. }
+            if name == "list_agents"
+                && call_id == "synthetic_watchdog_list_agents"
+                && arguments == "{}"
     )));
     assert!(!rollout_items.iter().any(|item| matches!(
         item,
@@ -1010,33 +1040,31 @@ async fn watchdog_helper_forks_owner_history() {
         RolloutItem::ResponseItem(ResponseItem::ToolSearchOutput { call_id: Some(call_id), .. })
             if call_id == "synthetic_watchdog_tool_search"
     )));
-    let status_bootstrap = rollout_items
+    let list_agents_bootstrap = rollout_items
         .iter()
         .find_map(|item| match item {
             RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output })
-                if call_id == "synthetic_watchdog_agent_status" =>
+                if call_id == "synthetic_watchdog_list_agents" =>
             {
                 Some(output)
             }
             _ => None,
         })
-        .expect("helper rollout should include synthetic agent status output");
-    let FunctionCallOutputBody::Text(status_bootstrap_body) = &status_bootstrap.body else {
-        panic!("synthetic agent status output should be text JSON");
+        .expect("helper rollout should include synthetic list_agents output");
+    let FunctionCallOutputBody::Text(list_agents_bootstrap_body) = &list_agents_bootstrap.body
+    else {
+        panic!("synthetic list_agents output should be text JSON");
     };
-    let status_bootstrap_json: serde_json::Value = serde_json::from_str(status_bootstrap_body)
-        .expect("synthetic agent status output should parse as JSON");
-    assert_eq!(status_bootstrap_json["source"], "pre_injected_agent_status");
-    assert_eq!(
-        status_bootstrap_json["owner_thread_id"],
-        owner_thread_id.to_string()
-    );
+    let list_agents_bootstrap_json: serde_json::Value =
+        serde_json::from_str(list_agents_bootstrap_body)
+            .expect("synthetic list_agents output should parse as JSON");
     assert!(
-        status_bootstrap_json["agent_statuses"]
+        list_agents_bootstrap_json["agents"]
             .as_array()
-            .expect("agent_statuses should be an array")
+            .expect("agents should be an array")
             .iter()
-            .any(|agent| agent["thread_id"] == owner_thread_id.to_string())
+            .any(|agent| agent["agent_name"] == "/root"
+                && agent["last_task_message"] == "Main thread")
     );
     assert!(
         !helper_thread
@@ -1186,7 +1214,7 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
         "watchdog compact tool should be an eager Responses API tool: {helper_body:#}"
     );
     assert!(
-        namespace_child_tool(&helper_body, "watchdog", "watchdog_self_close").is_some(),
+        namespace_child_tool(&helper_body, "watchdog", "close_self").is_some(),
         "watchdog self-close should be an eager Responses API tool: {helper_body:#}"
     );
     let input = helper_request.input();
@@ -1212,8 +1240,7 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
     };
     let owner_seed_idx = message_position("user", "owner seed before watchdog");
     let owner_final_idx = message_position("assistant", "owner final before watchdog");
-    let watchdog_prompt_idx =
-        message_position("developer", "More importantly, you are a **watchdog**");
+    let watchdog_prompt_idx = message_position("developer", "You are also a **watchdog**");
     let watchdog_task_idx = message_position("assistant", "Watchdog check-in facts:");
 
     assert!(owner_seed_idx < watchdog_prompt_idx);
@@ -1223,9 +1250,9 @@ async fn watchdog_helper_first_request_orders_owner_context_prompt_and_task() ->
         input.iter().any(|item| {
             item.get("type").and_then(serde_json::Value::as_str) == Some("function_call_output")
                 && item.get("call_id").and_then(serde_json::Value::as_str)
-                    == Some("synthetic_watchdog_agent_status")
+                    == Some("synthetic_watchdog_list_agents")
         }),
-        "first watchdog helper request should include pre-injected agent status output: {input:#?}"
+        "first watchdog helper request should include pre-injected list_agents output: {input:#?}"
     );
 
     Ok(())

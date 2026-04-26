@@ -177,15 +177,15 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     );
     assert!(
         description.contains(
-            "Spawned agents inherit your current model by default. Omit `model` to use that preferred default; set `model` only when an explicit override is needed."
+            "Full-history forks always copy your current agent type, model, and reasoning effort; `agent_type`, `model`, and `reasoning_effort` fields are ignored for full-history forks."
         ),
-        "expected inherited-model guidance in spawn_agent description: {description:?}"
+        "expected full-history fork inheritance guidance in spawn_agent description: {description:?}"
     );
     assert!(
         description.contains(
-            "Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason."
+            "When making a full-history fork, omit `agent_type`, `model`, and `reasoning_effort`; the runtime copies those from you."
         ),
-        "expected model override usage guidance in spawn_agent description: {description:?}"
+        "expected full-history fork override usage guidance in spawn_agent description: {description:?}"
     );
     assert!(
         description.contains("Default reasoning effort: medium."),

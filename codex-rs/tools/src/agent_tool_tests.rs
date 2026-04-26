@@ -83,6 +83,19 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
             .and_then(|schema| schema.description.as_deref()),
         Some(SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION)
     );
+    assert!(
+        properties
+            .get("fork_turns")
+            .and_then(|schema| schema.description.as_deref())
+            .is_some_and(|description| description
+                .contains("the fork copies your current agent type, model, and reasoning effort"))
+    );
+    assert_eq!(
+        properties
+            .get("reasoning_effort")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(SPAWN_AGENT_REASONING_EFFORT_OVERRIDE_DESCRIPTION)
+    );
     assert_eq!(
         parameters.required.as_ref(),
         Some(&vec!["task_name".to_string(), "message".to_string()])
@@ -117,11 +130,24 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    assert!(
+        properties
+            .get("fork_context")
+            .and_then(|schema| schema.description.as_deref())
+            .is_some_and(|description| description
+                .contains("The fork copies your current agent type, model, and reasoning effort"))
+    );
     assert_eq!(
         properties
             .get("model")
             .and_then(|schema| schema.description.as_deref()),
         Some(SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION)
+    );
+    assert_eq!(
+        properties
+            .get("reasoning_effort")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(SPAWN_AGENT_REASONING_EFFORT_OVERRIDE_DESCRIPTION)
     );
 }
 
@@ -156,7 +182,9 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("target")
             .and_then(|schema| schema.description.as_deref()),
-        Some("Relative or canonical task name to message (from spawn_agent).")
+        Some(
+            "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned non-watchdog agent."
+        )
     );
     assert_eq!(
         parameters.required.as_ref(),
@@ -194,6 +222,15 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     assert!(description.contains(
         "If interrupt=false and the target's turn has not completed, the message is queued"
     ));
+    assert!(description.contains("Watchdog check-ins may use target `parent`."));
+    assert_eq!(
+        properties
+            .get("target")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Agent id or canonical task name to message (from spawn_agent), or `parent` from a watchdog check-in."
+        )
+    );
     assert_eq!(
         properties
             .get("interrupt")
