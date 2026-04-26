@@ -1173,6 +1173,12 @@ impl Session {
         self.services.model_client.prompt_cache_key()
     }
 
+    pub(crate) fn response_continuation_for_fork(
+        &self,
+    ) -> Option<crate::client::ResponseContinuation> {
+        self.services.model_client.response_continuation_for_fork()
+    }
+
     /// Flush rollout writes and return the final durability-barrier result.
     pub(crate) async fn flush_rollout(&self) -> std::io::Result<()> {
         if let Some(live_thread) = self.live_thread() {
@@ -1869,6 +1875,7 @@ impl Session {
             .inject_response_items(vec![ResponseInputItem::Message {
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
+                phase: None,
             }])
             .await
             .is_err()
@@ -1965,6 +1972,7 @@ impl Session {
             .inject_response_items(vec![ResponseInputItem::Message {
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
+                phase: None,
             }])
             .await
             .is_err()

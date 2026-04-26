@@ -57,6 +57,8 @@ use tracing::warn;
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const WATCHDOG_BOOT_AGENT_STATUS_CALL_ID: &str = "synthetic_watchdog_agent_status";
+const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -533,22 +535,50 @@ impl AgentControl {
             })?;
 
         let is_watchdog_helper = is_watchdog_helper_source(&session_source);
-        let mut forked_rollout_items =
-            if is_watchdog_helper && matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
-                let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
-                    .await?
-                    .get_rollout_items();
-                full_history_fork_reference_items(rollout_path.clone(), source_items)
-            } else {
-                let mut items = RolloutRecorder::get_rollout_history(&rollout_path)
-                    .await?
-                    .get_rollout_items();
-                if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-                    items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
-                }
-                items
-            };
-        forked_rollout_items.retain(keep_forked_rollout_item);
+        let response_continuation = inherited_thread_state.response_continuation();
+        let use_response_continuation_baseline =
+            response_continuation.is_some() && matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        let mut forked_rollout_items = if let (Some(response_continuation), true) =
+            (&response_continuation, use_response_continuation_baseline)
+        {
+            let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+                .await?
+                .get_rollout_items();
+            let source_session_meta = source_items.into_iter().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta) => Some(meta),
+                RolloutItem::ForkReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            });
+            source_session_meta
+                .into_iter()
+                .map(RolloutItem::SessionMeta)
+                .chain(
+                    response_continuation
+                        .fork_baseline_input()
+                        .into_iter()
+                        .map(RolloutItem::ResponseItem),
+                )
+                .collect()
+        } else if is_watchdog_helper && matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
+            let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+                .await?
+                .get_rollout_items();
+            full_history_fork_reference_items(rollout_path.clone(), source_items)
+        } else {
+            let mut items = RolloutRecorder::get_rollout_history(&rollout_path)
+                .await?
+                .get_rollout_items();
+            if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
+                items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
+            }
+            items
+        };
+        if !use_response_continuation_baseline {
+            forked_rollout_items.retain(keep_forked_rollout_item);
+        }
         if is_watchdog_helper {
             forked_rollout_items.extend(
                 self.watchdog_boot_context_items(state, parent_thread_id)
@@ -1709,6 +1739,7 @@ async fn inherited_thread_state_for_source(
 
     InheritedThreadState::builder()
         .prompt_cache_key(parent_prompt_cache_key_for_source(state, session_source).await)
+        .response_continuation(parent_response_continuation_for_source(state, session_source).await)
         .mcp_tool_snapshot(parent_mcp_tool_snapshot_for_source(state, session_source).await)
         .app_server_client_metadata(
             parent_metadata
@@ -1719,6 +1750,39 @@ async fn inherited_thread_state_for_source(
                 .and_then(|metadata| metadata.client_version.clone()),
         )
         .build()
+}
+
+fn fork_previous_response_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
+        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+}
+
+fn fork_previous_response_id_value_enabled(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+async fn parent_response_continuation_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<crate::client::ResponseContinuation> {
+    if !fork_previous_response_id_enabled() {
+        return None;
+    }
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .and_then(|parent_thread| parent_thread.codex.session.response_continuation_for_fork())
 }
 
 async fn parent_mcp_tool_snapshot_for_source(

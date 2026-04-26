@@ -1,21 +1,38 @@
 use super::AuthRequestTelemetryContext;
+use super::LastResponse;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
+use super::ResponseContinuation;
+use super::ResponsesApiRequest;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
 use super::X_CODEX_TURN_METADATA_HEADER;
 use super::X_CODEX_WINDOW_ID_HEADER;
 use super::X_OPENAI_SUBAGENT_HEADER;
+use crate::client_common::Prompt;
+use crate::client_common::ResponseEvent;
 use codex_app_server_protocol::AuthMode;
 use codex_model_provider::BearerAuthProvider;
+use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use core_test_support::responses::WebSocketTestServer;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::start_websocket_server;
+use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -79,6 +96,200 @@ fn test_session_telemetry() -> SessionTelemetry {
         "test-terminal".to_string(),
         SessionSource::Cli,
     )
+}
+
+fn websocket_provider(server: &WebSocketTestServer) -> ModelProviderInfo {
+    ModelProviderInfo {
+        name: "mock-ws".into(),
+        base_url: Some(format!("{}/v1", server.uri())),
+        env_key: None,
+        env_key_instructions: None,
+        experimental_bearer_token: None,
+        auth: None,
+        aws: None,
+        wire_api: WireApi::Responses,
+        query_params: None,
+        http_headers: None,
+        env_http_headers: None,
+        request_max_retries: Some(0),
+        stream_max_retries: Some(0),
+        stream_idle_timeout_ms: Some(5_000),
+        websocket_connect_timeout_ms: None,
+        requires_openai_auth: false,
+        supports_websockets: true,
+    }
+}
+
+fn user_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".into(),
+        content: vec![ContentItem::InputText { text: text.into() }],
+        end_turn: None,
+        phase: None,
+    }
+}
+
+fn assistant_message_item(id: &str, text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: Some(id.to_string()),
+        role: "assistant".into(),
+        content: vec![ContentItem::OutputText { text: text.into() }],
+        end_turn: None,
+        phase: None,
+    }
+}
+
+fn reasoning_item(id: &str, text: &str) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: id.to_string(),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "summary".to_string(),
+        }],
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: text.to_string(),
+        }]),
+        encrypted_content: None,
+    }
+}
+
+fn previous_responses_request(
+    input: Vec<ResponseItem>,
+    prompt_cache_key: ThreadId,
+) -> ResponsesApiRequest {
+    ResponsesApiRequest {
+        model: "gpt-test".to_string(),
+        instructions: BaseInstructions::default().text,
+        input,
+        tools: Vec::new(),
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        include: Vec::new(),
+        service_tier: None,
+        prompt_cache_key: Some(prompt_cache_key.to_string()),
+        text: None,
+        client_metadata: Some(std::collections::HashMap::from([(
+            X_CODEX_INSTALLATION_ID_HEADER.to_string(),
+            "11111111-1111-4111-8111-111111111111".to_string(),
+        )])),
+    }
+}
+
+#[test]
+fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() {
+    let user_message = user_message_item("hello");
+    let old_reasoning = reasoning_item("rs-old", "old analysis");
+    let latest_reasoning = reasoning_item("rs-latest", "latest analysis");
+    let latest_message = assistant_message_item("msg-latest", "assistant output");
+    let response_continuation = ResponseContinuation {
+        request: previous_responses_request(
+            vec![user_message.clone(), old_reasoning],
+            ThreadId::new(),
+        ),
+        last_response: LastResponse {
+            response_id: "parent-resp".to_string(),
+            items_added: vec![latest_reasoning.clone(), latest_message.clone()],
+        },
+    }
+    .for_fork();
+
+    assert_eq!(
+        response_continuation.fork_baseline_input(),
+        vec![user_message, latest_reasoning, latest_message]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inherited_response_continuation_uses_previous_response_id_on_new_websocket() {
+    let server = start_websocket_server(vec![vec![vec![
+        ev_response_created("child-resp"),
+        ev_completed("child-resp"),
+    ]]])
+    .await;
+    let parent_input = [user_message_item("hello")];
+    let old_reasoning = reasoning_item("rs-old", "old analysis");
+    let parent_output = assistant_message_item("msg-1", "assistant output");
+    let child_delta = user_message_item("second");
+    let parent_prompt_cache_key = ThreadId::new();
+    let expected_prompt_cache_key = parent_prompt_cache_key.to_string();
+    let response_continuation = ResponseContinuation {
+        request: previous_responses_request(
+            vec![parent_input[0].clone(), old_reasoning],
+            parent_prompt_cache_key,
+        ),
+        last_response: LastResponse {
+            response_id: "parent-resp".to_string(),
+            items_added: vec![parent_output.clone()],
+        },
+    }
+    .for_fork();
+    let client = ModelClient::new_with_response_continuation(
+        /*auth_manager*/ None,
+        ThreadId::new(),
+        /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        /*prompt_cache_key_override*/ Some(parent_prompt_cache_key),
+        websocket_provider(&server),
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        /*model_verbosity*/ None,
+        /*enable_request_compression*/ false,
+        /*include_timing_metrics*/ false,
+        /*beta_features_header*/ None,
+        Some(response_continuation),
+    );
+    let mut client_session = client.new_session();
+    let prompt = Prompt {
+        input: vec![parent_input[0].clone(), parent_output, child_delta.clone()],
+        ..Prompt::default()
+    };
+
+    let mut stream = client_session
+        .stream(
+            &prompt,
+            &test_model_info(),
+            &test_session_telemetry(),
+            /*effort*/ None,
+            ReasoningSummary::Auto,
+            /*service_tier*/ None,
+            /*turn_metadata_header*/ None,
+            &codex_rollout_trace::InferenceTraceContext::disabled(),
+        )
+        .await
+        .expect("websocket stream failed");
+    while let Some(event) = stream.next().await {
+        if matches!(
+            event.expect("stream event"),
+            ResponseEvent::Completed { .. }
+        ) {
+            break;
+        }
+    }
+
+    let body = server
+        .single_connection()
+        .first()
+        .expect("missing websocket request")
+        .body_json();
+    assert_eq!(body["type"].as_str(), Some("response.create"));
+    assert_eq!(body["previous_response_id"].as_str(), Some("parent-resp"));
+    assert_eq!(
+        body["input"],
+        serde_json::to_value(vec![child_delta]).expect("serialize child delta")
+    );
+    assert_eq!(
+        body["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+
+    server.shutdown().await;
 }
 
 #[test]

@@ -6197,6 +6197,7 @@ async fn task_finish_emits_turn_item_lifecycle_for_leftover_pending_user_input()
         content: vec![ContentItem::InputText {
             text: "late pending input".to_string(),
         }],
+        phase: None,
     }])
     .await
     .expect("inject pending input into active turn");
@@ -6443,18 +6444,21 @@ async fn prepend_pending_input_keeps_older_tail_ahead_of_newer_input() {
         content: vec![ContentItem::InputText {
             text: "blocked queued prompt".to_string(),
         }],
+        phase: None,
     };
     let later = ResponseInputItem::Message {
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
             text: "later queued prompt".to_string(),
         }],
+        phase: None,
     };
     let newer = ResponseInputItem::Message {
         role: "user".to_string(),
         content: vec![ContentItem::InputText {
             text: "newer queued prompt".to_string(),
         }],
+        phase: None,
     };
 
     sess.inject_response_items(vec![blocked.clone(), later.clone()])
@@ -6485,6 +6489,7 @@ async fn queued_response_items_for_next_turn_move_into_next_active_turn() {
         content: vec![ContentItem::InputText {
             text: "queued before wake".to_string(),
         }],
+        phase: None,
     };
 
     sess.queue_response_items_for_next_turn(vec![queued_item.clone()])

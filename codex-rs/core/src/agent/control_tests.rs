@@ -147,6 +147,23 @@ fn full_history_fork_reference_items_omits_copied_parent_items() {
 }
 
 #[test]
+fn fork_previous_response_id_env_value_parses_truthy_values() {
+    for value in ["1", "true", "TRUE", "yes", "on"] {
+        assert!(
+            fork_previous_response_id_value_enabled(value),
+            "{value} should enable previous response forking"
+        );
+    }
+
+    for value in ["", "0", "false", "off", "no", "enabled"] {
+        assert!(
+            !fork_previous_response_id_value_enabled(value),
+            "{value} should not enable previous response forking"
+        );
+    }
+}
+
+#[test]
 fn watchdog_boot_agent_status_uses_wait_agent_shape() {
     let owner_thread_id =
         ThreadId::from_string("019db21c-95ee-7561-905d-eb01e02525e0").expect("valid thread id");
