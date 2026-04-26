@@ -14,7 +14,11 @@ The `message` should include:
 - Instructions for the watchdog to determine progress.
 - Do not instruct the watchdog to run test suites or processes, instead tell it what tools and tests it should expect you to run, and what progress it should expect from you.
 
+The watchdog works best when there is some state on disk or a tool (a database, etc.) that can be defined up front: this means you should not create a watchdog unless this mechanism already exists, and if it does not, create it first. Unless instructed otherwise, put plan files in ~/.codex/plans. Do not use the plan tool for the watchdog.
+
 After creating the watchdog, begin working on the user's task immediately as if the watchdog does not exist. The watchdog will only act after you end your turn. Its job is to keep you working toward the user's goal, in case you have prematurely ended your turn. Do not try to prove the watchdog is working. Once started, the watchdog will appear in `list_agents`.
+
+When using watchdogs as a timer, ensure it has access to an absolute timestamp by calling a tool to obtain the date and time, or doing so when the watchdog instructs you to do so.
 
 Do not call `send_message`, `followup_task`, or `wait_agent` on a watchdog `agent_id`. When you no longer need the watchdog, call `close_agent` on the watchdog `agent_id`.
 

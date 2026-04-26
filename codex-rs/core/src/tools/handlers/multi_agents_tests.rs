@@ -594,6 +594,61 @@ async fn multi_agent_v2_spawn_defaults_to_full_fork_and_ignores_child_model_over
 }
 
 #[tokio::test]
+async fn multi_agent_v2_spawn_watchdog_role_returns_inert_handle_and_ignores_fork_turns() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    turn.config = Arc::new(config);
+
+    let output = SpawnAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "check in later",
+                "task_name": "watchdog",
+                "agent_type": "watchdog",
+                "fork_turns": "ignored for watchdogs"
+            })),
+        ))
+        .await
+        .expect("watchdog spawn should ignore fork_turns and succeed");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    assert_eq!(result["task_name"], "/root/watchdog");
+
+    let watchdog_id = manager
+        .captured_ops()
+        .into_iter()
+        .filter_map(|(thread_id, op)| (thread_id != root.thread_id).then_some((thread_id, op)))
+        .find_map(|(thread_id, op)| (op == Op::Interrupt).then_some(thread_id))
+        .expect("watchdog handle should receive only an inert interrupt");
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        agent_control.get_status(watchdog_id).await,
+        AgentStatus::Running
+    );
+    assert!(agent_control.is_watchdog_handle(watchdog_id).await);
+}
+
+#[tokio::test]
 async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_override(&mut turn).await;
