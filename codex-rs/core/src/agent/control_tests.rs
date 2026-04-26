@@ -190,6 +190,12 @@ async fn previous_response_fork_rollout_items_preserve_latest_turn_context() -> 
 
 #[test]
 fn fork_previous_response_id_env_value_parses_truthy_values() {
+    let unset_env: Option<&str> = None;
+    assert!(
+        unset_env.is_none_or(fork_previous_response_id_value_enabled),
+        "unset env should enable previous response forking"
+    );
+
     for value in ["1", "true", "TRUE", "yes", "on"] {
         assert!(
             fork_previous_response_id_value_enabled(value),

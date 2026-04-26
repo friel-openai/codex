@@ -1773,7 +1773,9 @@ async fn inherited_thread_state_for_source(
 
 fn fork_previous_response_id_enabled() -> bool {
     std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
-        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+        .ok()
+        .as_deref()
+        .is_none_or(fork_previous_response_id_value_enabled)
 }
 
 fn fork_previous_response_id_value_enabled(value: &str) -> bool {
