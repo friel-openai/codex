@@ -445,6 +445,7 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
             request,
             ResponsesOptions {
                 conversation_id: Some("sess_123".into()),
+                prompt_cache_key: Some("prompt_cache_123".into()),
                 session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
                 extra_headers,
                 compression: Compression::None,
@@ -459,6 +460,12 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
 
     assert_eq!(
         req.headers.get("session_id").and_then(|v| v.to_str().ok()),
+        Some("prompt_cache_123")
+    );
+    assert_eq!(
+        req.headers
+            .get("x-client-request-id")
+            .and_then(|v| v.to_str().ok()),
         Some("sess_123")
     );
     assert_eq!(
