@@ -165,6 +165,7 @@ mod status_indicator_widget;
 mod streaming;
 mod style;
 mod subagent_panel;
+mod terminal_multiplexer;
 mod terminal_palette;
 mod terminal_title;
 mod text_formatting;
