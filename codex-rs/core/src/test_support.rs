@@ -110,6 +110,7 @@ pub fn models_manager_with_provider(
         codex_home,
         /*config_model_catalog*/ None,
         Default::default(),
+        Default::default(),
     )
 }
 

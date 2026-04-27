@@ -458,7 +458,7 @@ impl ModelClient {
             prompt.output_schema_strict,
         );
         let payload = ApiCompactionInput {
-            model: &model_info.slug,
+            model: model_info.request_model_slug(),
             input: &input,
             instructions: &instructions,
             tools,
@@ -544,7 +544,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
 
         let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             raw_memories,
             reasoning: effort.map(|effort| Reasoning {
                 effort: Some(effort),
@@ -879,7 +879,7 @@ impl ModelClientSession {
         );
         let prompt_cache_key = Some(self.client.state.conversation_id.to_string());
         let request = ResponsesApiRequest {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             instructions: instructions.clone(),
             input,
             tools,

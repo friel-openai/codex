@@ -38,6 +38,7 @@ pub(crate) fn static_model_catalog() -> ModelsResponse {
 fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
     ModelInfo {
         slug: GPT_5_4_CMB_MODEL_ID.to_string(),
+        request_model: None,
         display_name: "gpt-5.4".to_string(),
         description: Some("Strong model for everyday coding.".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
@@ -74,6 +75,7 @@ fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
 fn bedrock_oss_model(slug: &str, display_name: &str, priority: i32) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
+        request_model: None,
         display_name: display_name.to_string(),
         description: Some(display_name.to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
@@ -163,6 +165,20 @@ mod tests {
         assert_eq!(
             cmb_model.supported_reasoning_levels,
             gpt_5_4_cmb_reasoning_levels()
+        );
+    }
+
+    #[test]
+    fn catalog_models_use_their_slugs_as_request_models() {
+        let catalog = static_model_catalog();
+
+        assert_eq!(
+            catalog
+                .models
+                .iter()
+                .map(|model| model.request_model.as_deref())
+                .collect::<Vec<_>>(),
+            vec![None, None, None]
         );
     }
 }

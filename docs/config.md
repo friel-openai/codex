@@ -66,6 +66,25 @@ Codex can run a notification hook when the agent finishes a turn. See the config
 
 When Codex knows which client started the turn, the legacy notify JSON payload also includes a top-level `client` field. The TUI reports `codex-tui`, and the app server reports the `clientInfo.name` value from `initialize`.
 
+## Custom Models
+
+Use `custom_models` to add model aliases to the model picker while keeping a
+different provider-facing model slug on API requests. Each entry needs a
+user-facing `name` and a request `model`; optional token limits override the
+metadata Codex would otherwise infer for that model.
+
+```toml
+[[custom_models]]
+name = "frontier-local"
+model = "gpt-5.4"
+model_context_window = 123456
+model_auto_compact_token_limit = 100000
+```
+
+Custom model names must be unique. When an alias is selected, Codex displays the
+alias but sends the configured `model` value to the provider.
+
+
 ## JSON Schema
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
