@@ -44,6 +44,8 @@ use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -225,6 +227,10 @@ impl AgentControl {
                     .prompt_cache_key(
                         parent_prompt_cache_key_for_source(&state, Some(&session_source)).await,
                     )
+                    .response_continuation(
+                        parent_response_continuation_for_source(&state, Some(&session_source))
+                            .await,
+                    )
                     .mcp_tool_snapshot(
                         parent_mcp_tool_snapshot_for_source(&state, Some(&session_source)).await,
                     )
@@ -394,47 +400,65 @@ impl AgentControl {
                 ))
             })?;
 
-        let mut forked_rollout_items = RolloutRecorder::get_rollout_history(&rollout_path)
-            .await?
-            .get_rollout_items();
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
-        }
-        // MultiAgentV2 root/subagent usage hints are injected as standalone developer
-        // messages at thread start. When forking history, drop hints from the parent
-        // so the child gets a fresh hint that matches its own session source/config.
-        let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
-            if let Some(parent_thread) = parent_thread.as_ref() {
-                parent_thread
-                    .codex
-                    .session
-                    .configured_multi_agent_v2_usage_hint_texts()
-                    .await
-            } else if config.features.enabled(Feature::MultiAgentV2) {
-                [
-                    config.multi_agent_v2.root_agent_usage_hint_text.clone(),
-                    config.multi_agent_v2.subagent_usage_hint_text.clone(),
-                ]
-                .into_iter()
-                .flatten()
-                .collect()
-            } else {
-                Vec::new()
-            };
-        forked_rollout_items.retain(|item| {
-            if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = item
-                && role == "developer"
-                && let [ContentItem::InputText { text }] = content.as_slice()
-                && multi_agent_v2_usage_hint_texts_to_filter
-                    .iter()
-                    .any(|usage_hint_text| usage_hint_text == text)
-            {
-                return false;
+        let response_continuation = inherited_thread_state.response_continuation();
+        let use_response_continuation_baseline =
+            response_continuation.is_some() && matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        let mut forked_rollout_items = if let (Some(response_continuation), true) =
+            (&response_continuation, use_response_continuation_baseline)
+        {
+            let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+                .await?
+                .get_rollout_items();
+            previous_response_fork_rollout_items(
+                source_items,
+                response_continuation.fork_baseline_input(),
+            )
+        } else {
+            let mut items = RolloutRecorder::get_rollout_history(&rollout_path)
+                .await?
+                .get_rollout_items();
+            if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
+                items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
             }
+            items
+        };
+        if !use_response_continuation_baseline {
+            // MultiAgentV2 root/subagent usage hints are injected as standalone developer
+            // messages at thread start. When forking history, drop hints from the parent
+            // so the child gets a fresh hint that matches its own session source/config.
+            let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
+                if let Some(parent_thread) = parent_thread.as_ref() {
+                    parent_thread
+                        .codex
+                        .session
+                        .configured_multi_agent_v2_usage_hint_texts()
+                        .await
+                } else if config.features.enabled(Feature::MultiAgentV2) {
+                    [
+                        config.multi_agent_v2.root_agent_usage_hint_text.clone(),
+                        config.multi_agent_v2.subagent_usage_hint_text.clone(),
+                    ]
+                    .into_iter()
+                    .flatten()
+                    .collect()
+                } else {
+                    Vec::new()
+                };
+            forked_rollout_items.retain(|item| {
+                if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) =
+                    item
+                    && role == "developer"
+                    && let [ContentItem::InputText { text }] = content.as_slice()
+                    && multi_agent_v2_usage_hint_texts_to_filter
+                        .iter()
+                        .any(|usage_hint_text| usage_hint_text == text)
+                {
+                    return false;
+                }
 
-            keep_forked_rollout_item(item)
-        });
+                keep_forked_rollout_item(item)
+            });
+        }
 
         state
             .fork_thread_with_source(
@@ -1223,6 +1247,37 @@ async fn parent_prompt_cache_key_for_source(
         .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
 }
 
+fn previous_response_fork_rollout_items(
+    source_items: Vec<RolloutItem>,
+    baseline_input: Vec<ResponseItem>,
+) -> Vec<RolloutItem> {
+    let source_session_meta = source_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let latest_turn_context = source_items.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => Some(turn_context.clone()),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::SessionMeta(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+
+    source_session_meta
+        .into_iter()
+        .map(RolloutItem::SessionMeta)
+        .chain(baseline_input.into_iter().map(RolloutItem::ResponseItem))
+        .chain(
+            latest_turn_context
+                .into_iter()
+                .map(RolloutItem::TurnContext),
+        )
+        .collect()
+}
+
 async fn parent_mcp_tool_snapshot_for_source(
     state: &Arc<ThreadManagerState>,
     session_source: Option<&SessionSource>,
@@ -1245,6 +1300,39 @@ async fn parent_mcp_tool_snapshot_for_source(
         .list_all_tools()
         .await;
     Some(McpToolSnapshot { tools })
+}
+
+fn fork_previous_response_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
+        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+}
+
+fn fork_previous_response_id_value_enabled(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+async fn parent_response_continuation_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<crate::client::ResponseContinuation> {
+    if !fork_previous_response_id_enabled() {
+        return None;
+    }
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .and_then(|parent_thread| parent_thread.codex.session.response_continuation_for_fork())
 }
 
 fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {

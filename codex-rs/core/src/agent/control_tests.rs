@@ -78,6 +78,57 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     }
 }
 
+#[test]
+fn fork_previous_response_id_env_value_parses_truthy_values() {
+    for value in ["1", "true", "TRUE", "yes", "on"] {
+        assert!(
+            fork_previous_response_id_value_enabled(value),
+            "{value} should enable previous response forking"
+        );
+    }
+
+    for value in ["", "0", "false", "off", "no", "enabled"] {
+        assert!(
+            !fork_previous_response_id_value_enabled(value),
+            "{value} should not enable previous response forking"
+        );
+    }
+}
+
+#[tokio::test]
+async fn previous_response_fork_rollout_items_preserve_latest_turn_context() {
+    let harness = AgentControlHarness::new().await;
+    let (_thread_id, owner_thread) = harness.start_thread().await;
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    let mut first_turn_context = owner_turn.to_turn_context_item();
+    first_turn_context.model = "first-model".to_string();
+    let mut latest_turn_context = first_turn_context.clone();
+    latest_turn_context.model = "latest-model".to_string();
+
+    let baseline_item = assistant_message(
+        "parent final from previous response",
+        Some(MessagePhase::FinalAnswer),
+    );
+    let items = previous_response_fork_rollout_items(
+        vec![
+            RolloutItem::TurnContext(first_turn_context),
+            RolloutItem::ResponseItem(assistant_message(
+                "parent rollout item should not be copied",
+                Some(MessagePhase::FinalAnswer),
+            )),
+            RolloutItem::TurnContext(latest_turn_context.clone()),
+        ],
+        vec![baseline_item.clone()],
+    );
+
+    assert_eq!(items.len(), 2);
+    assert_matches!(&items[0], RolloutItem::ResponseItem(item) if *item == baseline_item);
+    assert_matches!(
+        &items[1],
+        RolloutItem::TurnContext(turn_context) if turn_context.model == latest_turn_context.model
+    );
+}
+
 fn spawn_agent_call(call_id: &str) -> ResponseItem {
     ResponseItem::FunctionCall {
         id: None,
