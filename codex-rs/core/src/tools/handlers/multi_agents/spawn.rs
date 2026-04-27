@@ -134,20 +134,23 @@ impl ToolHandler for Handler {
                 status: session.services.agent_control.get_status(thread_id).await,
             })
         } else {
-            Box::pin(session.services.agent_control.spawn_agent_with_metadata(
-                config,
-                input_items,
-                Some(spawn_source),
-                SpawnAgentOptions {
-                    fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
-                    environments: Some(
-                        turn.environments
-                            .iter()
-                            .map(TurnEnvironment::selection)
-                            .collect(),
-                    ),
-                },
-            ))
+            Box::pin(
+                session.services.agent_control.spawn_agent_with_metadata(
+                    config,
+                    input_items,
+                    Some(spawn_source),
+                    SpawnAgentOptions {
+                        fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                        fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+                        environments: Some(
+                            turn.environments
+                                .iter()
+                                .map(TurnEnvironment::selection)
+                                .collect(),
+                        ),
+                    },
+                ),
+            )
             .await
         }
         .map_err(collab_spawn_error);

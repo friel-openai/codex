@@ -403,6 +403,7 @@ async fn watchdog_spawns_helper_after_owner_completes() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -485,6 +486,7 @@ async fn watchdog_helper_forks_owner_history() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -542,7 +544,7 @@ async fn watchdog_helper_forks_owner_history() {
         } if call_id == "synthetic_watchdog_tool_search" => {
             let rendered = serde_json::to_string(tools).expect("tools should serialize");
             rendered.contains("compact_parent_context")
-                && rendered.contains("watchdog_self_close")
+                && rendered.contains("close_self")
                 && rendered.contains("snooze")
         }
         _ => false,
@@ -600,6 +602,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -644,6 +647,7 @@ async fn watchdog_forwards_completed_helper_without_waiting_for_interval() {
                 last_agent_message: Some("ping 5 (5)".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -711,6 +715,7 @@ async fn watchdog_snooze_delays_next_helper_and_resumes_after_delay() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -833,6 +838,7 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
                 last_agent_message: Some("root done".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -877,6 +883,7 @@ async fn watchdog_plain_goodbye_final_message_closes_handle() {
                 last_agent_message: Some("goodbye".to_string()),
                 completed_at: None,
                 duration_ms: None,
+                time_to_first_token_ms: None,
             }),
         )
         .await;
@@ -1244,6 +1251,37 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 }
 
 #[tokio::test]
+async fn spawn_agent_fork_rejects_missing_parent_spawn_call_id_for_non_watchdogs() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+
+    let err = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect_err("forked worker spawns should require the parent spawn call id");
+
+    assert_eq!(
+        err.to_string(),
+        "Fatal error: spawn_agent fork requires a parent spawn call id"
+    );
+}
+
+#[tokio::test]
 async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
@@ -1338,6 +1376,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1431,6 +1470,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -1540,6 +1580,7 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
                 agent_role: None,
             })),
             SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::LastNTurns(2)),
                 ..Default::default()
             },

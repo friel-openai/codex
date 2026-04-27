@@ -163,7 +163,10 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const MAX_MULTI_AGENT_V2_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
+pub(crate) const DEFAULT_WATCHDOG_INTERVAL_S: i64 = 60;
 const LOCAL_DEV_BUILD_VERSION: &str = "0.0.0";
+const WATCHDOG_ROLE_DESCRIPTION: &str =
+    "Creates an idle-time watchdog handle instead of a normal worker.";
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -2241,9 +2244,33 @@ impl Config {
         let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg, &config_profile);
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
-        let agent_roles =
+        let mut agent_roles =
             agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
                 .await?;
+        if let Some(watchdog_interval_s) = cfg.watchdog_interval_s {
+            if watchdog_interval_s <= 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "watchdog_interval_s must be greater than zero",
+                ));
+            }
+            for role in agent_roles.values_mut() {
+                if role.watchdog_interval_s.is_some() {
+                    role.watchdog_interval_s = Some(watchdog_interval_s);
+                }
+            }
+            agent_roles
+                .entry("watchdog".to_string())
+                .and_modify(|role| {
+                    role.watchdog_interval_s = Some(watchdog_interval_s);
+                })
+                .or_insert_with(|| AgentRoleConfig {
+                    description: Some(WATCHDOG_ROLE_DESCRIPTION.to_string()),
+                    config_file: None,
+                    nickname_candidates: None,
+                    watchdog_interval_s: Some(watchdog_interval_s),
+                });
+        }
 
         let openai_base_url = cfg
             .openai_base_url

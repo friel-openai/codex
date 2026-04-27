@@ -26,6 +26,8 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -37,7 +39,7 @@ use codex_protocol::user_input::UserInput;
 use codex_rollout::state_db;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_tools::create_compact_parent_context_tool;
-use codex_tools::create_watchdog_self_close_tool;
+use codex_tools::create_watchdog_close_self_tool;
 use codex_tools::create_watchdog_snooze_tool;
 use codex_tools::create_watchdog_tools_namespace;
 use serde::Serialize;
@@ -63,6 +65,7 @@ pub(crate) enum SpawnAgentForkMode {
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct SpawnAgentOptions {
+    pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
 }
@@ -167,7 +170,7 @@ fn unix_timestamp_seconds() -> u64 {
 fn synthetic_watchdog_tool_search_items() -> Vec<RolloutItem> {
     let namespace = create_watchdog_tools_namespace(vec![
         create_compact_parent_context_tool(),
-        create_watchdog_self_close_tool(),
+        create_watchdog_close_self_tool(),
         create_watchdog_snooze_tool(),
     ]);
     let Ok(namespace) = serde_json::to_value(namespace) else {
@@ -460,6 +463,13 @@ impl AgentControl {
         inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     ) -> CodexResult<crate::thread_manager::NewThread> {
+        if options.fork_parent_spawn_call_id.is_none()
+            && !is_watchdog_helper_source(&session_source)
+        {
+            return Err(CodexErr::Fatal(
+                "spawn_agent fork requires a parent spawn call id".to_string(),
+            ));
+        }
         let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
@@ -952,6 +962,36 @@ impl AgentControl {
             .await
     }
 
+    pub(crate) async fn finish_watchdog_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let Some(watchdogs) = self.watchdogs.as_ref() else {
+            return false;
+        };
+        watchdogs.finish_active_helper(helper_thread_id).await
+    }
+
+    pub(crate) async fn finish_watchdog_helper_thread(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        if let Ok(thread) = state.get_thread(agent_id).await {
+            if let Some(state_db_ctx) = thread.state_db()
+                && let Err(err) = state_db_ctx
+                    .set_thread_spawn_edge_status(
+                        agent_id,
+                        DirectionalThreadSpawnEdgeStatus::Closed,
+                    )
+                    .await
+            {
+                warn!("failed to persist thread-spawn edge status for {agent_id}: {err}");
+            }
+            thread.codex.session.flush_rollout().await?;
+        }
+        let _ = state.remove_thread(&agent_id).await;
+        self.state.release_spawned_thread(agent_id);
+        Ok(())
+    }
+
     fn watchdog_manager(&self) -> CodexResult<&Arc<WatchdogManager>> {
         self.watchdogs.as_ref().ok_or_else(|| {
             CodexErr::UnsupportedOperation("watchdog manager unavailable".to_string())
@@ -1000,7 +1040,8 @@ impl AgentControl {
         let Ok(thread) = state.get_thread(agent_id).await else {
             return AgentStatus::NotFound;
         };
-        thread.agent_status().await
+        self.reported_agent_status(agent_id, thread.agent_status().await)
+            .await
     }
 
     pub(crate) fn register_session_root(
@@ -1132,7 +1173,9 @@ impl AgentControl {
         {
             agents.push(ListedAgent {
                 agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
+                agent_status: self
+                    .reported_agent_status(root_thread_id, root_thread.agent_status().await)
+                    .await,
                 last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
             });
         }
@@ -1167,12 +1210,53 @@ impl AgentControl {
             let last_task_message = metadata.last_task_message.clone();
             agents.push(ListedAgent {
                 agent_name,
-                agent_status: thread.agent_status().await,
+                agent_status: self
+                    .reported_agent_status(thread_id, thread.agent_status().await)
+                    .await,
                 last_task_message,
             });
         }
 
         Ok(agents)
+    }
+
+    async fn reported_agent_status(&self, agent_id: ThreadId, status: AgentStatus) -> AgentStatus {
+        if matches!(status, AgentStatus::PendingInit)
+            && let Some(watchdogs) = self.watchdogs.as_ref()
+            && watchdogs.is_watchdog_handle(agent_id).await
+        {
+            return AgentStatus::Running;
+        }
+        status
+    }
+
+    pub(crate) async fn send_watchdog_close_event(
+        &self,
+        owner_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        receiver_agent_nickname: Option<String>,
+        receiver_agent_role: Option<String>,
+        status: AgentStatus,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let owner_thread = state.get_thread(owner_thread_id).await?;
+        owner_thread
+            .codex
+            .session
+            .send_event_raw(Event {
+                id: format!("watchdog-close-{target_thread_id}"),
+                msg: CollabCloseEndEvent {
+                    call_id: format!("watchdog-close-{target_thread_id}"),
+                    sender_thread_id: owner_thread_id,
+                    receiver_thread_id: target_thread_id,
+                    receiver_agent_nickname,
+                    receiver_agent_role,
+                    status,
+                }
+                .into(),
+            })
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn compact_parent_for_watchdog_helper(

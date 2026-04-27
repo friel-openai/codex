@@ -389,6 +389,7 @@ impl WatchdogManager {
                 },
                 Some(session_source),
                 SpawnAgentOptions {
+                    fork_parent_spawn_call_id: None,
                     fork_mode: Some(SpawnAgentForkMode::FullHistory),
                     environments: None,
                 },
@@ -528,6 +529,25 @@ impl WatchdogManager {
             target_thread_id,
             delay_seconds,
         })
+    }
+
+    pub(crate) async fn finish_active_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let found = {
+            let mut registrations = self.registrations.lock().await;
+            let Some(entry) = registrations
+                .values_mut()
+                .find(|entry| entry.active_helper_id == Some(helper_thread_id))
+            else {
+                return false;
+            };
+            entry.active_helper_id = None;
+            true
+        };
+        self.suppressed_helpers
+            .lock()
+            .await
+            .insert(helper_thread_id);
+        found
     }
 
     async fn update_after_spawn(
