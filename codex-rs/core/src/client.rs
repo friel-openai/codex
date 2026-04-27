@@ -549,7 +549,7 @@ impl ModelClient {
             prompt.output_schema_strict,
         );
         let payload = ApiCompactionInput {
-            model: &model_info.slug,
+            model: model_info.request_model_slug(),
             input: &input,
             instructions: &instructions,
             tools,
@@ -635,7 +635,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
 
         let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             raw_memories,
             reasoning: effort.map(|effort| Reasoning {
                 effort: Some(effort),
@@ -975,7 +975,7 @@ impl ModelClientSession {
         );
         let prompt_cache_key = Some(self.client.prompt_cache_key().to_string());
         let request = ResponsesApiRequest {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             instructions: instructions.clone(),
             input,
             tools,
@@ -1767,6 +1767,8 @@ fn map_response_stream(
     api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
+    client_state: Option<Arc<ModelClientState>>,
+    request: Option<ResponsesApiRequest>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -1781,6 +1783,8 @@ fn map_response_stream(
         api_stream,
         session_telemetry,
         inference_trace_attempt,
+        client_state,
+        request,
     )
 }
 
