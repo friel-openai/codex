@@ -993,7 +993,8 @@ fn thread_fork_params_from_config(
         model_provider: Some(config.model_provider_id.clone()),
         cwd: Some(config.cwd.to_string_lossy().to_string()),
         approval_policy: Some(config.permissions.approval_policy.value().into()),
-        sandbox: sandbox_mode_from_policy(config.permissions.sandbox_policy.get()),
+        sandbox: None,
+        permission_profile: Some(config.permissions.permission_profile().into()),
         ..ThreadForkParams::default()
     }
 }
@@ -1066,6 +1067,7 @@ fn session_configured_from_thread_fork_response(
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
         response.sandbox.to_core(),
+        response.permission_profile.clone().map(Into::into),
         response.cwd.clone(),
         response.reasoning_effort,
     )
