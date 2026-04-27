@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: screen
+---
+
+• Subagents (0s • no subagents running • esc to interrupt)
+• [#1] [watchdog] watch-buildpando-rpc-context-tracing-spike idle — Watch /build/pando-rpc-context-tracing-spike work on Pando RPC
+accounting tracing spike. Goal: end-to-end no-expl...
+
+
+› Ask Codex to do anything
+
+  gpt-5.3-codex default · /tmp/project

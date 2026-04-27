@@ -27,6 +27,8 @@ use crate::render::line_utils::line_to_static;
 use crate::render::line_utils::prefix_lines;
 use crate::render::line_utils::push_owned_lines;
 use crate::render::renderable::Renderable;
+use crate::shimmer::shimmer_spans;
+use crate::status_indicator_widget::fmt_elapsed_compact;
 use crate::style::proposed_plan_style;
 use crate::style::user_message_style;
 #[cfg(test)]
@@ -62,6 +64,7 @@ use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::PlanItemArg;
 use codex_protocol::plan_tool::StepStatus;
 use codex_protocol::plan_tool::UpdatePlanArgs;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::McpAuthStatus;
@@ -88,6 +91,8 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use std::time::Instant;
 use tracing::error;
@@ -553,6 +558,188 @@ impl PlainHistoryCell {
 impl HistoryCell for PlainHistoryCell {
     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
         self.lines.clone()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentPanelAgent {
+    pub(crate) ordinal: i32,
+    pub(crate) name: String,
+    pub(crate) status: AgentStatus,
+    pub(crate) is_watchdog: bool,
+    pub(crate) preview: String,
+    pub(crate) latest_update_at: Instant,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentPanelState {
+    pub(crate) started_at: Instant,
+    pub(crate) total_agents: i32,
+    pub(crate) running_count: i32,
+    pub(crate) running_agents: Vec<SubagentPanelAgent>,
+}
+
+impl SubagentPanelState {
+    pub(crate) fn has_animating_agents(&self, now: Instant) -> bool {
+        self.running_agents
+            .iter()
+            .any(|agent| should_subagent_panel_shimmer(agent, now))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SubagentStatusCell {
+    state: Arc<Mutex<SubagentPanelState>>,
+    animations_enabled: bool,
+}
+
+impl SubagentStatusCell {
+    pub(crate) fn new(
+        state: Arc<Mutex<SubagentPanelState>>,
+        animations_enabled: bool,
+    ) -> SubagentStatusCell {
+        SubagentStatusCell {
+            state,
+            animations_enabled,
+        }
+    }
+}
+
+impl HistoryCell for SubagentStatusCell {
+    fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
+        let state = {
+            let guard = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.clone()
+        };
+        if state.running_agents.is_empty() {
+            return Vec::new();
+        }
+
+        let elapsed = fmt_elapsed_compact(state.started_at.elapsed().as_secs());
+        let total_agents = state.total_agents.max(state.running_count);
+        let count_label = subagent_count_label(total_agents, state.running_count);
+        let header_suffix = format!("({elapsed} • {count_label} • esc to interrupt)");
+
+        let mut lines = Vec::new();
+        lines.push(Line::from(vec![
+            "• ".dim(),
+            "Subagents".bold(),
+            " ".into(),
+            header_suffix.dim(),
+        ]));
+
+        let mut running_agents = state.running_agents;
+        running_agents.sort_by_key(|agent| agent.ordinal);
+        let preview_budget = running_preview_budget(width);
+        let now = Instant::now();
+        lines.extend(running_agents.into_iter().map(|agent| {
+            let preview = truncate_text(agent.preview.trim(), preview_budget);
+            let mut spans: Vec<Span<'static>> =
+                vec!["• ".dim(), format!("[#{}] ", agent.ordinal).dim()];
+            if agent.is_watchdog {
+                spans.push("[watchdog] ".magenta().dim());
+            }
+            spans.push(Span::from(agent.name.clone()));
+            spans.push(" ".into());
+            spans.push(status_span_for_subagent_panel(&agent));
+            spans.push(" — ".dim());
+            if self.animations_enabled && should_subagent_panel_shimmer(&agent, now) {
+                spans.extend(shimmer_spans(&preview));
+            } else {
+                spans.push(Span::from(preview));
+            }
+            Line::from(spans)
+        }));
+
+        lines
+    }
+
+    fn transcript_animation_tick(&self) -> Option<u64> {
+        if !self.animations_enabled {
+            return None;
+        }
+        let guard = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let now = Instant::now();
+        if !guard.has_animating_agents(now) {
+            return None;
+        }
+        Some((now.duration_since(guard.started_at).as_millis() / 100) as u64)
+    }
+}
+
+impl Renderable for SubagentStatusCell {
+    fn render(&self, area: Rect, buf: &mut Buffer) {
+        let lines = self.display_lines(area.width);
+        let paragraph = Paragraph::new(Text::from(lines)).wrap(Wrap { trim: false });
+        let y = if area.height == 0 {
+            0
+        } else {
+            let overflow = paragraph
+                .line_count(area.width)
+                .saturating_sub(usize::from(area.height));
+            u16::try_from(overflow).unwrap_or(u16::MAX)
+        };
+        paragraph.scroll((y, 0)).render(area, buf);
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        HistoryCell::desired_height(self, width)
+    }
+}
+
+fn running_preview_budget(width: u16) -> usize {
+    let width = width as usize;
+    width.saturating_sub(24).clamp(60, 160)
+}
+
+fn is_running_agent_status(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+}
+
+fn status_span_for_subagent_panel(agent: &SubagentPanelAgent) -> Span<'static> {
+    match &agent.status {
+        AgentStatus::PendingInit if agent.is_watchdog => "idle".dim(),
+        AgentStatus::PendingInit | AgentStatus::Running => "running".cyan().bold(),
+        AgentStatus::Interrupted => "interrupted".magenta(),
+        AgentStatus::Completed(_) => "completed".green(),
+        AgentStatus::Errored(_) => "errored".red(),
+        AgentStatus::Shutdown => "shutdown".dim(),
+        AgentStatus::NotFound => "not found".red(),
+    }
+}
+
+const SUBAGENT_SHIMMER_WINDOW: Duration = Duration::from_secs(1);
+
+fn should_subagent_panel_shimmer(agent: &SubagentPanelAgent, now: Instant) -> bool {
+    if agent.is_watchdog && matches!(agent.status, AgentStatus::PendingInit) {
+        return false;
+    }
+    is_running_agent_status(&agent.status)
+        && now.saturating_duration_since(agent.latest_update_at) <= SUBAGENT_SHIMMER_WINDOW
+}
+
+fn subagent_count_label(total: i32, running: i32) -> String {
+    if total <= 0 || running <= 0 {
+        return "no subagents running".to_string();
+    }
+    let total_label = subagent_pluralize(total, "subagent");
+    if running >= total {
+        return format!("{total_label} running");
+    }
+    format!("{total_label}, {running} running")
+}
+
+fn subagent_pluralize(count: i32, singular: &str) -> String {
+    if count == 1 {
+        format!("1 {singular}")
+    } else {
+        format!("{count} {singular}s")
     }
 }
 
@@ -3129,6 +3316,48 @@ mod tests {
 
     fn render_transcript(cell: &dyn HistoryCell) -> Vec<String> {
         render_lines(&cell.transcript_lines(u16::MAX))
+    }
+
+    #[test]
+    fn subagent_panel_renders_watchdog_handle_as_idle() {
+        let state = Arc::new(Mutex::new(SubagentPanelState {
+            started_at: Instant::now(),
+            total_agents: 1,
+            running_count: 0,
+            running_agents: vec![SubagentPanelAgent {
+                ordinal: 1,
+                name: "watchdog-agent".to_string(),
+                status: AgentStatus::PendingInit,
+                is_watchdog: true,
+                preview: "monitor parent progress".to_string(),
+                latest_update_at: Instant::now(),
+            }],
+        }));
+        let cell = SubagentStatusCell::new(state, /*animations_enabled*/ true);
+        let lines = render_lines(&cell.display_lines(/*width*/ 120));
+
+        assert!(lines[0].contains("no subagents running"));
+        assert!(lines[1].contains("[watchdog] watchdog-agent idle"));
+    }
+
+    #[test]
+    fn subagent_panel_animation_tick_ignores_idle_watchdogs() {
+        let state = Arc::new(Mutex::new(SubagentPanelState {
+            started_at: Instant::now(),
+            total_agents: 1,
+            running_count: 0,
+            running_agents: vec![SubagentPanelAgent {
+                ordinal: 1,
+                name: "watchdog-agent".to_string(),
+                status: AgentStatus::PendingInit,
+                is_watchdog: true,
+                preview: "monitor parent progress".to_string(),
+                latest_update_at: Instant::now(),
+            }],
+        }));
+        let cell = SubagentStatusCell::new(state, /*animations_enabled*/ true);
+
+        assert_eq!(cell.transcript_animation_tick(), None);
     }
 
     fn image_block(data: &str) -> serde_json::Value {

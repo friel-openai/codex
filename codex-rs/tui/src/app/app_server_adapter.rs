@@ -82,6 +82,8 @@ use codex_protocol::protocol::ItemStartedEvent;
 #[cfg(test)]
 use codex_protocol::protocol::PlanDeltaEvent;
 #[cfg(test)]
+use codex_protocol::protocol::RawResponseItemEvent;
+#[cfg(test)]
 use codex_protocol::protocol::RealtimeConversationClosedEvent;
 #[cfg(test)]
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
@@ -587,6 +589,15 @@ fn server_notification_thread_events(
                 },
             )?,
         )),
+        ServerNotification::RawResponseItemCompleted(notification) => Some((
+            ThreadId::from_string(&notification.thread_id).ok()?,
+            vec![Event {
+                id: String::new(),
+                msg: EventMsg::RawResponseItem(RawResponseItemEvent {
+                    item: notification.item,
+                }),
+            }],
+        )),
         ServerNotification::CommandExecutionOutputDelta(notification) => Some((
             ThreadId::from_string(&notification.thread_id).ok()?,
             vec![Event {
@@ -917,6 +928,7 @@ fn thread_item_to_core(item: &ThreadItem) -> Option<TurnItem> {
         | ThreadItem::McpToolCall { .. }
         | ThreadItem::DynamicToolCall { .. }
         | ThreadItem::CollabAgentToolCall { .. }
+        | ThreadItem::RawResponseItem { .. }
         | ThreadItem::HookPrompt { .. }
         | ThreadItem::ImageView { .. }
         | ThreadItem::EnteredReviewMode { .. }
