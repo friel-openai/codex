@@ -251,6 +251,7 @@ pub fn build_models_manager(
     provider.models_manager(
         config.codex_home.to_path_buf(),
         config.model_catalog.clone(),
+        config.custom_models.clone(),
         collaboration_modes_config,
     )
 }
@@ -371,6 +372,7 @@ impl ThreadManager {
                     .models_manager(
                         codex_home,
                         /*config_model_catalog*/ None,
+                        Default::default(),
                         CollaborationModesConfig::default(),
                     ),
                 environment_manager,

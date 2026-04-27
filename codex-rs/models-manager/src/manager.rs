@@ -1,6 +1,7 @@
 use super::cache::ModelsCacheManager;
 use crate::collaboration_mode_presets::CollaborationModesConfig;
 use crate::collaboration_mode_presets::builtin_collaboration_mode_presets;
+use crate::config::CustomModelConfig;
 use crate::config::ModelsManagerConfig;
 use crate::model_info;
 use async_trait::async_trait;
@@ -10,6 +11,8 @@ use codex_protocol::error::Result as CoreResult;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ModelsResponse;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -104,11 +107,26 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     /// Return the auth manager used for picker filtering.
     fn auth_manager(&self) -> Option<&AuthManager>;
 
+    /// Return configured user-defined model aliases.
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig>;
+
     /// Build picker-ready presets from the active catalog snapshot.
     fn build_available_models(&self, mut remote_models: Vec<ModelInfo>) -> Vec<ModelPreset> {
         remote_models.sort_by(|a, b| a.priority.cmp(&b.priority));
 
-        let mut presets: Vec<ModelPreset> = remote_models.into_iter().map(Into::into).collect();
+        let mut presets: Vec<ModelPreset> = remote_models.iter().cloned().map(Into::into).collect();
+        let mut existing_models: HashSet<String> =
+            presets.iter().map(|preset| preset.model.clone()).collect();
+        let mut custom_presets = self
+            .custom_models()
+            .iter()
+            .filter(|(alias, _custom_model)| existing_models.insert((*alias).clone()))
+            .map(|(alias, custom_model)| {
+                construct_model_info_for_custom_alias(alias, custom_model, &remote_models).into()
+            })
+            .collect::<Vec<ModelPreset>>();
+        custom_presets.sort_by(|left, right| left.model.cmp(&right.model));
+        presets.extend(custom_presets);
         let uses_codex_backend = self
             .auth_manager()
             .is_some_and(AuthManager::current_auth_uses_codex_backend);
@@ -161,7 +179,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
     async fn get_model_info(&self, model: &str, config: &ModelsManagerConfig) -> ModelInfo {
         async move {
             let remote_models = self.get_remote_models().await;
-            construct_model_info_from_candidates(model, &remote_models, config)
+            let custom_model = config
+                .custom_models
+                .get(model)
+                .or_else(|| self.custom_models().get(model));
+            construct_model_info_from_candidates_with_custom(
+                model,
+                &remote_models,
+                config,
+                custom_model,
+            )
         }
         .instrument(tracing::info_span!("get_model_info", model = model))
         .await
@@ -180,6 +207,7 @@ pub type SharedModelsManager = Arc<dyn ModelsManager>;
 #[derive(Debug)]
 pub struct OpenAiModelsManager {
     remote_models: RwLock<Vec<ModelInfo>>,
+    custom_models: HashMap<String, CustomModelConfig>,
     collaboration_modes_config: CollaborationModesConfig,
     etag: RwLock<Option<String>>,
     cache_manager: ModelsCacheManager,
@@ -191,6 +219,7 @@ pub struct OpenAiModelsManager {
 #[derive(Debug)]
 pub struct StaticModelsManager {
     remote_models: Vec<ModelInfo>,
+    custom_models: HashMap<String, CustomModelConfig>,
     collaboration_modes_config: CollaborationModesConfig,
     auth_manager: Option<Arc<AuthManager>>,
 }
@@ -203,11 +232,28 @@ impl OpenAiModelsManager {
         auth_manager: Option<Arc<AuthManager>>,
         collaboration_modes_config: CollaborationModesConfig,
     ) -> Self {
+        Self::new_with_custom_models(
+            codex_home,
+            endpoint_client,
+            auth_manager,
+            HashMap::new(),
+            collaboration_modes_config,
+        )
+    }
+
+    pub fn new_with_custom_models(
+        codex_home: PathBuf,
+        endpoint_client: Arc<dyn ModelsEndpointClient>,
+        auth_manager: Option<Arc<AuthManager>>,
+        custom_models: HashMap<String, CustomModelConfig>,
+        collaboration_modes_config: CollaborationModesConfig,
+    ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
         let remote_models = load_remote_models_from_file().unwrap_or_default();
         Self {
             remote_models: RwLock::new(remote_models),
+            custom_models,
             collaboration_modes_config,
             etag: RwLock::new(None),
             cache_manager,
@@ -224,8 +270,23 @@ impl StaticModelsManager {
         model_catalog: ModelsResponse,
         collaboration_modes_config: CollaborationModesConfig,
     ) -> Self {
+        Self::new_with_custom_models(
+            auth_manager,
+            model_catalog,
+            HashMap::new(),
+            collaboration_modes_config,
+        )
+    }
+
+    pub fn new_with_custom_models(
+        auth_manager: Option<Arc<AuthManager>>,
+        model_catalog: ModelsResponse,
+        custom_models: HashMap<String, CustomModelConfig>,
+        collaboration_modes_config: CollaborationModesConfig,
+    ) -> Self {
         Self {
             remote_models: model_catalog.models,
+            custom_models,
             collaboration_modes_config,
             auth_manager,
         }
@@ -253,6 +314,10 @@ impl ModelsManager for OpenAiModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.auth_manager.as_deref()
+    }
+
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -390,6 +455,10 @@ impl ModelsManager for StaticModelsManager {
         self.auth_manager.as_deref()
     }
 
+    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
+        &self.custom_models
+    }
+
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
         builtin_collaboration_mode_presets(self.collaboration_modes_config)
     }
@@ -451,6 +520,32 @@ pub(crate) fn construct_model_info_from_candidates(
     candidates: &[ModelInfo],
     config: &ModelsManagerConfig,
 ) -> ModelInfo {
+    construct_model_info_from_candidates_with_custom(
+        model,
+        candidates,
+        config,
+        config.custom_models.get(model),
+    )
+}
+
+fn construct_model_info_from_candidates_with_custom(
+    model: &str,
+    candidates: &[ModelInfo],
+    config: &ModelsManagerConfig,
+    custom_model: Option<&CustomModelConfig>,
+) -> ModelInfo {
+    if let Some(custom_model) = custom_model {
+        let mut config = config.clone();
+        config.model_context_window = custom_model
+            .model_context_window
+            .or(config.model_context_window);
+        config.model_auto_compact_token_limit = custom_model
+            .model_auto_compact_token_limit
+            .or(config.model_auto_compact_token_limit);
+        let model_info = construct_model_info_for_custom_alias(model, custom_model, candidates);
+        return model_info::with_config_overrides(model_info, &config);
+    }
+
     // First use the normal longest-prefix match. If that misses, allow a narrowly scoped
     // retry for namespaced slugs like `custom/gpt-5.3-codex`.
     let remote = find_model_by_longest_prefix(model, candidates)
@@ -465,6 +560,30 @@ pub(crate) fn construct_model_info_from_candidates(
         model_info::model_info_from_slug(model)
     };
     model_info::with_config_overrides(model_info, config)
+}
+
+fn construct_model_info_for_custom_alias(
+    alias: &str,
+    custom_model: &CustomModelConfig,
+    candidates: &[ModelInfo],
+) -> ModelInfo {
+    let remote = find_model_by_longest_prefix(&custom_model.model, candidates)
+        .or_else(|| find_model_by_namespaced_suffix(&custom_model.model, candidates));
+    if let Some(remote) = remote {
+        ModelInfo {
+            slug: alias.to_string(),
+            request_model: Some(custom_model.model.clone()),
+            display_name: alias.to_string(),
+            used_fallback_model_metadata: false,
+            ..remote
+        }
+    } else {
+        let mut fallback_model = model_info::model_info_from_slug(&custom_model.model);
+        fallback_model.slug = alias.to_string();
+        fallback_model.request_model = Some(custom_model.model.clone());
+        fallback_model.display_name = alias.to_string();
+        fallback_model
+    }
 }
 
 #[cfg(test)]
