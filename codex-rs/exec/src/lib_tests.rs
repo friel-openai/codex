@@ -402,8 +402,11 @@ async fn thread_fork_params_include_permission_profile_from_config() {
         .await
         .expect("build config for fork params");
 
-    let params =
-        thread_fork_params_from_config(&config, "67e55044-10b1-426f-9247-bb680e5fe0c8", None);
+    let params = thread_fork_params_from_config(
+        &config,
+        "67e55044-10b1-426f-9247-bb680e5fe0c8",
+        /*path*/ None,
+    );
 
     assert_eq!(params.sandbox, None);
     assert_eq!(

@@ -709,7 +709,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     &client,
                     ClientRequest::ThreadFork {
                         request_id: request_ids.next(),
-                        params: thread_fork_params_from_config(&config, session_id, None),
+                        params: thread_fork_params_from_config(
+                            &config, session_id, /*path*/ None,
+                        ),
                     },
                     "thread/fork",
                 )
