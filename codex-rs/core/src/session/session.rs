@@ -327,6 +327,7 @@ impl Session {
         skills_watcher: Arc<SkillsWatcher>,
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
+        inherited_thread_state: InheritedThreadState,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
         parent_rollout_thread_trace: ThreadTraceContext,
@@ -786,6 +787,8 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
+            let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
+            let mcp_tool_snapshot = inherited_thread_state.mcp_tool_snapshot();
             let services = SessionServices {
                 // Initialize the MCP connection manager with an uninitialized
                 // instance. It will be replaced with one created via
@@ -828,10 +831,12 @@ impl Session {
                 state_db: state_db_ctx.clone(),
                 live_thread: live_thread_init.as_ref().cloned(),
                 thread_store: Arc::clone(&thread_store),
+                mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
                 model_client: ModelClient::new(
                     Some(Arc::clone(&auth_manager)),
                     conversation_id,
                     installation_id,
+                    prompt_cache_key_override,
                     session_configuration.provider.clone(),
                     session_configuration.session_source.clone(),
                     config.model_verbosity,

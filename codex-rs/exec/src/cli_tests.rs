@@ -80,3 +80,22 @@ fn removed_full_auto_flag_reports_migration_path() {
         Some("warning: `--full-auto` is deprecated; use `--sandbox workspace-write` instead.")
     );
 }
+
+#[test]
+fn fork_option_parses_prompt() {
+    const PROMPT: &str = "echo fork-non-interactive";
+    let cli = Cli::parse_from(["codex-exec", "--fork", "session-123", "--json", PROMPT]);
+
+    assert_eq!(cli.fork_session_id.as_deref(), Some("session-123"));
+    assert_eq!(cli.prompt.as_deref(), Some(PROMPT));
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn fork_option_conflicts_with_subcommands() {
+    let err = Cli::try_parse_from(["codex-exec", "--fork", "session-123", "resume"])
+        .and_then(Cli::validate)
+        .expect_err("fork should conflict with subcommands");
+
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}

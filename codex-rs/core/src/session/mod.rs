@@ -33,6 +33,7 @@ use crate::default_skill_metadata_budget;
 use crate::environment_selection::selected_primary_environment;
 use crate::environment_selection::validate_environment_selections;
 use crate::exec_policy::ExecPolicyManager;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::installation_id::resolve_installation_id;
 use crate::parse_turn_item;
 use crate::path_utils::normalize_for_native_workdir;
@@ -403,6 +404,7 @@ pub(crate) struct CodexSpawnArgs {
     /// Root sessions and non-thread-spawn subagents pass a disabled context;
     /// `Session::new` creates the root trace itself when rollout tracing is enabled.
     pub(crate) parent_rollout_thread_trace: ThreadTraceContext,
+    pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
     pub(crate) environments: Vec<TurnEnvironmentSelection>,
@@ -461,6 +463,7 @@ impl Codex {
             user_shell_override,
             inherited_exec_policy,
             parent_rollout_thread_trace,
+            inherited_thread_state,
             parent_trace: _,
             environments,
             analytics_events_client,
@@ -639,6 +642,7 @@ impl Codex {
             skills_watcher,
             agent_control,
             environment_manager,
+            inherited_thread_state,
             analytics_events_client,
             thread_store,
             parent_rollout_thread_trace,
@@ -1029,6 +1033,10 @@ impl Session {
 
     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
         self.services.live_thread.as_ref()
+    }
+
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.services.model_client.prompt_cache_key()
     }
 
     /// Flush rollout writes and return the final durability-barrier result.
