@@ -4613,6 +4613,7 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5563,6 +5564,7 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5603,6 +5605,7 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5640,6 +5643,7 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5677,6 +5681,7 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
+                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5694,6 +5699,57 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
     assert!(err.to_string().contains(
             "agents.researcher.nickname_candidates may only contain ASCII letters, digits, spaces, hyphens, and underscores"
         ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_reads_top_level_watchdog_interval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        watchdog_interval_s: Some(3),
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    assert_eq!(
+        config
+            .agent_roles
+            .get("watchdog")
+            .and_then(|role| role.watchdog_interval_s),
+        Some(3)
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_config_rejects_nonpositive_top_level_watchdog_interval() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        watchdog_interval_s: Some(0),
+        ..Default::default()
+    };
+
+    let err = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await
+    .expect_err("nonpositive watchdog interval should fail");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert_eq!(
+        err.to_string(),
+        "watchdog_interval_s must be greater than zero"
+    );
 
     Ok(())
 }

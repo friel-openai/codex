@@ -9,6 +9,7 @@
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigOverrides;
+use crate::config::DEFAULT_WATCHDOG_INTERVAL_S;
 use crate::config::agent_roles::parse_agent_role_file_contents;
 use crate::config::deserialize_config_toml_with_base;
 use anyhow::anyhow;
@@ -126,6 +127,11 @@ pub(crate) fn resolve_role_config<'a>(
         .agent_roles
         .get(role_name)
         .or_else(|| built_in::configs().get(role_name))
+}
+
+pub(crate) fn watchdog_interval_for_role(config: &Config, role_name: Option<&str>) -> Option<i64> {
+    let role_name = role_name.unwrap_or(DEFAULT_ROLE_NAME);
+    resolve_role_config(config, role_name).and_then(|role| role.watchdog_interval_s)
 }
 
 fn preservation_policy(config: &Config, role_layer_toml: &TomlValue) -> (bool, bool) {
@@ -342,7 +348,14 @@ pub(crate) mod spawn_tool_spec {
                     }
                 })
                 .unwrap_or_default();
-            format!("{name}: {{\n{description}{locked_settings_note}\n}}")
+            let watchdog_note = declaration
+                .watchdog_interval_s
+                .map(|_| {
+                    "\n- This role creates an idle-time watchdog with the configured watchdog interval."
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!("{name}: {{\n{description}{locked_settings_note}{watchdog_note}\n}}")
         } else {
             format!("{name}: no description")
         }
@@ -362,6 +375,7 @@ mod built_in {
                         description: Some("Default agent.".to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        watchdog_interval_s: None,
                     }
                 ),
                 (
@@ -376,6 +390,7 @@ Rules:
 - Reuse existing explorers for related questions."#.to_string()),
                         config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
                         nickname_candidates: None,
+                        watchdog_interval_s: None,
                     }
                 ),
                 (
@@ -391,6 +406,19 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should not revert the edits made by others, and they should adjust their implementation to accommodate the changes made by others. This is important because there may be multiple workers making changes in parallel, and they need to be aware of each other's work to avoid conflicts and ensure a cohesive final product."#.to_string()),
                         config_file: None,
                         nickname_candidates: None,
+                        watchdog_interval_s: None,
+                    }
+                ),
+                (
+                    "watchdog".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Creates an idle-time watchdog handle instead of a normal worker."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                        nickname_candidates: None,
+                        watchdog_interval_s: Some(DEFAULT_WATCHDOG_INTERVAL_S),
                     }
                 ),
                 // Awaiter is temp removed

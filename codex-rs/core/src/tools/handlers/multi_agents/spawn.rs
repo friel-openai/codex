@@ -1,4 +1,7 @@
 use super::*;
+use crate::agent::RemovedWatchdog;
+use crate::agent::WatchdogRegistration;
+use crate::agent::control::LiveAgent;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
@@ -6,7 +9,14 @@ use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
+use crate::agent::role::watchdog_interval_for_role;
+use crate::config::Config;
 use crate::session::turn_context::TurnEnvironment;
+use codex_features::Feature;
+use codex_protocol::protocol::Op;
+use codex_protocol::protocol::SessionSource;
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 pub(crate) struct Handler;
 
@@ -41,6 +51,18 @@ impl ToolHandler for Handler {
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
+        let watchdog_interval_s = watchdog_interval_for_role(&turn.config, role_name);
+        let is_watchdog = watchdog_interval_s.is_some();
+        if is_watchdog && !turn.config.features.enabled(Feature::AgentWatchdog) {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs are disabled".to_string(),
+            ));
+        }
+        if is_watchdog && matches!(session_source, SessionSource::SubAgent(_)) {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs can only be spawned by root agents".to_string(),
+            ));
+        }
         if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -83,30 +105,54 @@ impl ToolHandler for Handler {
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
-        let result = Box::pin(
-            session.services.agent_control.spawn_agent_with_metadata(
+        let spawn_source = thread_spawn_source(
+            session.conversation_id,
+            &turn.session_source,
+            child_depth,
+            role_name,
+            /*task_name*/ None,
+        )?;
+        let result = if let Some(watchdog_interval_s) = watchdog_interval_s {
+            let thread_id = spawn_watchdog(
+                &session.services.agent_control,
                 config,
-                input_items,
-                Some(thread_spawn_source(
-                    session.conversation_id,
-                    &turn.session_source,
-                    child_depth,
-                    role_name,
-                    /*task_name*/ None,
-                )?),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
-                    fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
-                    environments: Some(
-                        turn.environments
-                            .iter()
-                            .map(TurnEnvironment::selection)
-                            .collect(),
-                    ),
-                },
-            ),
-        )
-        .await
+                prompt.clone(),
+                session.conversation_id,
+                child_depth,
+                watchdog_interval_s,
+                spawn_source,
+            )
+            .await
+            .map_err(collab_spawn_error)?;
+            Ok(LiveAgent {
+                thread_id,
+                metadata: session
+                    .services
+                    .agent_control
+                    .get_agent_metadata(thread_id)
+                    .unwrap_or_default(),
+                status: session.services.agent_control.get_status(thread_id).await,
+            })
+        } else {
+            Box::pin(
+                session.services.agent_control.spawn_agent_with_metadata(
+                    config,
+                    input_items,
+                    Some(spawn_source),
+                    SpawnAgentOptions {
+                        fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
+                        fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
+                        environments: Some(
+                            turn.environments
+                                .iter()
+                                .map(TurnEnvironment::selection)
+                                .collect(),
+                        ),
+                    },
+                ),
+            )
+            .await
+        }
         .map_err(collab_spawn_error);
         let (new_thread_id, new_agent_metadata, status) = match &result {
             Ok(spawned_agent) => (
@@ -213,5 +259,67 @@ impl ToolOutput for SpawnAgentResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "spawn_agent")
+    }
+}
+
+async fn spawn_watchdog(
+    agent_control: &crate::agent::AgentControl,
+    config: Config,
+    prompt: String,
+    owner_thread_id: ThreadId,
+    child_depth: i32,
+    interval_s: i64,
+    spawn_source: SessionSource,
+) -> codex_protocol::error::Result<ThreadId> {
+    let mut handle_config = config.clone();
+    handle_config
+        .mcp_servers
+        .set(HashMap::new())
+        .map_err(|err| {
+            codex_protocol::error::CodexErr::UnsupportedOperation(format!(
+                "failed to clear watchdog MCP servers: {err}"
+            ))
+        })?;
+    let target_thread_id = agent_control
+        .spawn_agent(handle_config, Op::Interrupt, Some(spawn_source))
+        .await?;
+    let superseded_before_register = agent_control
+        .unregister_watchdogs_for_owner(owner_thread_id)
+        .await;
+    shutdown_removed_watchdogs(agent_control, superseded_before_register).await;
+    let registration = WatchdogRegistration {
+        owner_thread_id,
+        target_thread_id,
+        child_depth,
+        interval_s,
+        prompt,
+        config,
+    };
+    let superseded_after_register = match agent_control.register_watchdog(registration).await {
+        Ok(removed) => removed,
+        Err(err) => {
+            let _ = agent_control.close_agent(target_thread_id).await;
+            return Err(err);
+        }
+    };
+    shutdown_removed_watchdogs(agent_control, superseded_after_register).await;
+    Ok(target_thread_id)
+}
+
+async fn shutdown_removed_watchdogs(
+    agent_control: &crate::agent::AgentControl,
+    removed_watchdogs: Vec<RemovedWatchdog>,
+) {
+    let mut thread_ids = HashSet::new();
+    for removed in removed_watchdogs {
+        thread_ids.insert(removed.target_thread_id);
+        if let Some(helper_id) = removed.active_helper_id {
+            thread_ids.insert(helper_id);
+        }
+    }
+    let mut thread_ids = thread_ids.into_iter().collect::<Vec<_>>();
+    thread_ids.sort_by_key(ToString::to_string);
+    for thread_id in thread_ids {
+        let _ = agent_control.close_agent(thread_id).await;
     }
 }

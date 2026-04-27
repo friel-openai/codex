@@ -341,6 +341,10 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Default interval in seconds for idle-time watchdog check-ins.
+    #[schemars(range(min = 1))]
+    pub watchdog_interval_s: Option<i64>,
+
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
 
@@ -621,6 +625,9 @@ pub struct AgentRoleToml {
 
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
+
+    /// If set, this role creates an idle-time watchdog with this interval in seconds.
+    pub watchdog_interval_s: Option<i64>,
 }
 
 impl From<ToolsToml> for Tools {

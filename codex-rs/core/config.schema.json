@@ -27,6 +27,11 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "watchdog_interval_s": {
+          "description": "If set, this role creates an idle-time watchdog with this interval in seconds.",
+          "format": "int64",
+          "type": "integer"
         }
       },
       "type": "object"
@@ -3955,6 +3960,12 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "watchdog_interval_s": {
+      "description": "Default interval in seconds for idle-time watchdog check-ins.",
+      "format": "int64",
+      "minimum": 1.0,
+      "type": "integer"
     },
     "web_search": {
       "allOf": [
