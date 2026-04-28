@@ -51,3 +51,21 @@ fn does_not_persist_rollout_file_in_ephemeral_mode() -> anyhow::Result<()> {
     assert_eq!(session_rollout_count(test.home_path()), 0);
     Ok(())
 }
+
+#[test]
+fn materializes_rollout_file_for_ephemeral_mode_when_debug_env_is_enabled() -> anyhow::Result<()> {
+    let test = test_codex_exec();
+    let fixture = find_resource!("tests/fixtures/cli_responses_fixture.sse")?;
+
+    test.cmd()
+        .env("CODEX_RS_SSE_FIXTURE", &fixture)
+        .env("CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS", "1")
+        .arg("--skip-git-repo-check")
+        .arg("--ephemeral")
+        .arg("ephemeral debug behavior")
+        .assert()
+        .code(0);
+
+    assert_eq!(session_rollout_count(test.home_path()), 1);
+    Ok(())
+}
