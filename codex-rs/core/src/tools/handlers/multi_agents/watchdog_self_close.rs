@@ -64,6 +64,25 @@ impl ToolHandler for Handler {
             )
             .await;
 
+        session
+            .services
+            .agent_control
+            .finish_watchdog_helper(helper_thread_id)
+            .await;
+        session
+            .services
+            .agent_control
+            .finish_watchdog_helper_thread(helper_thread_id)
+            .await
+            .map_err(|err| collab_agent_error(helper_thread_id, err))?;
+
+        session
+            .services
+            .agent_control
+            .close_agent(target_thread_id)
+            .await
+            .map_err(|err| collab_agent_error(target_thread_id, err))?;
+
         if let Some(message) = args.message
             && !message.trim().is_empty()
         {
@@ -73,13 +92,6 @@ impl ToolHandler for Handler {
                 .send_watchdog_wakeup(owner_thread_id, message)
                 .await;
         }
-
-        session
-            .services
-            .agent_control
-            .close_agent(target_thread_id)
-            .await
-            .map_err(|err| collab_agent_error(target_thread_id, err))?;
 
         Ok(WatchdogSelfCloseResult {
             previous_status: status,
