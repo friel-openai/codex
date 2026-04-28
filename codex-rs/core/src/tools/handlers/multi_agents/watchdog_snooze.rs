@@ -29,6 +29,16 @@ impl ToolHandler for Handler {
                 "watchdog.snooze is only available in watchdog check-in threads.".to_string(),
             ));
         };
+        session
+            .services
+            .agent_control
+            .finish_watchdog_helper_thread(session.conversation_id)
+            .await
+            .map_err(|err| {
+                FunctionCallError::RespondToModel(format!(
+                    "failed to finish watchdog helper after snooze: {err}"
+                ))
+            })?;
         let _ = args.reason;
         Ok(WatchdogSnoozeResult {
             target_thread_id: result.target_thread_id.to_string(),
