@@ -32,6 +32,17 @@ impl ToolHandler for Handler {
         let items = args.items.clone();
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&input_items);
+        if session
+            .services
+            .agent_control
+            .is_watchdog_handle(receiver_thread_id)
+            .await
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdog handles can't receive send_input; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                    .to_string(),
+            ));
+        }
         let receiver_agent = session
             .services
             .agent_control

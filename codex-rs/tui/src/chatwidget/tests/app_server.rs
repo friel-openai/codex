@@ -2,7 +2,9 @@ use super::*;
 use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_protocol::AgentPath;
+use codex_protocol::protocol::CollabAgentSpawnEndEvent;
 use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutItem;
 use pretty_assertions::assert_eq;
@@ -102,6 +104,48 @@ async fn live_app_server_raw_inter_agent_message_renders_agent_message_cell() {
 
     assert_chatwidget_snapshot!(
         "live_app_server_raw_inter_agent_message_renders_agent_message_cell",
+        rendered
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_subagent_notification_renders_status_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let status = AgentStatus::Completed(Some(
+        "The watchdog closed itself. I did not close it.".to_string(),
+    ));
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": "/root/factorial_sum_agent",
+            "status": status,
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/factorial_sum_agent").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_subagent_notification_renders_status_message_cell",
         rendered
     );
 }
@@ -697,6 +741,93 @@ async fn subagent_panel_renders_subagent_and_watchdog_rows() {
     let screen = normalized_backend_snapshot(terminal.backend());
 
     assert_chatwidget_snapshot!("subagent_panel_renders_subagent_and_watchdog_rows", screen);
+}
+
+#[tokio::test]
+async fn subagent_notification_completion_hides_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let worker_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        worker_thread_id,
+        Some("Calculator".to_string()),
+        Some("worker".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-worker".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![worker_thread_id.to_string()],
+                prompt: Some("Compute the answer.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    worker_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": worker_thread_id.to_string(),
+            "status": AgentStatus::Completed(Some("4037913".to_string())),
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/calculator").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert!(!screen.contains("Subagents"));
+    assert!(!screen.contains("Calculator"));
+    assert!(!screen.contains("<subagent_notification>"));
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inserted.contains("Agent message: 4037913"));
+    assert!(!inserted.contains("<subagent_notification>"));
+    assert_chatwidget_snapshot!(
+        "subagent_notification_completion_hides_subagent_panel_row",
+        screen
+    );
 }
 
 #[tokio::test]

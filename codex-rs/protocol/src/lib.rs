@@ -4,6 +4,7 @@ pub mod auth;
 mod thread_id;
 mod tool_name;
 pub use agent_path::AgentPath;
+pub use thread_id::SegmentId;
 pub use thread_id::ThreadId;
 pub use tool_name::ToolName;
 pub mod approvals;

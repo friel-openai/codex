@@ -5,6 +5,7 @@ use crate::session::session::SessionSettingsUpdate;
 use crate::session::tests::make_session_and_context;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use codex_features::Feature;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::models::ContentItem;
@@ -803,6 +804,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config.agent_interrupt_message_enabled = true;
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =
@@ -865,7 +867,8 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        interrupted_turn_history_marker(InterruptedTurnHistoryMarker::from_config(&config))
+            .expect("interrupted marker should be enabled"),
     ))
     .expect("serialize interrupted marker");
     let interrupted_abort_json = serde_json::to_value(RolloutItem::EventMsg(
@@ -996,6 +999,7 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config.agent_interrupt_message_enabled = true;
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =
@@ -1057,7 +1061,8 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();
     let interrupted_marker_json = serde_json::to_value(RolloutItem::ResponseItem(
-        contextual_user_interrupted_marker(),
+        interrupted_turn_history_marker(InterruptedTurnHistoryMarker::from_config(&config))
+            .expect("interrupted marker should be enabled"),
     ))
     .expect("serialize interrupted marker");
     assert_eq!(
@@ -1089,8 +1094,17 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
     let reforked_history = RolloutRecorder::get_rollout_history(&reforked_path)
         .await
         .expect("read re-forked rollout history");
-    let reforked_rollout_items: Vec<_> = reforked_history
-        .get_rollout_items()
+    let reforked_raw_items = reforked_history.get_rollout_items();
+    assert!(
+        reforked_raw_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
+        "re-forked interrupted snapshots should keep compact ForkReference history"
+    );
+    let materialized_reforked_items =
+        materialize_rollout_items_for_replay(config.codex_home.as_path(), &reforked_raw_items)
+            .await;
+    let reforked_rollout_items: Vec<_> = materialized_reforked_items
         .into_iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();

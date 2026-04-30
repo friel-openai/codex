@@ -1,11 +1,18 @@
 use super::*;
 use crate::session::tests::make_session_and_context;
 use codex_protocol::AgentPath;
+use codex_protocol::SegmentId;
+use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use pretty_assertions::assert_eq;
+use std::path::PathBuf;
 
 fn user_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
@@ -38,6 +45,34 @@ fn inter_agent_msg(text: &str, trigger_turn: bool) -> ResponseItem {
         trigger_turn,
     );
     communication.to_response_input_item().into()
+}
+
+async fn write_rollout(path: &std::path::Path, items: &[RolloutItem]) {
+    let mut jsonl = String::new();
+    for item in items {
+        let line = RolloutLine {
+            timestamp: "2026-04-30T00:00:00.000Z".to_string(),
+            item: item.clone(),
+        };
+        jsonl.push_str(&serde_json::to_string(&line).expect("serialize rollout line"));
+        jsonl.push('\n');
+    }
+    tokio::fs::write(path, jsonl).await.expect("write rollout");
+}
+
+fn session_meta_item(thread_id: ThreadId, segment_id: SegmentId) -> RolloutItem {
+    RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            id: thread_id,
+            segment_id: Some(segment_id),
+            timestamp: "2026-04-30T00:00:00.000Z".to_string(),
+            cwd: PathBuf::from("/tmp"),
+            originator: "test".to_string(),
+            cli_version: "0.0.0".to_string(),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })
 }
 
 #[test]
@@ -106,6 +141,107 @@ fn truncation_max_keeps_full_rollout() {
         serde_json::to_value(&truncated).unwrap(),
         serde_json::to_value(&rollout).unwrap()
     );
+}
+
+#[tokio::test]
+async fn materializes_fork_reference_before_replay() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_path = temp
+        .path()
+        .join("rollout-2026-04-30T00-00-00-00000000-0000-0000-0000-000000000001.jsonl");
+    let source_items = vec![
+        RolloutItem::ResponseItem(user_msg("u1")),
+        RolloutItem::ResponseItem(assistant_msg("a1")),
+        RolloutItem::ResponseItem(user_msg("u2")),
+        RolloutItem::ResponseItem(assistant_msg("a2")),
+    ];
+    write_rollout(&source_path, &source_items).await;
+
+    let compact_fork = vec![
+        RolloutItem::ForkReference(ForkReferenceItem {
+            rollout_path: source_path.clone(),
+            thread_id: None,
+            segment_id: None,
+            nth_user_message: 1,
+        }),
+        RolloutItem::ResponseItem(user_msg("child request")),
+    ];
+
+    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_fork).await;
+
+    let expected = vec![
+        RolloutItem::ResponseItem(user_msg("u1")),
+        RolloutItem::ResponseItem(assistant_msg("a1")),
+        RolloutItem::ResponseItem(user_msg("child request")),
+    ];
+    assert_eq!(
+        serde_json::to_value(&materialized).unwrap(),
+        serde_json::to_value(&expected).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn materializes_fork_reference_by_segment_id_after_source_rollover() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let thread_id = ThreadId::new();
+    let old_segment_id = SegmentId::new();
+    let new_segment_id = SegmentId::new();
+
+    let old_active_path = temp
+        .path()
+        .join("sessions/2026/04/30")
+        .join(format!("rollout-2026-04-30T00-00-00-{thread_id}.jsonl"));
+    let old_archived_path = temp
+        .path()
+        .join("archived_sessions/2026/04/30")
+        .join(format!("rollout-2026-04-30T00-00-00-{thread_id}.jsonl"));
+    let new_active_path = temp
+        .path()
+        .join("sessions/2026/05/01")
+        .join(format!("rollout-2026-05-01T00-00-00-{thread_id}.jsonl"));
+
+    tokio::fs::create_dir_all(old_archived_path.parent().expect("archived parent"))
+        .await
+        .expect("create archived parent");
+    tokio::fs::create_dir_all(new_active_path.parent().expect("active parent"))
+        .await
+        .expect("create active parent");
+
+    write_rollout(
+        &old_archived_path,
+        &[
+            session_meta_item(thread_id, old_segment_id),
+            RolloutItem::ResponseItem(user_msg("old segment request")),
+            RolloutItem::ResponseItem(assistant_msg("old segment answer")),
+        ],
+    )
+    .await;
+    write_rollout(
+        &new_active_path,
+        &[
+            session_meta_item(thread_id, new_segment_id),
+            RolloutItem::ResponseItem(user_msg("new segment request")),
+            RolloutItem::ResponseItem(assistant_msg("new segment answer")),
+        ],
+    )
+    .await;
+
+    let compact_fork = vec![
+        RolloutItem::ForkReference(ForkReferenceItem {
+            rollout_path: old_active_path,
+            thread_id: Some(thread_id),
+            segment_id: Some(old_segment_id),
+            nth_user_message: usize::MAX,
+        }),
+        RolloutItem::ResponseItem(user_msg("child request")),
+    ];
+
+    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_fork).await;
+    let text = serde_json::to_string(&materialized).expect("serialize materialized rollout");
+
+    assert!(text.contains("old segment request"));
+    assert!(!text.contains("new segment request"));
+    assert!(text.contains("child request"));
 }
 
 #[test]

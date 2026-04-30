@@ -41,6 +41,7 @@ pub use list::ThreadListLayout;
 pub use list::ThreadSortKey;
 pub use list::ThreadsPage;
 pub use list::find_archived_thread_path_by_id_str;
+pub use list::find_rollout_path_by_segment_id;
 pub use list::find_thread_path_by_id_str;
 #[deprecated(note = "use find_thread_path_by_id_str")]
 pub use list::find_thread_path_by_id_str as find_conversation_path_by_id_str;
@@ -50,6 +51,7 @@ pub use list::parse_cursor;
 pub use list::read_head_for_summary;
 pub use list::read_session_meta_line;
 pub use list::read_thread_item_from_rollout;
+pub use list::resolve_fork_reference_rollout_path;
 pub use list::rollout_date_parts;
 pub use metadata::builder_from_items;
 pub use policy::EventPersistenceMode;

@@ -3283,7 +3283,6 @@ enabled = false
             description: None,
             config_file: Some(role_path.to_path_buf()),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
     crate::agent::role::apply_role_to_config(&mut child_config, Some("custom"))
@@ -8726,6 +8725,31 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 }
 
 #[tokio::test]
+async fn watchdog_prompt_is_loaded_for_watchdog_subagents() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::default(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("Test Watchdog".to_string()),
+        agent_role: Some("watchdog".to_string()),
+    });
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
+        .await
+        .expect("watchdog subagents need a role prompt");
+
+    assert!(prompt.contains("You are also a **watchdog**"));
+    assert!(prompt.contains("Call `watchdog.close_self`"));
+    assert!(prompt.contains("Call `followup_task` with `\"target\":\"parent\"`"));
+}
+
+#[tokio::test]
 async fn agent_prompt_loader_prefers_home_overrides() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     tokio::fs::write(codex_home.path().join("AGENTS.root.md"), "custom root")
@@ -8737,6 +8761,12 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     )
     .await
     .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.watchdog.md"),
+        "custom watchdog",
+    )
+    .await
+    .expect("write watchdog override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -8745,6 +8775,10 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     assert_eq!(
         load_subagent_prompt(codex_home.path()).await,
         "custom subagent"
+    );
+    assert_eq!(
+        load_watchdog_agent_prompt(codex_home.path()).await,
+        "custom watchdog"
     );
 }
 
@@ -8777,6 +8811,51 @@ async fn root_agent_prompt_is_inline_developer_context_not_session_instructions(
                         if text.contains("# You are the Root Agent")
                 ))
     )));
+}
+
+#[tokio::test]
+async fn watchdog_agent_prompt_is_inline_developer_context_for_watchdog_threads() {
+    let session = make_session_with_config(|config| {
+        config
+            .features
+            .enable(Feature::AgentPromptInjection)
+            .expect("test config should enable prompt injection");
+    })
+    .await
+    .expect("session should build");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/watchdog").expect("agent path should parse")),
+        agent_nickname: Some("Test Watchdog".to_string()),
+        agent_role: Some("watchdog".to_string()),
+    });
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .session_source = session_source.clone();
+
+    let mut turn_context = session.new_default_turn().await;
+    Arc::get_mut(&mut turn_context)
+        .expect("turn context should not be shared")
+        .session_source = session_source;
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+
+    let developer_texts = developer_input_texts(&initial_context);
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains("You are also a **watchdog**")),
+        "watchdog prompt must be visible as developer context so watchdog helpers do not act like the parent agent: {developer_texts:?}"
+    );
+    assert!(
+        !developer_texts
+            .iter()
+            .any(|text| text.contains("# You are the Root Agent")),
+        "watchdog helper current-turn developer context must not inject root prompt: {developer_texts:?}"
+    );
 }
 
 #[tokio::test]

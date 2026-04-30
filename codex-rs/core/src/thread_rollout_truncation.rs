@@ -5,12 +5,16 @@
 
 use crate::context_manager::is_user_turn_boundary;
 use crate::event_mapping;
+use crate::rollout::RolloutRecorder;
+use crate::rollout::resolve_fork_reference_rollout_path;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutItem;
+use std::path::Path;
+use tracing::warn;
 
 pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &InitialHistory) -> bool {
     conversation_history.scan_rollout_items(rollout_item_is_user_turn_boundary)
@@ -146,6 +150,68 @@ pub(crate) fn truncate_rollout_to_last_n_fork_turns(
 
     let keep_idx = fork_turn_positions[fork_turn_positions.len() - n_from_end];
     items[keep_idx..].to_vec()
+}
+
+pub async fn materialize_rollout_items_for_replay(
+    codex_home: &Path,
+    rollout_items: &[RolloutItem],
+) -> Vec<RolloutItem> {
+    materialize_rollout_items_for_replay_at_depth(codex_home, rollout_items, /*depth*/ 0).await
+}
+
+async fn materialize_rollout_items_for_replay_at_depth(
+    codex_home: &Path,
+    rollout_items: &[RolloutItem],
+    depth: usize,
+) -> Vec<RolloutItem> {
+    const MAX_FORK_REFERENCE_DEPTH: usize = 8;
+    if depth >= MAX_FORK_REFERENCE_DEPTH {
+        warn!("fork reference materialization reached max depth");
+        return rollout_items.to_vec();
+    }
+
+    let mut materialized = Vec::new();
+    for item in rollout_items {
+        match item {
+            RolloutItem::ForkReference(reference) => {
+                let resolved_path =
+                    match resolve_fork_reference_rollout_path(codex_home, reference).await {
+                        Ok(path) => path,
+                        Err(err) => {
+                            warn!(
+                                "failed to resolve fork reference {}: {err}",
+                                reference.rollout_path.display()
+                            );
+                            reference.rollout_path.clone()
+                        }
+                    };
+                match RolloutRecorder::load_rollout_items(&resolved_path).await {
+                    Ok((parent_items, _, _)) => {
+                        let parent_prefix = truncate_rollout_before_nth_user_message_from_start(
+                            &parent_items,
+                            reference.nth_user_message,
+                        );
+                        let parent_materialized =
+                            Box::pin(materialize_rollout_items_for_replay_at_depth(
+                                codex_home,
+                                &parent_prefix,
+                                depth + 1,
+                            ))
+                            .await;
+                        materialized.extend(parent_materialized);
+                    }
+                    Err(err) => {
+                        warn!(
+                            "failed to load fork reference {}: {err}",
+                            resolved_path.display()
+                        );
+                    }
+                }
+            }
+            other => materialized.push(other.clone()),
+        }
+    }
+    materialized
 }
 
 fn is_real_user_message_boundary(item: &ResponseItem) -> bool {

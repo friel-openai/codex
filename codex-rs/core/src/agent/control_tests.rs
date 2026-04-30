@@ -30,13 +30,19 @@ use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::ThreadStore;
+use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::responses::start_websocket_server;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
@@ -104,6 +110,49 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     }
 }
 
+async fn wait_for_turn_complete(thread: &CodexThread) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event channel should stay open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("turn should complete");
+}
+
+fn request_tool_signatures(body: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut signatures = std::collections::BTreeSet::new();
+    let tools = body["tools"].as_array().expect("tools should be an array");
+    for tool in tools {
+        let tool_type = tool.get("type").and_then(serde_json::Value::as_str);
+        let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if tool_type == Some("namespace") {
+            let child_tools = tool
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .expect("namespace tools should have child tools");
+            for child_tool in child_tools {
+                let child_name = child_tool
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("child tool should have a name");
+                signatures.insert(format!("{name}.{child_name}"));
+            }
+        } else {
+            signatures.insert(name.to_string());
+        }
+    }
+    signatures
+}
+
 #[test]
 fn fork_previous_response_id_env_value_parses_truthy_values() {
     for value in ["1", "true", "TRUE", "yes", "on"] {
@@ -124,6 +173,207 @@ fn fork_previous_response_id_env_value_parses_truthy_values() {
 #[test]
 fn fork_previous_response_id_is_enabled_by_default() {
     assert!(fork_previous_response_id_value_enabled(/*value*/ None));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(fork_env)]
+async fn fork_previous_response_id_env_controls_inherited_continuation() -> anyhow::Result<()> {
+    let server = start_websocket_server(vec![vec![
+        vec![
+            ev_response_created("warm-parent"),
+            ev_completed("warm-parent"),
+        ],
+        vec![
+            ev_response_created("resp-parent"),
+            ev_assistant_message("msg-parent", "parent done"),
+            ev_completed("resp-parent"),
+        ],
+    ]])
+    .await;
+    let (_home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = true;
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let control = manager.agent_control();
+    let parent = manager.start_thread(config).await?;
+    let parent_thread_id = parent.thread_id;
+    parent.thread.submit(text_input("parent seed")).await?;
+    wait_for_turn_complete(parent.thread.as_ref()).await;
+
+    let state = control
+        .manager
+        .upgrade()
+        .expect("test manager state should stay alive");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("worker".to_string()),
+        agent_role: None,
+    });
+
+    let enabled_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("1"),
+    );
+    assert!(
+        parent_response_continuation_for_source(&state, Some(&session_source))
+            .await
+            .is_some(),
+        "forked agents should inherit the parent response id by default so forked requests keep the parent prompt prefix cacheable"
+    );
+    drop(enabled_guard);
+
+    let disabled_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("0"),
+    );
+    assert!(
+        parent_response_continuation_for_source(&state, Some(&session_source))
+            .await
+            .is_none(),
+        "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID=0 must disable only the fork-specific previous_response_id inheritance"
+    );
+    drop(disabled_guard);
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(fork_env)]
+async fn fork_previous_response_id_env_disables_parent_previous_id_on_child_request()
+-> anyhow::Result<()> {
+    let _previous_response_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("0"),
+    );
+    let server = start_websocket_server(vec![
+        vec![
+            vec![
+                ev_response_created("warm-parent"),
+                ev_completed("warm-parent"),
+            ],
+            vec![
+                ev_response_created("resp-parent"),
+                ev_assistant_message("msg-parent", "parent done"),
+                ev_completed("resp-parent"),
+            ],
+        ],
+        vec![
+            vec![
+                ev_response_created("warm-child"),
+                ev_completed("warm-child"),
+            ],
+            vec![
+                ev_response_created("resp-child"),
+                ev_completed("resp-child"),
+            ],
+        ],
+    ])
+    .await;
+    let (_home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = true;
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let control = manager.agent_control();
+    let parent = manager.start_thread(config.clone()).await?;
+    let parent_thread_id = parent.thread_id;
+    parent.thread.submit(text_input("parent seed")).await?;
+    wait_for_turn_complete(parent.thread.as_ref()).await;
+    parent
+        .thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent.thread.codex.session.flush_rollout().await?;
+
+    let child_thread_id = control
+        .spawn_agent_with_metadata(
+            config,
+            text_input("child request boundary"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("worker".to_string()),
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(
+                    "spawn-call-previous-response-disabled".to_string(),
+                ),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await?
+        .thread_id;
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    wait_for_turn_complete(child_thread.as_ref()).await;
+
+    let connections = server.connections();
+    let child_connection = connections
+        .get(1)
+        .expect("forked child should use its own websocket connection");
+    assert!(
+        child_connection.iter().all(|request| {
+            request.body_json()["previous_response_id"].as_str() != Some("resp-parent")
+        }),
+        "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID=0 must prevent the child request from using the parent's response id; child requests={child_connection:#?}"
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[test]
+fn fork_parent_prompt_cache_key_env_values_parse_with_parent_precedence() {
+    for value in ["1", "true", "TRUE", "yes", "on"] {
+        assert!(
+            fork_parent_prompt_cache_key_value_enabled(Some(value), /*legacy_value*/ None),
+            "{value} should enable parent prompt cache key inheritance"
+        );
+    }
+
+    for value in ["", "0", "false", "off", "no", "enabled"] {
+        assert!(
+            !fork_parent_prompt_cache_key_value_enabled(Some(value), /*legacy_value*/ None),
+            "{value} should not enable parent prompt cache key inheritance"
+        );
+    }
+
+    assert!(fork_parent_prompt_cache_key_value_enabled(
+        /*parent_named_value*/ None, /*legacy_value*/ None
+    ));
+    assert!(fork_parent_prompt_cache_key_value_enabled(
+        /*parent_named_value*/ None,
+        Some("1")
+    ));
+    assert!(!fork_parent_prompt_cache_key_value_enabled(
+        Some("0"),
+        Some("1")
+    ));
+    assert!(fork_parent_prompt_cache_key_value_enabled(
+        Some("1"),
+        Some("0")
+    ));
 }
 
 #[tokio::test]
@@ -205,6 +455,32 @@ impl AgentControlHarness {
     }
 }
 
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &OsStr) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 fn has_subagent_notification(history_items: &[ResponseItem]) -> bool {
     history_items.iter().any(|item| {
         let ResponseItem::Message { role, content, .. } = item else {
@@ -235,6 +511,23 @@ fn history_contains_text(history_items: &[ResponseItem], needle: &str) -> bool {
             ContentItem::InputImage { .. } => false,
         })
     })
+}
+
+fn history_text_match_count(history_items: &[ResponseItem], needle: &str) -> usize {
+    history_items
+        .iter()
+        .filter(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return false;
+            };
+            content.iter().any(|content_item| match content_item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    text.contains(needle)
+                }
+                ContentItem::InputImage { .. } => false,
+            })
+        })
+        .count()
 }
 
 fn history_contains_assistant_inter_agent_communication(
@@ -506,6 +799,10 @@ async fn watchdog_helper_forks_owner_history() {
         .enable(Feature::AgentWatchdog)
         .expect("test config should allow feature update");
     config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should allow feature update");
+    config
         .mcp_servers
         .set(std::collections::HashMap::from([(
             "slow".to_string(),
@@ -514,6 +811,11 @@ async fn watchdog_helper_forks_owner_history() {
         .expect("test config should allow MCP servers");
 
     let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .record_context_updates_and_set_reference_context_item(owner_turn.as_ref())
+        .await;
     owner_thread
         .codex
         .session
@@ -594,6 +896,42 @@ async fn watchdog_helper_forks_owner_history() {
         &history_items,
         "previous owner response: pong 81 (118)"
     ));
+    let watchdog_prompt_position = history_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && content.iter().any(|content| matches!(
+                            content,
+                            ContentItem::InputText { text }
+                                if text.contains("You are also a **watchdog**")
+                        ))
+            )
+        })
+        .expect(
+            "forked watchdog helpers must receive watchdog_agent_prompt.md after the fork boundary",
+        );
+    let tool_search_position = history_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
+                    if call_id == "synthetic_watchdog_tool_search"
+            )
+        })
+        .expect("watchdog helpers should receive synthetic tool discovery context");
+    assert!(
+        watchdog_prompt_position < tool_search_position,
+        "watchdog_agent_prompt.md must be injected before synthetic watchdog tool context"
+    );
+    assert_eq!(
+        history_text_match_count(&history_items, "You are also a **watchdog**"),
+        1,
+        "forked watchdog helper history must contain exactly one watchdog prompt"
+    );
     assert!(history_items.iter().any(|item| matches!(
         item,
         ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
@@ -1345,7 +1683,12 @@ async fn spawn_agent_fork_rejects_missing_parent_spawn_call_id_for_non_watchdogs
 }
 
 #[tokio::test]
-async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+#[serial(fork_env)]
+async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_parent_items() {
+    let _previous_response_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("0"),
+    );
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -1441,6 +1784,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                initial_task_message: Some("child task".to_string()),
                 ..Default::default()
             },
         )
@@ -1485,7 +1829,22 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let mut parent_tool_names = parent_mcp_tools.keys().cloned().collect::<Vec<_>>();
     parent_tool_names.sort();
     assert_eq!(snapshot_tool_names, parent_tool_names);
+    let child_rollout_path = child_thread
+        .rollout_path()
+        .expect("child rollout path should be present");
+    let child_rollout = RolloutRecorder::get_rollout_history(&child_rollout_path)
+        .await
+        .expect("child rollout should be readable");
+    assert!(
+        child_rollout
+            .get_rollout_items()
+            .iter()
+            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
+        "full-history forks should store a compact ForkReference so fork rollout files do not copy parent rollout history"
+    );
+
     let history = child_thread.codex.session.clone_history().await;
+    let subagent_prompt = crate::session::load_subagent_prompt(&harness.config.codex_home).await;
     let expected_history = [
         ResponseItem::Message {
             id: None,
@@ -1495,12 +1854,54 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             }],
             phase: None,
         },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Parent root guidance.".to_string(),
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "Parent subagent guidance.".to_string(),
+            }],
+            phase: None,
+        },
+        assistant_message("parent commentary", Some(MessagePhase::Commentary)),
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
+        assistant_message("parent unknown phase", /*phase*/ None),
+        ResponseItem::Reasoning {
+            id: String::new(),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: None,
+        },
+        trigger_message.to_response_input_item().into(),
+        spawn_agent_call(&parent_spawn_call_id),
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: subagent_prompt,
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "# Subagent Assignment\n\nYou are `this subagent`. Your direct assignment from your parent agent is:\n\nchild task".to_string(),
+            }],
+            phase: None,
+        },
     ];
     assert_eq!(
         history.raw_items(),
         &expected_history,
-        "forked child history should keep only parent user messages and assistant final answers"
+        "forked child history should materialize the full parent prefix so full-history forks preserve prompt-cache alignment"
     );
 
     let expected = (
@@ -1534,11 +1935,21 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(fork_env)]
 async fn forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
     let server = start_mock_server().await;
-    let child_response_mock = mount_sse_once(
+    let request_log = mount_sse_sequence(
         &server,
-        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+        vec![
+            sse(vec![
+                ev_response_created("resp-parent"),
+                ev_completed("resp-parent"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-child"),
+                ev_completed("resp-child"),
+            ]),
+        ],
     )
     .await;
     let (_home, mut config) = test_config().await;
@@ -1667,10 +2078,8 @@ while True:
         parent_mcp_tools.contains_key("mcp__rmcp__echo"),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}; failures={startup_failures:#?}"
     );
-    parent
-        .thread
-        .inject_user_message_without_turn("parent seed".to_string())
-        .await;
+    parent.thread.submit(text_input("parent seed")).await?;
+    wait_for_turn_complete(parent.thread.as_ref()).await;
     parent
         .thread
         .codex
@@ -1716,15 +2125,131 @@ while True:
     })
     .await
     .expect("child turn should complete");
-    let body = child_response_mock.single_request().body_json();
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let parent_body = requests[0].body_json();
+    let child_body = requests[1].body_json();
     let expected_prompt_cache_key = parent_prompt_cache_key.to_string();
+    assert_eq!(
+        child_body["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+    let parent_tool_signatures = request_tool_signatures(&parent_body);
+    let child_tool_signatures = request_tool_signatures(&child_body);
+    assert_eq!(
+        child_tool_signatures, parent_tool_signatures,
+        "forked children must keep the same eager tool surface as their parent so request prefixes stay cacheable"
+    );
+    for expected_tool in [
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "list_agents",
+        "close_agent",
+        "watchdog.close_self",
+        "watchdog.snooze",
+        "watchdog.compact_parent_context",
+    ] {
+        assert!(
+            child_tool_signatures.contains(expected_tool),
+            "expected forked child request to expose `{expected_tool}`; tools={child_tool_signatures:#?}"
+        );
+    }
+    assert!(
+        namespace_child_tool(&child_body, "mcp__rmcp__", "echo").is_some(),
+        "first forked child request should expose parent MCP snapshot tools: {child_body:#}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(fork_env)]
+async fn fork_parent_prompt_cache_key_env_disables_request_inheritance() -> anyhow::Result<()> {
+    let _parent_prompt_cache_key_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY_ENV,
+        OsStr::new("0"),
+    );
+    let server = start_mock_server().await;
+    let child_response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let (_home, mut config) = test_config().await;
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let control = manager.agent_control();
+    let parent = manager.start_thread(config.clone()).await?;
+    let parent_thread_id = parent.thread_id;
+    let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
+    parent
+        .thread
+        .inject_user_message_without_turn("parent seed".to_string())
+        .await;
+    parent
+        .thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent.thread.codex.session.flush_rollout().await?;
+
+    let child_thread_id = control
+        .spawn_agent_with_metadata(
+            config,
+            text_input("child request boundary"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: Some("worker".to_string()),
+                agent_role: None,
+            })),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(
+                    "spawn-call-parent-prompt-cache-key-disabled".to_string(),
+                ),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await?
+        .thread_id;
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = child_thread
+                .next_event()
+                .await
+                .expect("child event channel should stay open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("child turn should complete");
+    let child_prompt_cache_key = child_thread.codex.session.prompt_cache_key();
+    assert_ne!(child_prompt_cache_key, parent_prompt_cache_key);
+
+    let body = child_response_mock.single_request().body_json();
+    let expected_prompt_cache_key = child_prompt_cache_key.to_string();
     assert_eq!(
         body["prompt_cache_key"].as_str(),
         Some(expected_prompt_cache_key.as_str())
-    );
-    assert!(
-        namespace_child_tool(&body, "mcp__rmcp__", "echo").is_some(),
-        "first forked child request should expose parent MCP snapshot tools: {body:#}"
     );
 
     Ok(())
@@ -1763,6 +2288,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                initial_task_message: Some("child task".to_string()),
                 ..Default::default()
             },
         )
@@ -1779,6 +2305,27 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
     assert!(
         history_contains_text(history.raw_items(), "unflushed final answer"),
         "forked child history should include unflushed assistant final answers after flushing the parent rollout"
+    );
+    assert!(
+        history_contains_text(history.raw_items(), "# Subagent Assignment"),
+        "forked child history should contain an explicit developer assignment"
+    );
+    assert_eq!(
+        history_text_match_count(history.raw_items(), "# You are a Subagent"),
+        1,
+        "forked child history must contain exactly one subagent prompt"
+    );
+    assert_eq!(
+        history_text_match_count(history.raw_items(), "# Subagent Assignment"),
+        1,
+        "forked child history must contain exactly one explicit assignment"
+    );
+    assert!(
+        history_contains_text(
+            history.raw_items(),
+            "Your direct assignment from your parent agent is:\n\nchild task"
+        ),
+        "forked child history should make the spawned task unambiguous"
     );
 
     let _ = harness
@@ -2329,7 +2876,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         .await;
 
     let expected_message = crate::session_prefix::format_subagent_notification_message(
-        tester_path.as_str(),
+        &tester_thread_id.to_string(),
         &AgentStatus::Completed(Some("done".to_string())),
     );
     let expected = (
@@ -2474,7 +3021,6 @@ async fn spawn_thread_subagent_uses_role_specific_nickname_candidates() {
             description: Some("Research role".to_string()),
             config_file: None,
             nickname_candidates: Some(vec!["Atlas".to_string()]),
-            watchdog_interval_s: None,
         },
     );
     let (parent_thread_id, _parent_thread) = harness.start_thread().await;

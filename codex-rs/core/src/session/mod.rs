@@ -41,6 +41,7 @@ use crate::rollout::find_thread_name_by_id;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use crate::turn_metadata::TurnMetadataState;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -218,6 +219,7 @@ mod rollout_reconstruction_tests;
 
 const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+const WATCHDOG_AGENT_PROMPT_FALLBACK: &str = include_str!("../../watchdog_agent_prompt.md");
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -242,6 +244,32 @@ pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
 }
 
+pub(crate) async fn load_watchdog_agent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        WATCHDOG_AGENT_PROMPT_FALLBACK,
+        "AGENTS.watchdog.md",
+    )
+    .await
+}
+
+fn history_contains_developer_text(
+    history: &crate::context_manager::ContextManager,
+    expected: &str,
+) -> bool {
+    history.raw_items().iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text == expected
+                    ))
+        )
+    })
+}
+
 pub(crate) async fn load_agent_role_prompt(
     config: &Config,
     session_source: &SessionSource,
@@ -251,12 +279,18 @@ pub(crate) async fn load_agent_role_prompt(
     }
 
     let role_prompt = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
+            if agent_role.as_deref() == Some("watchdog") =>
+        {
+            load_watchdog_agent_prompt(&config.codex_home).await
+        }
         SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
         SessionSource::Cli
         | SessionSource::VSCode
         | SessionSource::Exec
         | SessionSource::Mcp
         | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
         | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
     };
 
@@ -499,7 +533,7 @@ impl Codex {
 
     async fn spawn_internal(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
         let CodexSpawnArgs {
-            mut config,
+            config,
             auth_manager,
             models_manager,
             environment_manager,
@@ -538,14 +572,6 @@ impl Codex {
                 err.path.display(),
                 err.message
             );
-        }
-
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
-            && depth >= config.agent_max_depth
-            && !config.features.enabled(Feature::MultiAgentV2)
-        {
-            let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
 
         let primary_environment = environment_selections.primary_environment();
@@ -1215,7 +1241,27 @@ impl Session {
                 .session_source
                 .is_non_root_agent()
         };
-        let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
+        let codex_home = {
+            let state = self.state.lock().await;
+            state.session_configuration.codex_home().clone()
+        };
+        let replay_rollout_items = if conversation_history
+            .scan_rollout_items(|item| matches!(item, RolloutItem::ForkReference(_)))
+        {
+            Some(
+                materialize_rollout_items_for_replay(
+                    codex_home.as_path(),
+                    &conversation_history.get_rollout_items(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let has_prior_user_turns = replay_rollout_items.as_ref().map_or_else(
+            || initial_history_has_prior_user_turns(&conversation_history),
+            |items| initial_history_has_prior_user_turns(&InitialHistory::Forked(items.clone())),
+        );
         {
             let mut state = self.state.lock().await;
             state.set_next_turn_is_first(!has_prior_user_turns);
@@ -1228,7 +1274,7 @@ impl Session {
                     .await;
             }
             InitialHistory::Resumed(resumed_history) => {
-                let rollout_items = resumed_history.history;
+                let rollout_items = replay_rollout_items.unwrap_or(resumed_history.history);
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
@@ -1267,12 +1313,14 @@ impl Session {
                 }
             }
             InitialHistory::Forked(rollout_items) => {
-                self.apply_rollout_reconstruction(&turn_context, &rollout_items)
+                let replay_rollout_items =
+                    replay_rollout_items.unwrap_or_else(|| rollout_items.clone());
+                self.apply_rollout_reconstruction(&turn_context, &replay_rollout_items)
                     .await;
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&replay_rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
@@ -1616,7 +1664,10 @@ impl Session {
             return;
         };
 
-        let message = format_subagent_notification_message(child_agent_path.as_str(), &status);
+        // The TUI indexes live subagent rows by ThreadId. Use the child ThreadId in this
+        // hidden notification so final status updates remove the correct panel row.
+        let message =
+            format_subagent_notification_message(&self.conversation_id.to_string(), &status);
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
         let trace_message = self
@@ -2605,6 +2656,7 @@ impl Session {
             collaboration_mode,
             base_instructions,
             session_source,
+            history,
         ) = {
             let state = self.state.lock().await;
             (
@@ -2613,6 +2665,7 @@ impl Session {
                 state.session_configuration.collaboration_mode.clone(),
                 state.session_configuration.base_instructions.clone(),
                 state.session_configuration.session_source.clone(),
+                state.history.clone(),
             )
         };
         if let Some(model_switch_message) =
@@ -2625,6 +2678,7 @@ impl Session {
         }
         if let Some(role_prompt) =
             load_agent_role_prompt(&turn_context.config, &session_source).await
+            && !history_contains_developer_text(&history, &role_prompt)
         {
             developer_sections.push(role_prompt);
         }

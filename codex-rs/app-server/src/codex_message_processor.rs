@@ -4104,7 +4104,12 @@ impl CodexMessageProcessor {
                 .load_history(/*include_archived*/ true)
                 .await
                 .map_err(|err| thread_read_history_load_error(thread_id, err))?;
-            thread.turns = build_turns_from_rollout_items(&history.items);
+            let items = codex_core::materialize_rollout_items_for_replay(
+                &self.config.codex_home,
+                &history.items,
+            )
+            .await;
+            thread.turns = build_turns_from_rollout_items(&items);
         }
 
         Ok(())
@@ -4137,6 +4142,8 @@ impl CodexMessageProcessor {
             .load_thread_turns_list_history(thread_uuid)
             .await
             .map_err(thread_read_view_error)?;
+        let items =
+            codex_core::materialize_rollout_items_for_replay(&self.config.codex_home, &items).await;
         // This API optimizes network transfer by letting clients page through a
         // thread's turns incrementally, but it still replays the entire rollout on
         // every request. Rollback and compaction events can change earlier turns, so
@@ -4815,12 +4822,20 @@ impl CodexMessageProcessor {
     ) -> std::result::Result<Thread, String> {
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
-        if include_turns && let Some(history) = history {
-            populate_thread_turns_from_history(
-                &mut thread,
+        if let Some(history) = history {
+            let history_items = codex_core::materialize_rollout_items_for_replay(
+                self.config.codex_home.as_path(),
                 &history.items,
-                /*active_turn*/ None,
-            )?;
+            )
+            .await;
+            thread.preview = preview_from_rollout_items(&history_items);
+            if include_turns {
+                populate_thread_turns_from_history(
+                    &mut thread,
+                    &history_items,
+                    /*active_turn*/ None,
+                )?;
+            }
         }
         Ok(thread)
     }
@@ -5079,7 +5094,10 @@ impl CodexMessageProcessor {
             let mut thread =
                 if let Some(fork_rollout_path) = session_configured.rollout_path.as_ref() {
                     let stored_thread = self
-                        .read_stored_thread_for_new_fork(thread_id, include_turns)
+                        // The forked rollout may contain a compact ForkReference. Load history
+                        // even when excludeTurns is set so preview generation can materialize the
+                        // referenced source rollout without returning turns.
+                        .read_stored_thread_for_new_fork(thread_id, /*include_history*/ true)
                         .await?;
                     self.stored_thread_to_api_thread(
                         stored_thread,
@@ -10840,6 +10858,7 @@ mod tests {
 
         let session_meta = SessionMeta {
             id: conversation_id,
+            segment_id: None,
             timestamp: timestamp.clone(),
             model_provider: None,
             ..SessionMeta::default()
@@ -10896,6 +10915,7 @@ mod tests {
 
         let session_meta = SessionMeta {
             id: conversation_id,
+            segment_id: None,
             timestamp: timestamp.clone(),
             source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -10944,6 +10964,7 @@ mod tests {
 
         let session_meta = SessionMeta {
             id: conversation_id,
+            segment_id: None,
             forked_from_id: Some(forked_from_id),
             timestamp: timestamp.clone(),
             model_provider: Some("test-provider".to_string()),

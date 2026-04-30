@@ -26,7 +26,7 @@ impl App {
             }
         }
 
-let collab_enabled = self.config.features.enabled(Feature::Collab);
+        let collab_enabled = self.config.features.enabled(Feature::Collab);
         let selectable_threads = self
             .agent_navigation
             .ordered_threads()
@@ -55,7 +55,7 @@ let collab_enabled = self.config.features.enabled(Feature::Collab);
         }
 
         let mut initial_selected_idx = None;
-let items: Vec<SelectionItem> = selectable_threads
+        let items: Vec<SelectionItem> = selectable_threads
             .iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
@@ -608,10 +608,11 @@ let items: Vec<SelectionItem> = selectable_threads
         direction: AgentNavigationDirection,
     ) -> Option<ThreadId> {
         let current_thread = self.current_displayed_thread_id();
-        if let Some(thread_id) = self
-            .agent_navigation
-            .adjacent_thread_id(current_thread, direction)
-        {
+        if let Some(thread_id) = self.agent_navigation.adjacent_selectable_thread_id(
+            current_thread,
+            self.primary_thread_id,
+            direction,
+        ) {
             return Some(thread_id);
         }
 
@@ -623,8 +624,11 @@ let items: Vec<SelectionItem> = selectable_threads
         if self.backfill_loaded_subagent_threads(app_server).await {
             self.last_subagent_backfill_attempt = Some(primary_thread_id);
         }
-        self.agent_navigation
-            .adjacent_thread_id(self.current_displayed_thread_id(), direction)
+        self.agent_navigation.adjacent_selectable_thread_id(
+            self.current_displayed_thread_id(),
+            self.primary_thread_id,
+            direction,
+        )
     }
 
     pub(super) fn fresh_session_config(&self) -> Config {

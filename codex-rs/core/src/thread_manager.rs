@@ -40,6 +40,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
@@ -810,7 +811,23 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
     ) -> CodexResult<NewThread> {
         let interrupted_marker = InterruptedTurnHistoryMarker::from_config(&config);
+        let snapshot_state = snapshot_turn_state(&history);
+        let source_rollout_path = match &history {
+            InitialHistory::Resumed(resumed) => resumed.rollout_path.clone(),
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+        };
+        let source_items = history.get_rollout_items();
+        let reference_history = source_rollout_path.and_then(|rollout_path| {
+            fork_reference_history_for_snapshot(
+                snapshot,
+                rollout_path,
+                &source_items,
+                &snapshot_state,
+                interrupted_marker,
+            )
+        });
         let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        let history = reference_history.unwrap_or(history);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -1374,6 +1391,71 @@ fn fork_history_from_snapshot(
             }
         }
     }
+}
+
+fn fork_reference_history_for_snapshot(
+    snapshot: ForkSnapshot,
+    rollout_path: PathBuf,
+    source_items: &[RolloutItem],
+    snapshot_state: &SnapshotTurnState,
+    interrupted_marker: InterruptedTurnHistoryMarker,
+) -> Option<InitialHistory> {
+    let nth_user_message = match snapshot {
+        ForkSnapshot::TruncateBeforeNthUserMessage(nth_user_message) => {
+            let user_positions = truncation::user_message_positions_in_rollout(source_items);
+            if snapshot_state.ends_mid_turn && nth_user_message >= user_positions.len() {
+                return None;
+            }
+            nth_user_message
+        }
+        ForkSnapshot::Interrupted => usize::MAX,
+    };
+
+    let source_meta = source_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta),
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::TurnContext(_) => None,
+    });
+
+    let mut history: Vec<RolloutItem> = source_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
+            RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::ForkReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::TurnContext(_) => None,
+        })
+        .into_iter()
+        .chain(std::iter::once(RolloutItem::ForkReference(
+            ForkReferenceItem {
+                rollout_path,
+                thread_id: source_meta.map(|meta| meta.meta.id),
+                segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
+                nth_user_message,
+            },
+        )))
+        .collect();
+
+    if snapshot == ForkSnapshot::Interrupted && snapshot_state.ends_mid_turn {
+        if let Some(marker) = interrupted_turn_history_marker(interrupted_marker) {
+            history.push(RolloutItem::ResponseItem(marker));
+        }
+        history.push(RolloutItem::EventMsg(EventMsg::TurnAborted(
+            TurnAbortedEvent {
+                turn_id: snapshot_state.active_turn_id.clone(),
+                reason: TurnAbortReason::Interrupted,
+                completed_at: None,
+                duration_ms: None,
+            },
+        )));
+    }
+
+    Some(InitialHistory::Forked(history))
 }
 
 /// Append the same persisted interrupt boundary used by the live interrupt path

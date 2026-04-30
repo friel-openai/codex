@@ -11,6 +11,7 @@ use std::sync::Mutex;
 
 use chrono::SecondsFormat;
 use chrono::Utc;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -667,6 +668,7 @@ impl RolloutRecorder {
                     let log_file_info = precompute_log_file_info(config, conversation_id)?;
                     let path = log_file_info.path.clone();
                     let session_id = log_file_info.conversation_id;
+                    let segment_id = SegmentId::new();
                     let started_at = log_file_info.timestamp;
 
                     let timestamp_format: &[FormatItem] = format_description!(
@@ -679,6 +681,7 @@ impl RolloutRecorder {
 
                     let session_meta = SessionMeta {
                         id: session_id,
+                        segment_id: Some(segment_id),
                         forked_from_id,
                         timestamp,
                         cwd: config.cwd().to_path_buf(),
@@ -893,6 +896,9 @@ impl RolloutRecorder {
                     }
                     RolloutItem::ResponseItem(item) => {
                         items.push(RolloutItem::ResponseItem(item));
+                    }
+                    RolloutItem::ForkReference(item) => {
+                        items.push(RolloutItem::ForkReference(item));
                     }
                     RolloutItem::Compacted(item) => {
                         items.push(RolloutItem::Compacted(item));
@@ -1884,6 +1890,7 @@ async fn resume_candidate_matches_cwd(
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(turn_context.cwd.as_path()),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::ForkReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::EventMsg(_) => None,

@@ -2107,7 +2107,6 @@ mod tests {
     use codex_protocol::protocol::GuardianAssessmentEvent;
     use codex_protocol::protocol::GuardianAssessmentStatus;
     use codex_protocol::protocol::InterAgentCommunication;
-    use codex_protocol::protocol::McpInvocation;
     use codex_protocol::protocol::RateLimitSnapshot;
     use codex_protocol::protocol::RateLimitWindow;
     use codex_protocol::protocol::TokenUsage;
@@ -3682,7 +3681,10 @@ mod tests {
     #[tokio::test]
     async fn test_inter_agent_raw_response_emits_raw_response_item_completed() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
-        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
         let conversation_id = ThreadId::new();
         let outgoing = ThreadScopedOutgoingMessageSender::new(
             outgoing,
@@ -3699,14 +3701,8 @@ mod tests {
         let item: codex_protocol::models::ResponseItem =
             communication.to_response_input_item().into();
 
-        maybe_emit_raw_response_item_completed(
-            ApiVersion::V2,
-            conversation_id,
-            "turn-1",
-            item.clone(),
-            &outgoing,
-        )
-        .await;
+        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item.clone(), &outgoing)
+            .await;
 
         let msg = recv_broadcast_message(&mut rx).await?;
         match msg {

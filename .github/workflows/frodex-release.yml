@@ -57,8 +57,42 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#frodex-v}"
-          perl -0pi -e 's#^version = "0\.0\.0"#version = "'"${version}"'"#m' Cargo.toml
-          perl -0pi -e 's#version = "0\.0\.0"#version = "'"${version}"'"#g' Cargo.lock
+          perl -0pi -e 's#^version = "[^"]+"#version = "'"${version}"'"#m' Cargo.toml
+          python3 - "$version" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path("Cargo.lock")
+          text = path.read_text()
+
+          def replace_workspace_package_version(match: re.Match[str]) -> str:
+              block = match.group(0)
+              name_match = re.search(r'^name = "([^"]+)"$', block, flags=re.MULTILINE)
+              if name_match is None:
+                  return block
+              name = name_match.group(1)
+              if not (
+                  name.startswith("codex-")
+                  or name in {"app_test_support", "core_test_support"}
+              ):
+                  return block
+              return re.sub(
+                  r'^version = "[^"]+"$',
+                  f'version = "{version}"',
+                  block,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+
+          text = re.sub(
+              r'(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)',
+              replace_workspace_package_version,
+              text,
+          )
+          path.write_text(text)
+          PY
           grep -n '^version = "'"${version}"'"' Cargo.toml
 
       - name: Cargo build

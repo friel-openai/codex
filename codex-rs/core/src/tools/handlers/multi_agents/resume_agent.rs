@@ -28,6 +28,17 @@ impl ToolHandler for Handler {
         let receiver_thread_id = ThreadId::from_string(&args.id).map_err(|err| {
             FunctionCallError::RespondToModel(format!("invalid agent id {}: {err:?}", args.id))
         })?;
+        if session
+            .services
+            .agent_control
+            .is_watchdog_handle(receiver_thread_id)
+            .await
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdog handles can't receive resume_agent; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                    .to_string(),
+            ));
+        }
         let receiver_agent = session
             .services
             .agent_control

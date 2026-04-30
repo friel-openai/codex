@@ -243,6 +243,53 @@ fn goal_tools_require_goals_feature() {
 }
 
 #[test]
+fn watchdog_tools_are_eager_namespace_tools() {
+    let model_info = model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::AgentWatchdog);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, handlers) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    // Frodex keeps the watchdog namespace eager for every agent so parent and
+    // forked child requests have the same prompt-visible tool surface.
+    assert_eq!(
+        namespace_function_names(&tools, "watchdog"),
+        vec![
+            "compact_parent_context".to_string(),
+            "close_self".to_string(),
+            "snooze".to_string()
+        ]
+    );
+    assert!(handlers.contains(&ToolHandlerSpec {
+        name: ToolName::namespaced("watchdog", "compact_parent_context"),
+        kind: ToolHandlerKind::CompactParentContext,
+    }));
+    assert!(handlers.contains(&ToolHandlerSpec {
+        name: ToolName::namespaced("watchdog", "close_self"),
+        kind: ToolHandlerKind::WatchdogSelfClose,
+    }));
+    assert!(handlers.contains(&ToolHandlerSpec {
+        name: ToolName::namespaced("watchdog", "snooze"),
+        kind: ToolHandlerKind::WatchdogSnooze,
+    }));
+}
+
+#[test]
 fn test_build_specs_multi_agent_v2_uses_task_names_and_hides_resume() {
     let model_info = model_info();
     let mut features = Features::with_defaults();

@@ -175,6 +175,7 @@ impl MemoryStartupContext {
             Some(Arc::clone(&self.auth_manager)),
             self.thread_id,
             installation_id,
+            /*prompt_cache_key_override*/ None,
             config.model_provider.clone(),
             session_source,
             config.model_verbosity,

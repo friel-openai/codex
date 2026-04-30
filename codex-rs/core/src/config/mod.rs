@@ -178,8 +178,6 @@ pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 pub(crate) const DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS: Option<u64> = None;
 pub(crate) const DEFAULT_WATCHDOG_INTERVAL_S: i64 = 60;
 const LOCAL_DEV_BUILD_VERSION: &str = "0.0.0";
-const WATCHDOG_ROLE_DESCRIPTION: &str =
-    "Creates an idle-time watchdog handle instead of a normal worker.";
 
 pub const CONFIG_TOML_FILE: &str = "config.toml";
 
@@ -619,6 +617,9 @@ pub struct Config {
 
     /// User-defined role declarations keyed by role name.
     pub agent_roles: BTreeMap<String, AgentRoleConfig>,
+
+    /// Singleton interval in seconds for the built-in watchdog role.
+    pub watchdog_interval_s: i64,
 
     /// Memories subsystem settings.
     pub memories: MemoriesConfig,
@@ -1584,8 +1585,6 @@ pub struct AgentRoleConfig {
     pub config_file: Option<PathBuf>,
     /// Candidate nicknames for agents spawned with this role.
     pub nickname_candidates: Option<Vec<String>>,
-    /// If set, this role creates an idle-time watchdog with this interval in seconds.
-    pub watchdog_interval_s: Option<i64>,
 }
 
 fn resolve_tool_suggest_config(
@@ -2499,32 +2498,17 @@ impl Config {
         };
         let terminal_resize_reflow = resolve_terminal_resize_reflow_config(&cfg);
 
-        let mut agent_roles =
+        let agent_roles =
             agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
                 .await?;
-        if let Some(watchdog_interval_s) = cfg.watchdog_interval_s {
-            if watchdog_interval_s <= 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "watchdog_interval_s must be greater than zero",
-                ));
-            }
-            for role in agent_roles.values_mut() {
-                if role.watchdog_interval_s.is_some() {
-                    role.watchdog_interval_s = Some(watchdog_interval_s);
-                }
-            }
-            agent_roles
-                .entry("watchdog".to_string())
-                .and_modify(|role| {
-                    role.watchdog_interval_s = Some(watchdog_interval_s);
-                })
-                .or_insert_with(|| AgentRoleConfig {
-                    description: Some(WATCHDOG_ROLE_DESCRIPTION.to_string()),
-                    config_file: None,
-                    nickname_candidates: None,
-                    watchdog_interval_s: Some(watchdog_interval_s),
-                });
+        let watchdog_interval_s = cfg
+            .watchdog_interval_s
+            .unwrap_or(DEFAULT_WATCHDOG_INTERVAL_S);
+        if watchdog_interval_s <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "watchdog_interval_s must be greater than zero",
+            ));
         }
 
         let openai_base_url = cfg
@@ -2598,12 +2582,6 @@ impl Config {
         }
         let agent_max_threads_from_config = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
         let agent_max_threads = if features.enabled(Feature::MultiAgentV2) {
-            if agent_max_threads_from_config.is_some() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "agents.max_threads cannot be set when multi_agent_v2 is enabled",
-                ));
-            }
             Some(
                 multi_agent_v2
                     .max_concurrent_threads_per_session
@@ -3013,6 +2991,7 @@ impl Config {
             agent_max_threads,
             agent_max_depth,
             agent_roles,
+            watchdog_interval_s,
             memories: cfg.memories.unwrap_or_default().into(),
             agent_job_max_runtime_seconds,
             agent_interrupt_message_enabled,

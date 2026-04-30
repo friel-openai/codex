@@ -113,7 +113,6 @@ async fn apply_role_returns_unavailable_for_missing_user_role_file() {
             description: None,
             config_file: Some(PathBuf::from("/path/does/not/exist.toml")),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -134,7 +133,6 @@ async fn apply_role_returns_unavailable_for_invalid_user_role_toml() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -166,7 +164,6 @@ model = "role-model"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -198,7 +195,6 @@ async fn apply_role_preserves_unspecified_keys() {
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -258,7 +254,6 @@ model_provider = "test-provider"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -313,7 +308,6 @@ model_verbosity = "high"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -380,7 +374,6 @@ model_provider = "role-provider"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -439,7 +432,6 @@ model_provider = "base-provider"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -504,7 +496,6 @@ model_reasoning_effort = "high"
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -549,7 +540,6 @@ writable_roots = ["./sandbox-root"]
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -612,7 +602,6 @@ async fn apply_role_takes_precedence_over_existing_session_flags_for_same_key() 
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -656,7 +645,6 @@ enabled = false
             description: None,
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
 
@@ -695,7 +683,6 @@ fn spawn_tool_spec_build_deduplicates_user_defined_built_in_roles() {
                 description: Some("user override".to_string()),
                 config_file: None,
                 nickname_candidates: None,
-                watchdog_interval_s: None,
             },
         ),
         ("researcher".to_string(), AgentRoleConfig::default()),
@@ -717,7 +704,6 @@ fn spawn_tool_spec_lists_user_defined_roles_before_built_ins() {
             description: Some("first".to_string()),
             config_file: None,
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     )]);
 
@@ -745,7 +731,6 @@ fn spawn_tool_spec_marks_role_locked_model_and_reasoning_effort() {
             description: Some("Research carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     )]);
 
@@ -771,7 +756,6 @@ fn spawn_tool_spec_marks_role_locked_reasoning_effort_only() {
             description: Some("Review carefully.".to_string()),
             config_file: Some(role_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     )]);
 
@@ -815,7 +799,7 @@ async fn watchdog_role_uses_top_level_interval() {
 }
 
 #[tokio::test]
-async fn custom_role_can_define_watchdog_interval() {
+async fn custom_role_cannot_define_watchdog_interval() {
     let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
     config.agent_roles.insert(
         "slow_watch".to_string(),
@@ -823,12 +807,11 @@ async fn custom_role_can_define_watchdog_interval() {
             description: Some("Slow watchdog".to_string()),
             config_file: None,
             nickname_candidates: None,
-            watchdog_interval_s: Some(300),
         },
     );
 
     assert_eq!(
         watchdog_interval_for_role(&config, Some("slow_watch")),
-        Some(300)
+        None
     );
 }

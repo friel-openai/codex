@@ -147,6 +147,7 @@ pub(crate) mod state_db_bridge;
 pub use state_db_bridge::StateDbHandle;
 pub use state_db_bridge::get_state_db;
 mod thread_rollout_truncation;
+pub use thread_rollout_truncation::materialize_rollout_items_for_replay;
 mod tools;
 pub(crate) mod turn_diff_tracker;
 mod turn_metadata;

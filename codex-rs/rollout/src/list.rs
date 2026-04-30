@@ -21,6 +21,7 @@ use super::SESSIONS_SUBDIR;
 use crate::protocol::EventMsg;
 use crate::state_db;
 use codex_file_search as file_search;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
@@ -1118,6 +1119,9 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.saw_session_meta = true;
                 }
             }
+            RolloutItem::ForkReference(_) => {
+                // Not included in summaries; skip.
+            }
             RolloutItem::ResponseItem(_) => {
                 summary.created_at = summary
                     .created_at
@@ -1181,7 +1185,8 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                         head.push(value);
                     }
                 }
-                RolloutItem::Compacted(_)
+                RolloutItem::ForkReference(_)
+                | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_) => {}
             }
@@ -1328,6 +1333,125 @@ pub async fn find_archived_thread_path_by_id_str(
     id_str: &str,
 ) -> io::Result<Option<PathBuf>> {
     find_thread_path_by_id_str_in_subdir(codex_home, ARCHIVED_SESSIONS_SUBDIR, id_str).await
+}
+
+pub async fn find_rollout_path_by_segment_id(
+    codex_home: &Path,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+) -> io::Result<Option<PathBuf>> {
+    if let Some(path) = find_rollout_path_by_segment_id_in_subdir(
+        codex_home,
+        SESSIONS_SUBDIR,
+        thread_id,
+        segment_id,
+    )
+    .await?
+    {
+        return Ok(Some(path));
+    }
+    find_rollout_path_by_segment_id_in_subdir(
+        codex_home,
+        ARCHIVED_SESSIONS_SUBDIR,
+        thread_id,
+        segment_id,
+    )
+    .await
+}
+
+async fn find_rollout_path_by_segment_id_in_subdir(
+    codex_home: &Path,
+    subdir: &str,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+) -> io::Result<Option<PathBuf>> {
+    let root = codex_home.join(subdir);
+    if !tokio::fs::try_exists(&root).await.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let target_thread_id = thread_id.to_string();
+    let mut stack = vec![root];
+    let mut scanned_files = 0usize;
+    while let Some(dir) = stack.pop() {
+        let mut read_dir = match tokio::fs::read_dir(&dir).await {
+            Ok(read_dir) => read_dir,
+            Err(err) => {
+                tracing::warn!("failed to read rollout directory {}: {err}", dir.display());
+                continue;
+            }
+        };
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+                continue;
+            }
+            let Some((_, uuid)) = parse_timestamp_uuid_from_filename(file_name) else {
+                continue;
+            };
+            if uuid.to_string() != target_thread_id {
+                continue;
+            }
+            scanned_files = scanned_files.saturating_add(1);
+            if scanned_files > MAX_SCAN_FILES {
+                return Ok(None);
+            }
+            let Ok(meta_line) = read_session_meta_line(&path).await else {
+                continue;
+            };
+            if meta_line.meta.id == thread_id && meta_line.meta.segment_id == Some(segment_id) {
+                return Ok(Some(path));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub async fn resolve_fork_reference_rollout_path(
+    codex_home: &Path,
+    reference: &codex_protocol::protocol::ForkReferenceItem,
+) -> io::Result<PathBuf> {
+    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
+        && let Some(path) =
+            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
+    {
+        return Ok(path);
+    }
+
+    let rollout_path = reference.rollout_path.as_path();
+    if tokio::fs::try_exists(rollout_path).await.unwrap_or(false) {
+        return Ok(rollout_path.to_path_buf());
+    }
+
+    let Some(file_name) = rollout_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let Some((_, uuid)) = parse_timestamp_uuid_from_filename(file_name) else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let id = uuid.to_string();
+    if let Some(path) = find_thread_path_by_id_str(codex_home, id.as_str()).await? {
+        return Ok(path);
+    }
+    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, id.as_str()).await? {
+        return Ok(path);
+    }
+    Ok(rollout_path.to_path_buf())
 }
 
 /// Extract the `YYYY/MM/DD` directory components from a rollout filename.

@@ -19,6 +19,11 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: WatchdogSnoozeArgs = parse_arguments(&arguments)?;
+        let owner_thread_id = session
+            .services
+            .agent_control
+            .watchdog_owner_for_active_helper(session.conversation_id)
+            .await;
         let Some(result) = session
             .services
             .agent_control
@@ -39,6 +44,17 @@ impl ToolHandler for Handler {
                     "failed to finish watchdog helper after snooze: {err}"
                 ))
             })?;
+        if let Some(owner_thread_id) = owner_thread_id {
+            let _ = session
+                .services
+                .agent_control
+                .send_watchdog_snooze_event(
+                    owner_thread_id,
+                    result.target_thread_id,
+                    result.delay_seconds,
+                )
+                .await;
+        }
         let _ = args.reason;
         Ok(WatchdogSnoozeResult {
             target_thread_id: result.target_thread_id.to_string(),

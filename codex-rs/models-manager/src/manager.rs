@@ -228,12 +228,7 @@ impl OpenAiModelsManager {
         endpoint_client: Arc<dyn ModelsEndpointClient>,
         auth_manager: Option<Arc<AuthManager>>,
     ) -> Self {
-        Self::new_with_custom_models(
-            codex_home,
-            endpoint_client,
-            auth_manager,
-            HashMap::new(),
-        )
+        Self::new_with_custom_models(codex_home, endpoint_client, auth_manager, HashMap::new())
     }
 
     pub fn new_with_custom_models(
