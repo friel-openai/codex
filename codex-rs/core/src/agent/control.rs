@@ -60,6 +60,10 @@ const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
+const CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY";
+const CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY";
 const WATCHDOG_BOOT_TOOL_SEARCH_CALL_ID: &str = "synthetic_watchdog_tool_search";
 const WATCHDOG_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_watchdog_list_agents";
 
@@ -721,17 +725,10 @@ impl AgentControl {
 
     async fn resume_single_agent_from_rollout(
         &self,
-        mut config: crate::config::Config,
+        config: crate::config::Config,
         thread_id: ThreadId,
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = &session_source
-            && *depth >= config.agent_max_depth
-            && !config.features.enabled(Feature::MultiAgentV2)
-        {
-            let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
-        }
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {
@@ -1665,6 +1662,10 @@ async fn parent_prompt_cache_key_for_source(
     state: &Arc<ThreadManagerState>,
     session_source: Option<&SessionSource>,
 ) -> Option<ThreadId> {
+    if !fork_parent_prompt_cache_key_enabled() {
+        return None;
+    }
+
     let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id, ..
     })) = session_source
@@ -1677,6 +1678,28 @@ async fn parent_prompt_cache_key_for_source(
         .await
         .ok()
         .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
+}
+
+fn fork_parent_prompt_cache_key_enabled() -> bool {
+    let parent_named_value =
+        std::env::var(CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY_ENV).ok();
+    let legacy_value = std::env::var(CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY_ENV).ok();
+    fork_parent_prompt_cache_key_value_enabled(
+        parent_named_value.as_deref(),
+        legacy_value.as_deref(),
+    )
+}
+
+fn fork_parent_prompt_cache_key_value_enabled(
+    parent_named_value: Option<&str>,
+    legacy_value: Option<&str>,
+) -> bool {
+    parent_named_value.or(legacy_value).is_none_or(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn previous_response_fork_rollout_items(

@@ -497,7 +497,7 @@ impl Codex {
 
     async fn spawn_internal(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
         let CodexSpawnArgs {
-            mut config,
+            config,
             auth_manager,
             models_manager,
             environment_manager,
@@ -540,14 +540,6 @@ impl Codex {
                 err.path.display(),
                 err.message
             );
-        }
-
-        if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
-            && depth >= config.agent_max_depth
-            && !config.features.enabled(Feature::MultiAgentV2)
-        {
-            let _ = config.features.disable(Feature::SpawnCsv);
-            let _ = config.features.disable(Feature::Collab);
         }
 
         let user_instructions = AgentsMdManager::new(&config)
