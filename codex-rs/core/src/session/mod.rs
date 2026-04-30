@@ -42,6 +42,7 @@ use crate::rollout::find_thread_name_by_id;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use crate::turn_metadata::TurnMetadataState;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -1214,7 +1215,27 @@ impl Session {
                 .session_source
                 .is_non_root_agent()
         };
-        let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
+        let codex_home = {
+            let state = self.state.lock().await;
+            state.session_configuration.codex_home().clone()
+        };
+        let replay_rollout_items = if conversation_history
+            .scan_rollout_items(|item| matches!(item, RolloutItem::ForkReference(_)))
+        {
+            Some(
+                materialize_rollout_items_for_replay(
+                    codex_home.as_path(),
+                    &conversation_history.get_rollout_items(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let has_prior_user_turns = replay_rollout_items.as_ref().map_or_else(
+            || initial_history_has_prior_user_turns(&conversation_history),
+            |items| initial_history_has_prior_user_turns(&InitialHistory::Forked(items.clone())),
+        );
         {
             let mut state = self.state.lock().await;
             state.set_next_turn_is_first(!has_prior_user_turns);
@@ -1227,7 +1248,7 @@ impl Session {
                     .await;
             }
             InitialHistory::Resumed(resumed_history) => {
-                let rollout_items = resumed_history.history;
+                let rollout_items = replay_rollout_items.unwrap_or(resumed_history.history);
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
@@ -1266,12 +1287,14 @@ impl Session {
                 }
             }
             InitialHistory::Forked(rollout_items) => {
-                self.apply_rollout_reconstruction(&turn_context, &rollout_items)
+                let replay_rollout_items =
+                    replay_rollout_items.unwrap_or_else(|| rollout_items.clone());
+                self.apply_rollout_reconstruction(&turn_context, &replay_rollout_items)
                     .await;
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&replay_rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }

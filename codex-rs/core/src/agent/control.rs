@@ -30,6 +30,7 @@ use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::CollabCloseEndEvent;
 use codex_protocol::protocol::Event;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -47,6 +48,7 @@ use codex_tools::create_watchdog_tools_namespace;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
 use std::time::SystemTime;
@@ -150,8 +152,35 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
         // A forked child gets its own runtime config, including spawned-agent
         // instructions, so it must establish a fresh context diff baseline.
         RolloutItem::TurnContext(_) => false,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
+}
+
+fn full_history_fork_reference_items(
+    rollout_path: PathBuf,
+    source_items: &[RolloutItem],
+) -> Vec<RolloutItem> {
+    source_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
+            RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::ForkReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::TurnContext(_) => None,
+        })
+        .into_iter()
+        .chain(std::iter::once(RolloutItem::ForkReference(
+            ForkReferenceItem {
+                rollout_path,
+                nth_user_message: usize::MAX,
+            },
+        )))
+        .collect()
 }
 
 fn is_watchdog_helper_source(session_source: &SessionSource) -> bool {
@@ -534,24 +563,25 @@ impl AgentControl {
         let response_continuation = inherited_thread_state.response_continuation();
         let use_response_continuation_baseline =
             response_continuation.is_some() && matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+            .await?
+            .get_rollout_items();
         let mut forked_rollout_items = if let (Some(response_continuation), true) =
             (&response_continuation, use_response_continuation_baseline)
         {
-            let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
-                .await?
-                .get_rollout_items();
             previous_response_fork_rollout_items(
                 source_items,
                 response_continuation.fork_baseline_input(),
             )
         } else {
-            let mut items = RolloutRecorder::get_rollout_history(&rollout_path)
-                .await?
-                .get_rollout_items();
-            if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-                items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
+            match fork_mode {
+                SpawnAgentForkMode::FullHistory => {
+                    full_history_fork_reference_items(rollout_path.clone(), &source_items)
+                }
+                SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                    truncate_rollout_to_last_n_fork_turns(&source_items, *last_n_turns)
+                }
             }
-            items
         };
         if !use_response_continuation_baseline {
             // MultiAgentV2 root/subagent usage hints are injected as standalone developer
@@ -1655,14 +1685,16 @@ fn previous_response_fork_rollout_items(
 ) -> Vec<RolloutItem> {
     let source_session_meta = source_items.iter().find_map(|item| match item {
         RolloutItem::SessionMeta(meta) => Some(meta.clone()),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
     });
     let latest_turn_context = source_items.iter().rev().find_map(|item| match item {
         RolloutItem::TurnContext(turn_context) => Some(turn_context.clone()),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::SessionMeta(_)
         | RolloutItem::EventMsg(_) => None,

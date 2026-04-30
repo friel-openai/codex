@@ -3955,7 +3955,12 @@ impl CodexMessageProcessor {
         self.attach_thread_name(thread_id, thread).await;
 
         if include_turns && let Some(rollout_path) = rollout_path {
-            match read_rollout_items_from_rollout(rollout_path).await {
+            match read_materialized_rollout_items_from_rollout(
+                self.config.codex_home.as_path(),
+                rollout_path,
+            )
+            .await
+            {
                 Ok(items) => {
                     thread.turns = build_turns_from_rollout_items(&items);
                 }
@@ -4050,7 +4055,12 @@ impl CodexMessageProcessor {
             )));
         };
 
-        let items = match read_rollout_items_from_rollout(rollout_path).await {
+        let items = match read_materialized_rollout_items_from_rollout(
+            self.config.codex_home.as_path(),
+            rollout_path,
+        )
+        .await
+        {
             Ok(items) => items,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Err(invalid_request(format!(
@@ -4656,13 +4666,21 @@ impl CodexMessageProcessor {
     ) -> std::result::Result<Thread, String> {
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
-        if include_turns && let Some(history) = history {
-            populate_thread_turns(
-                &mut thread,
-                ThreadTurnSource::HistoryItems(&history.items),
-                /*active_turn*/ None,
+        if let Some(history) = history {
+            let history_items = codex_core::materialize_rollout_items_for_replay(
+                self.config.codex_home.as_path(),
+                &history.items,
             )
-            .await?;
+            .await;
+            thread.preview = preview_from_rollout_items(&history_items);
+            if include_turns {
+                populate_thread_turns(
+                    &mut thread,
+                    ThreadTurnSource::HistoryItems(&history_items),
+                    /*active_turn*/ None,
+                )
+                .await?;
+            }
         }
         Ok(thread)
     }
@@ -4903,7 +4921,11 @@ impl CodexMessageProcessor {
                         .read_stored_thread_for_new_fork(
                             fork_thread_store.as_ref(),
                             thread_id,
-                            include_turns,
+                            // The forked rollout may contain a compact ForkReference. Load
+                            // history even when excludeTurns is set so preview generation can
+                            // materialize the referenced source rollout without returning turns.
+                            /*include_history*/
+                            true,
                         )
                         .await?;
                     self.stored_thread_to_api_thread(
@@ -9256,6 +9278,14 @@ pub(crate) async fn read_rollout_items_from_rollout(
     };
 
     Ok(items)
+}
+
+pub(crate) async fn read_materialized_rollout_items_from_rollout(
+    codex_home: &Path,
+    path: &Path,
+) -> std::io::Result<Vec<RolloutItem>> {
+    let items = read_rollout_items_from_rollout(path).await?;
+    Ok(codex_core::materialize_rollout_items_for_replay(codex_home, &items).await)
 }
 
 fn extract_conversation_summary(
