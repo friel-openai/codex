@@ -123,7 +123,6 @@ model_reasoning_effort = "minimal"
             description: Some("Role with model overrides".to_string()),
             config_file: Some(role_config_path),
             nickname_candidates: None,
-            watchdog_interval_s: None,
         },
     );
     turn.config = Arc::new(config);
@@ -798,6 +797,21 @@ async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
             .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown)),
         "snooze should finish the helper turn without a shutdown op"
     );
+    let snooze_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = owner
+                .thread
+                .next_event()
+                .await
+                .expect("owner event channel should stay open");
+            if let EventMsg::Warning(warning) = event.msg {
+                break warning.message;
+            }
+        }
+    })
+    .await
+    .expect("watchdog snooze should publish a visible owner-thread event");
+    assert_eq!(snooze_event, "Watchdog snoozed for 30s.");
 }
 
 #[tokio::test]

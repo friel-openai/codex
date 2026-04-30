@@ -84,6 +84,48 @@ async fn live_app_server_raw_inter_agent_message_renders_agent_message_cell() {
 }
 
 #[tokio::test]
+async fn live_app_server_subagent_notification_renders_status_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let status = AgentStatus::Completed(Some(
+        "The watchdog closed itself. I did not close it.".to_string(),
+    ));
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": "/root/factorial_sum_agent",
+            "status": status,
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/factorial_sum_agent").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_subagent_notification_renders_status_message_cell",
+        rendered
+    );
+}
+
+#[tokio::test]
 async fn live_app_server_user_message_item_completed_does_not_duplicate_rendered_prompt() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.thread_id = Some(ThreadId::new());

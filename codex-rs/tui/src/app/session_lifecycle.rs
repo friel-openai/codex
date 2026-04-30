@@ -26,15 +26,18 @@ impl App {
             }
         }
 
-        let has_non_primary_agent_thread = self
+        let selectable_threads = self
             .agent_navigation
-            .has_non_primary_thread(self.primary_thread_id);
+            .selectable_threads(self.primary_thread_id);
+        let has_non_primary_agent_thread = selectable_threads
+            .iter()
+            .any(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id);
         if !self.config.features.enabled(Feature::Collab) && !has_non_primary_agent_thread {
             self.chat_widget.open_multi_agent_enable_prompt();
             return;
         }
 
-        if self.agent_navigation.is_empty() {
+        if selectable_threads.is_empty() {
             self.chat_widget
                 .add_info_message("No agents available yet.".to_string(), /*hint*/ None);
             return;
@@ -43,7 +46,7 @@ impl App {
         let mut initial_selected_idx = None;
         let items: Vec<SelectionItem> = self
             .agent_navigation
-            .ordered_threads()
+            .selectable_threads(self.primary_thread_id)
             .iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
@@ -596,10 +599,11 @@ impl App {
         direction: AgentNavigationDirection,
     ) -> Option<ThreadId> {
         let current_thread = self.current_displayed_thread_id();
-        if let Some(thread_id) = self
-            .agent_navigation
-            .adjacent_thread_id(current_thread, direction)
-        {
+        if let Some(thread_id) = self.agent_navigation.adjacent_selectable_thread_id(
+            current_thread,
+            self.primary_thread_id,
+            direction,
+        ) {
             return Some(thread_id);
         }
 
@@ -611,8 +615,11 @@ impl App {
         if self.backfill_loaded_subagent_threads(app_server).await {
             self.last_subagent_backfill_attempt = Some(primary_thread_id);
         }
-        self.agent_navigation
-            .adjacent_thread_id(self.current_displayed_thread_id(), direction)
+        self.agent_navigation.adjacent_selectable_thread_id(
+            self.current_displayed_thread_id(),
+            self.primary_thread_id,
+            direction,
+        )
     }
 
     pub(super) fn fresh_session_config(&self) -> Config {

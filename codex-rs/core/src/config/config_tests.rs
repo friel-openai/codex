@@ -4613,7 +4613,6 @@ async fn load_config_rejects_missing_agent_role_config_file() -> std::io::Result
                     description: Some("Research role".to_string()),
                     config_file: Some(missing_path.abs()),
                     nickname_candidates: None,
-                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -4682,6 +4681,22 @@ nickname_candidates = ["Hypatia", "Noether"]
     );
 
     Ok(())
+}
+
+#[test]
+fn agent_role_toml_rejects_watchdog_interval() {
+    let err = toml::from_str::<ConfigToml>(
+        r#"[agents.slow_watch]
+description = "Not a watchdog"
+watchdog_interval_s = 300
+"#,
+    )
+    .expect_err("role-scoped watchdog_interval_s should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("unknown field `watchdog_interval_s`")
+    );
 }
 
 #[tokio::test]
@@ -4787,6 +4802,74 @@ nickname_candidates = ["Noether"]
             .as_ref()
             .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
         Some(vec!["Hypatia"])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_file_drops_watchdog_interval_with_warning() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let role_config_path = codex_home.path().join("agents").join("researcher.toml");
+    tokio::fs::create_dir_all(
+        role_config_path
+            .parent()
+            .expect("role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::write(
+        &role_config_path,
+        r#"
+description = "Research role"
+developer_instructions = "Research carefully"
+watchdog_interval_s = 300
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[agents.researcher]
+description = "Research role"
+config_file = "./agents/researcher.toml"
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("cannot set watchdog_interval_s"))
+    );
+    assert!(
+        !config.agent_roles.contains_key("researcher"),
+        "malformed role file should be dropped"
+    );
+    assert!(
+        !config
+            .config_layer_stack
+            .get_layers(
+                ConfigLayerStackOrdering::LowestPrecedenceFirst,
+                /*include_disabled*/ true,
+            )
+            .iter()
+            .any(|layer| layer.config.to_string().contains("watchdog_interval_s")),
+        "malformed role file should not add watchdog_interval_s to the config layer stack"
+    );
+    assert_eq!(config.watchdog_interval_s, DEFAULT_WATCHDOG_INTERVAL_S);
+
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("cannot set watchdog_interval_s")
+                && warning.contains("set it at the top level of config.toml"))
     );
 
     Ok(())
@@ -5564,7 +5647,6 @@ async fn load_config_normalizes_agent_role_nickname_candidates() -> std::io::Res
                         "  Hypatia  ".to_string(),
                         "Noether".to_string(),
                     ]),
-                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5605,7 +5687,6 @@ async fn load_config_rejects_empty_agent_role_nickname_candidates() -> std::io::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(Vec::new()),
-                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5643,7 +5724,6 @@ async fn load_config_rejects_duplicate_agent_role_nickname_candidates() -> std::
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Hypatia".to_string(), " Hypatia ".to_string()]),
-                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5681,7 +5761,6 @@ async fn load_config_rejects_unsafe_agent_role_nickname_candidates() -> std::io:
                     description: Some("Research role".to_string()),
                     config_file: None,
                     nickname_candidates: Some(vec!["Agent <One>".to_string()]),
-                    watchdog_interval_s: None,
                 },
             )]),
         }),
@@ -5718,13 +5797,7 @@ async fn load_config_reads_top_level_watchdog_interval() -> std::io::Result<()> 
     )
     .await?;
 
-    assert_eq!(
-        config
-            .agent_roles
-            .get("watchdog")
-            .and_then(|role| role.watchdog_interval_s),
-        Some(3)
-    );
+    assert_eq!(config.watchdog_interval_s, 3);
 
     Ok(())
 }
@@ -6042,6 +6115,7 @@ async fn test_precedence_fixture_with_o3_profile() -> std::io::Result<()> {
             agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
             agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
             agent_roles: BTreeMap::new(),
+            watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
             memories: MemoriesConfig::default(),
             agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
             agent_interrupt_message_enabled: true,
@@ -6237,6 +6311,7 @@ async fn test_precedence_fixture_with_gpt3_profile() -> std::io::Result<()> {
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
+        watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_interrupt_message_enabled: true,
@@ -6386,6 +6461,7 @@ async fn test_precedence_fixture_with_zdr_profile() -> std::io::Result<()> {
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
+        watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_interrupt_message_enabled: true,
@@ -6520,6 +6596,7 @@ async fn test_precedence_fixture_with_gpt5_profile() -> std::io::Result<()> {
         agent_max_threads: DEFAULT_AGENT_MAX_THREADS,
         agent_max_depth: DEFAULT_AGENT_MAX_DEPTH,
         agent_roles: BTreeMap::new(),
+        watchdog_interval_s: DEFAULT_WATCHDOG_INTERVAL_S,
         memories: MemoriesConfig::default(),
         agent_job_max_runtime_seconds: DEFAULT_AGENT_JOB_MAX_RUNTIME_SECONDS,
         agent_interrupt_message_enabled: true,

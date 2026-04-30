@@ -27,11 +27,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "watchdog_interval_s": {
-          "description": "If set, this role creates an idle-time watchdog with this interval in seconds.",
-          "format": "int64",
-          "type": "integer"
         }
       },
       "type": "object"
@@ -351,6 +346,9 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "agent_prompt_injection": {
+              "type": "boolean"
+            },
             "agent_watchdog": {
               "type": "boolean"
             },
@@ -3332,6 +3330,9 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "agent_prompt_injection": {
+          "type": "boolean"
+        },
         "agent_watchdog": {
           "type": "boolean"
         },

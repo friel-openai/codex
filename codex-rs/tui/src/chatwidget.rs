@@ -258,6 +258,7 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 use tracing::warn;
@@ -503,7 +504,59 @@ fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String)
         return None;
     };
     let communication = InterAgentCommunication::from_message_content(content)?;
-    Some((communication.author.to_string(), communication.content))
+    Some((
+        communication.author.to_string(),
+        display_inter_agent_message_content(&communication.content),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationPayload {
+    status: AgentStatus,
+}
+
+fn display_inter_agent_message_content(content: &str) -> String {
+    parse_subagent_notification_status(content)
+        .map(display_subagent_notification_status)
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn display_subagent_notification_status(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => "completed".to_string(),
+        AgentStatus::Errored(message) => format!("errored: {message}"),
+        AgentStatus::Interrupted => "interrupted".to_string(),
+        AgentStatus::Shutdown => "shutdown".to_string(),
+        AgentStatus::NotFound => "not found".to_string(),
+        AgentStatus::PendingInit => "pending init".to_string(),
+        AgentStatus::Running => "running".to_string(),
+    }
+}
+
+fn parse_subagent_notification_status(content: &str) -> Option<AgentStatus> {
+    const START_MARKER: &str = "<subagent_notification>";
+    const END_MARKER: &str = "</subagent_notification>";
+
+    let trimmed = content.trim();
+    if !trimmed
+        .get(..START_MARKER.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(START_MARKER))
+    {
+        return None;
+    }
+    let without_start = &trimmed[START_MARKER.len()..];
+    let end_start = without_start.len().checked_sub(END_MARKER.len())?;
+    if !without_start
+        .get(end_start..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(END_MARKER))
+    {
+        return None;
+    }
+    let body = without_start[..end_start].trim();
+    serde_json::from_str::<SubagentNotificationPayload>(body)
+        .ok()
+        .map(|payload| payload.status)
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {

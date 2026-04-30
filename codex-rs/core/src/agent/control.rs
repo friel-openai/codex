@@ -38,6 +38,7 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::state_db;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
@@ -1326,6 +1327,30 @@ impl AgentControl {
         Ok(())
     }
 
+    pub(crate) async fn send_watchdog_snooze_event(
+        &self,
+        owner_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        delay_seconds: u64,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let owner_thread = state.get_thread(owner_thread_id).await?;
+        owner_thread
+            .codex
+            .session
+            .send_event_raw(Event {
+                id: format!("watchdog-snooze-{target_thread_id}-{}", ThreadId::new()),
+                msg: codex_protocol::protocol::EventMsg::Warning(WarningEvent {
+                    message: format!(
+                        "Watchdog snoozed for {}.",
+                        format_watchdog_snooze_duration(delay_seconds)
+                    ),
+                }),
+            })
+            .await;
+        Ok(())
+    }
+
     pub(crate) async fn compact_parent_for_watchdog_helper(
         &self,
         helper_thread_id: ThreadId,
@@ -1853,6 +1878,16 @@ fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> b
                 .strip_prefix(prefix.as_str())
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
+}
+
+fn format_watchdog_snooze_duration(delay_seconds: u64) -> String {
+    let minutes = delay_seconds / 60;
+    let seconds = delay_seconds % 60;
+    match (minutes, seconds) {
+        (0, seconds) => format!("{seconds}s"),
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, seconds) => format!("{minutes}m {seconds}s"),
+    }
 }
 
 pub(crate) fn render_input_preview(initial_operation: &Op) -> String {
