@@ -314,7 +314,6 @@ impl AgentControl {
     }
 
     /// Spawn a new agent thread and submit the initial prompt.
-    #[cfg(test)]
     pub(crate) async fn spawn_agent(
         &self,
         config: crate::config::Config,
@@ -611,8 +610,7 @@ impl AgentControl {
                     Vec::new()
                 };
             forked_rollout_items.retain(|item| {
-                if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) =
-                    item
+                if let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = item
                     && role == "developer"
                     && let [ContentItem::InputText { text }] = content.as_slice()
                     && multi_agent_v2_usage_hint_texts_to_filter

@@ -578,6 +578,7 @@ impl ThreadManager {
             options.metrics_service_name,
             /*inherited_shell_snapshot*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             options.parent_trace,
             options.environments,
             /*user_shell_override*/ None,

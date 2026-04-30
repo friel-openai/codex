@@ -151,14 +151,6 @@ async fn run_remote_compact_task_inner_impl(
         .filter(|item| !is_compaction_filtered_history_item(item))
         .cloned()
         .collect::<Vec<_>>();
-    // Required to keep `/undo` available after compaction
-    let ghost_snapshots: Vec<ResponseItem> = history
-        .raw_items()
-        .iter()
-        .filter(|item| matches!(item, ResponseItem::GhostSnapshot { .. }))
-        .cloned()
-        .collect();
-
     let prompt_input = history
         .for_prompt(&turn_context.model_info.input_modalities)
         .into_iter()
@@ -214,9 +206,6 @@ async fn run_remote_compact_task_inner_impl(
     )
     .await;
 
-    if !ghost_snapshots.is_empty() {
-        new_history.extend(ghost_snapshots);
-    }
     let reference_context_item = match initial_context_injection {
         InitialContextInjection::DoNotInject => None,
         InitialContextInjection::BeforeLastUserMessage => Some(turn_context.to_turn_context_item()),

@@ -113,7 +113,7 @@ impl ToolHandler for Handler {
             /*task_name*/ None,
         )?;
         let result = if let Some(watchdog_interval_s) = watchdog_interval_s {
-            let thread_id = spawn_watchdog(
+            let thread_id = Box::pin(spawn_watchdog(
                 &session.services.agent_control,
                 config,
                 prompt.clone(),
@@ -121,7 +121,7 @@ impl ToolHandler for Handler {
                 child_depth,
                 watchdog_interval_s,
                 spawn_source,
-            )
+            ))
             .await
             .map_err(collab_spawn_error)?;
             Ok(LiveAgent {
@@ -280,9 +280,9 @@ async fn spawn_watchdog(
                 "failed to clear watchdog MCP servers: {err}"
             ))
         })?;
-    let target_thread_id = agent_control
-        .spawn_agent(handle_config, Op::Interrupt, Some(spawn_source))
-        .await?;
+    let target_thread_id =
+        Box::pin(agent_control.spawn_agent(handle_config, Op::Interrupt, Some(spawn_source)))
+            .await?;
     let superseded_before_register = agent_control
         .unregister_watchdogs_for_owner(owner_thread_id)
         .await;

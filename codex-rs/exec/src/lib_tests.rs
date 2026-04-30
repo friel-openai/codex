@@ -510,5 +510,5 @@ fn session_configured_from_thread_fork_response_preserves_permission_profile() {
     let event = session_configured_from_thread_fork_response(&response)
         .expect("build fork session configured event");
 
-    assert_eq!(event.permission_profile, Some(permission_profile));
+    assert_eq!(event.permission_profile, permission_profile);
 }

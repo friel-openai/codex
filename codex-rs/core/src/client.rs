@@ -1767,6 +1767,8 @@ fn map_response_stream(
     api_stream: codex_api::ResponseStream,
     session_telemetry: SessionTelemetry,
     inference_trace_attempt: InferenceTraceAttempt,
+    client_state: Option<Arc<ModelClientState>>,
+    request: Option<ResponsesApiRequest>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -1781,6 +1783,8 @@ fn map_response_stream(
         api_stream,
         session_telemetry,
         inference_trace_attempt,
+        client_state,
+        request,
     )
 }
 

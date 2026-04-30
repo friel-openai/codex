@@ -255,6 +255,7 @@ pub(crate) async fn load_agent_role_prompt(
         | SessionSource::Exec
         | SessionSource::Mcp
         | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
         | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
     };
 

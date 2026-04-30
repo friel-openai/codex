@@ -48,6 +48,8 @@ pub(crate) struct SendMessageArgs {
 pub(crate) struct FollowupTaskArgs {
     pub(crate) target: String,
     pub(crate) message: String,
+    #[serde(default)]
+    pub(crate) interrupt: bool,
 }
 
 fn message_content(message: String) -> Result<String, FunctionCallError> {
@@ -65,8 +67,16 @@ pub(crate) async fn handle_message_string_tool(
     mode: MessageDeliveryMode,
     target: String,
     message: String,
+    interrupt: bool,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
-    handle_message_submission(invocation, mode, target, message_content(message)?).await
+    handle_message_submission(
+        invocation,
+        mode,
+        target,
+        message_content(message)?,
+        interrupt,
+    )
+    .await
 }
 
 async fn handle_message_submission(
@@ -74,6 +84,7 @@ async fn handle_message_submission(
     mode: MessageDeliveryMode,
     target: String,
     prompt: String,
+    interrupt: bool,
 ) -> Result<FunctionToolOutput, FunctionCallError> {
     let ToolInvocation {
         session,
@@ -242,6 +253,7 @@ fn direct_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {
         | SessionSource::Exec
         | SessionSource::Mcp
         | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
         | SessionSource::SubAgent(SubAgentSource::Review)
         | SessionSource::SubAgent(SubAgentSource::Compact)
         | SessionSource::SubAgent(SubAgentSource::MemoryConsolidation)
