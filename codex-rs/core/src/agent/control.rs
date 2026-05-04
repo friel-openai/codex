@@ -489,6 +489,21 @@ impl AgentControl {
                     }
                 }
             };
+            if let Err(error) = new_thread
+                .thread
+                .set_app_server_client_info(
+                    client_metadata.client_name.clone(),
+                    client_metadata.client_version.clone(),
+                )
+                .await
+            {
+                warn!(
+                    error = %error,
+                    child_thread_id = %new_thread.thread_id,
+                    parent_thread_id = %parent_thread_id,
+                    "failed to inherit app-server client metadata for spawned thread"
+                );
+            }
             let thread_config = new_thread.thread.codex.thread_config_snapshot().await;
             emit_subagent_session_started(
                 &new_thread
