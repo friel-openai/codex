@@ -3,7 +3,6 @@ use super::control::SpawnAgentForkMode;
 use super::control::SpawnAgentOptions;
 use super::registry::AgentRegistry;
 use super::registry::exceeds_thread_spawn_depth_limit;
-use super::status::is_final;
 use crate::config::Config;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
@@ -303,7 +302,7 @@ impl WatchdogManager {
 
         if let Some(helper_id) = snapshot.active_helper_id {
             let helper_status = get_status(manager_state, helper_id).await;
-            if !is_final(&helper_status) {
+            if watchdog_helper_is_still_active(&helper_status) {
                 return;
             }
             let _ = control_for_spawn
@@ -577,6 +576,10 @@ struct WatchdogSnapshot {
 }
 
 fn is_running(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+}
+
+fn watchdog_helper_is_still_active(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
 }
 

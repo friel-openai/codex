@@ -750,7 +750,11 @@ async fn compact_parent_context_submits_compaction_for_idle_parent() {
         .start_thread((*turn.config).clone())
         .await
         .expect("watchdog handle should start");
-    let helper_thread_id = ThreadId::new();
+    let helper = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog helper thread should start");
+    let helper_thread_id = helper.thread_id;
     agent_control
         .register_watchdog(WatchdogRegistration {
             owner_thread_id: owner.thread_id,
@@ -799,6 +803,28 @@ async fn compact_parent_context_submits_compaction_for_idle_parent() {
         .into_iter()
         .find(|(thread_id, op)| *thread_id == owner.thread_id && matches!(op, Op::Compact));
     assert_eq!(captured, Some((owner.thread_id, Op::Compact)));
+    assert_eq!(
+        agent_control
+            .watchdog_target_for_active_helper(helper_thread_id)
+            .await,
+        None
+    );
+    assert!(
+        agent_control
+            .watchdog_helper_is_suppressed_for_tests(helper_thread_id)
+            .await
+    );
+    assert_eq!(
+        agent_control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        !manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown)),
+        "compact_parent_context should finish the helper turn without a shutdown op"
+    );
 }
 
 #[tokio::test]

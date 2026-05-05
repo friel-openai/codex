@@ -29,6 +29,23 @@ impl ToolHandler for Handler {
             .map_err(|err| {
                 FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
             })?;
+        if !matches!(&result, WatchdogParentCompactionResult::NotWatchdogHelper) {
+            let _ = session
+                .services
+                .agent_control
+                .finish_watchdog_helper(session.conversation_id)
+                .await;
+            session
+                .services
+                .agent_control
+                .finish_watchdog_helper_thread(session.conversation_id)
+                .await
+                .map_err(|err| {
+                    FunctionCallError::RespondToModel(format!(
+                        "compact_parent_context failed to finish watchdog helper: {err}"
+                    ))
+                })?;
+        }
         Ok(CompactParentContextResult::from(result))
     }
 }
