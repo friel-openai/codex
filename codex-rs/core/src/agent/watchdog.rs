@@ -28,6 +28,8 @@ use tracing::warn;
 const WATCHDOG_TICK_SECONDS: i64 = 1;
 const WATCHDOG_MIN_SNOOZE_SECONDS: u64 = 30;
 const WATCHDOG_MAX_SNOOZE_SECONDS: u64 = 60 * 60;
+const WATCHDOG_HELPER_MIN_RUNTIME_SECONDS: u64 = 30;
+const WATCHDOG_HELPER_MAX_RUNTIME_SECONDS: u64 = 5 * 60;
 
 #[derive(Clone)]
 pub(crate) struct WatchdogRegistration {
@@ -50,6 +52,7 @@ struct WatchdogEntry {
     interval: Duration,
     last_trigger: Instant,
     active_helper_id: Option<ThreadId>,
+    active_helper_started_at: Option<Instant>,
     snoozed_until: Option<Instant>,
     owner_idle_since: Option<Instant>,
     owner_was_running: bool,
@@ -115,6 +118,7 @@ impl WatchdogManager {
             interval,
             last_trigger: now,
             active_helper_id: None,
+            active_helper_started_at: None,
             snoozed_until: None,
             owner_idle_since: Some(now),
             owner_was_running: false,
@@ -152,7 +156,7 @@ impl WatchdogManager {
         if !suppressed_helpers.is_empty() {
             let mut suppressed = self.suppressed_helpers.lock().await;
             for helper_id in suppressed_helpers {
-                suppressed.remove(&helper_id);
+                suppressed.insert(helper_id);
             }
         }
         Ok(superseded)
@@ -206,6 +210,21 @@ impl WatchdogManager {
     ) {
         if let Some(entry) = self.registrations.lock().await.get_mut(&target_thread_id) {
             entry.active_helper_id = Some(helper_thread_id);
+            entry.active_helper_started_at = Some(Instant::now());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn backdate_active_helper_for_tests(
+        &self,
+        target_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+        age: Duration,
+    ) {
+        if let Some(entry) = self.registrations.lock().await.get_mut(&target_thread_id)
+            && entry.active_helper_id == Some(helper_thread_id)
+        {
+            entry.active_helper_started_at = Some(Instant::now() - age);
         }
     }
 
@@ -288,7 +307,7 @@ impl WatchdogManager {
             return;
         }
 
-        let owner_running = is_running(&owner_status);
+        let owner_running = owner_is_running(&owner_status);
         let owner_idle_since = self
             .update_owner_idle_state_if_generation(target_thread_id, generation, owner_running, now)
             .await;
@@ -303,6 +322,18 @@ impl WatchdogManager {
         if let Some(helper_id) = snapshot.active_helper_id {
             let helper_status = get_status(manager_state, helper_id).await;
             if watchdog_helper_is_still_active(&helper_status) {
+                if snapshot.active_helper_started_at.is_some_and(|started_at| {
+                    now.duration_since(started_at) >= snapshot.helper_timeout
+                }) {
+                    warn!(
+                        target_thread_id = %target_thread_id,
+                        helper_thread_id = %helper_id,
+                        "watchdog helper exceeded runtime limit; replacing helper"
+                    );
+                    let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
+                    let _ = self.finish_active_helper(helper_id).await;
+                    return;
+                }
                 return;
             }
             let _ = control_for_spawn
@@ -412,6 +443,8 @@ impl WatchdogManager {
             interval: entry.interval,
             last_trigger: entry.last_trigger,
             active_helper_id: entry.active_helper_id,
+            active_helper_started_at: entry.active_helper_started_at,
+            helper_timeout: helper_timeout(entry.interval),
             snoozed_until: entry.snoozed_until,
             owner_idle_since: entry.owner_idle_since,
         })
@@ -504,6 +537,7 @@ impl WatchdogManager {
                 .unwrap_or_else(|| entry.interval.as_secs().max(1));
             entry.snoozed_until = Some(Instant::now() + Duration::from_secs(delay_seconds));
             entry.active_helper_id = None;
+            entry.active_helper_started_at = None;
             WatchdogSnoozeResult {
                 target_thread_id,
                 delay_seconds,
@@ -526,6 +560,7 @@ impl WatchdogManager {
                 return false;
             };
             entry.active_helper_id = None;
+            entry.active_helper_started_at = None;
             true
         };
         self.suppressed_helpers
@@ -551,6 +586,7 @@ impl WatchdogManager {
         }
         entry.last_trigger = now;
         entry.active_helper_id = active_helper_id;
+        entry.active_helper_started_at = active_helper_id.map(|_| now);
         entry.owner_idle_since = Some(now);
         entry.snoozed_until = None;
     }
@@ -571,12 +607,14 @@ struct WatchdogSnapshot {
     interval: Duration,
     last_trigger: Instant,
     active_helper_id: Option<ThreadId>,
+    active_helper_started_at: Option<Instant>,
+    helper_timeout: Duration,
     snoozed_until: Option<Instant>,
     owner_idle_since: Option<Instant>,
 }
 
-fn is_running(status: &AgentStatus) -> bool {
-    matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+fn owner_is_running(status: &AgentStatus) -> bool {
+    matches!(status, AgentStatus::Running)
 }
 
 fn watchdog_helper_is_still_active(status: &AgentStatus) -> bool {
@@ -609,6 +647,13 @@ fn interval_duration(interval_s: i64) -> CodexResult<Duration> {
 
 fn tick_duration() -> Duration {
     Duration::from_secs(WATCHDOG_TICK_SECONDS as u64)
+}
+
+fn helper_timeout(interval: Duration) -> Duration {
+    interval.saturating_mul(10).clamp(
+        Duration::from_secs(WATCHDOG_HELPER_MIN_RUNTIME_SECONDS),
+        Duration::from_secs(WATCHDOG_HELPER_MAX_RUNTIME_SECONDS),
+    )
 }
 
 fn watchdog_helper_prompt(owner_thread_id: ThreadId, prompt: &str) -> String {

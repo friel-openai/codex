@@ -975,6 +975,174 @@ async fn watchdog_interrupted_helper_does_not_block_future_checkins() {
 }
 
 #[tokio::test]
+async fn watchdog_pending_init_owner_does_not_wedge_scheduler() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, _) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "recover after pending owner".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    // A reconstructed long-lived session can leave the owner status at PendingInit.
+    // PendingInit must not be treated as an active root turn forever.
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let helper_spawned = harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("recover after pending owner"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            });
+            if helper_spawned {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should treat stale PendingInit owners as idle");
+}
+
+#[tokio::test]
+async fn watchdog_stale_running_helper_does_not_block_future_checkins() {
+    let harness = AgentControlHarness::new().await;
+    let (owner_thread_id, owner_thread) = harness.start_thread().await;
+    let (target_thread_id, _) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+
+    harness
+        .control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id,
+            target_thread_id,
+            child_depth: 0,
+            interval_s: 1,
+            prompt: "recover after stale running helper".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let owner_turn = owner_thread.codex.session.new_default_turn().await;
+    owner_thread
+        .codex
+        .session
+        .send_event(
+            owner_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: owner_turn.sub_id.clone(),
+                last_agent_message: Some("root done".to_string()),
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+
+    let first_helper_id = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some((thread_id, _)) = harness.manager.captured_ops().into_iter().find(
+                |(thread_id, op)| {
+                    *thread_id != owner_thread_id
+                        && *thread_id != target_thread_id
+                        && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                            UserInput::Text { text, .. } => text.contains("recover after stale running helper"),
+                            UserInput::Image { .. }
+                            | UserInput::LocalImage { .. }
+                            | UserInput::Skill { .. }
+                            | UserInput::Mention { .. } => false,
+                            _ => false,
+                        }))
+                },
+            ) {
+                break thread_id;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should spawn an initial helper");
+
+    let first_helper = harness
+        .manager
+        .get_thread(first_helper_id)
+        .await
+        .expect("first helper thread should be registered");
+    let helper_turn = first_helper.codex.session.new_default_turn().await;
+    first_helper
+        .codex
+        .session
+        .send_event(
+            helper_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: helper_turn.sub_id.clone(),
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
+        )
+        .await;
+
+    harness
+        .control
+        .backdate_watchdog_active_helper_for_tests(
+            target_thread_id,
+            first_helper_id,
+            Duration::from_secs(10 * 60),
+        )
+        .await;
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let spawned_again = harness.manager.captured_ops().into_iter().any(|(thread_id, op)| {
+                thread_id != owner_thread_id
+                    && thread_id != target_thread_id
+                    && thread_id != first_helper_id
+                    && matches!(op, Op::UserInput { items, .. } if items.iter().any(|item| match item {
+                        UserInput::Text { text, .. } => text.contains("recover after stale running helper"),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => false,
+                        _ => false,
+                    }))
+            });
+            if spawned_again {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("watchdog should replace a stale running helper on a later check-in");
+}
+
+#[tokio::test]
 async fn watchdog_helper_forks_owner_history() {
     let harness = AgentControlHarness::new().await;
     let (owner_thread_id, owner_thread) = harness.start_thread().await;

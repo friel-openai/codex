@@ -56,6 +56,8 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
+#[cfg(test)]
+use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
@@ -1074,6 +1076,20 @@ impl AgentControl {
         if let Some(watchdogs) = self.watchdogs.as_ref() {
             watchdogs
                 .set_active_helper_for_tests(target_thread_id, helper_thread_id)
+                .await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn backdate_watchdog_active_helper_for_tests(
+        &self,
+        target_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+        age: Duration,
+    ) {
+        if let Some(watchdogs) = self.watchdogs.as_ref() {
+            watchdogs
+                .backdate_active_helper_for_tests(target_thread_id, helper_thread_id, age)
                 .await;
         }
     }
