@@ -4,6 +4,7 @@ use crate::agent::WatchdogManager;
 use crate::agent::WatchdogRegistration;
 use crate::agent::registry::AgentMetadata;
 use crate::agent::registry::AgentRegistry;
+use crate::agent::registry::is_watchdog_agent_metadata;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
@@ -387,7 +388,14 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
-        let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let mut reservation = if session_source
+            .as_ref()
+            .is_some_and(is_watchdog_helper_source)
+        {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(config.agent_max_threads)?
+        };
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
             .await;
@@ -538,7 +546,7 @@ impl AgentControl {
                 .as_ref()
                 .is_some_and(is_watchdog_helper_source);
         if (!new_thread.thread.enabled(Feature::MultiAgentV2)
-            && !matches!(agent_metadata.agent_role.as_deref(), Some("watchdog")))
+            && !is_watchdog_agent_metadata(&agent_metadata))
             || is_watchdog_helper
         {
             let child_reference = agent_metadata
@@ -802,7 +810,11 @@ impl AgentControl {
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
-        let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let mut reservation = if is_watchdog_helper_source(&session_source) {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(config.agent_max_threads)?
+        };
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -873,7 +885,7 @@ impl AgentControl {
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
         if !resumed_thread.thread.enabled(Feature::MultiAgentV2)
-            && !matches!(agent_metadata.agent_role.as_deref(), Some("watchdog"))
+            && !is_watchdog_agent_metadata(&agent_metadata)
         {
             let child_reference = agent_metadata
                 .agent_path

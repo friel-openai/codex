@@ -601,6 +601,129 @@ fn multi_agent_v2_spawn_watchdog_role_returns_inert_handle_and_ignores_fork_turn
 }
 
 #[test]
+fn multi_agent_v2_spawn_watchdog_role_ignores_thread_limit() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let mut config = (*turn.config).clone();
+        config.agent_max_threads = Some(1);
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        let root = manager
+            .start_thread(config.clone())
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.conversation_id = root.thread_id;
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let worker_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "occupy the only counted slot",
+                    "task_name": "worker",
+                    "fork_turns": "none"
+                })),
+            ))
+            .await
+            .expect("worker spawn should consume the only counted slot");
+        let _ = expect_text_output(worker_output);
+
+        let watchdog_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should ignore counted thread limit");
+        let (content, success) = expect_text_output(watchdog_output);
+        let result: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        assert_eq!(result["task_name"], "/root/watchdog");
+        assert_eq!(success, Some(true));
+    });
+}
+
+#[test]
+fn multi_agent_v2_spawn_watchdog_role_does_not_count_against_thread_limit() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let mut config = (*turn.config).clone();
+        config.agent_max_threads = Some(1);
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        let root = manager
+            .start_thread(config.clone())
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.conversation_id = root.thread_id;
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let watchdog_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                Arc::clone(&session),
+                Arc::clone(&turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should succeed");
+        let (content, success) = expect_text_output(watchdog_output);
+        let result: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        assert_eq!(result["task_name"], "/root/watchdog");
+        assert_eq!(success, Some(true));
+
+        let worker_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "use the only counted slot",
+                    "task_name": "worker",
+                    "fork_turns": "none"
+                })),
+            ))
+            .await
+            .expect("watchdog should not consume the counted slot");
+        let (_, success) = expect_text_output(worker_output);
+        assert_eq!(success, Some(true));
+    });
+}
+
+#[test]
 fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     run_large_stack_async(|| async {
         let (mut session, mut turn) = make_session_and_context().await;

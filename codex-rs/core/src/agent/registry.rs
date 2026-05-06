@@ -76,6 +76,10 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
     depth > max_depth
 }
 
+pub(crate) fn is_watchdog_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+    agent_metadata.agent_role.as_deref() == Some("watchdog")
+}
+
 impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
@@ -93,7 +97,18 @@ impl AgentRegistry {
             active: true,
             reserved_agent_nickname: None,
             reserved_agent_path: None,
+            counted: true,
         })
+    }
+
+    pub(crate) fn reserve_uncounted_spawn_slot(self: &Arc<Self>) -> SpawnReservation {
+        SpawnReservation {
+            state: Arc::clone(self),
+            active: true,
+            reserved_agent_nickname: None,
+            reserved_agent_path: None,
+            counted: false,
+        }
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
@@ -111,6 +126,7 @@ impl AgentRegistry {
                 .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                        && !is_watchdog_agent_metadata(&metadata)
                 })
         };
         if removed_counted_agent {
@@ -296,6 +312,7 @@ pub(crate) struct SpawnReservation {
     active: bool,
     reserved_agent_nickname: Option<String>,
     reserved_agent_path: Option<AgentPath>,
+    counted: bool,
 }
 
 impl SpawnReservation {
@@ -321,6 +338,10 @@ impl SpawnReservation {
     }
 
     pub(crate) fn commit(mut self, agent_metadata: AgentMetadata) {
+        if self.counted && is_watchdog_agent_metadata(&agent_metadata) {
+            self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            self.counted = false;
+        }
         self.reserved_agent_nickname = None;
         self.reserved_agent_path = None;
         self.state.register_spawned_thread(agent_metadata);
@@ -334,7 +355,9 @@ impl Drop for SpawnReservation {
             if let Some(agent_path) = self.reserved_agent_path.take() {
                 self.state.release_reserved_agent_path(&agent_path);
             }
-            self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            if self.counted {
+                self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 }
