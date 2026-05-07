@@ -28,6 +28,7 @@ use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RotateThreadSegmentParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
@@ -108,6 +109,14 @@ impl LocalThreadStore {
     /// Return the live local rollout path for legacy local-only code paths.
     pub async fn live_rollout_path(&self, thread_id: ThreadId) -> ThreadStoreResult<PathBuf> {
         live_writer::rollout_path(self, thread_id).await
+    }
+
+    pub async fn rotate_thread_segment(
+        &self,
+        thread_id: ThreadId,
+        params: RotateThreadSegmentParams,
+    ) -> ThreadStoreResult<()> {
+        live_writer::rotate_thread_segment(self, thread_id, params).await
     }
 
     pub(super) async fn live_recorder(
@@ -270,6 +279,8 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use codex_protocol::ThreadId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::EventMsg;
@@ -278,10 +289,14 @@ mod tests {
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::*;
+    use crate::ListThreadsParams;
+    use crate::RotateThreadSegmentParams;
     use crate::ThreadEventPersistenceMode;
     use crate::ThreadPersistenceMetadata;
+    use crate::ThreadSortKey;
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
@@ -333,6 +348,384 @@ mod tests {
         assert!(
             matches!(err, ThreadStoreError::ThreadNotFound { thread_id: missing } if missing == thread_id)
         );
+    }
+
+    #[tokio::test]
+    async fn rotate_thread_segment_keeps_thread_id_and_references_previous_segment() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("before rotation")],
+            })
+            .await
+            .expect("append pre-rotation item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush pre-rotation item");
+        let old_rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("old rollout path");
+        let (old_items, _, _) = RolloutRecorder::load_rollout_items(old_rollout_path.as_path())
+            .await
+            .expect("old rollout items");
+        let old_segment_id = old_items.iter().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
+            RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => None,
+        });
+
+        store
+            .rotate_thread_segment(
+                thread_id,
+                RotateThreadSegmentParams {
+                    source: SessionSource::Exec,
+                    base_instructions: BaseInstructions::default(),
+                    dynamic_tools: Vec::new(),
+                    metadata: thread_metadata(),
+                    event_persistence_mode: ThreadEventPersistenceMode::Limited,
+                    initial_items: vec![user_message_item("rotation checkpoint")],
+                    previous_segment_reference_depth: 2,
+                },
+            )
+            .await
+            .expect("rotate segment");
+        let new_rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("new rollout path");
+        assert_eq!(new_rollout_path, old_rollout_path);
+
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("after rotation")],
+            })
+            .await
+            .expect("append post-rotation item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush post-rotation item");
+        let old_segment_id = old_segment_id.expect("old rollout should have a segment id");
+        let archived_old_rollout_path = home
+            .path()
+            .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+            .join(thread_id.to_string())
+            .join(old_segment_id.to_string())
+            .join(
+                old_rollout_path
+                    .file_name()
+                    .expect("old rollout path should have a file name"),
+            );
+        assert!(old_rollout_path.exists());
+        assert!(archived_old_rollout_path.exists());
+        let resolved_old_rollout_path =
+            codex_rollout::find_rollout_path_by_segment_id(home.path(), thread_id, old_segment_id)
+                .await
+                .expect("resolve archived segment by id")
+                .expect("archived segment should resolve by id");
+        assert_eq!(resolved_old_rollout_path, archived_old_rollout_path);
+        let archived_threads = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: crate::SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: true,
+                search_term: None,
+                use_state_db_only: false,
+            })
+            .await
+            .expect("list archived threads");
+        assert!(archived_threads.items.is_empty());
+        let old_rollout_timestamp = old_rollout_path
+            .file_name()
+            .and_then(|file_name| file_name.to_str())
+            .and_then(|file_name| file_name.strip_prefix("rollout-"))
+            .and_then(|file_name| file_name.strip_suffix(&format!("-{thread_id}.jsonl")))
+            .expect("old rollout timestamp");
+
+        let (new_items, new_thread_id, _) =
+            RolloutRecorder::load_rollout_items(new_rollout_path.as_path())
+                .await
+                .expect("new rollout items");
+        assert_eq!(new_thread_id, Some(thread_id));
+        let new_timestamp = new_items.iter().find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(meta.meta.timestamp.as_str()),
+            RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => None,
+        });
+        assert_eq!(
+            new_timestamp,
+            old_items.iter().find_map(|item| match item {
+                RolloutItem::SessionMeta(meta) => Some(meta.meta.timestamp.as_str()),
+                RolloutItem::ForkReference(_)
+                | RolloutItem::RolloutReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+        );
+        assert!(new_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::RolloutReference(reference)
+                    if reference.rollout_path == archived_old_rollout_path
+                        && reference.thread_id == Some(thread_id)
+                        && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
+                        && reference.segment_id == Some(old_segment_id)
+                        && reference.max_depth == 2
+            )
+        }));
+        assert!(new_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                    if event.message == "rotation checkpoint"
+            )
+        }));
+        assert!(new_items.iter().any(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                    if event.message == "after rotation"
+            )
+        }));
+        assert_rollout_contains_message(archived_old_rollout_path.as_path(), "before rotation")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn rotate_thread_segment_keeps_live_rollout_visible_before_commit() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            home.path().to_path_buf(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime)));
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("before staged rotation")],
+            })
+            .await
+            .expect("append pre-rotation item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush pre-rotation item");
+        let live_rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+
+        let staged = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        live_writer::install_segment_rotation_commit_hook(
+            thread_id,
+            Arc::clone(&staged),
+            Arc::clone(&resume),
+        );
+
+        let rotate_store = Arc::clone(&store);
+        let rotation = tokio::spawn(async move {
+            rotate_store
+                .rotate_thread_segment(
+                    thread_id,
+                    RotateThreadSegmentParams {
+                        source: SessionSource::Exec,
+                        base_instructions: BaseInstructions::default(),
+                        dynamic_tools: Vec::new(),
+                        metadata: thread_metadata(),
+                        event_persistence_mode: ThreadEventPersistenceMode::Limited,
+                        initial_items: vec![user_message_item("rotation checkpoint")],
+                        previous_segment_reference_depth: 2,
+                    },
+                )
+                .await
+        });
+
+        staged.notified().await;
+        assert!(
+            tokio::fs::try_exists(live_rollout_path.as_path())
+                .await
+                .expect("check live rollout path"),
+            "live rollout path should stay visible while the replacement is staged"
+        );
+        let listed = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: crate::SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: false,
+                search_term: None,
+                use_state_db_only: true,
+            })
+            .await
+            .expect("list live threads during staged rotation");
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].thread_id, thread_id);
+
+        resume.notify_one();
+        rotation
+            .await
+            .expect("rotation task should finish")
+            .expect("rotation should succeed");
+        live_writer::clear_segment_rotation_commit_hook();
+    }
+
+    #[tokio::test]
+    async fn rotate_thread_segment_preserves_each_archived_segment_at_a_stable_live_path() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("before first rotation")],
+            })
+            .await
+            .expect("append pre-rotation item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush pre-rotation item");
+        let stable_rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("initial rollout path");
+
+        store
+            .rotate_thread_segment(
+                thread_id,
+                RotateThreadSegmentParams {
+                    source: SessionSource::Exec,
+                    base_instructions: BaseInstructions::default(),
+                    dynamic_tools: Vec::new(),
+                    metadata: thread_metadata(),
+                    event_persistence_mode: ThreadEventPersistenceMode::Limited,
+                    initial_items: vec![user_message_item("first checkpoint")],
+                    previous_segment_reference_depth: 2,
+                },
+            )
+            .await
+            .expect("first rotation");
+        let (first_live_items, _, _) =
+            RolloutRecorder::load_rollout_items(stable_rollout_path.as_path())
+                .await
+                .expect("first live rollout items");
+        let first_archived_segment_id = first_live_items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::RolloutReference(reference) => reference.segment_id,
+                RolloutItem::SessionMeta(_)
+                | RolloutItem::ForkReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+            .expect("first archived segment id");
+
+        store
+            .rotate_thread_segment(
+                thread_id,
+                RotateThreadSegmentParams {
+                    source: SessionSource::Exec,
+                    base_instructions: BaseInstructions::default(),
+                    dynamic_tools: Vec::new(),
+                    metadata: thread_metadata(),
+                    event_persistence_mode: ThreadEventPersistenceMode::Limited,
+                    initial_items: vec![user_message_item("second checkpoint")],
+                    previous_segment_reference_depth: 2,
+                },
+            )
+            .await
+            .expect("second rotation");
+
+        assert_eq!(
+            store
+                .live_rollout_path(thread_id)
+                .await
+                .expect("stable rollout path after second rotation"),
+            stable_rollout_path
+        );
+
+        let (second_live_items, _, _) =
+            RolloutRecorder::load_rollout_items(stable_rollout_path.as_path())
+                .await
+                .expect("second live rollout items");
+        let second_archived_segment_id = second_live_items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::RolloutReference(reference) => reference.segment_id,
+                RolloutItem::SessionMeta(_)
+                | RolloutItem::ForkReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+            .expect("second archived segment id");
+        assert_ne!(second_archived_segment_id, first_archived_segment_id);
+
+        for segment_id in [first_archived_segment_id, second_archived_segment_id] {
+            let archived_path =
+                codex_rollout::find_rollout_path_by_segment_id(home.path(), thread_id, segment_id)
+                    .await
+                    .expect("resolve archived segment")
+                    .expect("archived segment should exist");
+            assert!(
+                archived_path.starts_with(
+                    home.path()
+                        .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+                        .join(thread_id.to_string())
+                        .join(segment_id.to_string())
+                ),
+                "archived path should be segment-specific: {}",
+                archived_path.display()
+            );
+        }
     }
 
     #[tokio::test]

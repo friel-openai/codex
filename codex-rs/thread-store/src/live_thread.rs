@@ -12,6 +12,7 @@ use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RotateThreadSegmentParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
@@ -111,6 +112,23 @@ impl LiveThread {
                 items: items.to_vec(),
             })
             .await
+    }
+
+    pub async fn rotate_local_segment(
+        &self,
+        params: RotateThreadSegmentParams,
+    ) -> ThreadStoreResult<bool> {
+        let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+        else {
+            return Ok(false);
+        };
+        local_store
+            .rotate_thread_segment(self.thread_id, params)
+            .await?;
+        Ok(true)
     }
 
     pub async fn persist(&self) -> ThreadStoreResult<()> {

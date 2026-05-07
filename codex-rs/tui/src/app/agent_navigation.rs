@@ -16,7 +16,7 @@
 //!
 //! The key invariant is that traversal follows first-seen spawn order rather than thread-id sort
 //! order. Once a thread id is observed it keeps its place in the cycle even if the entry is later
-//! updated or marked closed.
+//! updated. Closed threads remain cached for replay metadata, but they are not selectable.
 
 use crate::multi_agents::AgentPickerThreadEntry;
 use crate::multi_agents::format_agent_picker_item_name;
@@ -93,12 +93,10 @@ impl AgentNavigationState {
         );
     }
 
-    /// Marks a thread as closed without removing it from the traversal cache.
+    /// Marks a thread as closed without removing it from the metadata cache.
     ///
-    /// Closed threads stay in the picker and in spawn order so users can still review them and so
-    /// next/previous navigation does not reshuffle around disappearing entries. If a caller "cleans
-    /// this up" by deleting the entry instead, wraparound navigation will silently change shape
-    /// mid-session.
+    /// Closed threads stay cached so replayed transcript metadata remains available, but picker
+    /// traversal filters them out because selecting a closed thread is not actionable.
     pub(crate) fn mark_closed(&mut self, thread_id: ThreadId) {
         if let Some(entry) = self.threads.get_mut(&thread_id) {
             entry.is_closed = true;
@@ -141,6 +139,23 @@ impl AgentNavigationState {
             .collect()
     }
 
+    /// Returns selectable picker rows in first-seen order.
+    ///
+    /// The primary thread stays selectable even when it is the only row. Closed agents and watchdog
+    /// handles are hidden because neither is a useful target for `/agent` thread selection.
+    pub(crate) fn selectable_threads(
+        &self,
+        primary_thread_id: Option<ThreadId>,
+    ) -> Vec<(ThreadId, &AgentPickerThreadEntry)> {
+        self.ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, entry)| {
+                Some(*thread_id) == primary_thread_id
+                    || (!entry.is_closed && entry.agent_role.as_deref() != Some("watchdog"))
+            })
+            .collect()
+    }
+
     /// Returns tracked thread ids in the same stable order used by the picker.
     pub(crate) fn tracked_thread_ids(&self) -> Vec<ThreadId> {
         self.ordered_threads()
@@ -149,12 +164,8 @@ impl AgentNavigationState {
             .collect()
     }
 
-    /// Returns the adjacent thread id for keyboard navigation in stable spawn order.
-    ///
-    /// The caller must pass the thread whose transcript is actually being shown to the user, not
-    /// just whichever thread bookkeeping most recently marked active. If the wrong current thread
-    /// is supplied, next/previous navigation will jump in a way that feels nondeterministic even
-    /// though the cache itself is correct.
+    #[cfg(test)]
+    /// Returns the adjacent tracked thread id for focused tests of stable spawn-order traversal.
     pub(crate) fn adjacent_thread_id(
         &self,
         current_displayed_thread_id: Option<ThreadId>,
@@ -182,9 +193,43 @@ impl AgentNavigationState {
         Some(ordered_threads[next_idx].0)
     }
 
+    /// Returns the adjacent selectable thread id for keyboard navigation in stable spawn order.
+    ///
+    /// The caller must pass the thread whose transcript is actually being shown to the user, not
+    /// just whichever thread bookkeeping most recently marked active. If the wrong current thread
+    /// is supplied, next/previous navigation will jump in a way that feels nondeterministic even
+    /// though the cache itself is correct.
+    pub(crate) fn adjacent_selectable_thread_id(
+        &self,
+        current_displayed_thread_id: Option<ThreadId>,
+        primary_thread_id: Option<ThreadId>,
+        direction: AgentNavigationDirection,
+    ) -> Option<ThreadId> {
+        let ordered_threads = self.selectable_threads(primary_thread_id);
+        if ordered_threads.len() < 2 {
+            return None;
+        }
+
+        let current_thread_id = current_displayed_thread_id?;
+        let current_idx = ordered_threads
+            .iter()
+            .position(|(thread_id, _)| *thread_id == current_thread_id)?;
+        let next_idx = match direction {
+            AgentNavigationDirection::Next => (current_idx + 1) % ordered_threads.len(),
+            AgentNavigationDirection::Previous => {
+                if current_idx == 0 {
+                    ordered_threads.len() - 1
+                } else {
+                    current_idx - 1
+                }
+            }
+        };
+        Some(ordered_threads[next_idx].0)
+    }
+
     /// Derives the contextual footer label for the currently displayed thread.
     ///
-    /// This intentionally returns `None` until there is more than one tracked thread so
+    /// This intentionally returns `None` until there is more than one selectable thread so
     /// single-thread sessions do not waste footer space restating the obvious. When metadata for
     /// the displayed thread is missing, the label falls back to the same generic naming rules used
     /// by the picker.
@@ -193,16 +238,18 @@ impl AgentNavigationState {
         current_displayed_thread_id: Option<ThreadId>,
         primary_thread_id: Option<ThreadId>,
     ) -> Option<String> {
-        if self.threads.len() <= 1 {
+        let selectable_threads = self.selectable_threads(primary_thread_id);
+        if selectable_threads.len() <= 1 {
             return None;
         }
 
         let thread_id = current_displayed_thread_id?;
         let is_primary = primary_thread_id == Some(thread_id);
         Some(
-            self.threads
-                .get(&thread_id)
-                .map(|entry| {
+            selectable_threads
+                .into_iter()
+                .find(|(candidate, _)| *candidate == thread_id)
+                .map(|(_, entry)| {
                     format_agent_picker_item_name(
                         entry.agent_nickname.as_deref(),
                         entry.agent_role.as_deref(),
@@ -335,6 +382,41 @@ mod tests {
         assert_eq!(
             state.active_agent_label(Some(main_thread_id), Some(main_thread_id)),
             Some("Main [default]".to_string())
+        );
+    }
+
+    #[test]
+    fn selectable_threads_hide_closed_agents_and_watchdogs() {
+        let (mut state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
+        let watchdog_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000104").expect("valid thread");
+        state.upsert(
+            first_agent_id,
+            Some("Robie".to_string()),
+            Some("worker".to_string()),
+            /*is_closed*/ true,
+        );
+        state.upsert(
+            watchdog_id,
+            Some("Watcher".to_string()),
+            Some("watchdog".to_string()),
+            /*is_closed*/ false,
+        );
+
+        let selectable_ids = state
+            .selectable_threads(Some(main_thread_id))
+            .into_iter()
+            .map(|(thread_id, _)| thread_id)
+            .collect::<Vec<_>>();
+
+        assert_eq!(selectable_ids, vec![main_thread_id, second_agent_id]);
+        assert_eq!(
+            state.adjacent_selectable_thread_id(
+                Some(main_thread_id),
+                Some(main_thread_id),
+                AgentNavigationDirection::Next,
+            ),
+            Some(second_agent_id)
         );
     }
 }

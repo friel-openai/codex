@@ -259,7 +259,7 @@ mod tests {
         assert!(matches!(
             multi_agent_v2,
             FeatureToml::Config(MultiAgentV2ConfigToml {
-                enabled: Some(false),
+                enabled: Some(_),
                 max_concurrent_threads_per_session: Some(_),
                 min_wait_timeout_ms: Some(_),
                 usage_hint_enabled: Some(_),
@@ -267,6 +267,14 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            multi_agent_v2.enabled(),
+            Some(
+                sc.original_config_do_not_use
+                    .features
+                    .enabled(Feature::MultiAgentV2)
+            )
+        );
 
         assert_eq!(lockfile.version, crate::config_lock::CONFIG_LOCK_VERSION);
     }
