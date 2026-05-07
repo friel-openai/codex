@@ -882,7 +882,12 @@ async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
         .start_thread((*turn.config).clone())
         .await
         .expect("watchdog handle should start");
-    let helper_thread_id = session.conversation_id;
+    let helper = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog helper thread should start");
+    let helper_thread_id = helper.thread_id;
+    session.conversation_id = helper_thread_id;
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
     config
@@ -1151,7 +1156,6 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
         .start_thread((*turn.config).clone())
         .await
         .expect("watchdog handle should start");
-    let helper_thread_id = session.conversation_id;
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
     config
@@ -1167,10 +1171,29 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
             child_depth: 0,
             interval_s: 60,
             prompt: "check in".to_string(),
-            config,
+            config: config.clone(),
         })
         .await
         .expect("watchdog registration should succeed");
+    let helper_thread_id = agent_control
+        .spawn_agent(
+            config,
+            vec![UserInput::Text {
+                text: "watchdog helper implementation detail".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: owner.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            })),
+        )
+        .await
+        .expect("watchdog helper should start");
+    session.conversation_id = helper_thread_id;
     agent_control
         .set_watchdog_active_helper_for_tests(target.thread_id, helper_thread_id)
         .await;
@@ -1194,6 +1217,19 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
     assert_eq!(
         agent_control.get_status(target.thread_id).await,
         AgentStatus::NotFound
+    );
+    assert_eq!(
+        agent_control.get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let listed_agents = agent_control
+        .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+        .await
+        .expect("list_agents should succeed after self-close");
+    assert!(
+        !listed_agents
+            .iter()
+            .any(|agent| agent.agent_name == target.thread_id.to_string())
     );
     let expected = InterAgentCommunication::new(
         AgentPath::try_from("/root/watchdog").expect("watchdog path"),
@@ -1223,6 +1259,97 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
     assert_eq!(close_event.sender_thread_id, owner.thread_id);
     assert_eq!(close_event.receiver_thread_id, target.thread_id);
     assert_eq!(close_event.status, AgentStatus::Running);
+}
+
+#[tokio::test]
+async fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    let enabled_config = config.clone();
+    turn.config = Arc::new(config);
+    let root_session = Arc::new(session);
+    let root_turn = Arc::new(turn);
+
+    let spawn_output = SpawnAgentHandlerV2
+        .handle(invocation(
+            root_session,
+            root_turn,
+            "spawn_agent",
+            function_payload(json!({
+                "message": "check this branch periodically",
+                "task_name": "ping_watchdog",
+                "agent_type": "watchdog"
+            })),
+        ))
+        .await
+        .expect("watchdog spawn should succeed");
+    let (_, spawn_success) = expect_text_output(spawn_output);
+    let watchdog_id = agent_control
+        .resolve_agent_reference(root.thread_id, &SessionSource::Cli, "ping_watchdog")
+        .await
+        .expect("watchdog path should resolve");
+    assert_eq!(spawn_success, Some(true));
+
+    let helper_id = agent_control
+        .spawn_agent(
+            enabled_config,
+            vec![UserInput::Text {
+                text: "watchdog helper implementation detail".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("watchdog".to_string()),
+            })),
+        )
+        .await
+        .expect("watchdog helper should start");
+    agent_control
+        .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
+        .await;
+    let (mut helper_session, helper_turn) = make_session_and_context().await;
+    helper_session.services.agent_control = agent_control.clone();
+    helper_session.conversation_id = helper_id;
+
+    WatchdogSelfCloseHandler
+        .handle(invocation(
+            Arc::new(helper_session),
+            Arc::new(helper_turn),
+            "close_self",
+            function_payload(json!({"message": "watchdog done"})),
+        ))
+        .await
+        .expect("watchdog helper should self-close");
+
+    let listed_agents = agent_control
+        .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+        .await
+        .expect("list_agents should succeed after self-close");
+    assert!(
+        !listed_agents
+            .iter()
+            .any(|agent| agent.agent_name == "/root/ping_watchdog")
+    );
 }
 
 #[tokio::test]
