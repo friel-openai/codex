@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: replayed_history
+---
+• Spawned Boyle [watchdog] (arcanine 1m low)
+  └ Every time you start, respond with goodbye.
+
+
+• Agent message: goodbye from /root/watchdog
+
+
+• Closed Boyle [watchdog]
