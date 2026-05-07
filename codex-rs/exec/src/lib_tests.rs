@@ -792,6 +792,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
     let response = ThreadForkResponse {
         thread: codex_app_server_protocol::Thread {
             id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
+            session_id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
             forked_from_id: Some("f6f10963-370f-4f42-8f3b-bb680e5fe0c8".to_string()),
             preview: String::new(),
             ephemeral: false,
@@ -803,6 +804,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,

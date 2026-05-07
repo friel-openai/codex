@@ -64,6 +64,9 @@ impl ChatWidget {
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
             }
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                self.on_raw_response_item(notification.item, from_replay);
+            }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.on_agent_message_delta(notification.delta);
             }
@@ -216,7 +219,6 @@ impl ChatWidget {
             | ServerNotification::ThreadStatusChanged(_)
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::ProcessOutputDelta(_)
             | ServerNotification::ProcessExited(_)
