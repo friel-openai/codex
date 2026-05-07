@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/app_server.rs
-assertion_line: 789
+assertion_line: 806
 expression: inserted
 ---
 • Spawned Boyle [watchdog] (arcanine 1m low)
