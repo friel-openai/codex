@@ -992,6 +992,80 @@
       ],
       "type": "object"
     },
+    "ContentItem": {
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_text"
+              ],
+              "title": "InputTextContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_image"
+              ],
+              "title": "InputImageContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "title": "InputImageContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "output_text"
+              ],
+              "title": "OutputTextContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "OutputTextContentItem",
+          "type": "object"
+        }
+      ]
+    },
     "ContextCompactedNotification": {
       "description": "Deprecated: Use `ContextCompaction` item type instead.",
       "properties": {
@@ -1411,6 +1485,74 @@
         "watchId"
       ],
       "type": "object"
+    },
+    "FunctionCallOutputBody": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/definitions/FunctionCallOutputContentItem"
+          },
+          "type": "array"
+        }
+      ]
+    },
+    "FunctionCallOutputContentItem": {
+      "description": "Responses API compatible content items that can be returned by a tool call. This is a subset of ContentItem with the types we support as function call outputs.",
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_text"
+              ],
+              "title": "InputTextFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "text",
+            "type"
+          ],
+          "title": "InputTextFunctionCallOutputContentItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "detail": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/ImageDetail"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "image_url": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "input_image"
+              ],
+              "title": "InputImageFunctionCallOutputContentItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "image_url",
+            "type"
+          ],
+          "title": "InputImageFunctionCallOutputContentItem",
+          "type": "object"
+        }
+      ]
     },
     "FuzzyFileSearchMatchType": {
       "enum": [
@@ -2181,6 +2323,70 @@
         "turnId"
       ],
       "type": "object"
+    },
+    "LocalShellAction": {
+      "oneOf": [
+        {
+          "properties": {
+            "command": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "env": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "timeout_ms": {
+              "format": "uint64",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "exec"
+              ],
+              "title": "ExecLocalShellActionType",
+              "type": "string"
+            },
+            "user": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "working_directory": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "command",
+            "type"
+          ],
+          "title": "ExecLocalShellAction",
+          "type": "object"
+        }
+      ]
+    },
+    "LocalShellStatus": {
+      "enum": [
+        "completed",
+        "in_progress",
+        "incomplete"
+      ],
+      "type": "string"
     },
     "McpServerOauthLoginCompletedNotification": {
       "properties": {
@@ -3657,6 +3863,30 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "item": {
+              "$ref": "#/definitions/ResponseItem"
+            },
+            "type": {
+              "enum": [
+                "rawResponseItem"
+              ],
+              "title": "RawResponseItemThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "item",
+            "type"
+          ],
+          "title": "RawResponseItemThreadItem",
           "type": "object"
         },
         {

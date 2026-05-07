@@ -1382,7 +1382,8 @@ fn thread_start_params_from_config(
         ephemeral: Some(config.ephemeral),
         session_start_source,
         thread_source: Some(ThreadSource::User),
-        persist_extended_history: false,
+        experimental_raw_events: true,
+        persist_extended_history: true,
         ..ThreadStartParams::default()
     }
 }
@@ -1869,6 +1870,7 @@ mod tests {
         );
         assert_eq!(params.model_provider, Some(config.model_provider_id));
         assert_eq!(params.thread_source, Some(ThreadSource::User));
+        assert!(params.experimental_raw_events);
     }
 
     #[tokio::test]
