@@ -16,9 +16,11 @@ pub fn is_persisted_rollout_item(item: &RolloutItem, mode: EventPersistenceMode)
         RolloutItem::ResponseItem(item) => should_persist_response_item(item),
         RolloutItem::EventMsg(ev) => should_persist_event_msg(ev, mode),
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
-        RolloutItem::Compacted(_) | RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) => {
-            true
-        }
+        RolloutItem::Compacted(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 

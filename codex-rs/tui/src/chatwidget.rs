@@ -159,6 +159,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::models::local_image_label_text;
@@ -190,6 +191,7 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 use tracing::warn;
@@ -475,12 +477,72 @@ fn is_unified_exec_source(source: ExecCommandSource) -> bool {
     )
 }
 
-fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
+fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String, String)> {
     let ResponseItem::Message { content, .. } = item else {
         return None;
     };
     let communication = InterAgentCommunication::from_message_content(content)?;
-    Some((communication.author.to_string(), communication.content))
+    let raw_content = communication.content.clone();
+    Some((
+        communication.author.to_string(),
+        raw_content.clone(),
+        display_inter_agent_message_content(&raw_content),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationPayload {
+    agent_path: Option<String>,
+    status: AgentStatus,
+}
+
+fn text_from_message_content(content: &[ContentItem]) -> Option<&str> {
+    content.iter().find_map(|item| match item {
+        ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
+        ContentItem::InputImage { .. } => None,
+    })
+}
+
+fn display_inter_agent_message_content(content: &str) -> String {
+    parse_subagent_notification(content)
+        .map(|payload| display_subagent_notification_status(payload.status))
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn display_subagent_notification_status(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => "completed".to_string(),
+        AgentStatus::Errored(message) => format!("errored: {message}"),
+        AgentStatus::Interrupted => "interrupted".to_string(),
+        AgentStatus::Shutdown => "shutdown".to_string(),
+        AgentStatus::NotFound => "not found".to_string(),
+        AgentStatus::PendingInit => "pending init".to_string(),
+        AgentStatus::Running => "running".to_string(),
+    }
+}
+
+fn parse_subagent_notification(content: &str) -> Option<SubagentNotificationPayload> {
+    const START_MARKER: &str = "<subagent_notification>";
+    const END_MARKER: &str = "</subagent_notification>";
+
+    let trimmed = content.trim();
+    if !trimmed
+        .get(..START_MARKER.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(START_MARKER))
+    {
+        return None;
+    }
+    let without_start = &trimmed[START_MARKER.len()..];
+    let end_start = without_start.len().checked_sub(END_MARKER.len())?;
+    if !without_start
+        .get(end_start..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(END_MARKER))
+    {
+        return None;
+    }
+    let body = without_start[..end_start].trim();
+    serde_json::from_str::<SubagentNotificationPayload>(body).ok()
 }
 
 fn is_standard_tool_call(parsed_cmd: &[ParsedCommand]) -> bool {
@@ -3890,13 +3952,39 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    fn apply_subagent_notification_text(&mut self, text: &str) -> bool {
+        let Some(payload) = parse_subagent_notification(text) else {
+            return false;
+        };
+        let Some(agent_path) = payload.agent_path else {
+            return true;
+        };
+        let Ok(thread_id) = ThreadId::from_string(&agent_path) else {
+            return true;
+        };
+        self.subagent_panel_registry
+            .update_status(thread_id, payload.status);
+        self.refresh_subagent_panel();
+        true
+    }
+
     fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
-        let Some((sender, message)) = inter_agent_message_from_item(&item) else {
+        let direct_message_text = match &item {
+            ResponseItem::Message { content, .. } => text_from_message_content(content),
+            _ => None,
+        }
+        .map(str::to_owned);
+        if let Some(text) = direct_message_text.as_deref() {
+            self.apply_subagent_notification_text(text);
+        }
+
+        let Some((sender, raw_message, message)) = inter_agent_message_from_item(&item) else {
             if from_replay {
                 self.last_replayed_inter_agent_message = None;
             }
             return;
         };
+        self.apply_subagent_notification_text(&raw_message);
 
         let replay_key = (sender.clone(), message.clone());
         if from_replay {

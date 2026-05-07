@@ -104,12 +104,8 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if args.fork_context {
-            reject_full_fork_spawn_overrides(
-                role_name,
-                args.model.as_deref(),
-                args.reasoning_effort,
-            )?;
+        let effective_role_name = if args.fork_context && !is_watchdog {
+            None
         } else {
             apply_requested_spawn_agent_model_overrides(
                 &session,
@@ -122,7 +118,8 @@ impl ToolHandler for Handler {
             apply_role_to_config(&mut config, role_name)
                 .await
                 .map_err(FunctionCallError::RespondToModel)?;
-        }
+            role_name
+        };
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
@@ -130,11 +127,11 @@ impl ToolHandler for Handler {
             session.conversation_id,
             &turn.session_source,
             child_depth,
-            role_name,
+            effective_role_name,
             /*task_name*/ None,
         )?;
         let result = if let Some(watchdog_interval_s) = watchdog_interval_s {
-            let thread_id = spawn_watchdog(
+            let thread_id = Box::pin(spawn_watchdog(
                 &session.services.agent_control,
                 config,
                 prompt.clone(),
@@ -142,7 +139,7 @@ impl ToolHandler for Handler {
                 child_depth,
                 watchdog_interval_s,
                 spawn_source,
-            )
+            ))
             .await
             .map_err(collab_spawn_error)?;
             Ok(LiveAgent {
@@ -164,6 +161,7 @@ impl ToolHandler for Handler {
                         fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
                         fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
                         environments: Some(turn.environments.to_selections()),
+                        initial_task_message: args.fork_context.then_some(prompt.clone()),
                     },
                 ),
             )
@@ -297,15 +295,9 @@ async fn spawn_watchdog(
                 "failed to clear watchdog MCP servers: {err}"
             ))
         })?;
-    let target_thread_id = agent_control
-        .spawn_agent_with_metadata(
-            handle_config,
-            Op::Interrupt,
-            Some(spawn_source),
-            Default::default(),
-        )
-        .await?
-        .thread_id;
+    let target_thread_id =
+        Box::pin(agent_control.spawn_agent(handle_config, Op::Interrupt, Some(spawn_source)))
+            .await?;
     let superseded_before_register = agent_control
         .unregister_watchdogs_for_owner(owner_thread_id)
         .await;
