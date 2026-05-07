@@ -1,0 +1,13 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 789
+expression: inserted
+---
+• Spawned Boyle [watchdog] (arcanine 1m low)
+  └ Every time you start, respond with exactly `ping $RANDOM ($SUM)`.
+
+
+• Agent message: goodbye from /root/watchdog
+
+
+• Closed Boyle [watchdog]

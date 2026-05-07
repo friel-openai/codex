@@ -1591,6 +1591,7 @@ fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
         | ThreadItem::ImageView { .. }
+        | ThreadItem::RawResponseItem { .. }
         | ThreadItem::EnteredReviewMode { .. }
         | ThreadItem::ExitedReviewMode { .. }
         | ThreadItem::ContextCompaction { .. } => None,
