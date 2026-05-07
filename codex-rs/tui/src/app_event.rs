@@ -210,7 +210,9 @@ pub(crate) enum AppEvent {
     ResumeSessionByIdOrName(String),
 
     /// Fork the current session into a new thread.
-    ForkCurrentSession,
+    ForkCurrentSession {
+        placement: Option<ForkPanePlacement>,
+    },
 
     /// Request to exit the application.
     ///
@@ -1018,6 +1020,15 @@ pub(crate) struct PermissionProfileSelection {
 pub(crate) struct RealtimeWebrtcOffer {
     pub(crate) offer_sdp: String,
     pub(crate) handle: RealtimeWebrtcSessionHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPanePlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    Float,
 }
 
 /// The exit strategy requested by the UI layer.
