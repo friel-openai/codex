@@ -7,6 +7,7 @@ use crate::compact::CompactionAnalyticsDetails;
 use crate::compact::InitialContextInjection;
 use crate::compact::compaction_status_from_result;
 use crate::compact::insert_initial_context_before_last_real_user_or_summary;
+use crate::compact::is_compaction_filtered_history_item;
 use crate::context_manager::ContextManager;
 use crate::hook_runtime::PostCompactHookOutcome;
 use crate::hook_runtime::PreCompactHookOutcome;
@@ -207,8 +208,17 @@ async fn run_remote_compact_task_inner_impl(
     // This is the history selected for remote compaction, after any output rewriting required to
     // fit the compact endpoint. The checkpoint below records it separately from the next sampling
     // request, whose prompt will repeat current developer/context prefix items.
-    let trace_input_history = history.raw_items().to_vec();
-    let prompt_input = history.for_prompt(&turn_context.model_info.input_modalities);
+    let trace_input_history = history
+        .raw_items()
+        .iter()
+        .filter(|item| !is_compaction_filtered_history_item(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    let prompt_input = history
+        .for_prompt(&turn_context.model_info.input_modalities)
+        .into_iter()
+        .filter(|item| !is_compaction_filtered_history_item(item))
+        .collect::<Vec<_>>();
     let tool_router = built_tools(
         sess.as_ref(),
         turn_context.as_ref(),
@@ -310,8 +320,9 @@ pub(crate) async fn process_compacted_history(
 /// We drop:
 /// - `developer` messages because remote output can include stale/duplicated
 ///   instruction content.
-/// - non-user-content `user` messages (session prefix/instruction wrappers),
-///   while preserving real user messages and persisted hook prompts.
+/// - non-user-content `user` messages (session prefix/instruction wrappers).
+/// - user warnings that are known to be local runtime noise and should not
+///   survive compaction.
 ///
 /// This intentionally keeps:
 /// - `assistant` messages (future remote compaction models may emit them)
@@ -322,6 +333,9 @@ pub(crate) fn should_keep_compacted_history_item(item: &ResponseItem) -> bool {
     match item {
         ResponseItem::Message { role, .. } if role == "developer" => false,
         ResponseItem::Message { role, .. } if role == "user" => {
+            if is_compaction_filtered_history_item(item) {
+                return false;
+            }
             matches!(
                 crate::event_mapping::parse_turn_item(item),
                 Some(TurnItem::UserMessage(_) | TurnItem::HookPrompt(_))
