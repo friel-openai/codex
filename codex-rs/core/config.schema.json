@@ -374,6 +374,12 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "agent_prompt_injection": {
+              "type": "boolean"
+            },
+            "agent_watchdog": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -721,6 +727,34 @@
           "description": "Optional absolute path to patched zsh used by zsh-exec-bridge-backed shell execution."
         }
       },
+      "type": "object"
+    },
+    "CustomModelToml": {
+      "additionalProperties": false,
+      "properties": {
+        "model": {
+          "description": "Provider-facing model slug used on API requests.",
+          "type": "string"
+        },
+        "model_auto_compact_token_limit": {
+          "description": "Optional auto-compaction token limit override applied when this alias is selected.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "model_context_window": {
+          "description": "Optional context window override applied when this alias is selected.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "description": "User-facing alias shown in the model picker.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "name"
+      ],
       "type": "object"
     },
     "DebugConfigLockToml": {
@@ -4235,6 +4269,14 @@
       "description": "Compact prompt used for history compaction.",
       "type": "string"
     },
+    "custom_models": {
+      "default": [],
+      "description": "User-defined model aliases that can override model context settings.",
+      "items": {
+        "$ref": "#/definitions/CustomModelToml"
+      },
+      "type": "array"
+    },
     "debug": {
       "allOf": [
         {
@@ -4305,6 +4347,12 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "agent_prompt_injection": {
+          "type": "boolean"
+        },
+        "agent_watchdog": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -4969,6 +5017,12 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "watchdog_interval_s": {
+      "description": "Default interval in seconds for idle-time watchdog check-ins.",
+      "format": "int64",
+      "minimum": 1.0,
+      "type": "integer"
     },
     "web_search": {
       "allOf": [
