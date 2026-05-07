@@ -2,6 +2,7 @@ mod auth;
 mod catalog;
 mod mantle;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -12,6 +13,7 @@ use codex_login::CodexAuth;
 use codex_model_provider_info::AMAZON_BEDROCK_GPT_5_4_MODEL_ID;
 use codex_model_provider_info::ModelProviderAwsAuthInfo;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
 use codex_protocol::account::ProviderAccount;
@@ -109,10 +111,12 @@ impl ModelProvider for AmazonBedrockModelProvider {
         &self,
         _codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        Arc::new(StaticModelsManager::new(
+        Arc::new(StaticModelsManager::new_with_custom_models(
             /*auth_manager*/ None,
             config_model_catalog.map_or_else(static_model_catalog, with_default_only_service_tier),
+            custom_models,
         ))
     }
 }
