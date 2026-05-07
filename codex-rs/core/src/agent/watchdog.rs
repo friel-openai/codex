@@ -126,7 +126,7 @@ impl WatchdogManager {
             generation,
         };
 
-        let (superseded, helper_ids_to_suppress) = {
+        let (superseded, suppressed_helpers) = {
             let mut registrations = self.registrations.lock().await;
             let superseded_targets = registrations
                 .iter()
@@ -138,11 +138,11 @@ impl WatchdogManager {
                 })
                 .collect::<Vec<_>>();
             let mut superseded = Vec::new();
-            let mut helper_ids_to_suppress = Vec::new();
+            let mut suppressed_helpers = Vec::new();
             for superseded_target in superseded_targets {
                 if let Some(removed) = registrations.remove(&superseded_target) {
                     if let Some(helper_id) = removed.active_helper_id {
-                        helper_ids_to_suppress.push(helper_id);
+                        suppressed_helpers.push(helper_id);
                     }
                     superseded.push(RemovedWatchdog {
                         target_thread_id: superseded_target,
@@ -151,11 +151,11 @@ impl WatchdogManager {
                 }
             }
             registrations.insert(entry.registration.target_thread_id, entry);
-            (superseded, helper_ids_to_suppress)
+            (superseded, suppressed_helpers)
         };
-        if !helper_ids_to_suppress.is_empty() {
+        if !suppressed_helpers.is_empty() {
             let mut suppressed = self.suppressed_helpers.lock().await;
-            for helper_id in helper_ids_to_suppress {
+            for helper_id in suppressed_helpers {
                 suppressed.insert(helper_id);
             }
         }
@@ -336,27 +336,9 @@ impl WatchdogManager {
                 }
                 return;
             }
-            let helper_suppressed = self.take_suppressed_helper(helper_id).await;
-            if let AgentStatus::Completed(Some(message)) = helper_status
-                && !helper_suppressed
-                && let Err(err) = control_for_spawn
-                    .send_watchdog_wakeup(snapshot.owner_thread_id, message)
-                    .await
-            {
-                warn!(
-                    helper_id = %helper_id,
-                    owner_thread_id = %snapshot.owner_thread_id,
-                    "watchdog helper forward failed: {err}"
-                );
-            }
-            let _ = control_for_spawn.shutdown_live_agent(helper_id).await;
-            self.update_after_spawn(
-                target_thread_id,
-                generation,
-                now,
-                /*active_helper_id*/ None,
-            )
-            .await;
+            let _ = control_for_spawn
+                .finalize_watchdog_helper(helper_id, helper_status)
+                .await;
             return;
         }
 
@@ -420,6 +402,7 @@ impl WatchdogManager {
                     fork_parent_spawn_call_id: None,
                     fork_mode: Some(SpawnAgentForkMode::FullHistory),
                     environments: None,
+                    initial_task_message: None,
                 },
             )
             .await;
@@ -586,6 +569,7 @@ impl WatchdogManager {
             .insert(helper_thread_id);
         found
     }
+
     async fn update_after_spawn(
         &self,
         target_thread_id: ThreadId,
@@ -639,6 +623,10 @@ fn watchdog_helper_is_still_active(status: &AgentStatus) -> bool {
 
 fn is_watchdog_terminated(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound)
+}
+
+pub(crate) fn final_message_requests_watchdog_close(message: &str) -> bool {
+    message.trim().eq_ignore_ascii_case("goodbye")
 }
 
 async fn get_status(manager_state: &Arc<ThreadManagerState>, thread_id: ThreadId) -> AgentStatus {

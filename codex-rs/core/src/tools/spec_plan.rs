@@ -37,6 +37,7 @@ use crate::tools::handlers::mcp_resource_spec::create_list_mcp_resource_template
 use crate::tools::handlers::mcp_resource_spec::create_list_mcp_resources_tool;
 use crate::tools::handlers::mcp_resource_spec::create_read_mcp_resource_tool;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
+use crate::tools::handlers::multi_agents::CompactParentContextHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
@@ -55,7 +56,8 @@ use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
-use crate::tools::handlers::multi_agents_spec::create_watchdog_self_close_tool;
+use crate::tools::handlers::multi_agents_spec::create_compact_parent_context_tool;
+use crate::tools::handlers::multi_agents_spec::create_watchdog_close_self_tool;
 use crate::tools::handlers::multi_agents_spec::create_watchdog_snooze_tool;
 use crate::tools::handlers::multi_agents_spec::create_watchdog_tools_namespace;
 use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
@@ -517,14 +519,16 @@ pub fn build_tool_registry_builder(
     if config.agent_watchdog {
         builder.push_spec(
             create_watchdog_tools_namespace(vec![
-                create_watchdog_self_close_tool(),
+                create_watchdog_close_self_tool(),
                 create_watchdog_snooze_tool(),
+                create_compact_parent_context_tool(),
             ]),
             /*supports_parallel_tool_calls*/ false,
             config.code_mode_enabled,
         );
         builder.register_handler(Arc::new(WatchdogSelfCloseHandler));
         builder.register_handler(Arc::new(WatchdogSnoozeHandler));
+        builder.register_handler(Arc::new(CompactParentContextHandler));
     }
 
     if config.agent_jobs_tools {
