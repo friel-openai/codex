@@ -153,6 +153,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
+use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
@@ -436,6 +437,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         thread_id.into(),
         thread_id,
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        /*prompt_cache_key_override*/ None,
         ModelProviderInfo::create_openai_provider(/* base_url */ /*base_url*/ None),
         codex_protocol::protocol::SessionSource::Exec,
         /*parent_thread_id*/ None,
@@ -2537,6 +2539,125 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let inherited_prompt_cache_key = ThreadId::try_from("00000000-0000-4000-8000-000000000002")
+        .expect("test thread id should be valid");
+    let inherited_tool = codex_mcp::ToolInfo {
+        server_name: "snapshot".to_string(),
+        callable_name: "echo".to_string(),
+        callable_namespace: "mcp__snapshot__".to_string(),
+        namespace_description: None,
+        tool: rmcp::model::Tool {
+            name: "echo".to_string().into(),
+            title: None,
+            description: Some("Echo from the inherited MCP snapshot".to_string().into()),
+            input_schema: std::sync::Arc::new(rmcp::model::object(json!({
+                "type": "object",
+                "properties": {
+                    "message": { "type": "string" }
+                },
+                "required": ["message"],
+                "additionalProperties": false
+            }))),
+            output_schema: None,
+            annotations: None,
+            execution: None,
+            icons: None,
+            meta: None,
+        },
+        connector_id: None,
+        connector_name: None,
+        plugin_display_names: Vec::new(),
+    };
+    let inherited_thread_state = crate::inherited_thread_state::InheritedThreadState::builder()
+        .prompt_cache_key(Some(inherited_prompt_cache_key))
+        .mcp_tool_snapshot(Some(crate::state::McpToolSnapshot {
+            tools: std::collections::HashMap::from([(
+                "mcp__snapshot__echo".to_string(),
+                inherited_tool,
+            )]),
+        }))
+        .build();
+    let (session, rx_event) = make_session_with_config_inherited_and_rx(
+        |config| {
+            config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+            config.model_provider.supports_websockets = false;
+            config
+                .mcp_servers
+                .set(std::collections::HashMap::new())
+                .expect("empty mcp server config should be valid");
+        },
+        inherited_thread_state,
+    )
+    .await?;
+    let turn_context = session.new_default_turn().await;
+
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            vec![UserInput::Text {
+                text: "use inherited state".to_string(),
+                text_elements: Vec::new(),
+            }],
+            crate::tasks::RegularTask::new(),
+        )
+        .await;
+
+    let mut observed_events = Vec::new();
+    let wait_result = timeout(Duration::from_secs(5), async {
+        while let Ok(event) = rx_event.recv().await {
+            observed_events.push(match &event.msg {
+                EventMsg::SessionConfigured(_) => "SessionConfigured",
+                EventMsg::McpStartupComplete(_) => "McpStartupComplete",
+                EventMsg::TurnStarted(_) => "TurnStarted",
+                EventMsg::RawResponseItem(_) => "RawResponseItem",
+                EventMsg::ItemStarted(_) => "ItemStarted",
+                EventMsg::ItemCompleted(_) => "ItemCompleted",
+                EventMsg::UserMessage(_) => "UserMessage",
+                EventMsg::StreamError(_) => "StreamError",
+                EventMsg::Error(_) => "Error",
+                EventMsg::TurnAborted(_) => "TurnAborted",
+                EventMsg::TurnComplete(_) => "TurnComplete",
+                _ => "Other",
+            });
+            match event.msg {
+                EventMsg::TurnComplete(_) => return,
+                EventMsg::Error(error) => panic!("turn errored: {}", error.message),
+                EventMsg::TurnAborted(aborted) => panic!("turn aborted: {:?}", aborted.reason),
+                _ => {}
+            }
+        }
+    })
+    .await;
+    if let Err(err) = wait_result {
+        panic!(
+            "turn should complete: {err:?}; captured requests: {}; observed events: {observed_events:#?}",
+            response_mock.requests().len(),
+        );
+    }
+
+    let request = response_mock.single_request();
+    let body = request.body_json();
+    let expected_prompt_cache_key = inherited_prompt_cache_key.to_string();
+    assert_eq!(
+        body["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+    assert!(
+        namespace_child_tool(&body, "mcp__snapshot__", "echo").is_some(),
+        "first request should expose inherited MCP snapshot tools: {body:#}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
     let (session, turn_context) = make_session_and_context().await;
@@ -4598,6 +4719,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         AgentControl::default(),
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Default::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -4769,6 +4891,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             thread_id.into(),
             thread_id,
             /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+            /*prompt_cache_key_override*/ None,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
             session_configuration.parent_thread_id,
@@ -4862,6 +4985,13 @@ async fn load_latest_config_for_session(session: &Session) -> Config {
 async fn make_session_with_config_and_rx(
     mutator: impl FnOnce(&mut Config),
 ) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
+    make_session_with_config_inherited_and_rx(mutator, Default::default()).await
+}
+
+async fn make_session_with_config_inherited_and_rx(
+    mutator: impl FnOnce(&mut Config),
+    inherited_thread_state: crate::inherited_thread_state::InheritedThreadState,
+) -> anyhow::Result<(Arc<Session>, async_channel::Receiver<Event>)> {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let mut config = build_test_config(codex_home.path()).await;
     mutator(&mut config);
@@ -4948,6 +5078,7 @@ async fn make_session_with_config_and_rx(
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         AgentControl::default(),
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        inherited_thread_state,
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -5053,6 +5184,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         Arc::new(codex_extension_api::ExtensionRegistryBuilder::new().build()),
         agent_control,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -6859,6 +6991,7 @@ where
             thread_id.into(),
             thread_id,
             /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+            /*prompt_cache_key_override*/ None,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
             session_configuration.parent_thread_id,

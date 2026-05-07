@@ -2,6 +2,8 @@ use anyhow::Result;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::config::AgentRoleConfig;
+use codex_core_plugins::OPENAI_CURATED_MARKETPLACE_NAME;
+use codex_core_plugins::startup_sync::curated_plugins_repo_path;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::models::PermissionProfile;
@@ -41,6 +43,10 @@ use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
 use wiremock::MockServer;
+use wiremock::ResponseTemplate;
+use wiremock::matchers::method;
+use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 
 const SPAWN_CALL_ID: &str = "spawn-call-1";
 const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
@@ -91,6 +97,23 @@ fn tool_parameter_description(tool: &Value, parameter_name: &str) -> Option<Stri
         .and_then(|parameter| parameter.get("description"))
         .and_then(Value::as_str)
         .map(str::to_owned)
+}
+
+fn tool_names(body: &Value) -> Vec<String> {
+    body.get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| {
+                    tool.get("name")
+                        .or_else(|| tool.get("type"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn role_block(description: &str, role_name: &str) -> Option<String> {
@@ -923,6 +946,108 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     };
     assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
     assert!(!body_contains(&child_request, SPAWN_CALL_ID));
+
+    Ok(())
+}
+
+#[test]
+fn spawned_child_inherits_parent_app_server_client_tool_filters() -> Result<()> {
+    run_large_fork_request_test(
+        "spawned_child_inherits_parent_app_server_client_tool_filters",
+        spawned_child_inherits_parent_app_server_client_tool_filters_impl,
+    )
+}
+
+async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    mount_empty_apps_directory(&server).await;
+    let spawn_args = serde_json::to_string(&json!({
+        "message": CHILD_PROMPT,
+        "fork_turns": "all",
+    }))?;
+    let spawn_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
+        sse(vec![
+            ev_response_created("resp-turn1-1"),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
+            ev_completed("resp-turn1-1"),
+        ]),
+    )
+    .await;
+    let child_turn = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| {
+            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
+    let _turn1_followup = mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        sse(vec![
+            ev_response_created("resp-turn1-2"),
+            ev_completed("resp-turn1-2"),
+        ]),
+    )
+    .await;
+
+    let plugin_name = "slack";
+    let chatgpt_base_url = server.uri();
+    let mut builder = test_codex()
+        .with_pre_build_hook(move |codex_home| {
+            write_discoverable_plugin(codex_home, plugin_name)
+                .expect("discoverable plugin fixture should be written");
+        })
+        .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::Apps)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::Plugins)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .enable(Feature::ToolSuggest)
+                .expect("test config should allow feature update");
+            config.chatgpt_base_url = chatgpt_base_url;
+            config.tool_suggest.discoverables = vec![ToolSuggestDiscoverable {
+                kind: ToolSuggestDiscoverableType::Plugin,
+                id: format!("{plugin_name}@{OPENAI_CURATED_MARKETPLACE_NAME}"),
+            }];
+        });
+    let test = builder.build(&server).await?;
+    test.codex
+        .set_app_server_client_info(
+            Some("codex-tui".to_string()),
+            Some("test-client-version".to_string()),
+            false,
+        )
+        .await?;
+
+    test.submit_turn(TURN_1_PROMPT).await?;
+    let root_tool_names = tool_names(&spawn_turn.single_request().body_json());
+    let child_requests = wait_for_requests(&child_turn).await?;
+    let child_tool_names = tool_names(&child_requests[0].body_json());
+
+    // `request_plugin_install` is controlled by client-sensitive discoverable-tool
+    // filtering. Forked children must inherit the parent client metadata so the
+    // backend-visible tool list stays byte-compatible with the parent request.
+    assert_eq!(child_tool_names, root_tool_names);
+    assert!(
+        !root_tool_names
+            .iter()
+            .any(|name| name == "request_plugin_install"),
+        "codex-tui should filter plugin install suggestions out of both requests: {root_tool_names:?}"
+    );
 
     Ok(())
 }
