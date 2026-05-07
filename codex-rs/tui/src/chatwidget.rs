@@ -157,8 +157,12 @@ use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as UpdatePlanItemStatus;
+use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::InterAgentCommunication;
+
 use codex_protocol::request_permissions::RequestPermissionsEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
@@ -187,6 +191,7 @@ use ratatui::widgets::Clear;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Widget;
 use ratatui::widgets::Wrap;
+use serde::Deserialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::debug;
 use tracing::warn;
@@ -209,6 +214,63 @@ const CONNECTORS_SELECTION_VIEW_ID: &str = "connectors-selection";
 const PET_SELECTION_LOADING_VIEW_ID: &str = "pet-selection-loading";
 const AMBIENT_PET_WRAP_GAP_COLUMNS: u16 = 2;
 const TUI_STUB_MESSAGE: &str = "Not available in TUI yet.";
+
+fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String)> {
+    let ResponseItem::Message { content, .. } = item else {
+        return None;
+    };
+    let communication = InterAgentCommunication::from_message_content(content)?;
+    Some((
+        communication.author.to_string(),
+        display_inter_agent_message_content(&communication.content),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationPayload {
+    status: AgentStatus,
+}
+
+fn display_inter_agent_message_content(content: &str) -> String {
+    parse_subagent_notification(content)
+        .map(|payload| display_subagent_notification_status(payload.status))
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn display_subagent_notification_status(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => "completed".to_string(),
+        AgentStatus::Errored(message) => format!("errored: {message}"),
+        AgentStatus::Interrupted => "interrupted".to_string(),
+        AgentStatus::Shutdown => "shutdown".to_string(),
+        AgentStatus::NotFound => "not found".to_string(),
+        AgentStatus::PendingInit => "pending init".to_string(),
+        AgentStatus::Running => "running".to_string(),
+    }
+}
+
+fn parse_subagent_notification(content: &str) -> Option<SubagentNotificationPayload> {
+    const START_MARKER: &str = "<subagent_notification>";
+    const END_MARKER: &str = "</subagent_notification>";
+
+    let trimmed = content.trim();
+    if !trimmed
+        .get(..START_MARKER.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(START_MARKER))
+    {
+        return None;
+    }
+    let without_start = &trimmed[START_MARKER.len()..];
+    let end_start = without_start.len().checked_sub(END_MARKER.len())?;
+    if !without_start
+        .get(end_start..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(END_MARKER))
+    {
+        return None;
+    }
+    serde_json::from_str(without_start[..end_start].trim()).ok()
+}
 
 /// Choose the keybinding used to edit the most-recently queued message.
 ///
@@ -722,6 +784,7 @@ pub(crate) struct ChatWidget {
     external_editor_state: ExternalEditorState,
     realtime_conversation: RealtimeConversationUiState,
     last_rendered_user_message_display: Option<UserMessageDisplay>,
+    last_replayed_inter_agent_message: Option<(String, String)>,
     last_non_retry_error: Option<(String, String)>,
 }
 

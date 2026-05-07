@@ -1,6 +1,32 @@
 use super::*;
 
 impl ChatWidget {
+    pub(super) fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
+        let Some((sender, message)) = inter_agent_message_from_item(&item) else {
+            if from_replay {
+                self.last_replayed_inter_agent_message = None;
+            }
+            return;
+        };
+
+        let replay_key = (sender.clone(), message.clone());
+        if from_replay {
+            if self.last_replayed_inter_agent_message.as_ref() == Some(&replay_key) {
+                return;
+            }
+            self.last_replayed_inter_agent_message = Some(replay_key);
+        } else {
+            self.last_replayed_inter_agent_message = None;
+        }
+
+        let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
+        self.add_to_history(history_cell::new_info_event(
+            format!("Agent message: {message}"),
+            hint,
+        ));
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_server_notification(
         &mut self,
         notification: ServerNotification,
@@ -72,6 +98,9 @@ impl ChatWidget {
             }
             ServerNotification::ItemCompleted(notification) => {
                 self.handle_item_completed_notification(notification, replay_kind);
+            }
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                self.on_raw_response_item(notification.item, from_replay);
             }
             ServerNotification::AgentMessageDelta(notification) => {
                 self.on_agent_message_delta(notification.delta);
@@ -226,7 +255,6 @@ impl ChatWidget {
             | ServerNotification::ThreadArchived(_)
             | ServerNotification::ThreadDeleted(_)
             | ServerNotification::ThreadUnarchived(_)
-            | ServerNotification::RawResponseItemCompleted(_)
             | ServerNotification::CommandExecOutputDelta(_)
             | ServerNotification::ProcessOutputDelta(_)
             | ServerNotification::ProcessExited(_)

@@ -164,6 +164,7 @@ impl ChatWidget {
             status_state: StatusState::default(),
             review: ReviewState::default(),
             active_hook_cell: None,
+            last_replayed_inter_agent_message: None,
             ambient_pet: None,
             pet_picker_preview_state: crate::pets::PetPickerPreviewState::default(),
             pet_picker_preview_pet: None,
