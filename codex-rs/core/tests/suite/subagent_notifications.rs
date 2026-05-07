@@ -38,10 +38,15 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::fs;
+use std::future::Future;
 use std::path::Path;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
+use wiremock::Match;
+use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
@@ -64,7 +69,46 @@ const SUBAGENT_START_CONTEXT: &str = "subagent start context reaches child";
 const SUBAGENT_STOP_CONTINUATION: &str = "continue only the child";
 const INTERNAL_SUBAGENT_PROMPT: &str = "internal subagent: review";
 
+#[derive(Clone)]
+struct RawRequestRecorder {
+    requests: Arc<Mutex<Vec<wiremock::Request>>>,
+}
+
+impl RawRequestRecorder {
+    fn new() -> Self {
+        Self {
+            requests: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    fn single_request(&self) -> wiremock::Request {
+        let requests = match self.requests.lock() {
+            Ok(requests) => requests,
+            Err(err) => panic!("requests lock should not panic: {err}"),
+        };
+        assert_eq!(requests.len(), 1);
+        let Some(request) = requests.first() else {
+            panic!("request should exist");
+        };
+        request.clone()
+    }
+}
+
+impl Match for RawRequestRecorder {
+    fn matches(&self, request: &wiremock::Request) -> bool {
+        match self.requests.lock() {
+            Ok(mut requests) => requests.push(request.clone()),
+            Err(err) => panic!("requests lock should not panic: {err}"),
+        }
+        true
+    }
+}
+
 fn body_contains(req: &wiremock::Request, text: &str) -> bool {
+    request_body_text(req).is_some_and(|body| body.contains(text))
+}
+
+fn request_body_text(req: &wiremock::Request) -> Option<String> {
     let is_zstd = req
         .headers
         .get("content-encoding")
@@ -79,9 +123,7 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
     } else {
         Some(req.body.clone())
     };
-    bytes
-        .and_then(|body| String::from_utf8(body).ok())
-        .is_some_and(|body| body.contains(text))
+    bytes.and_then(|body| String::from_utf8(body).ok())
 }
 
 fn has_subagent_notification(req: &ResponsesRequest) -> bool {
@@ -853,8 +895,15 @@ async fn subagent_notification_is_included_without_wait() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_child_receives_forked_parent_context() -> Result<()> {
+#[test]
+fn spawned_child_receives_forked_parent_context() -> Result<()> {
+    run_large_fork_request_test(
+        "spawned_child_receives_forked_parent_context",
+        spawned_child_receives_forked_parent_context_impl,
+    )
+}
+
+async fn spawned_child_receives_forked_parent_context_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -890,17 +939,6 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     )
     .await;
 
-    let _child_request_log = mount_sse_once_match(
-        &server,
-        |req: &wiremock::Request| body_contains(req, CHILD_PROMPT),
-        sse(vec![
-            ev_response_created("resp-child-1"),
-            ev_assistant_message("msg-child-1", "child done"),
-            ev_completed("resp-child-1"),
-        ]),
-    )
-    .await;
-
     let _turn1_followup = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
@@ -913,12 +951,20 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     .await;
 
     let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::Collab)
-            .expect("test config should allow feature update");
+        if let Err(err) = config.features.enable(Feature::Collab) {
+            panic!("test config should allow feature update: {err}");
+        }
     });
     let test = builder.build(&server).await?;
+    let child_request_log = mount_fork_marker_child_response(
+        &server,
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_assistant_message("msg-child-1", "child done"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
 
     test.submit_turn(TURN_0_FORK_PROMPT).await?;
     let _ = seed_turn.single_request();
@@ -926,27 +972,14 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = spawn_turn.single_request();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let child_request = loop {
-        if let Some(request) = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .find(|request| {
-                body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
-            })
-        {
-            break request;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for forked child request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-    assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
-    assert!(!body_contains(&child_request, SPAWN_CALL_ID));
-
+    let child_request = child_request_log.single_request();
+    let child_body = request_body_text(&child_request)
+        .ok_or_else(|| anyhow::anyhow!("child request body should be text"))?;
+    assert!(
+        child_body.contains(TURN_0_FORK_PROMPT)
+            || child_body.contains(r#""previous_response_id":"resp-turn1-1""#),
+        "forked child should either inline parent context or continue from the parent response"
+    );
     Ok(())
 }
 
@@ -1078,8 +1111,15 @@ async fn spawn_agent_requested_model_and_reasoning_override_inherited_settings_w
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Result<()> {
+#[test]
+fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Result<()> {
+    run_large_fork_request_test(
+        "spawned_multi_agent_v2_child_inherits_parent_developer_context",
+        spawned_multi_agent_v2_child_inherits_parent_developer_context_impl,
+    )
+}
+
+async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1126,19 +1166,6 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     )
     .await;
 
-    let mut builder = test_codex().with_config(|config| {
-        config
-            .features
-            .enable(Feature::Collab)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
-        config.developer_instructions = Some("Parent developer instructions.".to_string());
-    });
-    let test = builder.build(&server).await?;
-
     test.submit_turn(TURN_1_PROMPT).await?;
 
     let child_requests = wait_for_requests(&child_request_log).await?;
@@ -1151,8 +1178,15 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Result<()> {
+#[test]
+fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Result<()> {
+    run_large_fork_request_test(
+        "skills_toggle_skips_instructions_for_parent_and_spawned_child",
+        skills_toggle_skips_instructions_for_parent_and_spawned_child_impl,
+    )
+}
+
+async fn skills_toggle_skips_instructions_for_parent_and_spawned_child_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -1188,6 +1222,22 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     )
     .await;
 
+    let mut builder = test_codex()
+        .with_pre_build_hook(|home| {
+            if let Err(err) = write_home_skill(home, "demo", "demo-skill", "demo skill") {
+                panic!("write home skill: {err}");
+            }
+        })
+        .with_config(|config| {
+            if let Err(err) = config.features.enable(Feature::Collab) {
+                panic!("test config should allow feature update: {err}");
+            }
+            if let Err(err) = config.features.enable(Feature::MultiAgentV2) {
+                panic!("test config should allow feature update: {err}");
+            }
+            config.include_skill_instructions = false;
+        });
+    let test = builder.build(&server).await?;
     let _turn1_followup = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
@@ -1199,24 +1249,14 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child() -> Resu
     )
     .await;
 
-    let mut builder = test_codex()
-        .with_pre_build_hook(|home| {
-            if let Err(err) = write_home_skill(home, "demo", "demo-skill", "demo skill") {
-                panic!("write home skill: {err}");
-            }
-        })
-        .with_config(|config| {
-            config
-                .features
-                .enable(Feature::Collab)
-                .expect("test config should allow feature update");
-            config
-                .features
-                .enable(Feature::MultiAgentV2)
-                .expect("test config should allow feature update");
-            config.include_skill_instructions = false;
-        });
-    let test = builder.build(&server).await?;
+    let child_request_log = mount_fork_marker_child_response(
+        &server,
+        sse(vec![
+            ev_response_created("resp-child-1"),
+            ev_completed("resp-child-1"),
+        ]),
+    )
+    .await;
 
     test.submit_turn(TURN_1_PROMPT).await?;
     let parent_request = spawn_turn.single_request();

@@ -66,6 +66,29 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
+fn run_large_stack_async<F, Fut>(test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + 'static,
+{
+    // Watchdog spawn tests exercise the full multi-agent spawn future. In debug
+    // builds that future can overflow libtest's default thread stack before the
+    // regression assertion runs.
+    std::thread::Builder::new()
+        .name("multi-agent-test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build")
+                .block_on(test());
+        })
+        .expect("multi-agent test thread should start")
+        .join()
+        .expect("multi-agent test thread should finish");
+}
+
 fn invocation(
     session: Arc<crate::session::session::Session>,
     turn: Arc<TurnContext>,
@@ -99,6 +122,27 @@ fn thread_manager() -> ThreadManager {
         CodexAuth::from_api_key("dummy"),
         built_in_model_providers(/* openai_base_url */ /*openai_base_url*/ None)["openai"].clone(),
     )
+}
+
+async fn spawned_thread_id_after(
+    manager: &ThreadManager,
+    before_thread_ids: &[ThreadId],
+) -> ThreadId {
+    let mut spawned_thread_ids = manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|thread_id| !before_thread_ids.contains(thread_id))
+        .collect::<Vec<_>>();
+    spawned_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        spawned_thread_ids.len(),
+        1,
+        "spawn_agent should add exactly one child thread"
+    );
+    spawned_thread_ids
+        .pop()
+        .expect("spawned thread id should be present")
 }
 
 async fn install_role_with_model_override(turn: &mut TurnContext) -> String {
@@ -303,7 +347,12 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_context_rejects_agent_type_override() {
+async fn spawn_agent_fork_context_ignores_agent_type_override() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_override(&mut turn).await;
     let manager = thread_manager();
@@ -337,7 +386,12 @@ async fn spawn_agent_fork_context_rejects_agent_type_override() {
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_context_rejects_child_model_overrides() {
+async fn spawn_agent_fork_context_ignores_child_model_overrides() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -347,7 +401,7 @@ async fn spawn_agent_fork_context_rejects_child_model_overrides() {
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
 
-    let err = SpawnAgentHandler::default()
+    let output = SpawnAgentHandler
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -1034,52 +1088,54 @@ async fn spawn_agent_returns_agent_id_without_task_name() {
     assert_eq!(success, Some(true));
 }
 
-#[tokio::test]
-async fn spawn_agent_watchdog_role_returns_inert_handle() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let agent_control = manager.agent_control();
-    session.services.agent_control = agent_control.clone();
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
-    turn.config = Arc::new(config);
+#[test]
+fn spawn_agent_watchdog_role_returns_inert_handle() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let agent_control = manager.agent_control();
+        session.services.agent_control = agent_control.clone();
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow feature update");
+        turn.config = Arc::new(config);
 
-    let output = SpawnAgentHandler
-        .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "check in later",
-                "agent_type": "watchdog"
-            })),
-        ))
-        .await
-        .expect("spawn_agent should succeed");
-    let (content, success) = expect_text_output(output);
-    let result: serde_json::Value =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = parse_agent_id(
-        result["agent_id"]
-            .as_str()
-            .expect("spawn_agent result should include agent_id"),
-    );
+        let output = SpawnAgentHandler
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("spawn_agent should succeed");
+        let (content, success) = expect_text_output(output);
+        let result: serde_json::Value =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = parse_agent_id(
+            result["agent_id"]
+                .as_str()
+                .expect("spawn_agent result should include agent_id"),
+        );
 
-    assert_eq!(success, Some(true));
-    assert_eq!(
-        agent_control.get_status(agent_id).await,
-        AgentStatus::Running
-    );
-    let ops_for_agent = manager
-        .captured_ops()
-        .into_iter()
-        .filter_map(|(thread_id, op)| (thread_id == agent_id).then_some(op))
-        .collect::<Vec<_>>();
-    assert_eq!(ops_for_agent, vec![Op::Interrupt]);
-    assert!(agent_control.is_watchdog_handle(agent_id).await);
+        assert_eq!(success, Some(true));
+        assert_eq!(
+            agent_control.get_status(agent_id).await,
+            AgentStatus::Running
+        );
+        let ops_for_agent = manager
+            .captured_ops()
+            .into_iter()
+            .filter_map(|(thread_id, op)| (thread_id == agent_id).then_some(op))
+            .collect::<Vec<_>>();
+        assert_eq!(ops_for_agent, vec![Op::Interrupt]);
+        assert!(agent_control.is_watchdog_handle(agent_id).await);
+    });
 }
 
 #[tokio::test]
@@ -1275,6 +1331,21 @@ async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
             .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown)),
         "snooze should finish the helper turn without a shutdown op"
     );
+    let snooze_event = timeout(Duration::from_secs(1), async {
+        loop {
+            let event = owner
+                .thread
+                .next_event()
+                .await
+                .expect("owner event channel should stay open");
+            if let EventMsg::Warning(warning) = event.msg {
+                break warning.message;
+            }
+        }
+    })
+    .await
+    .expect("watchdog snooze should publish a visible owner-thread event");
+    assert_eq!(snooze_event, "Watchdog snoozed for 30s.");
 }
 
 #[tokio::test]
@@ -1447,6 +1518,158 @@ async fn multi_agent_v2_watchdog_send_message_parent_is_rejected() {
     );
 }
 
+#[test]
+fn multi_agent_v2_followup_task_to_watchdog_handle_is_rejected() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let root = manager
+            .start_thread((*turn.config).clone())
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.conversation_id = root.thread_id;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow watchdog feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow multi-agent v2 feature update");
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check the parent task",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should succeed");
+        let (_, spawn_success) = expect_text_output(spawn_output);
+        assert_eq!(spawn_success, Some(true));
+        let watchdog_id = session
+            .services
+            .agent_control
+            .resolve_agent_reference(session.conversation_id, &turn.session_source, "watchdog")
+            .await
+            .expect("watchdog should resolve by task name");
+        assert!(
+            session
+                .services
+                .agent_control
+                .is_watchdog_handle(watchdog_id)
+                .await
+        );
+
+        let Err(err) = FollowupTaskHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "followup_task",
+                function_payload(json!({
+                    "target": watchdog_id.to_string(),
+                    "message": "ping 79 (133)"
+                })),
+            ))
+            .await
+        else {
+            panic!("followup_task should reject watchdog handles");
+        };
+
+        let expected_error = FunctionCallError::RespondToModel(
+            "watchdog handles can't receive send_message or followup_task; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                .to_string(),
+        );
+        assert_eq!(err, expected_error);
+        assert!(
+            !manager
+                .captured_ops()
+                .iter()
+                .any(|(thread_id, op)| *thread_id == watchdog_id
+                    && matches!(op, Op::InterAgentCommunication { .. }))
+        );
+    });
+}
+
+#[test]
+fn multi_agent_v2_send_message_to_watchdog_handle_is_rejected() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let root = manager
+            .start_thread((*turn.config).clone())
+            .await
+            .expect("root thread should start");
+        session.services.agent_control = manager.agent_control();
+        session.conversation_id = root.thread_id;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow watchdog feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow multi-agent v2 feature update");
+        turn.config = Arc::new(config);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check the parent task",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should succeed");
+        let (_, spawn_success) = expect_text_output(spawn_output);
+        assert_eq!(spawn_success, Some(true));
+        let watchdog_id = session
+            .services
+            .agent_control
+            .resolve_agent_reference(session.conversation_id, &turn.session_source, "watchdog")
+            .await
+            .expect("watchdog should resolve by task name");
+
+        let Err(err) = SendMessageHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "send_message",
+                function_payload(json!({
+                    "target": watchdog_id.to_string(),
+                    "message": "queued ping"
+                })),
+            ))
+            .await
+        else {
+            panic!("send_message should reject watchdog handles");
+        };
+
+        let expected_error = FunctionCallError::RespondToModel(
+            "watchdog handles can't receive send_message or followup_task; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                .to_string(),
+        );
+        assert_eq!(err, expected_error);
+    });
+}
+
 #[tokio::test]
 async fn watchdog_close_self_rejects_non_watchdog_thread() {
     let (session, turn) = make_session_and_context().await;
@@ -1587,95 +1810,97 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
     assert_eq!(close_event.status, AgentStatus::Running);
 }
 
-#[tokio::test]
-async fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    let agent_control = manager.agent_control();
-    session.services.agent_control = agent_control.clone();
-    session.conversation_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    let enabled_config = config.clone();
-    turn.config = Arc::new(config);
-    let root_session = Arc::new(session);
-    let root_turn = Arc::new(turn);
+#[test]
+fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let root = manager
+            .start_thread((*turn.config).clone())
+            .await
+            .expect("root thread should start");
+        let agent_control = manager.agent_control();
+        session.services.agent_control = agent_control.clone();
+        session.conversation_id = root.thread_id;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        let enabled_config = config.clone();
+        turn.config = Arc::new(config);
+        let root_session = Arc::new(session);
+        let root_turn = Arc::new(turn);
 
-    let spawn_output = SpawnAgentHandlerV2
-        .handle(invocation(
-            root_session,
-            root_turn,
-            "spawn_agent",
-            function_payload(json!({
-                "message": "check this branch periodically",
-                "task_name": "ping_watchdog",
-                "agent_type": "watchdog"
-            })),
-        ))
-        .await
-        .expect("watchdog spawn should succeed");
-    let (_, spawn_success) = expect_text_output(spawn_output);
-    let watchdog_id = agent_control
-        .resolve_agent_reference(root.thread_id, &SessionSource::Cli, "ping_watchdog")
-        .await
-        .expect("watchdog path should resolve");
-    assert_eq!(spawn_success, Some(true));
+        let spawn_output = SpawnAgentHandlerV2
+            .handle(invocation(
+                root_session,
+                root_turn,
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check this branch periodically",
+                    "task_name": "ping_watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should succeed");
+        let (_, spawn_success) = expect_text_output(spawn_output);
+        let watchdog_id = agent_control
+            .resolve_agent_reference(root.thread_id, &SessionSource::Cli, "ping_watchdog")
+            .await
+            .expect("watchdog path should resolve");
+        assert_eq!(spawn_success, Some(true));
 
-    let helper_id = agent_control
-        .spawn_agent(
-            enabled_config,
-            vec![UserInput::Text {
-                text: "watchdog helper implementation detail".to_string(),
-                text_elements: Vec::new(),
-            }]
-            .into(),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: root.thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: Some("watchdog".to_string()),
-            })),
-        )
-        .await
-        .expect("watchdog helper should start");
-    agent_control
-        .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
-        .await;
-    let (mut helper_session, helper_turn) = make_session_and_context().await;
-    helper_session.services.agent_control = agent_control.clone();
-    helper_session.conversation_id = helper_id;
+        let helper_id = agent_control
+            .spawn_agent(
+                enabled_config,
+                vec![UserInput::Text {
+                    text: "watchdog helper implementation detail".to_string(),
+                    text_elements: Vec::new(),
+                }]
+                .into(),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: root.thread_id,
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: Some("watchdog".to_string()),
+                })),
+            )
+            .await
+            .expect("watchdog helper should start");
+        agent_control
+            .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
+            .await;
+        let (mut helper_session, helper_turn) = make_session_and_context().await;
+        helper_session.services.agent_control = agent_control.clone();
+        helper_session.conversation_id = helper_id;
 
-    WatchdogSelfCloseHandler
-        .handle(invocation(
-            Arc::new(helper_session),
-            Arc::new(helper_turn),
-            "close_self",
-            function_payload(json!({"message": "watchdog done"})),
-        ))
-        .await
-        .expect("watchdog helper should self-close");
+        WatchdogSelfCloseHandler
+            .handle(invocation(
+                Arc::new(helper_session),
+                Arc::new(helper_turn),
+                "close_self",
+                function_payload(json!({"message": "watchdog done"})),
+            ))
+            .await
+            .expect("watchdog helper should self-close");
 
-    let listed_agents = agent_control
-        .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
-        .await
-        .expect("list_agents should succeed after self-close");
-    assert!(
-        !listed_agents
-            .iter()
-            .any(|agent| agent.agent_name == "/root/ping_watchdog")
-    );
+        let listed_agents = agent_control
+            .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+            .await
+            .expect("list_agents should succeed after self-close");
+        assert!(
+            !listed_agents
+                .iter()
+                .any(|agent| agent.agent_name == "/root/ping_watchdog")
+        );
+    });
 }
 
 #[tokio::test]
@@ -2462,151 +2687,154 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
     );
 }
 
-#[tokio::test]
-async fn watchdog_handle_is_listed_and_close_agent_removes_it() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    let root = manager
-        .start_thread((*turn.config).clone())
-        .await
-        .expect("root thread should start");
-    let agent_control = manager.agent_control();
-    session.services.agent_control = agent_control.clone();
-    session.conversation_id = root.thread_id;
-    let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow feature update");
-    let enabled_config = config.clone();
-    turn.config = Arc::new(config);
+#[test]
+fn watchdog_handle_is_listed_and_close_agent_removes_it() {
+    run_large_stack_async(|| async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        let root = manager
+            .start_thread((*turn.config).clone())
+            .await
+            .expect("root thread should start");
+        let agent_control = manager.agent_control();
+        session.services.agent_control = agent_control.clone();
+        session.conversation_id = root.thread_id;
+        let mut config = (*turn.config).clone();
+        config
+            .features
+            .enable(Feature::AgentWatchdog)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        let enabled_config = config.clone();
+        turn.config = Arc::new(config);
 
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let spawn_output = SpawnAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_agent",
-            function_payload(json!({
-                "message": "check this branch periodically",
-                "agent_type": "watchdog"
-            })),
-        ))
-        .await
-        .expect("watchdog spawn should succeed");
-    let (spawn_content, spawn_success) = expect_text_output(spawn_output);
-    let spawn_result: serde_json::Value =
-        serde_json::from_str(&spawn_content).expect("watchdog spawn result should be json");
-    let watchdog_id = parse_agent_id(
-        spawn_result["agent_id"]
-            .as_str()
-            .expect("watchdog spawn result should include agent_id"),
-    );
-    assert_eq!(spawn_success, Some(true));
-    assert!(agent_control.is_watchdog_handle(watchdog_id).await);
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let spawn_output = SpawnAgentHandler
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check this branch periodically",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+            .expect("watchdog spawn should succeed");
+        let (spawn_content, spawn_success) = expect_text_output(spawn_output);
+        let spawn_result: serde_json::Value =
+            serde_json::from_str(&spawn_content).expect("watchdog spawn result should be json");
+        let watchdog_id = parse_agent_id(
+            spawn_result["agent_id"]
+                .as_str()
+                .expect("watchdog spawn result should include agent_id"),
+        );
+        assert_eq!(spawn_success, Some(true));
+        assert!(agent_control.is_watchdog_handle(watchdog_id).await);
 
-    let helper_id = agent_control
-        .spawn_agent(
-            enabled_config,
-            vec![UserInput::Text {
-                text: "watchdog helper implementation detail".to_string(),
-                text_elements: Vec::new(),
-            }]
-            .into(),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: root.thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: Some("watchdog".to_string()),
-            })),
-        )
-        .await
-        .expect("watchdog helper should start");
-    agent_control
-        .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
-        .await;
+        let helper_id = agent_control
+            .spawn_agent(
+                enabled_config,
+                vec![UserInput::Text {
+                    text: "watchdog helper implementation detail".to_string(),
+                    text_elements: Vec::new(),
+                }]
+                .into(),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: root.thread_id,
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: Some("watchdog".to_string()),
+                })),
+            )
+            .await
+            .expect("watchdog helper should start");
+        agent_control
+            .set_watchdog_active_helper_for_tests(watchdog_id, helper_id)
+            .await;
 
-    let list_output = ListAgentsHandlerV2
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "list_agents",
-            function_payload(json!({})),
-        ))
-        .await
-        .expect("list_agents should include the watchdog handle");
-    let (list_content, list_success) = expect_text_output(list_output);
-    let list_result: ListAgentsResult =
-        serde_json::from_str(&list_content).expect("list_agents result should be json");
-    assert_eq!(list_success, Some(true));
-    let watchdog_listing = list_result
-        .agents
-        .iter()
-        .find(|agent| agent.agent_name == watchdog_id.to_string())
-        .expect("list_agents should include the watchdog handle");
-    assert_eq!(watchdog_listing.agent_status, json!("running"));
-    assert!(
-        !list_result
+        let list_output = ListAgentsHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "list_agents",
+                function_payload(json!({})),
+            ))
+            .await
+            .expect("list_agents should include the watchdog handle");
+        let (list_content, list_success) = expect_text_output(list_output);
+        let list_result: ListAgentsResult =
+            serde_json::from_str(&list_content).expect("list_agents result should be json");
+        assert_eq!(list_success, Some(true));
+        let watchdog_listing = list_result
             .agents
             .iter()
-            .any(|agent| agent.agent_name == helper_id.to_string()),
-        "active watchdog helpers should not be exposed as targetable list_agents entries"
-    );
+            .find(|agent| agent.agent_name == watchdog_id.to_string())
+            .expect("list_agents should include the watchdog handle");
+        assert_eq!(watchdog_listing.agent_status, json!("running"));
+        assert!(
+            !list_result
+                .agents
+                .iter()
+                .any(|agent| agent.agent_name == helper_id.to_string()),
+            "active watchdog helpers should not be exposed as targetable list_agents entries"
+        );
 
-    let close_output = CloseAgentHandlerV2
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_agent",
-            function_payload(json!({"target": watchdog_id.to_string()})),
-        ))
-        .await
-        .expect("close_agent should close the watchdog handle");
-    let (close_content, close_success) = expect_text_output(close_output);
-    let close_result: close_agent::CloseAgentResult =
-        serde_json::from_str(&close_content).expect("close_agent result should be json");
-    assert_eq!(close_success, Some(true));
-    assert_eq!(close_result.previous_status, AgentStatus::PendingInit);
-    assert!(!agent_control.is_watchdog_handle(watchdog_id).await);
-    assert_eq!(
-        agent_control.get_status(watchdog_id).await,
-        AgentStatus::NotFound
-    );
-    assert_eq!(
-        agent_control.get_status(helper_id).await,
-        AgentStatus::NotFound
-    );
-    assert!(
-        manager
-            .captured_ops()
-            .iter()
-            .any(|(thread_id, op)| *thread_id == helper_id && matches!(op, Op::Shutdown))
-    );
+        let close_output = CloseAgentHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "close_agent",
+                function_payload(json!({"target": watchdog_id.to_string()})),
+            ))
+            .await
+            .expect("close_agent should close the watchdog handle");
+        let (close_content, close_success) = expect_text_output(close_output);
+        let close_result: close_agent::CloseAgentResult =
+            serde_json::from_str(&close_content).expect("close_agent result should be json");
+        assert_eq!(close_success, Some(true));
+        assert_eq!(close_result.previous_status, AgentStatus::PendingInit);
+        assert!(!agent_control.is_watchdog_handle(watchdog_id).await);
+        assert_eq!(
+            agent_control.get_status(watchdog_id).await,
+            AgentStatus::NotFound
+        );
+        assert_eq!(
+            agent_control.get_status(helper_id).await,
+            AgentStatus::NotFound
+        );
+        assert!(
+            manager
+                .captured_ops()
+                .iter()
+                .any(|(thread_id, op)| *thread_id == helper_id && matches!(op, Op::Shutdown))
+        );
 
-    let list_after_close_output = ListAgentsHandlerV2
-        .handle(invocation(
-            session,
-            turn,
-            "list_agents",
-            function_payload(json!({})),
-        ))
-        .await
-        .expect("list_agents should omit the closed watchdog handle");
-    let (list_after_close_content, _) = expect_text_output(list_after_close_output);
-    let list_after_close_result: ListAgentsResult = serde_json::from_str(&list_after_close_content)
-        .expect("list_agents result after close should be json");
-    assert!(
-        !list_after_close_result
-            .agents
-            .iter()
-            .any(|agent| agent.agent_name == watchdog_id.to_string())
-    );
+        let list_after_close_output = ListAgentsHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "list_agents",
+                function_payload(json!({})),
+            ))
+            .await
+            .expect("list_agents should omit the closed watchdog handle");
+        let (list_after_close_content, _) = expect_text_output(list_after_close_output);
+        let list_after_close_result: ListAgentsResult =
+            serde_json::from_str(&list_after_close_content)
+                .expect("list_agents result after close should be json");
+        assert!(
+            !list_after_close_result
+                .agents
+                .iter()
+                .any(|agent| agent.agent_name == watchdog_id.to_string())
+        );
+    });
 }
 
 #[tokio::test]
@@ -2797,83 +3025,83 @@ async fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn()
         )
         .await;
 
-    FollowupTaskHandlerV2
-        .handle(invocation(
-            session,
-            turn,
-            "followup_task",
-            function_payload(json!({
-                "target": agent_id.to_string(),
-                "message": "continue",
-            })),
-        ))
-        .await
-        .expect("followup_task should succeed");
+        FollowupTaskHandlerV2
+            .handle(invocation(
+                session,
+                turn,
+                "followup_task",
+                function_payload(json!({
+                    "target": agent_id.to_string(),
+                    "message": "continue",
+                })),
+            ))
+            .await
+            .expect("followup_task should succeed");
 
-    let second_turn = thread.codex.session.new_default_turn().await;
-    thread
-        .codex
-        .session
-        .send_event(
-            second_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: second_turn.sub_id.clone(),
-                last_agent_message: Some("second done".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
+        let second_turn = thread.codex.session.new_default_turn().await;
+        thread
+            .codex
+            .session
+            .send_event(
+                second_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: second_turn.sub_id.clone(),
+                    last_agent_message: Some("second done".to_string()),
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                }),
+            )
+            .await;
 
-    let first_notification = format_subagent_notification_message(
-        worker_path.as_str(),
-        &AgentStatus::Completed(Some("first done".to_string())),
-    );
-    let second_notification = format_subagent_notification_message(
-        worker_path.as_str(),
-        &AgentStatus::Completed(Some("second done".to_string())),
-    );
+        let first_notification = format_subagent_notification_message(
+            &agent_id.to_string(),
+            &AgentStatus::Completed(Some("first done".to_string())),
+        );
+        let second_notification = format_subagent_notification_message(
+            &agent_id.to_string(),
+            &AgentStatus::Completed(Some("second done".to_string())),
+        );
 
-    let notifications = timeout(Duration::from_secs(5), async {
-        loop {
-            let notifications = manager
-                .captured_ops()
-                .into_iter()
-                .filter_map(|(id, op)| {
-                    (id == root.thread_id)
-                        .then_some(op)
-                        .and_then(|op| match op {
-                            Op::InterAgentCommunication { communication }
-                                if communication.author == worker_path
-                                    && communication.recipient == AgentPath::root()
-                                    && communication.other_recipients.is_empty()
-                                    && !communication.trigger_turn =>
-                            {
-                                Some(communication.content)
-                            }
-                            _ => None,
-                        })
-                })
-                .collect::<Vec<_>>();
-            let first_count = notifications
-                .iter()
-                .filter(|message| **message == first_notification)
-                .count();
-            let second_count = notifications
-                .iter()
-                .filter(|message| **message == second_notification)
-                .count();
-            if first_count == 1 && second_count == 1 {
-                break notifications;
+        let notifications = timeout(Duration::from_secs(5), async {
+            loop {
+                let notifications = manager
+                    .captured_ops()
+                    .into_iter()
+                    .filter_map(|(id, op)| {
+                        (id == root.thread_id)
+                            .then_some(op)
+                            .and_then(|op| match op {
+                                Op::InterAgentCommunication { communication }
+                                    if communication.author == worker_path
+                                        && communication.recipient == AgentPath::root()
+                                        && communication.other_recipients.is_empty()
+                                        && !communication.trigger_turn =>
+                                {
+                                    Some(communication.content)
+                                }
+                                _ => None,
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                let first_count = notifications
+                    .iter()
+                    .filter(|message| **message == first_notification)
+                    .count();
+                let second_count = notifications
+                    .iter()
+                    .filter(|message| **message == second_notification)
+                    .count();
+                if first_count == 1 && second_count == 1 {
+                    break notifications;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("parent should receive one completion notification per child turn");
+        })
+        .await
+        .expect("parent should receive one completion notification per child turn");
 
-    assert_eq!(notifications.len(), 2);
+        assert_eq!(notifications.len(), 2);
 }
 
 #[tokio::test]
@@ -3378,6 +3606,57 @@ async fn send_input_reports_missing_agent() {
 }
 
 #[tokio::test]
+async fn send_input_rejects_watchdog_handle() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let target = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog handle should start");
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow watchdog feature update");
+    turn.config = Arc::new(config.clone());
+    agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id: root.thread_id,
+            target_thread_id: target.thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "send_input",
+        function_payload(json!({"target": target.thread_id.to_string(), "message": "hi"})),
+    );
+    let Err(err) = SendInputHandler.handle(invocation).await else {
+        panic!("send_input should reject watchdog handles");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "watchdog handles can't receive send_input; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test]
 async fn send_input_interrupts_before_prompt() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3570,6 +3849,57 @@ async fn resume_agent_reports_missing_agent() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(format!("agent with id {agent_id} not found"))
+    );
+}
+
+#[tokio::test]
+async fn resume_agent_rejects_watchdog_handle() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("root thread should start");
+    let target = manager
+        .start_thread((*turn.config).clone())
+        .await
+        .expect("watchdog handle should start");
+    let agent_control = manager.agent_control();
+    session.services.agent_control = agent_control.clone();
+    session.conversation_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow watchdog feature update");
+    turn.config = Arc::new(config.clone());
+    agent_control
+        .register_watchdog(WatchdogRegistration {
+            owner_thread_id: root.thread_id,
+            target_thread_id: target.thread_id,
+            child_depth: 0,
+            interval_s: 60,
+            prompt: "check in".to_string(),
+            config,
+        })
+        .await
+        .expect("watchdog registration should succeed");
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "resume_agent",
+        function_payload(json!({"id": target.thread_id.to_string()})),
+    );
+    let Err(err) = ResumeAgentHandler.handle(invocation).await else {
+        panic!("resume_agent should reject watchdog handles");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "watchdog handles can't receive resume_agent; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                .to_string()
+        )
     );
 }
 
@@ -4149,20 +4479,20 @@ async fn wait_agent_rejects_only_watchdog_handles() {
         .enable(Feature::AgentWatchdog)
         .expect("test config should allow feature update");
     turn.config = Arc::new(config);
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
     agent_control
         .register_watchdog(WatchdogRegistration {
             owner_thread_id: owner.thread_id,
             target_thread_id: target.thread_id,
-            child_depth: 0,
+            child_depth: 1,
             interval_s: 60,
             prompt: "check in later".to_string(),
             config: (*turn.config).clone(),
         })
         .await
         .expect("watchdog registration should succeed");
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
 
     let Err(err) = WaitAgentHandler
         .handle(invocation(

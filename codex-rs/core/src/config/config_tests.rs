@@ -6821,6 +6821,22 @@ nickname_candidates = ["Hypatia", "Noether"]
     Ok(())
 }
 
+#[test]
+fn agent_role_toml_rejects_watchdog_interval() {
+    let err = toml::from_str::<ConfigToml>(
+        r#"[agents.slow_watch]
+description = "Not a watchdog"
+watchdog_interval_s = 300
+"#,
+    )
+    .expect_err("role-scoped watchdog_interval_s should be rejected");
+
+    assert!(
+        err.to_string()
+            .contains("unknown field `watchdog_interval_s`")
+    );
+}
+
 #[tokio::test]
 async fn agent_role_relative_config_file_resolves_from_config_layer() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
@@ -6925,6 +6941,74 @@ nickname_candidates = ["Noether"]
             .as_ref()
             .map(|candidates| candidates.iter().map(String::as_str).collect::<Vec<_>>()),
         Some(vec!["Hypatia"])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn agent_role_file_drops_watchdog_interval_with_warning() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let role_config_path = codex_home.path().join("agents").join("researcher.toml");
+    tokio::fs::create_dir_all(
+        role_config_path
+            .parent()
+            .expect("role config should have a parent directory"),
+    )
+    .await?;
+    tokio::fs::write(
+        &role_config_path,
+        r#"
+description = "Research role"
+developer_instructions = "Research carefully"
+watchdog_interval_s = 300
+"#,
+    )
+    .await?;
+    tokio::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[agents.researcher]
+description = "Research role"
+config_file = "./agents/researcher.toml"
+"#,
+    )
+    .await?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("cannot set watchdog_interval_s"))
+    );
+    assert!(
+        !config.agent_roles.contains_key("researcher"),
+        "malformed role file should be dropped"
+    );
+    assert!(
+        !config
+            .config_layer_stack
+            .get_layers(
+                ConfigLayerStackOrdering::LowestPrecedenceFirst,
+                /*include_disabled*/ true,
+            )
+            .iter()
+            .any(|layer| layer.config.to_string().contains("watchdog_interval_s")),
+        "malformed role file should not add watchdog_interval_s to the config layer stack"
+    );
+    assert_eq!(config.watchdog_interval_s, DEFAULT_WATCHDOG_INTERVAL_S);
+
+    assert!(
+        config
+            .startup_warnings
+            .iter()
+            .any(|warning| warning.contains("cannot set watchdog_interval_s")
+                && warning.contains("set it at the top level of config.toml"))
     );
 
     Ok(())
@@ -10007,7 +10091,7 @@ subagent_usage_hint_text = ""
 }
 
 #[tokio::test]
-async fn multi_agent_v2_feature_rejects_agents_max_threads() -> std::io::Result<()> {
+async fn multi_agent_v2_ignores_legacy_agents_max_threads() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -10024,46 +10108,16 @@ max_threads = 3
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
         .build()
         .await?;
-    let err = config
-        .validate_multi_agent_v2_config()
-        .expect_err("agents.max_threads should conflict with multi_agent_v2");
-
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert_eq!(
-        err.to_string(),
-        "agents.max_threads cannot be set when features.multi_agent_v2 is enabled"
-    );
-    assert_eq!(
-        config.effective_agent_max_threads(MultiAgentVersion::V2),
-        Some(3)
-    );
-
-    Ok(())
-}
-
-#[tokio::test]
-async fn catalog_v2_allows_agents_max_threads_when_feature_disabled() -> std::io::Result<()> {
-    let codex_home = TempDir::new()?;
-    std::fs::write(
-        codex_home.path().join(CONFIG_TOML_FILE),
-        r#"[features.multi_agent_v2]
-enabled = false
-
-[agents]
-max_threads = 3
-"#,
-    )?;
-
-    let config = ConfigBuilder::without_managed_config_for_tests()
-        .codex_home(codex_home.path().to_path_buf())
-        .fallback_cwd(Some(codex_home.path().to_path_buf()))
-        .build()
-        .await?;
-
     config.validate_multi_agent_v2_config()?;
+
     assert_eq!(
-        config.effective_agent_max_threads(MultiAgentVersion::V2),
-        Some(3)
+        config.agent_max_threads,
+        Some(
+            config
+                .multi_agent_v2
+                .max_concurrent_threads_per_session
+                .saturating_sub(1)
+        )
     );
 
     Ok(())

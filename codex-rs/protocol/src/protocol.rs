@@ -15,6 +15,7 @@ use std::time::Duration;
 use strum_macros::EnumIter;
 
 use crate::AgentPath;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
@@ -2774,6 +2775,8 @@ pub enum MultiAgentVersion {
 #[derive(Serialize, Deserialize, Clone, Debug, JsonSchema, TS)]
 pub struct SessionMeta {
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2813,6 +2816,7 @@ impl Default for SessionMeta {
     fn default() -> Self {
         SessionMeta {
             id: ThreadId::default(),
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: String::new(),
@@ -2842,9 +2846,40 @@ pub struct SessionMetaLine {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct ForkReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    pub nth_user_message: usize,
+}
+
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
+    ForkReference(ForkReferenceItem),
+    RolloutReference(RolloutReferenceItem),
     ResponseItem(ResponseItem),
     Compacted(CompactedItem),
     TurnContext(TurnContextItem),

@@ -947,10 +947,24 @@ SELECT
     );
 }
 
+pub(super) fn extract_dynamic_tools(items: &[RolloutItem]) -> Option<Option<Vec<DynamicToolSpec>>> {
+    items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.dynamic_tools.clone()),
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    })
+}
+
 pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
     items.iter().rev().find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
@@ -1317,6 +1331,7 @@ mod tests {
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: metadata.created_at.to_rfc3339(),
@@ -1378,6 +1393,7 @@ mod tests {
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: created_at,

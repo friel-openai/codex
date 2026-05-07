@@ -1351,14 +1351,18 @@ fn previous_response_fork_rollout_items(
 ) -> Vec<RolloutItem> {
     let source_session_meta = source_items.iter().find_map(|item| match item {
         RolloutItem::SessionMeta(meta) => Some(meta.clone()),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
     });
     let latest_turn_context = source_items.iter().rev().find_map(|item| match item {
         RolloutItem::TurnContext(turn_context) => Some(turn_context.clone()),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::SessionMeta(_)
         | RolloutItem::EventMsg(_) => None,

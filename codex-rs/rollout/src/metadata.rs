@@ -67,7 +67,9 @@ pub fn builder_from_items(
 ) -> Option<ThreadMetadataBuilder> {
     if let Some(session_meta) = items.iter().find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
@@ -119,7 +121,9 @@ pub async fn extract_metadata_from_rollout(
         metadata,
         memory_mode: items.iter().rev().find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
-            RolloutItem::ResponseItem(_)
+            RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::EventMsg(_) => None,
