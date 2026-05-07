@@ -779,7 +779,7 @@ fn sample_thread_start_response() -> ThreadStartResponse {
 }
 
 #[tokio::test]
-async fn session_configured_from_thread_fork_response_preserves_permission_profile() {
+async fn session_configured_from_thread_fork_response_uses_permission_profile_from_config() {
     let codex_home = tempdir().expect("create temp codex home");
     let cwd = tempdir().expect("create temp cwd");
     let config = ConfigBuilder::default()
@@ -788,11 +788,12 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
         .build()
         .await
         .expect("build config");
-    let permission_profile = PermissionProfile::Disabled;
     let response = ThreadForkResponse {
         thread: codex_app_server_protocol::Thread {
             id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
+            session_id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
             forked_from_id: Some("f6f10963-370f-4f42-8f3b-bb680e5fe0c8".to_string()),
+            parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
             model_provider: "openai".to_string(),
@@ -803,6 +804,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             cwd: test_path_buf("/tmp").abs(),
             cli_version: "0.0.0".to_string(),
             source: codex_app_server_protocol::SessionSource::Cli,
+            thread_source: None,
             agent_nickname: None,
             agent_role: None,
             git_info: None,
@@ -813,6 +815,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
         model_provider: "openai".to_string(),
         service_tier: None,
         cwd: test_path_buf("/tmp").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: codex_app_server_protocol::AskForApproval::OnRequest,
         approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
@@ -822,7 +825,6 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         },
-        permission_profile: Some(permission_profile.clone().into()),
         active_permission_profile: None,
         reasoning_effort: None,
     };
@@ -830,5 +832,8 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
     let event = session_configured_from_thread_fork_response(&response, &config)
         .expect("build fork session configured event");
 
-    assert_eq!(event.permission_profile, permission_profile);
+    assert_eq!(
+        event.permission_profile,
+        config.permissions.effective_permission_profile()
+    );
 }
