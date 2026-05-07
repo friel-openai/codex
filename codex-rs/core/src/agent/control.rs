@@ -5,10 +5,12 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
+use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
@@ -43,6 +45,8 @@ use tracing::warn;
 
 const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -303,9 +307,26 @@ impl AgentControl {
                     crate::session::session::AppServerClientMetadata {
                         client_name: None,
                         client_version: None,
+                        mcp_elicitations_auto_deny: false,
                     }
                 }
             };
+            if let Err(error) = new_thread
+                .thread
+                .set_app_server_client_info(
+                    client_metadata.client_name.clone(),
+                    client_metadata.client_version.clone(),
+                    client_metadata.mcp_elicitations_auto_deny,
+                )
+                .await
+            {
+                warn!(
+                    error = %error,
+                    child_thread_id = %new_thread.thread_id,
+                    parent_thread_id = %parent_thread_id,
+                    "failed to inherit app-server client metadata for spawned thread"
+                );
+            }
             let thread_config = new_thread.thread.codex.thread_config_snapshot().await;
             emit_subagent_session_started(
                 &new_thread
@@ -357,6 +378,7 @@ impl AgentControl {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn spawn_forked_thread(
         &self,
         state: &Arc<ThreadManagerState>,
@@ -365,6 +387,7 @@ impl AgentControl {
         options: &SpawnAgentOptions,
         inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        inherited_thread_state: InheritedThreadState,
     ) -> CodexResult<crate::thread_manager::NewThread> {
         if options.fork_parent_spawn_call_id.is_none() {
             return Err(CodexErr::Fatal(
@@ -491,6 +514,7 @@ impl AgentControl {
                 inherited_shell_snapshot,
                 inherited_exec_policy,
                 options.environments.clone(),
+                inherited_thread_state,
             )
             .await
     }
@@ -647,6 +671,7 @@ impl AgentControl {
                 session_source,
                 inherited_shell_snapshot,
                 inherited_exec_policy,
+                inherited_thread_state: Default::default(),
             })
             .await?;
         let mut agent_metadata = agent_metadata;
@@ -1243,6 +1268,114 @@ impl AgentControl {
 
         Ok(descendants)
     }
+}
+
+async fn parent_prompt_cache_key_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<ThreadId> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
+}
+
+fn previous_response_fork_rollout_items(
+    source_items: Vec<RolloutItem>,
+    baseline_input: Vec<ResponseItem>,
+) -> Vec<RolloutItem> {
+    let source_session_meta = source_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let latest_turn_context = source_items.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(turn_context) => Some(turn_context.clone()),
+        RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::SessionMeta(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+
+    source_session_meta
+        .into_iter()
+        .map(RolloutItem::SessionMeta)
+        .chain(baseline_input.into_iter().map(RolloutItem::ResponseItem))
+        .chain(
+            latest_turn_context
+                .into_iter()
+                .map(RolloutItem::TurnContext),
+        )
+        .collect()
+}
+
+async fn parent_mcp_tool_snapshot_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<McpToolSnapshot> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+    let list_all_tools = {
+        let mcp_connection_manager = parent_thread
+            .codex
+            .session
+            .services
+            .mcp_connection_manager
+            .read()
+            .await;
+        mcp_connection_manager.list_all_tools_future()
+    };
+    let tools = list_all_tools.await;
+    Some(McpToolSnapshot { tools })
+}
+
+fn fork_previous_response_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
+        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+}
+
+fn fork_previous_response_id_value_enabled(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+async fn parent_response_continuation_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<crate::client::ResponseContinuation> {
+    if !fork_previous_response_id_enabled() {
+        return None;
+    }
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .and_then(|parent_thread| parent_thread.codex.session.response_continuation_for_fork())
 }
 
 fn thread_spawn_parent_thread_id(session_source: &SessionSource) -> Option<ThreadId> {

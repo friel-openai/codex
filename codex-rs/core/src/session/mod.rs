@@ -30,6 +30,7 @@ use crate::context::PersonalitySpecInstructions;
 use crate::default_skill_metadata_budget;
 use crate::environment_selection::ResolvedTurnEnvironments;
 use crate::exec_policy::ExecPolicyManager;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::parse_turn_item;
 use crate::path_utils::normalize_for_native_workdir;
 use crate::realtime_conversation::RealtimeConversationManager;
@@ -410,6 +411,7 @@ pub(crate) struct CodexSpawnArgs {
     /// Root sessions and non-thread-spawn subagents pass a disabled context;
     /// `Session::new` creates the root trace itself when rollout tracing is enabled.
     pub(crate) parent_rollout_thread_trace: ThreadTraceContext,
+    pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
     pub(crate) environment_selections: ResolvedTurnEnvironments,
@@ -471,6 +473,7 @@ impl Codex {
             user_shell_override,
             inherited_exec_policy,
             parent_rollout_thread_trace,
+            inherited_thread_state,
             parent_trace: _,
             environment_selections,
             analytics_events_client,
@@ -645,6 +648,7 @@ impl Codex {
             extensions,
             agent_control,
             environment_manager,
+            inherited_thread_state,
             analytics_events_client,
             thread_store,
             parent_rollout_thread_trace,
@@ -857,13 +861,26 @@ async fn thread_title_from_thread_store(
 
 impl Session {
     pub(crate) async fn app_server_client_metadata(&self) -> AppServerClientMetadata {
-        let state = self.state.lock().await;
+        let (client_name, client_version) = {
+            let state = self.state.lock().await;
+            (
+                state.session_configuration.app_server_client_name.clone(),
+                state
+                    .session_configuration
+                    .app_server_client_version
+                    .clone(),
+            )
+        };
+        let mcp_elicitations_auto_deny = self
+            .services
+            .mcp_connection_manager
+            .read()
+            .await
+            .elicitations_auto_deny();
         AppServerClientMetadata {
-            client_name: state.session_configuration.app_server_client_name.clone(),
-            client_version: state
-                .session_configuration
-                .app_server_client_version
-                .clone(),
+            client_name,
+            client_version,
+            mcp_elicitations_auto_deny,
         }
     }
 
@@ -1043,6 +1060,16 @@ impl Session {
 
     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
         self.services.live_thread.as_ref()
+    }
+
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.services.model_client.prompt_cache_key()
+    }
+
+    pub(crate) fn response_continuation_for_fork(
+        &self,
+    ) -> Option<crate::client::ResponseContinuation> {
+        self.services.model_client.response_continuation_for_fork()
     }
 
     /// Flush rollout writes and return the final durability-barrier result.
@@ -3287,6 +3314,7 @@ pub(crate) fn emit_subagent_session_started(
     let AppServerClientMetadata {
         client_name,
         client_version,
+        ..
     } = client_metadata;
     let (Some(client_name), Some(client_version)) = (client_name, client_version) else {
         tracing::warn!("skipping subagent thread analytics: missing inherited client metadata");

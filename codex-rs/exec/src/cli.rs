@@ -85,6 +85,19 @@ pub struct Cli {
     pub prompt: Option<String>,
 }
 
+impl Cli {
+    pub fn validate(self) -> Result<Self, clap::Error> {
+        if self.fork_session_id.is_some() && self.command.is_some() {
+            return Err(clap::Error::raw(
+                clap::error::ErrorKind::ArgumentConflict,
+                "--fork cannot be used with subcommands",
+            ));
+        }
+
+        Ok(self)
+    }
+}
+
 impl std::ops::Deref for Cli {
     type Target = SharedCliOptions;
 
@@ -161,7 +174,6 @@ fn mark_exec_global_args(cmd: clap::Command) -> clap::Command {
         })
         .mut_arg("bypass_hook_trust", |arg| arg.global(true))
 }
-
 #[derive(Debug, clap::Subcommand)]
 pub enum Command {
     /// Resume a previous session by id or pick the most recent with --last.

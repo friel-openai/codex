@@ -446,6 +446,7 @@ async fn azure_default_store_attaches_ids_and_headers() -> Result<()> {
             ResponsesOptions {
                 session_id: Some("sess_123".into()),
                 thread_id: Some("thread_123".into()),
+                prompt_cache_key: Some("prompt_cache_123".into()),
                 session_source: Some(SessionSource::SubAgent(SubAgentSource::Review)),
                 extra_headers,
                 compression: Compression::None,
