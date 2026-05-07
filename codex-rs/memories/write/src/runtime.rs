@@ -177,6 +177,7 @@ impl MemoryStartupContext {
             SessionId::from(self.thread_id),
             self.thread_id,
             installation_id,
+            /*prompt_cache_key_override*/ None,
             config.model_provider.clone(),
             session_source,
             config.model_verbosity,

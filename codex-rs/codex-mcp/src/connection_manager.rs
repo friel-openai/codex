@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -363,6 +364,34 @@ impl McpConnectionManager {
         failures
     }
 
+    pub fn required_startup_failures_future(
+        &self,
+        required_servers: Vec<String>,
+    ) -> impl Future<Output = Vec<McpStartupFailure>> + Send + 'static {
+        let clients = self.clients.clone();
+        async move {
+            let mut failures = Vec::new();
+            for server_name in required_servers {
+                let Some(async_managed_client) = clients.get(&server_name).cloned() else {
+                    failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: format!("required MCP server `{server_name}` was not initialized"),
+                    });
+                    continue;
+                };
+
+                match async_managed_client.client().await {
+                    Ok(_) => {}
+                    Err(error) => failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: startup_outcome_error_message(error),
+                    }),
+                }
+            }
+            failures
+        }
+    }
+
     /// Returns a single map that contains all tools. Each key is the
     /// fully-qualified name for the tool.
     #[instrument(level = "trace", skip_all)]
@@ -375,6 +404,22 @@ impl McpConnectionManager {
             tools.extend(server_tools);
         }
         qualify_tools(tools)
+    }
+
+    pub fn list_all_tools_future(
+        &self,
+    ) -> impl Future<Output = HashMap<String, ToolInfo>> + Send + 'static {
+        let clients = self.clients.values().cloned().collect::<Vec<_>>();
+        async move {
+            let mut tools = Vec::new();
+            for managed_client in clients {
+                let Some(server_tools) = managed_client.listed_tools().await else {
+                    continue;
+                };
+                tools.extend(server_tools);
+            }
+            qualify_tools(tools)
+        }
     }
 
     /// Force-refresh codex apps tools by bypassing the in-process cache.
