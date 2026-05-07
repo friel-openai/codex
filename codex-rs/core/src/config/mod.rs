@@ -3071,12 +3071,6 @@ impl Config {
         validate_multi_agent_v2_tool_namespace(multi_agent_v2.tool_namespace.as_deref())?;
         let agent_max_threads_from_config = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
         let agent_max_threads = if features.enabled(Feature::MultiAgentV2) {
-            if agent_max_threads_from_config.is_some() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "agents.max_threads cannot be set when multi_agent_v2 is enabled",
-                ));
-            }
             Some(
                 multi_agent_v2
                     .max_concurrent_threads_per_session

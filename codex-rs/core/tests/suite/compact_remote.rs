@@ -2062,11 +2062,6 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
         test_codex().with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     let initial = start_builder.build(&server).await?;
     let home = initial.home.clone();
-    let rollout_path = initial
-        .session_configured
-        .rollout_path
-        .clone()
-        .expect("rollout path");
 
     let responses_mock = responses::mount_sse_sequence(
         &server,
@@ -2123,6 +2118,12 @@ async fn remote_compact_and_resume_refresh_stale_developer_instructions() -> Res
 
     initial.codex.submit(Op::Compact).await?;
     wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let rollout_path = initial
+        .codex
+        .current_rollout_path()
+        .await
+        .expect("rollout path");
 
     initial
         .codex
@@ -2742,11 +2743,6 @@ async fn snapshot_request_shape_remote_compact_resume_restates_realtime_end() ->
     let mut builder = remote_realtime_test_codex_builder(&realtime_server);
     let initial = builder.build(&server).await?;
     let home = initial.home.clone();
-    let rollout_path = initial
-        .session_configured
-        .rollout_path
-        .clone()
-        .expect("rollout path");
 
     let responses_mock = responses::mount_sse_sequence(
         &server,
@@ -2793,6 +2789,12 @@ async fn snapshot_request_shape_remote_compact_resume_restates_realtime_end() ->
 
     initial.codex.submit(Op::Compact).await?;
     wait_for_event(&initial.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let rollout_path = initial
+        .codex
+        .current_rollout_path()
+        .await
+        .expect("rollout path");
 
     initial.codex.submit(Op::Shutdown).await?;
     wait_for_event(&initial.codex, |ev| {

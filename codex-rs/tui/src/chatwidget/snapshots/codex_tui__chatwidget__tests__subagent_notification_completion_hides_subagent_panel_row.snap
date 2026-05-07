@@ -1,6 +1,6 @@
 ---
 source: tui/src/chatwidget/tests/app_server.rs
-assertion_line: 885
+assertion_line: 819
 expression: screen
 ---
 

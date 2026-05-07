@@ -3503,6 +3503,104 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
         .expect("thread should have rollout path")
 }
 
+#[tokio::test]
+async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
+    let (mut sess, tc, _) = make_session_and_context_with_rx().await;
+    let sess = Arc::get_mut(&mut sess).expect("session should not have additional references");
+    let old_rollout_path = attach_thread_persistence(sess).await;
+    sess.persist_rollout_items(&[
+        RolloutItem::ResponseItem(user_message("before compaction")),
+        RolloutItem::ResponseItem(assistant_message("before compaction answer")),
+    ])
+    .await;
+    sess.flush_rollout()
+        .await
+        .expect("pre-compaction rollout should flush");
+    let (old_items, _, _) = RolloutRecorder::load_rollout_items(old_rollout_path.as_path())
+        .await
+        .expect("load pre-compaction rollout segment");
+    let old_segment_id = old_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let old_segment_id = old_segment_id.expect("pre-compaction rollout should have segment id");
+    let replacement_history = vec![user_message("compacted summary")];
+
+    sess.replace_compacted_history(
+        replacement_history.clone(),
+        Some(tc.to_turn_context_item()),
+        CompactedItem {
+            message: "compacted summary".to_string(),
+            replacement_history: Some(replacement_history.clone()),
+        },
+    )
+    .await;
+
+    let new_rollout_path = sess
+        .current_rollout_path()
+        .await
+        .expect("load current rollout path")
+        .expect("rollout path after compaction");
+    assert_eq!(new_rollout_path, old_rollout_path);
+    let config = sess.get_config().await;
+    let archived_old_rollout_path = config
+        .codex_home
+        .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+        .join(sess.conversation_id.to_string())
+        .join(old_segment_id.to_string())
+        .join(
+            old_rollout_path
+                .file_name()
+                .expect("old rollout path should have a file name"),
+        );
+    assert!(old_rollout_path.exists());
+    assert!(archived_old_rollout_path.exists());
+    let old_rollout_timestamp = old_rollout_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .and_then(|file_name| file_name.strip_prefix("rollout-"))
+        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.conversation_id)))
+        .expect("old rollout timestamp");
+    let (new_items, new_thread_id, _) =
+        RolloutRecorder::load_rollout_items(new_rollout_path.as_path())
+            .await
+            .expect("load new rollout segment");
+    assert_eq!(new_thread_id, Some(sess.conversation_id));
+    assert!(new_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.rollout_path.as_path() == archived_old_rollout_path.as_path()
+                    && reference.thread_id == Some(sess.conversation_id)
+                    && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
+        )
+    }));
+    assert!(new_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(CompactedItem {
+                replacement_history: Some(history),
+                ..
+            }) if *history == replacement_history
+        )
+    }));
+
+    let replay_items = crate::thread_rollout_truncation::materialize_rollout_items_for_replay(
+        config.codex_home.as_path(),
+        &new_items,
+    )
+    .await;
+    let reconstructed = sess
+        .reconstruct_history_from_rollout(tc.as_ref(), &replay_items)
+        .await;
+    assert_eq!(reconstructed.history, replacement_history);
+}
+
 fn text_block(s: &str) -> serde_json::Value {
     json!({
         "type": "text",
@@ -7029,6 +7127,8 @@ async fn make_multi_agent_v2_usage_hint_test_session(
         |config| {
             if enable_multi_agent_v2 {
                 let _ = config.features.enable(Feature::MultiAgentV2);
+            } else {
+                let _ = config.features.disable(Feature::MultiAgentV2);
             }
             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
@@ -10427,6 +10527,31 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 }
 
 #[tokio::test]
+async fn watchdog_prompt_is_loaded_for_watchdog_subagents() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::default(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("Test Watchdog".to_string()),
+        agent_role: Some("watchdog".to_string()),
+    });
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
+        .await
+        .expect("watchdog subagents need a role prompt");
+
+    assert!(prompt.contains("You are also a **watchdog**"));
+    assert!(prompt.contains("Call `watchdog.close_self`"));
+    assert!(prompt.contains("Call `followup_task` with `\"target\":\"parent\"`"));
+}
+
+#[tokio::test]
 async fn agent_prompt_loader_prefers_home_overrides() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     tokio::fs::write(codex_home.path().join("AGENTS.root.md"), "custom root")
@@ -10438,6 +10563,12 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     )
     .await
     .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.watchdog.md"),
+        "custom watchdog",
+    )
+    .await
+    .expect("write watchdog override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -10446,6 +10577,10 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     assert_eq!(
         load_subagent_prompt(codex_home.path()).await,
         "custom subagent"
+    );
+    assert_eq!(
+        load_watchdog_agent_prompt(codex_home.path()).await,
+        "custom watchdog"
     );
 }
 
@@ -10478,6 +10613,51 @@ async fn root_agent_prompt_is_inline_developer_context_not_session_instructions(
                         if text.contains("# You are the Root Agent")
                 ))
     )));
+}
+
+#[tokio::test]
+async fn watchdog_agent_prompt_is_inline_developer_context_for_watchdog_threads() {
+    let session = make_session_with_config(|config| {
+        config
+            .features
+            .enable(Feature::AgentPromptInjection)
+            .expect("test config should enable prompt injection");
+    })
+    .await
+    .expect("session should build");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/watchdog").expect("agent path should parse")),
+        agent_nickname: Some("Test Watchdog".to_string()),
+        agent_role: Some("watchdog".to_string()),
+    });
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .session_source = session_source.clone();
+
+    let mut turn_context = session.new_default_turn().await;
+    Arc::get_mut(&mut turn_context)
+        .expect("turn context should not be shared")
+        .session_source = session_source;
+    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
+
+    let developer_texts = developer_input_texts(&initial_context);
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains("You are also a **watchdog**")),
+        "watchdog prompt must be visible as developer context so watchdog helpers do not act like the parent agent: {developer_texts:?}"
+    );
+    assert!(
+        !developer_texts
+            .iter()
+            .any(|text| text.contains("# You are the Root Agent")),
+        "watchdog helper current-turn developer context must not inject root prompt: {developer_texts:?}"
+    );
 }
 
 #[tokio::test]
