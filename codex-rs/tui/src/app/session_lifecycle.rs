@@ -26,24 +26,36 @@ impl App {
             }
         }
 
-        let has_non_primary_agent_thread = self
+        let collab_enabled = self.config.features.enabled(Feature::Collab);
+        let selectable_threads = self
             .agent_navigation
-            .has_non_primary_thread(self.primary_thread_id);
-        if !self.config.features.enabled(Feature::Collab) && !has_non_primary_agent_thread {
+            .ordered_threads()
+            .into_iter()
+            .filter(|(thread_id, entry)| {
+                let is_primary = Some(*thread_id) == self.primary_thread_id;
+                let is_watchdog = entry.agent_role.as_deref() == Some("watchdog");
+                let is_open_agent = !entry.is_closed && !is_watchdog;
+                let is_existing_replay_thread = self.thread_event_channels.contains_key(thread_id)
+                    && entry.agent_role.is_none();
+                is_primary || is_open_agent || (is_existing_replay_thread && !is_watchdog)
+            })
+            .collect::<Vec<_>>();
+        let has_non_primary_agent_thread = selectable_threads
+            .iter()
+            .any(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id);
+        if !collab_enabled && !has_non_primary_agent_thread {
             self.chat_widget.open_multi_agent_enable_prompt();
             return;
         }
 
-        if self.agent_navigation.is_empty() {
+        if selectable_threads.is_empty() {
             self.chat_widget
                 .add_info_message("No agents available yet.".to_string(), /*hint*/ None);
             return;
         }
 
         let mut initial_selected_idx = None;
-        let items: Vec<SelectionItem> = self
-            .agent_navigation
-            .ordered_threads()
+        let items: Vec<SelectionItem> = selectable_threads
             .iter()
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
