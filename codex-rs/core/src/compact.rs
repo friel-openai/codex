@@ -46,6 +46,8 @@ use codex_model_provider_info::ModelProviderInfo;
 pub const SUMMARIZATION_PROMPT: &str = include_str!("../templates/compact/prompt.md");
 pub const SUMMARY_PREFIX: &str = include_str!("../templates/compact/summary_prefix.md");
 const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
+pub(crate) const UNIFIED_EXEC_PROCESS_WARNING_PREFIX: &str =
+    "Warning: The maximum number of unified exec process";
 
 /// Controls whether compaction replacement history must include initial context.
 ///
@@ -387,19 +389,51 @@ pub fn content_items_to_text(content: &[ContentItem]) -> Option<String> {
 }
 
 pub(crate) fn collect_user_messages(items: &[ResponseItem]) -> Vec<String> {
-    items
-        .iter()
-        .filter_map(|item| match crate::event_mapping::parse_turn_item(item) {
+    let mut messages = Vec::new();
+    let mut previous_message: Option<String> = Some(String::new());
+    for item in items {
+        let message = match crate::event_mapping::parse_turn_item(item) {
             Some(TurnItem::UserMessage(user)) => {
-                if is_summary_message(&user.message()) {
+                if is_summary_message(&user.message())
+                    || is_compaction_filtered_user_message(&user.message())
+                {
                     None
                 } else {
                     Some(user.message())
                 }
             }
             _ => None,
-        })
-        .collect()
+        };
+        let Some(message) = message else {
+            previous_message = None;
+            continue;
+        };
+        if message.is_empty() {
+            continue;
+        }
+        if previous_message.as_deref() == Some(message.as_str()) {
+            continue;
+        }
+        previous_message = Some(message.clone());
+        messages.push(message);
+    }
+    messages
+}
+
+pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
+    message.starts_with(UNIFIED_EXEC_PROCESS_WARNING_PREFIX)
+}
+
+pub(crate) fn is_compaction_filtered_history_item(item: &ResponseItem) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return false;
+    };
+    if role != "user" {
+        return false;
+    }
+    content_items_to_text(content)
+        .as_deref()
+        .is_some_and(is_compaction_filtered_user_message)
 }
 
 pub(crate) fn is_summary_message(message: &str) -> bool {
