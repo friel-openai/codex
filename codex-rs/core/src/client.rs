@@ -696,7 +696,7 @@ impl ModelClient {
                 .with_telemetry(Some(request_telemetry));
 
         let payload = ApiMemorySummarizeInput {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             raw_memories,
             reasoning: effort.map(|effort| Reasoning {
                 effort: Some(effort),
@@ -862,7 +862,7 @@ impl ModelClient {
         let prompt_cache_key = Some(self.prompt_cache_key());
         let service_tier = model_info.service_tier_for_request(service_tier);
         let request = ResponsesApiRequest {
-            model: model_info.slug.clone(),
+            model: model_info.request_model_slug().to_string(),
             instructions: instructions.clone(),
             input,
             tools,
