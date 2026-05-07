@@ -266,6 +266,15 @@ pub(crate) fn parse_agent_role_file_contents(
         parsed.config.developer_instructions.as_deref(),
         role_name_hint.is_none(),
     )?;
+    if parsed.config.watchdog_interval_s.is_some() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "agent role file {} cannot set watchdog_interval_s; set it at the top level of config.toml",
+                role_file_label.display()
+            ),
+        ));
+    }
 
     let role_name = parsed
         .name

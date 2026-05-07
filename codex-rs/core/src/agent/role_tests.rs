@@ -773,3 +773,45 @@ fn built_in_config_file_contents_resolves_explorer_only() {
         None
     );
 }
+
+#[tokio::test]
+async fn watchdog_role_uses_builtin_interval() {
+    let (_home, config) = test_config_with_cli_overrides(Vec::new()).await;
+
+    assert_eq!(
+        watchdog_interval_for_role(&config, Some("watchdog")),
+        Some(60)
+    );
+}
+
+#[tokio::test]
+async fn watchdog_role_uses_top_level_interval() {
+    let (_home, config) = test_config_with_cli_overrides(vec![(
+        "watchdog_interval_s".to_string(),
+        TomlValue::Integer(3),
+    )])
+    .await;
+
+    assert_eq!(
+        watchdog_interval_for_role(&config, Some("watchdog")),
+        Some(3)
+    );
+}
+
+#[tokio::test]
+async fn custom_role_cannot_define_watchdog_interval() {
+    let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+    config.agent_roles.insert(
+        "slow_watch".to_string(),
+        AgentRoleConfig {
+            description: Some("Slow watchdog".to_string()),
+            config_file: None,
+            nickname_candidates: None,
+        },
+    );
+
+    assert_eq!(
+        watchdog_interval_for_role(&config, Some("slow_watch")),
+        None
+    );
+}
