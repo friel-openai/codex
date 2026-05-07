@@ -232,6 +232,7 @@ impl MemoryStartupContext {
             SessionId::from(self.thread_id), // We use thread_id to detach this query from the foreground user session.
             self.thread_id,
             installation_id,
+            /*prompt_cache_key_override*/ None,
             config.model_provider.clone(),
             session_source,
             config_snapshot.parent_thread_id,
