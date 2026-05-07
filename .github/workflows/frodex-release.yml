@@ -1,0 +1,160 @@
+name: frodex-release
+
+on:
+  push:
+    tags:
+      - "frodex-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 150
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Validate Frodex tag
+        if: ${{ startsWith(github.ref_name, 'frodex-v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#frodex-v}"
+          if [[ ! "${version}" =~ ^(.+)\+frodex\.([0-9]+)$ ]]; then
+            echo "Frodex tags must have the form frodex-v<upstream-tag>+frodex.<release-number>." >&2
+            exit 1
+          fi
+
+          upstream_version="${BASH_REMATCH[1]}"
+          if ! git ls-remote --exit-code --tags https://github.com/openai/codex.git \
+            "refs/tags/rust-v${upstream_version}" >/dev/null
+          then
+            echo "Frodex tags must reuse an existing upstream Codex release version exactly: rust-v${upstream_version} was not found." >&2
+            exit 1
+          fi
+
+      - name: Set package version from tag
+        if: ${{ startsWith(github.ref_name, 'frodex-v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#frodex-v}"
+          perl -0pi -e 's#^version = "[^"]+"#version = "'"${version}"'"#m' Cargo.toml
+          python3 - "$version" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          path = Path("Cargo.lock")
+          text = path.read_text()
+
+          def replace_workspace_package_version(match: re.Match[str]) -> str:
+              block = match.group(0)
+              name_match = re.search(r'^name = "([^"]+)"$', block, flags=re.MULTILINE)
+              if name_match is None:
+                  return block
+              name = name_match.group(1)
+              if not (
+                  name.startswith("codex-")
+                  or name in {"app_test_support", "core_test_support"}
+              ):
+                  return block
+              return re.sub(
+                  r'^version = "[^"]+"$',
+                  f'version = "{version}"',
+                  block,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+
+          text = re.sub(
+              r'(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)',
+              replace_workspace_package_version,
+              text,
+          )
+          path.write_text(text)
+          PY
+          grep -n '^version = "'"${version}"'"' Cargo.toml
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target ${{ matrix.target }} --release --bin codex
+
+      - name: Stage archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="${GITHUB_WORKSPACE}/dist/${{ matrix.target }}"
+          mkdir -p "${dest}"
+          tar -C "target/${{ matrix.target }}/release" \
+            -czf "${dest}/frodex-${{ matrix.target }}.tar.gz" \
+            codex
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: frodex-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*
+
+  release:
+    needs: build
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List staged artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          find dist -type f | sort
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**
+          prerelease: true
