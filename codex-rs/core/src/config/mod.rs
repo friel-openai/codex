@@ -1308,14 +1308,7 @@ impl Config {
     }
 
     pub(crate) fn validate_multi_agent_v2_config(&self) -> std::io::Result<()> {
-        if self.features.enabled(Feature::MultiAgentV2) && self.agent_max_threads.is_some() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
-            ))
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 
     pub(crate) fn effective_agent_max_threads(
@@ -3146,13 +3139,23 @@ impl Config {
             ));
         }
         validate_multi_agent_v2_tool_namespace(multi_agent_v2.tool_namespace.as_deref())?;
-        let agent_max_threads = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
-        if agent_max_threads == Some(0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_threads must be at least 1",
-            ));
-        }
+        let agent_max_threads_from_config = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
+        let agent_max_threads = if features.enabled(Feature::MultiAgentV2) {
+            Some(
+                multi_agent_v2
+                    .max_concurrent_threads_per_session
+                    .saturating_sub(1),
+            )
+        } else {
+            let agent_max_threads = agent_max_threads_from_config.or(DEFAULT_AGENT_MAX_THREADS);
+            if agent_max_threads == Some(0) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "agents.max_threads must be at least 1",
+                ));
+            }
+            agent_max_threads
+        };
         let agent_max_depth = cfg
             .agents
             .as_ref()

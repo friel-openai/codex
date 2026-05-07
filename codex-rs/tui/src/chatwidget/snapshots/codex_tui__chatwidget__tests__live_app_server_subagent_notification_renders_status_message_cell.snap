@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 122
+expression: rendered
+---
+• Agent message: The watchdog closed itself. I did not close it. from /root/factorial_sum_agent

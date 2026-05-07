@@ -22,6 +22,7 @@ use super::compression;
 use crate::protocol::EventMsg;
 use crate::state_db;
 use codex_file_search as file_search;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
@@ -946,6 +947,19 @@ pub(crate) fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(OffsetDa
     Some((ts, uuid))
 }
 
+fn parse_timestamp_string_uuid_from_filename(name: &str) -> Option<(&str, Uuid)> {
+    // Expected: rollout-YYYY-MM-DDThh-mm-ss-<uuid>.jsonl
+    let core = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    core.match_indices('-')
+        .rev()
+        .find_map(|(index, _)| {
+            Uuid::parse_str(&core[index + 1..])
+                .ok()
+                .map(|uuid| (index, uuid))
+        })
+        .map(|(index, uuid)| (&core[..index], uuid))
+}
+
 struct ThreadCandidate {
     path: PathBuf,
     id: Uuid,
@@ -1121,6 +1135,9 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.saw_session_meta = true;
                 }
             }
+            RolloutItem::ForkReference(_) | RolloutItem::RolloutReference(_) => {
+                // Not included in summaries; skip.
+            }
             RolloutItem::ResponseItem(_) => {
                 summary.created_at = summary
                     .created_at
@@ -1184,7 +1201,9 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                         head.push(value);
                     }
                 }
-                RolloutItem::Compacted(_)
+                RolloutItem::ForkReference(_)
+                | RolloutItem::RolloutReference(_)
+                | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_) => {}
             }
@@ -1458,6 +1477,225 @@ pub async fn find_archived_thread_path_by_id_str(
 ) -> io::Result<Option<PathBuf>> {
     find_thread_path_by_id_str_in_subdir(codex_home, ARCHIVED_SESSIONS_SUBDIR, id_str, state_db_ctx)
         .await
+}
+
+pub async fn find_rollout_path_by_segment_id(
+    codex_home: &Path,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+) -> io::Result<Option<PathBuf>> {
+    if let Some(path) = find_rollout_path_by_segment_id_in_subdir(
+        codex_home,
+        SESSIONS_SUBDIR,
+        thread_id,
+        segment_id,
+    )
+    .await?
+    {
+        return Ok(Some(path));
+    }
+    find_rollout_path_by_segment_id_in_subdir(
+        codex_home,
+        ARCHIVED_SESSIONS_SUBDIR,
+        thread_id,
+        segment_id,
+    )
+    .await
+}
+
+async fn find_rollout_path_by_segment_id_in_subdir(
+    codex_home: &Path,
+    subdir: &str,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+) -> io::Result<Option<PathBuf>> {
+    let root = codex_home.join(subdir);
+    if !tokio::fs::try_exists(&root).await.unwrap_or(false) {
+        return Ok(None);
+    }
+
+    let target_thread_id = thread_id.to_string();
+    let mut stack = vec![root];
+    let mut scanned_files = 0usize;
+    while let Some(dir) = stack.pop() {
+        let mut read_dir = match tokio::fs::read_dir(&dir).await {
+            Ok(read_dir) => read_dir,
+            Err(err) => {
+                tracing::warn!("failed to read rollout directory {}: {err}", dir.display());
+                continue;
+            }
+        };
+        while let Some(entry) = read_dir.next_entry().await? {
+            let path = entry.path();
+            let file_type = entry.file_type().await?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                continue;
+            }
+            let Some(file_name) = path.file_name().and_then(|file_name| file_name.to_str()) else {
+                continue;
+            };
+            if !file_name.starts_with("rollout-") || !file_name.ends_with(".jsonl") {
+                continue;
+            }
+            let Some((_, uuid)) = parse_timestamp_uuid_from_filename(file_name) else {
+                continue;
+            };
+            if uuid.to_string() != target_thread_id {
+                continue;
+            }
+            scanned_files = scanned_files.saturating_add(1);
+            if scanned_files > MAX_SCAN_FILES {
+                return Ok(None);
+            }
+            let Ok(meta_line) = read_session_meta_line(&path).await else {
+                continue;
+            };
+            if meta_line.meta.id == thread_id && meta_line.meta.segment_id == Some(segment_id) {
+                return Ok(Some(path));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+pub async fn resolve_fork_reference_rollout_path(
+    codex_home: &Path,
+    reference: &codex_protocol::protocol::ForkReferenceItem,
+) -> io::Result<PathBuf> {
+    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
+        && let Some(path) =
+            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
+    {
+        return Ok(path);
+    }
+
+    let rollout_path = reference.rollout_path.as_path();
+    if tokio::fs::try_exists(rollout_path).await.unwrap_or(false) {
+        return Ok(rollout_path.to_path_buf());
+    }
+
+    let Some(file_name) = rollout_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let Some((_, uuid)) = parse_timestamp_uuid_from_filename(file_name) else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let archived_path = codex_home.join(ARCHIVED_SESSIONS_SUBDIR).join(file_name);
+    if tokio::fs::try_exists(archived_path.as_path())
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(archived_path);
+    }
+    let id = uuid.to_string();
+    if let Some(path) = find_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+        return Ok(path);
+    }
+    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+        return Ok(path);
+    }
+    Ok(rollout_path.to_path_buf())
+}
+
+pub async fn resolve_rollout_reference_rollout_path(
+    codex_home: &Path,
+    reference: &codex_protocol::protocol::RolloutReferenceItem,
+) -> io::Result<PathBuf> {
+    // A compacted live thread can keep the same rollout path and timestamp while moving the
+    // referenced predecessor into archive storage, so segment identity must win before fallback
+    // lookup by mutable live-path metadata.
+    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
+        && let Some(path) =
+            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
+    {
+        return Ok(path);
+    }
+
+    if let (Some(thread_id), Some(rollout_timestamp)) =
+        (reference.thread_id, reference.rollout_timestamp.as_deref())
+    {
+        let file_name = format!("rollout-{rollout_timestamp}-{thread_id}.jsonl");
+        if let Some(active_path) =
+            rollout_path_for_timestamp_file(codex_home, rollout_timestamp, &file_name)
+            && tokio::fs::try_exists(active_path.as_path())
+                .await
+                .unwrap_or(false)
+        {
+            return Ok(active_path);
+        }
+        let archived_path = codex_home.join(ARCHIVED_SESSIONS_SUBDIR).join(&file_name);
+        if tokio::fs::try_exists(archived_path.as_path())
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(archived_path);
+        }
+    }
+
+    let rollout_path = reference.rollout_path.as_path();
+    if tokio::fs::try_exists(rollout_path).await.unwrap_or(false) {
+        return Ok(rollout_path.to_path_buf());
+    }
+
+    let Some(file_name) = rollout_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let Some((rollout_timestamp, uuid)) = parse_timestamp_string_uuid_from_filename(file_name)
+    else {
+        return Ok(rollout_path.to_path_buf());
+    };
+    let archived_path = codex_home.join(ARCHIVED_SESSIONS_SUBDIR).join(file_name);
+    if tokio::fs::try_exists(archived_path.as_path())
+        .await
+        .unwrap_or(false)
+    {
+        return Ok(archived_path);
+    }
+    if let Some(active_path) =
+        rollout_path_for_timestamp_file(codex_home, rollout_timestamp, file_name)
+        && tokio::fs::try_exists(active_path.as_path())
+            .await
+            .unwrap_or(false)
+    {
+        return Ok(active_path);
+    }
+    let id = uuid.to_string();
+    if let Some(path) = find_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+        return Ok(path);
+    }
+    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+        return Ok(path);
+    }
+    Ok(rollout_path.to_path_buf())
+}
+
+fn rollout_path_for_timestamp_file(
+    codex_home: &Path,
+    rollout_timestamp: &str,
+    file_name: &str,
+) -> Option<PathBuf> {
+    let year = rollout_timestamp.get(0..4)?;
+    let month = rollout_timestamp.get(5..7)?;
+    let day = rollout_timestamp.get(8..10)?;
+    Some(
+        codex_home
+            .join(SESSIONS_SUBDIR)
+            .join(year)
+            .join(month)
+            .join(day)
+            .join(file_name),
+    )
 }
 
 /// Extract the `YYYY/MM/DD` directory components from a rollout filename.
