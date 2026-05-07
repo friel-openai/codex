@@ -1,6 +1,17 @@
+use std::path::Path;
 use std::path::PathBuf;
 
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex;
+
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
@@ -13,8 +24,45 @@ use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RotateThreadSegmentParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+
+#[cfg(test)]
+#[derive(Clone)]
+struct SegmentRotationCommitHook {
+    thread_id: ThreadId,
+    staged: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[cfg(test)]
+static SEGMENT_ROTATION_COMMIT_HOOK: LazyLock<Mutex<Option<SegmentRotationCommitHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+pub(super) fn install_segment_rotation_commit_hook(
+    thread_id: ThreadId,
+    staged: Arc<Notify>,
+    resume: Arc<Notify>,
+) {
+    let mut guard = SEGMENT_ROTATION_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some(SegmentRotationCommitHook {
+        thread_id,
+        staged,
+        resume,
+    });
+}
+
+#[cfg(test)]
+pub(super) fn clear_segment_rotation_commit_hook() {
+    let mut guard = SEGMENT_ROTATION_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = None;
+}
 
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
@@ -198,4 +246,14 @@ fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: err.to_string(),
     }
+}
+
+fn rollout_timestamp_from_path(path: &std::path::Path) -> Option<String> {
+    let file_name = path.file_name()?.to_str()?;
+    let core = file_name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    core.match_indices('-').rev().find_map(|(index, _)| {
+        ThreadId::from_string(&core[index + 1..])
+            .ok()
+            .map(|_| core[..index].to_string())
+    })
 }

@@ -28,6 +28,7 @@ use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::RotateThreadSegmentParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
@@ -120,6 +121,14 @@ impl LocalThreadStore {
     /// Return the live local rollout path for legacy local-only code paths.
     pub async fn live_rollout_path(&self, thread_id: ThreadId) -> ThreadStoreResult<PathBuf> {
         live_writer::rollout_path(self, thread_id).await
+    }
+
+    pub async fn rotate_thread_segment(
+        &self,
+        thread_id: ThreadId,
+        params: RotateThreadSegmentParams,
+    ) -> ThreadStoreResult<()> {
+        live_writer::rotate_thread_segment(self, thread_id, params).await
     }
 
     pub(super) async fn live_recorder(
@@ -292,11 +301,13 @@ mod tests {
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::LiveThread;
     use crate::ThreadEventPersistenceMode;
     use crate::ThreadPersistenceMetadata;
+    use crate::ThreadSortKey;
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;
