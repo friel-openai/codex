@@ -185,6 +185,7 @@ mod streaming;
 mod style;
 mod terminal_hyperlinks;
 mod subagent_panel;
+mod terminal_multiplexer;
 mod terminal_palette;
 mod terminal_probe;
 mod terminal_title;
