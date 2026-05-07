@@ -1077,7 +1077,8 @@ SELECT
 pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
     items.iter().rev().find_map(|item| match item {
         RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
-        RolloutItem::ResponseItem(_)
+        RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
@@ -1752,6 +1753,7 @@ mod tests {
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: metadata.created_at.to_rfc3339(),
@@ -1813,6 +1815,7 @@ mod tests {
         let items = vec![RolloutItem::SessionMeta(SessionMetaLine {
             meta: SessionMeta {
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: created_at,
