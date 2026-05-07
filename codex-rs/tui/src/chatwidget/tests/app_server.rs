@@ -1,4 +1,12 @@
 use super::*;
+use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_app_server_protocol::build_turns_from_rollout_items;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutItem;
 use pretty_assertions::assert_eq;
 
 #[tokio::test]
@@ -103,6 +111,80 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
     assert!(
         rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
         "expected spawn line to include agent metadata and requested model, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_raw_inter_agent_message_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ping 21 (21)".to_string(),
+        /*trigger_turn*/ true,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_raw_inter_agent_message_renders_agent_message_cell",
+        rendered
+    );
+}
+
+#[tokio::test]
+async fn live_app_server_subagent_notification_renders_status_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let status = AgentStatus::Completed(Some(
+        "The watchdog closed itself. I did not close it.".to_string(),
+    ));
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": "/root/factorial_sum_agent",
+            "status": status,
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/factorial_sum_agent").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert_chatwidget_snapshot!(
+        "live_app_server_subagent_notification_renders_status_message_cell",
+        rendered
     );
 }
 
@@ -569,6 +651,465 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
     assert_chatwidget_snapshot!(
         "app_server_collab_spawn_completed_renders_requested_model_and_effort",
         combined
+    );
+}
+
+#[tokio::test]
+async fn subagent_panel_mounts_watchdog_spawn() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("watch-buildpando-rpc-context-tracing-spike".to_string()),
+        Some("watchdog".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some(
+                    "Watch /build/pando-rpc-context-tracing-spike work on Pando RPC accounting tracing spike. Goal: end-to-end no-explicit...".to_string(),
+                ),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("subagent_panel_mounts_watchdog_spawn", screen);
+}
+
+#[tokio::test]
+async fn subagent_panel_renders_subagent_and_watchdog_rows() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let worker_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001004").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        worker_thread_id,
+        Some("Explorer".to_string()),
+        Some("worker".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-worker".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![worker_thread_id.to_string()],
+                prompt: Some(
+                    "Audit the TUI app-server event flow and report visible regressions."
+                        .to_string(),
+                ),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                agents_states: HashMap::from([(
+                    worker_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("Watcher".to_string()),
+        Some("watchdog".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some("Watch the worker for stalled progress.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("subagent_panel_renders_subagent_and_watchdog_rows", screen);
+}
+
+#[tokio::test]
+async fn subagent_notification_completion_hides_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let worker_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        worker_thread_id,
+        Some("Calculator".to_string()),
+        Some("worker".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-worker".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![worker_thread_id.to_string()],
+                prompt: Some("Compute the answer.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    worker_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": worker_thread_id.to_string(),
+            "status": AgentStatus::Completed(Some("4037913".to_string())),
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/calculator").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert!(!screen.contains("Subagents"));
+    assert!(!screen.contains("Calculator"));
+    assert!(!screen.contains("<subagent_notification>"));
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inserted.contains("Agent message: 4037913"));
+    assert!(!inserted.contains("<subagent_notification>"));
+    assert_chatwidget_snapshot!(
+        "subagent_notification_completion_hides_subagent_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn watchdog_goodbye_message_closes_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("Boyle".to_string()),
+        Some("watchdog".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some(
+                    "Every time you start, respond with exactly `ping $RANDOM ($SUM)`.".to_string(),
+                ),
+                model: Some("arcanine 1m".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "watchdog-close".to_string(),
+                tool: AppServerCollabAgentTool::CloseAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Completed,
+                        message: Some("goodbye".to_string()),
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("watchdog_goodbye_message_inserts_close_history", inserted);
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("watchdog_goodbye_message_closes_subagent_panel_row", screen);
+}
+
+#[tokio::test]
+async fn resume_replay_does_not_resurrect_closed_watchdog_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("Boyle".to_string()),
+        Some("watchdog".to_string()),
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let turns = build_turns_from_rollout_items(&[
+        RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-watchdog".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(watchdog_thread_id),
+            new_agent_nickname: Some("Boyle".to_string()),
+            new_agent_role: Some("watchdog".to_string()),
+            prompt: "Every time you start, respond with goodbye.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Low,
+            status: AgentStatus::PendingInit,
+            completed_at_ms: 0,
+        })),
+        RolloutItem::ResponseItem(communication.to_response_input_item().into()),
+        RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+            call_id: "watchdog-close".to_string(),
+            sender_thread_id,
+            receiver_thread_id: watchdog_thread_id,
+            receiver_agent_nickname: Some("Boyle".to_string()),
+            receiver_agent_role: Some("watchdog".to_string()),
+            status: AgentStatus::Completed(Some("goodbye".to_string())),
+            completed_at_ms: 0,
+        })),
+    ]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let replayed_history = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "resume_replay_closed_watchdog_history_cells",
+        replayed_history
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "resume_replay_does_not_resurrect_closed_watchdog_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn resume_replay_does_not_resurrect_open_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001012").expect("valid thread id");
+    let subagent_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001013").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        subagent_thread_id,
+        Some("Avicenna".to_string()),
+        Some("fast-worker".to_string()),
+    );
+    let turns = build_turns_from_rollout_items(&[RolloutItem::EventMsg(
+        EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-subagent".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(subagent_thread_id),
+            new_agent_nickname: Some("Avicenna".to_string()),
+            new_agent_role: Some("fast-worker".to_string()),
+            prompt: "Compute the exact value.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Medium,
+            status: AgentStatus::Running,
+            completed_at_ms: 0,
+        }),
+    )]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let replayed_history = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "resume_replay_open_subagent_history_cells",
+        replayed_history
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "resume_replay_does_not_resurrect_open_subagent_panel_row",
+        screen
     );
 }
 

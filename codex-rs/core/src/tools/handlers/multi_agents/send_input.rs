@@ -1,6 +1,9 @@
 use super::*;
 use crate::agent::control::render_input_preview;
 use crate::turn_timing::now_unix_timestamp_ms;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::SessionSource;
 
 pub(crate) struct Handler;
 
@@ -30,6 +33,8 @@ impl ToolHandler for Handler {
         let arguments = function_arguments(payload)?;
         let args: SendInputArgs = parse_arguments(&arguments)?;
         let receiver_thread_id = parse_agent_id_target(&args.target)?;
+        let message = args.message.clone();
+        let items = args.items.clone();
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = render_input_preview(&input_items);
         let receiver_agent = session
@@ -59,10 +64,42 @@ impl ToolHandler for Handler {
             )
             .await;
         let agent_control = session.services.agent_control.clone();
-        let result = agent_control
-            .send_input(receiver_thread_id, input_items)
-            .await
-            .map_err(|err| collab_agent_error(receiver_thread_id, err));
+        let sender_is_subagent = matches!(&turn.session_source, SessionSource::SubAgent(_));
+        let result = match (sender_is_subagent, message, items) {
+            (true, Some(message), None) => {
+                let sender_path = turn
+                    .session_source
+                    .get_agent_path()
+                    .or_else(|| {
+                        agent_control
+                            .get_agent_metadata(session.conversation_id)
+                            .and_then(|metadata| metadata.agent_path)
+                    })
+                    .unwrap_or_else(|| fallback_agent_path(session.conversation_id));
+                let receiver_path = receiver_agent
+                    .agent_path
+                    .clone()
+                    .unwrap_or_else(|| fallback_agent_path(receiver_thread_id));
+                agent_control
+                    .send_inter_agent_communication(
+                        receiver_thread_id,
+                        InterAgentCommunication::new(
+                            sender_path,
+                            receiver_path,
+                            Vec::new(),
+                            message,
+                            /*trigger_turn*/ true,
+                        ),
+                    )
+                    .await
+            }
+            _ => {
+                agent_control
+                    .send_input(receiver_thread_id, input_items)
+                    .await
+            }
+        }
+        .map_err(|err| collab_agent_error(receiver_thread_id, err));
         let status = session
             .services
             .agent_control
@@ -88,6 +125,13 @@ impl ToolHandler for Handler {
 
         Ok(SendInputResult { submission_id })
     }
+}
+
+fn fallback_agent_path(thread_id: ThreadId) -> AgentPath {
+    let name = format!("thread_{}", thread_id.to_string().replace('-', "_"));
+    AgentPath::root()
+        .join(&name)
+        .unwrap_or_else(|_| AgentPath::root())
 }
 
 #[derive(Debug, Deserialize)]
