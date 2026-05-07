@@ -35,6 +35,7 @@ impl ToolHandler for Handler {
             MessageDeliveryMode::TriggerTurn,
             args.target,
             args.message,
+            args.interrupt,
         )
         .await
     }
