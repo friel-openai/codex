@@ -86,6 +86,16 @@ pub enum RolloutRecorderParams {
         base_instructions: BaseInstructions,
         dynamic_tools: Vec<DynamicToolSpec>,
     },
+    CreateAtPath {
+        path: PathBuf,
+        conversation_id: ThreadId,
+        forked_from_id: Option<ThreadId>,
+        source: SessionSource,
+        base_instructions: BaseInstructions,
+        dynamic_tools: Vec<DynamicToolSpec>,
+        session_timestamp: Option<String>,
+        event_persistence_mode: EventPersistenceMode,
+    },
     Resume {
         path: PathBuf,
     },
@@ -854,6 +864,12 @@ impl RolloutRecorder {
                     RolloutItem::ResponseItem(item) => {
                         items.push(RolloutItem::ResponseItem(item));
                     }
+                    RolloutItem::ForkReference(item) => {
+                        items.push(RolloutItem::ForkReference(item));
+                    }
+                    RolloutItem::RolloutReference(item) => {
+                        items.push(RolloutItem::RolloutReference(item));
+                    }
                     RolloutItem::Compacted(item) => {
                         items.push(RolloutItem::Compacted(item));
                     }
@@ -1331,28 +1347,43 @@ fn precompute_log_file_info(
     // Resolve ~/.codex/sessions/YYYY/MM/DD path.
     let timestamp = OffsetDateTime::now_local()
         .map_err(|e| IoError::other(format!("failed to get local time: {e}")))?;
-    let mut dir = config.codex_home().to_path_buf();
-    dir.push(SESSIONS_SUBDIR);
-    dir.push(timestamp.year().to_string());
-    dir.push(format!("{:02}", u8::from(timestamp.month())));
-    dir.push(format!("{:02}", timestamp.day()));
 
     // Custom format for YYYY-MM-DDThh-mm-ss. Use `-` instead of `:` for
     // compatibility with filesystems that do not allow colons in filenames.
     let format: &[FormatItem] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
-    let date_str = timestamp
-        .format(format)
-        .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
-
-    let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
-
-    let path = dir.join(filename);
+    let mut selected_timestamp = timestamp;
+    let mut path = None;
+    for offset_seconds in 0..60 {
+        let candidate_timestamp = timestamp
+            .checked_add(time::Duration::seconds(offset_seconds))
+            .ok_or_else(|| IoError::other("failed to compute rollout timestamp"))?;
+        let mut dir = config.codex_home().to_path_buf();
+        dir.push(SESSIONS_SUBDIR);
+        dir.push(candidate_timestamp.year().to_string());
+        dir.push(format!("{:02}", u8::from(candidate_timestamp.month())));
+        dir.push(format!("{:02}", candidate_timestamp.day()));
+        let date_str = candidate_timestamp
+            .format(format)
+            .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
+        let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
+        let candidate_path = dir.join(filename);
+        if !candidate_path.exists() {
+            selected_timestamp = candidate_timestamp;
+            path = Some(candidate_path);
+            break;
+        }
+    }
+    let path = path.ok_or_else(|| {
+        IoError::other(format!(
+            "failed to find an unused rollout path for thread {conversation_id}"
+        ))
+    })?;
 
     Ok(LogFileInfo {
         path,
         conversation_id,
-        timestamp,
+        timestamp: selected_timestamp,
     })
 }
 
@@ -1368,6 +1399,51 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
         .append(true)
         .create(true)
         .open(path)
+}
+
+fn create_session_meta(
+    config: &impl RolloutConfigView,
+    log_file_info: &LogFileInfo,
+    forked_from_id: Option<ThreadId>,
+    source: SessionSource,
+    thread_source: Option<ThreadSource>,
+    base_instructions: BaseInstructions,
+    dynamic_tools: Vec<DynamicToolSpec>,
+    timestamp_override: Option<String>,
+) -> std::io::Result<SessionMeta> {
+    let timestamp_format: &[FormatItem] =
+        format_description!("[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:3]Z");
+    let timestamp = match timestamp_override {
+        Some(timestamp) => timestamp,
+        None => log_file_info
+            .timestamp
+            .to_offset(time::UtcOffset::UTC)
+            .format(timestamp_format)
+            .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?,
+    };
+
+    Ok(SessionMeta {
+        id: log_file_info.conversation_id,
+        segment_id: Some(SegmentId::new()),
+        forked_from_id,
+        timestamp,
+        cwd: config.cwd().to_path_buf(),
+        originator: originator().value,
+        cli_version: env!("CARGO_PKG_VERSION").to_string(),
+        agent_nickname: source.get_nickname(),
+        agent_role: source.get_agent_role(),
+        agent_path: source.get_agent_path().map(Into::into),
+        source,
+        thread_source,
+        model_provider: Some(config.model_provider_id().to_string()),
+        base_instructions: Some(base_instructions),
+        dynamic_tools: if dynamic_tools.is_empty() {
+            None
+        } else {
+            Some(dynamic_tools)
+        },
+        memory_mode: (!config.generate_memories()).then_some("disabled".to_string()),
+    })
 }
 
 /// Mutable state owned by the background rollout writer.
@@ -1738,6 +1814,8 @@ async fn resume_candidate_matches_cwd(
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(turn_context.cwd.as_path()),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::EventMsg(_) => None,
