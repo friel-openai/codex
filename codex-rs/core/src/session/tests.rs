@@ -2880,7 +2880,7 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
 }
 
 #[tokio::test]
-async fn replace_compacted_history_rotates_local_rollout_segment() {
+async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
     let (mut sess, tc, _) = make_session_and_context_with_rx().await;
     let sess = Arc::get_mut(&mut sess).expect("session should not have additional references");
     let old_rollout_path = attach_thread_persistence(sess).await;
@@ -2892,6 +2892,19 @@ async fn replace_compacted_history_rotates_local_rollout_segment() {
     sess.flush_rollout()
         .await
         .expect("pre-compaction rollout should flush");
+    let (old_items, _, _) = RolloutRecorder::load_rollout_items(old_rollout_path.as_path())
+        .await
+        .expect("load pre-compaction rollout segment");
+    let old_segment_id = old_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
+        RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let old_segment_id = old_segment_id.expect("pre-compaction rollout should have segment id");
     let replacement_history = vec![user_message("compacted summary")];
 
     sess.replace_compacted_history(
@@ -2909,17 +2922,19 @@ async fn replace_compacted_history_rotates_local_rollout_segment() {
         .await
         .expect("load current rollout path")
         .expect("rollout path after compaction");
-    assert_ne!(new_rollout_path, old_rollout_path);
+    assert_eq!(new_rollout_path, old_rollout_path);
     let config = sess.get_config().await;
     let archived_old_rollout_path = config
         .codex_home
         .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+        .join(sess.conversation_id.to_string())
+        .join(old_segment_id.to_string())
         .join(
             old_rollout_path
                 .file_name()
                 .expect("old rollout path should have a file name"),
         );
-    assert!(!old_rollout_path.exists());
+    assert!(old_rollout_path.exists());
     assert!(archived_old_rollout_path.exists());
     let old_rollout_timestamp = old_rollout_path
         .file_name()
@@ -2936,7 +2951,7 @@ async fn replace_compacted_history_rotates_local_rollout_segment() {
         matches!(
             item,
             RolloutItem::RolloutReference(reference)
-                if reference.rollout_path == old_rollout_path
+                if reference.rollout_path.as_path() == archived_old_rollout_path.as_path()
                     && reference.thread_id == Some(sess.conversation_id)
                     && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
         )

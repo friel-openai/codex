@@ -1479,6 +1479,16 @@ pub async fn resolve_rollout_reference_rollout_path(
     codex_home: &Path,
     reference: &codex_protocol::protocol::RolloutReferenceItem,
 ) -> io::Result<PathBuf> {
+    // A compacted live thread can keep the same rollout path and timestamp while moving the
+    // referenced predecessor into archive storage, so segment identity must win before fallback
+    // lookup by mutable live-path metadata.
+    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
+        && let Some(path) =
+            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
+    {
+        return Ok(path);
+    }
+
     if let (Some(thread_id), Some(rollout_timestamp)) =
         (reference.thread_id, reference.rollout_timestamp.as_deref())
     {
@@ -1498,13 +1508,6 @@ pub async fn resolve_rollout_reference_rollout_path(
         {
             return Ok(archived_path);
         }
-    }
-
-    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
-        && let Some(path) =
-            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
-    {
-        return Ok(path);
     }
 
     let rollout_path = reference.rollout_path.as_path();
