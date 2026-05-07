@@ -51,6 +51,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Validate Frodex tag
+        if: ${{ startsWith(github.ref_name, 'frodex-v') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#frodex-v}"
+          if [[ ! "${version}" =~ ^(.+)\+frodex\.([0-9]+)$ ]]; then
+            echo "Frodex tags must have the form frodex-v<upstream-tag>+frodex.<release-number>." >&2
+            exit 1
+          fi
+
+          upstream_version="${BASH_REMATCH[1]}"
+          if ! git ls-remote --exit-code --tags https://github.com/openai/codex.git \
+            "refs/tags/rust-v${upstream_version}" >/dev/null
+          then
+            echo "Frodex tags must reuse an existing upstream Codex release version exactly: rust-v${upstream_version} was not found." >&2
+            exit 1
+          fi
+
       - name: Set package version from tag
         if: ${{ startsWith(github.ref_name, 'frodex-v') }}
         shell: bash
