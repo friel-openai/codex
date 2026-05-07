@@ -282,8 +282,14 @@ async fn spawn_watchdog(
             ))
         })?;
     let target_thread_id = agent_control
-        .spawn_agent(handle_config, Op::Interrupt, Some(spawn_source))
-        .await?;
+        .spawn_agent_with_metadata(
+            handle_config,
+            Op::Interrupt,
+            Some(spawn_source),
+            Default::default(),
+        )
+        .await?
+        .thread_id;
     let superseded_before_register = agent_control
         .unregister_watchdogs_for_owner(owner_thread_id)
         .await;

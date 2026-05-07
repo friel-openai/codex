@@ -795,12 +795,12 @@ impl Session {
             }
         };
 
-        self.new_turn_from_configuration(
+        Box::pin(self.new_turn_from_configuration(
             sub_id,
             session_configuration,
             /*final_output_json_schema*/ None,
             turn_environments,
-        )
+        ))
         .await
     }
 
