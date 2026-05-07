@@ -358,6 +358,9 @@
           "default": null,
           "description": "Optional feature toggles scoped to this profile.",
           "properties": {
+            "agent_watchdog": {
+              "type": "boolean"
+            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -4000,6 +4003,9 @@
       "default": null,
       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
       "properties": {
+        "agent_watchdog": {
+          "type": "boolean"
+        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -4651,6 +4657,12 @@
         }
       ],
       "description": "Collection of settings that are specific to the TUI."
+    },
+    "watchdog_interval_s": {
+      "description": "Default interval in seconds for idle-time watchdog check-ins.",
+      "format": "int64",
+      "minimum": 1.0,
+      "type": "integer"
     },
     "web_search": {
       "allOf": [

@@ -117,6 +117,7 @@ pub struct ToolsConfig {
     pub collab_tools: bool,
     pub goal_tools: bool,
     pub multi_agent_v2: bool,
+    pub agent_watchdog: bool,
     pub hide_spawn_agent_metadata: bool,
     pub spawn_agent_usage_hint: bool,
     pub spawn_agent_usage_hint_text: Option<String>,
@@ -177,6 +178,7 @@ impl ToolsConfig {
         let include_code_mode_only = include_code_mode && features.enabled(Feature::CodeModeOnly);
         let include_goal_tools = features.enabled(Feature::Goals);
         let include_multi_agent_v2 = features.enabled(Feature::MultiAgentV2);
+        let include_agent_watchdog = features.enabled(Feature::AgentWatchdog);
         let include_collab_tools = include_multi_agent_v2 || features.enabled(Feature::Collab);
         let include_agent_jobs = features.enabled(Feature::SpawnCsv);
         let include_search_tool =
@@ -254,6 +256,7 @@ impl ToolsConfig {
             collab_tools: include_collab_tools,
             goal_tools: include_goal_tools,
             multi_agent_v2: include_multi_agent_v2,
+            agent_watchdog: include_agent_watchdog,
             hide_spawn_agent_metadata: false,
             spawn_agent_usage_hint: true,
             spawn_agent_usage_hint_text: None,
