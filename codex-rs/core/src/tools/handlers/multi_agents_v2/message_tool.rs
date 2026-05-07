@@ -108,6 +108,17 @@ async fn handle_message_submission(
         .agent_control
         .get_agent_metadata(receiver_thread_id)
         .unwrap_or_default();
+    if session
+        .services
+        .agent_control
+        .is_watchdog_handle(receiver_thread_id)
+        .await
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "watchdog handles can't receive send_message or followup_task; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
+                .to_string(),
+        ));
+    }
     if mode == MessageDeliveryMode::QueueOnly && is_watchdog_parent {
         return Err(FunctionCallError::RespondToModel(
             "watchdog check-in threads must use followup_task with target `parent` to message their parent."

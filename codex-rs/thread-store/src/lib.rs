@@ -32,6 +32,7 @@ pub use types::OptionalStringPatch;
 pub use types::ReadThreadByRolloutPathParams;
 pub use types::ReadThreadParams;
 pub use types::ResumeThreadParams;
+pub use types::RotateThreadSegmentParams;
 pub use types::SortDirection;
 pub use types::StoredThread;
 pub use types::StoredThreadHistory;
