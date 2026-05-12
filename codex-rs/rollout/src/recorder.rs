@@ -202,6 +202,7 @@ impl RolloutRecorderParams {
             event_persistence_mode,
         }
     }
+
 }
 
 const PERSISTED_EXEC_AGGREGATED_OUTPUT_MAX_BYTES: usize = 10_000;

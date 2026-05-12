@@ -1554,7 +1554,9 @@ pub async fn resolve_fork_reference_rollout_path(
     if let Some(path) = find_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
         return Ok(path);
     }
-    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+    if let Some(path) =
+        find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await?
+    {
         return Ok(path);
     }
     Ok(rollout_path.to_path_buf())
@@ -1629,7 +1631,9 @@ pub async fn resolve_rollout_reference_rollout_path(
     if let Some(path) = find_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
         return Ok(path);
     }
-    if let Some(path) = find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await? {
+    if let Some(path) =
+        find_archived_thread_path_by_id_str(codex_home, id.as_str(), None).await?
+    {
         return Ok(path);
     }
     Ok(rollout_path.to_path_buf())

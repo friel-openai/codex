@@ -14,8 +14,8 @@ use std::time::Duration;
 use strum_macros::EnumIter;
 
 use crate::AgentPath;
-use crate::SegmentId;
 use crate::SessionId;
+use crate::SegmentId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
 use crate::config_types::ApprovalsReviewer;
