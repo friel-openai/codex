@@ -6,7 +6,6 @@ use crate::config::Config;
 use crate::config::ThreadStoreConfig;
 use crate::environment_selection::default_thread_environment_selections;
 use crate::environment_selection::resolve_environment_selections;
-use crate::file_watcher::FileWatcher;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;

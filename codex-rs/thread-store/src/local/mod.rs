@@ -350,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn rotate_thread_segment_keeps_thread_id_and_references_previous_segment() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()));
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let thread_id = ThreadId::default();
 
         store
@@ -517,7 +517,7 @@ mod tests {
     #[tokio::test]
     async fn rotate_thread_segment_preserves_each_archived_segment_at_a_stable_live_path() {
         let home = TempDir::new().expect("temp dir");
-        let store = LocalThreadStore::new(test_config(home.path()));
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let thread_id = ThreadId::default();
 
         store

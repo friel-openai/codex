@@ -590,6 +590,7 @@ fn model_client_with_counting_attestation(
         SessionId::new(),
         ThreadId::new(),
         /*installation_id*/ "11111111-1111-4111-8111-111111111111".to_string(),
+        /*prompt_cache_key_override*/ None,
         provider,
         SessionSource::Exec,
         /*model_verbosity*/ None,

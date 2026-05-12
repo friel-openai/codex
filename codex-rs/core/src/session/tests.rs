@@ -6368,6 +6368,8 @@ async fn make_multi_agent_v2_usage_hint_test_session(
         |config| {
             if enable_multi_agent_v2 {
                 let _ = config.features.enable(Feature::MultiAgentV2);
+            } else {
+                let _ = config.features.disable(Feature::MultiAgentV2);
             }
             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
@@ -6548,9 +6550,11 @@ async fn configured_multi_agent_v2_usage_hint_texts_use_effective_enabled_featur
 async fn configured_multi_agent_v2_usage_hint_texts_omit_effectively_disabled_feature() {
     let (mut session, _turn_context) =
         make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ true).await;
+    let mut features = Features::with_defaults();
+    let _ = features.disable(Feature::MultiAgentV2);
     Arc::get_mut(&mut session)
         .expect("session should not be shared")
-        .features = Features::with_defaults().into();
+        .features = features.into();
 
     let hint_texts = session.configured_multi_agent_v2_usage_hint_texts().await;
 

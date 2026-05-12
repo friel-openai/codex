@@ -24,6 +24,7 @@ use codex_model_provider::create_model_provider;
 use codex_model_provider_info::built_in_model_providers;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
@@ -51,6 +52,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
 use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
@@ -355,7 +357,7 @@ async fn spawn_agent_fork_context_ignores_agent_type_override() {
         .expect("root thread should start");
     session.services.agent_control = manager.agent_control();
     session.conversation_id = root.thread_id;
-    let output = SpawnAgentHandler
+    let output = SpawnAgentHandler::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -399,7 +401,7 @@ async fn spawn_agent_fork_context_ignores_child_model_overrides() {
     session.services.agent_control = manager.agent_control();
     session.conversation_id = root.thread_id;
 
-    let output = SpawnAgentHandler
+    let output = SpawnAgentHandler::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -458,7 +460,7 @@ fn multi_agent_v2_spawn_fork_turns_all_ignores_agent_type_override() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let output = SpawnAgentHandlerV2
+        let output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session.clone(),
                 turn,
@@ -516,7 +518,7 @@ fn multi_agent_v2_spawn_defaults_to_full_fork_and_ignores_child_model_overrides(
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let output = SpawnAgentHandlerV2
+        let output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session.clone(),
                 turn,
@@ -569,7 +571,7 @@ fn multi_agent_v2_spawn_watchdog_role_returns_inert_handle_and_ignores_fork_turn
             .expect("test config should allow feature update");
         turn.config = Arc::new(config);
 
-        let output = SpawnAgentHandlerV2
+        let output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 Arc::new(session),
                 Arc::new(turn),
@@ -628,7 +630,7 @@ fn multi_agent_v2_spawn_watchdog_role_ignores_thread_limit() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let worker_output = SpawnAgentHandlerV2
+        let worker_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 Arc::clone(&session),
                 Arc::clone(&turn),
@@ -643,7 +645,7 @@ fn multi_agent_v2_spawn_watchdog_role_ignores_thread_limit() {
             .expect("worker spawn should consume the only counted slot");
         let _ = expect_text_output(worker_output);
 
-        let watchdog_output = SpawnAgentHandlerV2
+        let watchdog_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session,
                 turn,
@@ -689,7 +691,7 @@ fn multi_agent_v2_spawn_watchdog_role_does_not_count_against_thread_limit() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let watchdog_output = SpawnAgentHandlerV2
+        let watchdog_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 Arc::clone(&session),
                 Arc::clone(&turn),
@@ -708,7 +710,7 @@ fn multi_agent_v2_spawn_watchdog_role_does_not_count_against_thread_limit() {
         assert_eq!(result["task_name"], "/root/watchdog");
         assert_eq!(success, Some(true));
 
-        let worker_output = SpawnAgentHandlerV2
+        let worker_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session,
                 turn,
@@ -748,7 +750,7 @@ fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
             ..turn
         };
 
-        let output = SpawnAgentHandlerV2
+        let output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 Arc::new(session),
                 Arc::new(turn),
@@ -826,7 +828,7 @@ fn spawn_agent_watchdog_role_returns_inert_handle() {
             .expect("test config should allow feature update");
         turn.config = Arc::new(config);
 
-        let output = SpawnAgentHandler
+        let output = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
                 Arc::new(turn),
@@ -1266,7 +1268,7 @@ fn multi_agent_v2_followup_task_to_watchdog_handle_is_rejected() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let spawn_output = SpawnAgentHandlerV2
+        let spawn_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session.clone(),
                 turn.clone(),
@@ -1349,7 +1351,7 @@ fn multi_agent_v2_send_message_to_watchdog_handle_is_rejected() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        let spawn_output = SpawnAgentHandlerV2
+        let spawn_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session.clone(),
                 turn.clone(),
@@ -1546,6 +1548,20 @@ fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
         let agent_control = manager.agent_control();
         session.services.agent_control = agent_control.clone();
         session.conversation_id = root.thread_id;
+        let root_turn_context = root.thread.codex.session.new_default_turn().await;
+        root.thread
+            .codex
+            .session
+            .send_event(
+                root_turn_context.as_ref(),
+                EventMsg::TurnStarted(TurnStartedEvent {
+                    turn_id: root_turn_context.sub_id.clone(),
+                    started_at: None,
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                }),
+            )
+            .await;
         let mut config = (*turn.config).clone();
         config
             .features
@@ -1560,7 +1576,7 @@ fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
         let root_session = Arc::new(session);
         let root_turn = Arc::new(turn);
 
-        let spawn_output = SpawnAgentHandlerV2
+        let spawn_output = SpawnAgentHandlerV2::default()
             .handle(invocation(
                 root_session,
                 root_turn,
@@ -2436,7 +2452,7 @@ fn watchdog_handle_is_listed_and_close_agent_removes_it() {
 
         let session = Arc::new(session);
         let turn = Arc::new(turn);
-        let spawn_output = SpawnAgentHandler
+        let spawn_output = SpawnAgentHandler::default()
             .handle(invocation(
                 session.clone(),
                 turn.clone(),
@@ -2706,7 +2722,7 @@ fn multi_agent_v2_followup_task_completion_notifies_parent_on_every_turn() {
         let session = Arc::new(session);
         let turn = Arc::new(turn);
 
-        SpawnAgentHandlerV2
+        SpawnAgentHandlerV2::default()
             .handle(invocation(
                 session.clone(),
                 turn.clone(),
@@ -3233,7 +3249,7 @@ async fn multi_agent_v2_spawn_agent_rejects_when_depth_limit_exceeded() {
             "fork_turns": "none"
         })),
     );
-    let Err(err) = SpawnAgentHandlerV2.handle(invocation).await else {
+    let Err(err) = SpawnAgentHandlerV2::default().handle(invocation).await else {
         panic!("multi-agent v2 spawn should fail when depth limit exceeded");
     };
     assert_eq!(
@@ -4038,7 +4054,7 @@ async fn wait_agent_rejects_only_watchdog_handles() {
     let session = Arc::new(session);
     let turn = Arc::new(turn);
 
-    let Err(err) = WaitAgentHandler
+    let Err(err) = WaitAgentHandler::default()
         .handle(invocation(
             session,
             turn,

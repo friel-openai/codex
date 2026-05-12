@@ -2828,11 +2828,16 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
 #[tokio::test]
 async fn spawn_agent_respects_max_threads_limit() {
     let max_threads = 1usize;
-    let (_home, config) = test_config_with_cli_overrides(vec![(
+    let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("legacy max_threads test should disable MultiAgentV2");
+    config.agent_max_threads = Some(max_threads);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
@@ -2880,11 +2885,16 @@ async fn spawn_agent_respects_max_threads_limit() {
 #[tokio::test]
 async fn spawn_agent_releases_slot_after_shutdown() {
     let max_threads = 1usize;
-    let (_home, config) = test_config_with_cli_overrides(vec![(
+    let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("legacy max_threads test should disable MultiAgentV2");
+    config.agent_max_threads = Some(max_threads);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
@@ -2923,11 +2933,16 @@ async fn spawn_agent_releases_slot_after_shutdown() {
 #[tokio::test]
 async fn spawn_agent_limit_shared_across_clones() {
     let max_threads = 1usize;
-    let (_home, config) = test_config_with_cli_overrides(vec![(
+    let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("legacy max_threads test should disable MultiAgentV2");
+    config.agent_max_threads = Some(max_threads);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
@@ -2968,11 +2983,16 @@ async fn spawn_agent_limit_shared_across_clones() {
 #[tokio::test]
 async fn resume_agent_respects_max_threads_limit() {
     let max_threads = 1usize;
-    let (_home, config) = test_config_with_cli_overrides(vec![(
+    let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("legacy max_threads test should disable MultiAgentV2");
+    config.agent_max_threads = Some(max_threads);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
@@ -3024,11 +3044,16 @@ async fn resume_agent_respects_max_threads_limit() {
 #[tokio::test]
 async fn resume_agent_releases_slot_after_resume_failure() {
     let max_threads = 1usize;
-    let (_home, config) = test_config_with_cli_overrides(vec![(
+    let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
         TomlValue::Integer(max_threads as i64),
     )])
     .await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("legacy max_threads test should disable MultiAgentV2");
+    config.agent_max_threads = Some(max_threads);
     let manager = ThreadManager::with_models_provider_and_home_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
@@ -3078,10 +3103,10 @@ async fn spawn_child_completion_notifies_parent_history() {
         .get_thread(child_thread_id)
         .await
         .expect("child thread should exist");
-    let _ = child_thread
-        .submit(Op::Shutdown {})
+    child_thread
+        .shutdown_and_wait()
         .await
-        .expect("child shutdown should submit");
+        .expect("child shutdown should complete");
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 }

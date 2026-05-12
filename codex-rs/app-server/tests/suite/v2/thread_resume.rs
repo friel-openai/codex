@@ -3167,6 +3167,7 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
                 call_id: "spawn-watchdog".to_string(),
+                completed_at_ms: 0,
                 sender_thread_id,
                 new_thread_id: Some(watchdog_thread_id),
                 new_agent_nickname: Some("Boyle".to_string()),
@@ -3185,6 +3186,7 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
                 call_id: "watchdog-close".to_string(),
+                completed_at_ms: 0,
                 sender_thread_id,
                 receiver_thread_id: watchdog_thread_id,
                 receiver_agent_nickname: Some("Boyle".to_string()),

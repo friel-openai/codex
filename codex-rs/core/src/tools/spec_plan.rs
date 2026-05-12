@@ -347,7 +347,6 @@ pub fn build_tool_registry_builder(
                 create_compact_parent_context_tool(),
             ]),
             /*supports_parallel_tool_calls*/ false,
-            config.code_mode_enabled,
         );
         builder.register_handler(Arc::new(WatchdogSelfCloseHandler));
         builder.register_handler(Arc::new(WatchdogSnoozeHandler));

@@ -568,8 +568,11 @@ impl AgentControl {
             && notification_source
                 .as_ref()
                 .is_some_and(is_watchdog_helper_source);
-        if (!new_thread.thread.enabled(Feature::MultiAgentV2)
-            && !is_watchdog_agent_metadata(&agent_metadata))
+        // Pathless MultiAgentV2 children cannot emit routed inter-agent completion messages.
+        // Keep the completion watcher so their parent still receives the fallback notification.
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if (!is_watchdog_agent_metadata(&agent_metadata)
+            && (!new_thread.thread.enabled(Feature::MultiAgentV2) || pathless_multi_agent_child))
             || is_watchdog_helper
         {
             let child_reference = agent_metadata
@@ -913,8 +916,11 @@ impl AgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
-        if !resumed_thread.thread.enabled(Feature::MultiAgentV2)
-            && !is_watchdog_agent_metadata(&agent_metadata)
+        // Pathless MultiAgentV2 children cannot emit routed inter-agent completion messages.
+        // Keep the completion watcher so their parent still receives the fallback notification.
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if !is_watchdog_agent_metadata(&agent_metadata)
+            && (!resumed_thread.thread.enabled(Feature::MultiAgentV2) || pathless_multi_agent_child)
         {
             let child_reference = agent_metadata
                 .agent_path
@@ -1639,15 +1645,12 @@ impl AgentControl {
             // hidden notification so final status updates remove the correct panel row.
             let message =
                 format_subagent_notification_message(&child_thread_id.to_string(), &status);
-            if child_agent_path.is_some()
+            if let Some(child_agent_path) = child_agent_path.clone()
                 && child_thread
                     .as_ref()
                     .map(|thread| thread.enabled(Feature::MultiAgentV2))
                     .unwrap_or(true)
             {
-                let Some(child_agent_path) = child_agent_path.clone() else {
-                    return;
-                };
                 let Some(parent_agent_path) = child_agent_path
                     .as_str()
                     .rsplit_once('/')

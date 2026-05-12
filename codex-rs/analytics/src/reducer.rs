@@ -364,7 +364,8 @@ impl TurnToolCounts {
             | ThreadItem::ImageView { .. }
             | ThreadItem::EnteredReviewMode { .. }
             | ThreadItem::ExitedReviewMode { .. }
-            | ThreadItem::ContextCompaction { .. } => return,
+            | ThreadItem::ContextCompaction { .. }
+            | ThreadItem::RawResponseItem { .. } => return,
         }
         self.total += 1;
     }

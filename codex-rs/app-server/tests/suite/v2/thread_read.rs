@@ -532,6 +532,7 @@ async fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> 
             thread_id,
             forked_from_id: None,
             source: ProtocolSessionSource::Cli,
+            thread_source: None,
             base_instructions: BaseInstructions::default(),
             dynamic_tools: Vec::new(),
             metadata: ThreadPersistenceMetadata {
@@ -581,6 +582,7 @@ async fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> 
         thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),
         log_db: None,
+        state_db: None,
         environment_manager: Arc::new(EnvironmentManager::default_for_tests()),
         config_warnings: Vec::new(),
         session_source: SessionSource::Cli.into(),

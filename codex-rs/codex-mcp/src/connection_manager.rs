@@ -419,7 +419,10 @@ impl McpConnectionManager {
                 };
                 tools.extend(server_tools);
             }
-            qualify_tools(tools)
+            normalize_tools_for_model(tools)
+                .into_iter()
+                .map(|tool| (tool.canonical_tool_name().to_string(), tool))
+                .collect()
         }
     }
 

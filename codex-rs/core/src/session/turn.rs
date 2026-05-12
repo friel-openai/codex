@@ -1156,20 +1156,24 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let inherited_mcp_tools = sess.services.mcp_tool_snapshot.lock().await.clone();
-    let (has_mcp_servers, all_mcp_tools, parallel_mcp_server_names) =
-        if let Some(snapshot) = inherited_mcp_tools {
-            (!snapshot.tools.is_empty(), snapshot.tools, HashSet::new())
-        } else {
-            let mcp_connection_manager = sess.services.mcp_connection_manager.read().await;
-            let has_mcp_servers = mcp_connection_manager.has_servers();
-            let all_mcp_tools = mcp_connection_manager
-                .list_all_tools()
-                .or_cancel(cancellation_token)
-                .await?;
-            let parallel_mcp_server_names =
-                mcp_connection_manager.parallel_tool_call_server_names();
-            (has_mcp_servers, all_mcp_tools, parallel_mcp_server_names)
-        };
+    let (has_mcp_servers, all_mcp_tools, parallel_mcp_server_names) = if let Some(snapshot) =
+        inherited_mcp_tools
+    {
+        (
+            !snapshot.tools.is_empty(),
+            snapshot.tools.into_values().collect(),
+            HashSet::new(),
+        )
+    } else {
+        let mcp_connection_manager = sess.services.mcp_connection_manager.read().await;
+        let has_mcp_servers = mcp_connection_manager.has_servers();
+        let all_mcp_tools = mcp_connection_manager
+            .list_all_tools()
+            .or_cancel(cancellation_token)
+            .await?;
+        let parallel_mcp_server_names = mcp_connection_manager.parallel_tool_call_server_names();
+        (has_mcp_servers, all_mcp_tools, parallel_mcp_server_names)
+    };
     let loaded_plugins = sess
         .services
         .plugins_manager
