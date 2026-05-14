@@ -279,6 +279,8 @@ impl ThreadStore for LocalThreadStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use codex_protocol::ThreadId;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::EventMsg;
@@ -287,6 +289,7 @@ mod tests {
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
+    use tokio::sync::Notify;
 
     use super::*;
     use crate::ListThreadsParams;
@@ -512,6 +515,98 @@ mod tests {
         }));
         assert_rollout_contains_message(archived_old_rollout_path.as_path(), "before rotation")
             .await;
+    }
+
+    #[tokio::test]
+    async fn rotate_thread_segment_keeps_live_rollout_visible_before_commit() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            home.path().to_path_buf(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = Arc::new(LocalThreadStore::new(config, Some(runtime)));
+        let thread_id = ThreadId::default();
+
+        store
+            .create_thread(create_thread_params(thread_id))
+            .await
+            .expect("create live thread");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("before staged rotation")],
+            })
+            .await
+            .expect("append pre-rotation item");
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush pre-rotation item");
+        let live_rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+
+        let staged = Arc::new(Notify::new());
+        let resume = Arc::new(Notify::new());
+        live_writer::install_segment_rotation_commit_hook(
+            thread_id,
+            Arc::clone(&staged),
+            Arc::clone(&resume),
+        );
+
+        let rotate_store = Arc::clone(&store);
+        let rotation = tokio::spawn(async move {
+            rotate_store
+                .rotate_thread_segment(
+                    thread_id,
+                    RotateThreadSegmentParams {
+                        source: SessionSource::Exec,
+                        base_instructions: BaseInstructions::default(),
+                        dynamic_tools: Vec::new(),
+                        metadata: thread_metadata(),
+                        event_persistence_mode: ThreadEventPersistenceMode::Limited,
+                        initial_items: vec![user_message_item("rotation checkpoint")],
+                        previous_segment_reference_depth: 2,
+                    },
+                )
+                .await
+        });
+
+        staged.notified().await;
+        assert!(
+            tokio::fs::try_exists(live_rollout_path.as_path())
+                .await
+                .expect("check live rollout path"),
+            "live rollout path should stay visible while the replacement is staged"
+        );
+        let listed = store
+            .list_threads(ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::CreatedAt,
+                sort_direction: crate::SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                archived: false,
+                search_term: None,
+                use_state_db_only: true,
+            })
+            .await
+            .expect("list live threads during staged rotation");
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(listed.items[0].thread_id, thread_id);
+
+        resume.notify_one();
+        rotation
+            .await
+            .expect("rotation task should finish")
+            .expect("rotation should succeed");
+        live_writer::clear_segment_rotation_commit_hook();
     }
 
     #[tokio::test]

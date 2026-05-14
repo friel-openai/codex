@@ -1,4 +1,12 @@
+use std::path::Path;
 use std::path::PathBuf;
+
+#[cfg(test)]
+use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex;
 
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
@@ -11,6 +19,8 @@ use codex_rollout::RolloutRecorderParams;
 use codex_rollout::builder_from_items;
 use codex_rollout::read_session_meta_line;
 use tokio::fs;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tracing::warn;
 
 use super::LocalThreadStore;
@@ -22,6 +32,42 @@ use crate::ResumeThreadParams;
 use crate::RotateThreadSegmentParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+
+#[cfg(test)]
+#[derive(Clone)]
+struct SegmentRotationCommitHook {
+    thread_id: ThreadId,
+    staged: Arc<Notify>,
+    resume: Arc<Notify>,
+}
+
+#[cfg(test)]
+static SEGMENT_ROTATION_COMMIT_HOOK: LazyLock<Mutex<Option<SegmentRotationCommitHook>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+pub(super) fn install_segment_rotation_commit_hook(
+    thread_id: ThreadId,
+    staged: Arc<Notify>,
+    resume: Arc<Notify>,
+) {
+    let mut guard = SEGMENT_ROTATION_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = Some(SegmentRotationCommitHook {
+        thread_id,
+        staged,
+        resume,
+    });
+}
+
+#[cfg(test)]
+pub(super) fn clear_segment_rotation_commit_hook() {
+    let mut guard = SEGMENT_ROTATION_COMMIT_HOOK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    *guard = None;
+}
 
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
@@ -208,6 +254,7 @@ pub(super) async fn rotate_thread_segment(
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
     };
+    let event_persistence_mode = params.event_persistence_mode;
     if let Err(err) = old_recorder.shutdown().await {
         warn!(
             "failed to close previous rollout segment {} for thread {thread_id}: {err}",
@@ -247,11 +294,11 @@ pub(super) async fn rotate_thread_segment(
     )
     .await
     .map_err(thread_store_io_error)?;
-    fs::rename(old_rollout_path.as_path(), archived_path.as_path())
+    fs::copy(old_rollout_path.as_path(), archived_path.as_path())
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!(
-                "failed to archive previous rollout segment {} to {}: {err}",
+                "failed to copy previous rollout segment {} to {}: {err}",
                 old_rollout_path.display(),
                 archived_path.display()
             ),
@@ -267,59 +314,117 @@ pub(super) async fn rotate_thread_segment(
     }));
     initial_items.extend(params.initial_items);
 
-    let state_db_ctx = store.state_db().await;
-    let new_recorder = match RolloutRecorder::new(
+    let staged_rollout_path = staged_rollout_path(old_rollout_path.as_path())?;
+    let staged_recorder = match RolloutRecorder::new(
         &config,
         RolloutRecorderParams::CreateAtPath {
-            path: old_rollout_path.clone(),
+            path: staged_rollout_path.clone(),
             conversation_id: thread_id,
             forked_from_id: old_meta.meta.forked_from_id,
             source: params.source,
             base_instructions: params.base_instructions,
             dynamic_tools: params.dynamic_tools,
             session_timestamp: Some(old_meta.meta.timestamp.clone()),
-            event_persistence_mode: create_thread::event_persistence_mode(
-                params.event_persistence_mode,
-            ),
+            event_persistence_mode: create_thread::event_persistence_mode(event_persistence_mode),
         },
-        state_db_ctx,
+        /*state_db_ctx*/ None,
         /*state_builder*/ None,
     )
     .await
     {
-        Ok(new_recorder) => new_recorder,
+        Ok(staged_recorder) => staged_recorder,
         Err(err) => {
-            if let Err(restore_err) =
-                fs::rename(archived_path.as_path(), old_rollout_path.as_path()).await
-            {
-                warn!(
-                    "failed to restore previous rollout segment {} after rollover failure: {restore_err}",
-                    old_rollout_path.display()
-                );
-            }
+            remove_rotation_artifacts(
+                staged_rollout_path.as_path(),
+                archived_path.as_path(),
+                "staged recorder initialization",
+            )
+            .await;
             return Err(ThreadStoreError::Internal {
                 message: format!("failed to initialize rotated local thread recorder: {err}"),
             });
         }
     };
-    if let Err(err) = new_recorder.record_items(initial_items.as_slice()).await {
-        let _ = new_recorder.shutdown().await;
-        restore_archived_rollout_on_rollover_failure(
+    if let Err(err) = staged_recorder.record_items(initial_items.as_slice()).await {
+        let _ = staged_recorder.shutdown().await;
+        remove_rotation_artifacts(
+            staged_rollout_path.as_path(),
             archived_path.as_path(),
-            old_rollout_path.as_path(),
+            "staged recorder write",
         )
         .await;
         return Err(thread_store_io_error(err));
     }
-    if let Err(err) = new_recorder.flush().await {
-        let _ = new_recorder.shutdown().await;
-        restore_archived_rollout_on_rollover_failure(
+    if let Err(err) = staged_recorder.flush().await {
+        let _ = staged_recorder.shutdown().await;
+        remove_rotation_artifacts(
+            staged_rollout_path.as_path(),
             archived_path.as_path(),
-            old_rollout_path.as_path(),
+            "staged recorder flush",
         )
         .await;
         return Err(thread_store_io_error(err));
     }
+    if let Err(err) = staged_recorder.shutdown().await {
+        remove_rotation_artifacts(
+            staged_rollout_path.as_path(),
+            archived_path.as_path(),
+            "staged recorder shutdown",
+        )
+        .await;
+        return Err(thread_store_io_error(err));
+    }
+
+    wait_for_segment_rotation_commit_hook(thread_id).await;
+
+    if let Err(err) = replace_live_rollout_with_staged_segment(
+        staged_rollout_path.as_path(),
+        old_rollout_path.as_path(),
+    )
+    .await
+    {
+        remove_rotation_artifacts(
+            staged_rollout_path.as_path(),
+            archived_path.as_path(),
+            "staged recorder install",
+        )
+        .await;
+        return Err(err);
+    }
+
+    let state_db_ctx = store.state_db().await;
+    let (committed_items, _, _) = RolloutRecorder::load_rollout_items(old_rollout_path.as_path())
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!(
+                "failed to load committed rotated rollout {}: {err}",
+                old_rollout_path.display()
+            ),
+        })?;
+    let state_builder = builder_from_items(committed_items.as_slice(), old_rollout_path.as_path());
+    codex_rollout::state_db::reconcile_rollout(
+        state_db_ctx.as_deref(),
+        old_rollout_path.as_path(),
+        config.model_provider_id.as_str(),
+        state_builder.as_ref(),
+        committed_items.as_slice(),
+        Some(false),
+        /*new_thread_memory_mode*/ None,
+    )
+    .await;
+    let new_recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::resume(
+            old_rollout_path.clone(),
+            create_thread::event_persistence_mode(event_persistence_mode),
+        ),
+        state_db_ctx,
+        state_builder,
+    )
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to resume rotated local thread recorder: {err}"),
+    })?;
 
     let mut live_recorders = store.live_recorders.lock().await;
     let current_path = live_recorders
@@ -337,10 +442,10 @@ pub(super) async fn rotate_thread_segment(
 }
 
 fn archived_segment_path(
-    codex_home: &std::path::Path,
+    codex_home: &Path,
     thread_id: ThreadId,
     segment_id: Option<SegmentId>,
-    old_rollout_path: &std::path::Path,
+    old_rollout_path: &Path,
 ) -> ThreadStoreResult<PathBuf> {
     let old_file_name = old_rollout_path
         .file_name()
@@ -360,25 +465,81 @@ fn archived_segment_path(
     })
 }
 
-async fn restore_archived_rollout_on_rollover_failure(
-    archived_path: &std::path::Path,
-    old_rollout_path: &std::path::Path,
-) {
-    if fs::try_exists(old_rollout_path).await.unwrap_or(false)
-        && let Err(err) = fs::remove_file(old_rollout_path).await
-    {
-        warn!(
-            "failed to remove replacement rollout segment {} after rollover failure: {err}",
-            old_rollout_path.display()
-        );
-    }
-    if let Err(err) = fs::rename(archived_path, old_rollout_path).await {
-        warn!(
-            "failed to restore previous rollout segment {} after rollover failure: {err}",
-            old_rollout_path.display()
-        );
+fn staged_rollout_path(live_rollout_path: &Path) -> ThreadStoreResult<PathBuf> {
+    let file_name = live_rollout_path
+        .file_name()
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: format!(
+                "live rollout path {} does not have a file name",
+                live_rollout_path.display()
+            ),
+        })?;
+    let mut staged_file_name = file_name.to_os_string();
+    staged_file_name.push(format!(".staged-{}.tmp", SegmentId::new()));
+    Ok(live_rollout_path.with_file_name(staged_file_name))
+}
+
+async fn replace_live_rollout_with_staged_segment(
+    staged_rollout_path: &Path,
+    live_rollout_path: &Path,
+) -> ThreadStoreResult<()> {
+    match fs::rename(staged_rollout_path, live_rollout_path).await {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            fs::copy(staged_rollout_path, live_rollout_path)
+                .await
+                .map_err(|copy_err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to replace live rollout {} from staged rollout {}: rename failed: {rename_err}; copy failed: {copy_err}",
+                        live_rollout_path.display(),
+                        staged_rollout_path.display()
+                    ),
+                })?;
+            fs::remove_file(staged_rollout_path)
+                .await
+                .map_err(|remove_err| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to remove staged rollout {} after copying it to {}: {remove_err}",
+                        staged_rollout_path.display(),
+                        live_rollout_path.display()
+                    ),
+                })?;
+            Ok(())
+        }
     }
 }
+
+async fn remove_rotation_artifacts(staged_rollout_path: &Path, archived_path: &Path, stage: &str) {
+    for path in [staged_rollout_path, archived_path] {
+        if fs::try_exists(path).await.unwrap_or(false)
+            && let Err(err) = fs::remove_file(path).await
+        {
+            warn!(
+                "failed to remove rollout rotation artifact {} after {stage}: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+async fn wait_for_segment_rotation_commit_hook(thread_id: ThreadId) {
+    let hook = {
+        let guard = SEGMENT_ROTATION_COMMIT_HOOK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.clone()
+    };
+    if let Some(hook) = hook
+        && hook.thread_id == thread_id
+    {
+        hook.staged.notify_one();
+        hook.resume.notified().await;
+    }
+}
+
+#[cfg(not(test))]
+async fn wait_for_segment_rotation_commit_hook(_thread_id: ThreadId) {}
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
     ThreadStoreError::Internal {
