@@ -118,11 +118,11 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo_args=()
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
-            cargo_args+=(--jobs 2)
+            cargo build --jobs 2 --target ${{ matrix.target }} --release --bin codex
+          else
+            cargo build --target ${{ matrix.target }} --release --bin codex
           fi
-          cargo build --target ${{ matrix.target }} --release --bin codex "${cargo_args[@]}"
 
       - name: Stage archive
         shell: bash
