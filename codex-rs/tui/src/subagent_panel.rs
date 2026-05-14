@@ -108,6 +108,27 @@ impl SubagentPanelRegistry {
         info.update_status(status);
     }
 
+    pub(crate) fn update_metadata(
+        &mut self,
+        thread_id: ThreadId,
+        nickname: Option<String>,
+        role: Option<String>,
+    ) -> bool {
+        if role.as_deref() == Some("watchdog") {
+            self.prune_superseded_watchdogs(thread_id);
+        }
+
+        let Some(info) = self.agents.get_mut(&thread_id) else {
+            return false;
+        };
+
+        if let Some(nickname) = nickname.filter(|nickname| !nickname.trim().is_empty()) {
+            info.name = nickname;
+        }
+        info.role = role;
+        true
+    }
+
     pub(crate) fn update_status(&mut self, thread_id: ThreadId, status: AgentStatus) {
         if let Some(info) = self.agents.get_mut(&thread_id) {
             info.update_status(status);

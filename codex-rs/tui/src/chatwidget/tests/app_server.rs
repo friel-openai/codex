@@ -709,6 +709,65 @@ async fn subagent_panel_mounts_watchdog_spawn() {
 }
 
 #[tokio::test]
+async fn subagent_panel_reclassifies_watchdog_after_late_metadata() {
+    // Regression guard for the live TUI race observed in May 2026: the spawn completion can reach
+    // the chat widget before `ThreadStarted` supplies nickname/role metadata. The row must not stay
+    // as a generic prompt-derived subagent once watchdog metadata arrives.
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001012").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001013").expect("valid thread id");
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog-before-metadata".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                prompt: Some("Every time you start, respond with exactly pong.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.set_collab_agent_metadata(
+        watchdog_thread_id,
+        Some("Pauli".to_string()),
+        Some("watchdog".to_string()),
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        ratatui::Terminal::new(VT100Backend::new(width, height)).expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "subagent_panel_reclassifies_watchdog_after_late_metadata",
+        screen
+    );
+}
+
+#[tokio::test]
 async fn subagent_panel_renders_subagent_and_watchdog_rows() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let sender_thread_id =

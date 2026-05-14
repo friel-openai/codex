@@ -1577,9 +1577,9 @@ impl ChatWidget {
     /// Stores or overwrites the cached nickname and role for a collab agent thread.
     ///
     /// Called by `App::upsert_agent_picker_thread` and `App::replace_chat_widget` to keep the
-    /// rendering metadata in sync with the navigation cache. Must be called before any
-    /// notification referencing this thread is processed, otherwise the rendered item will fall
-    /// back to showing the raw thread id.
+    /// rendering metadata in sync with the navigation cache. History cells emitted before this
+    /// metadata arrives keep their original label, but the live subagent panel is refreshed so a
+    /// placeholder watchdog row gains its watchdog role and nickname once `ThreadStarted` arrives.
     pub(crate) fn set_collab_agent_metadata(
         &mut self,
         thread_id: ThreadId,
@@ -1589,10 +1589,16 @@ impl ChatWidget {
         self.collab_agent_metadata.insert(
             thread_id,
             AgentMetadata {
-                agent_nickname,
-                agent_role,
+                agent_nickname: agent_nickname.clone(),
+                agent_role: agent_role.clone(),
             },
         );
+        if self
+            .subagent_panel_registry
+            .update_metadata(thread_id, agent_nickname, agent_role)
+        {
+            self.refresh_subagent_panel();
+        }
     }
 
     /// Returns the cached metadata for a thread, defaulting to empty if none has been registered.

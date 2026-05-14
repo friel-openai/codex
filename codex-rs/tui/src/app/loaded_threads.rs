@@ -82,8 +82,12 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
                 .remove(&thread_id)
                 .map(|thread| LoadedSubagentThread {
                     thread_id,
-                    agent_nickname: thread.agent_nickname,
-                    agent_role: thread.agent_role,
+                    agent_nickname: thread
+                        .agent_nickname
+                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_nickname")),
+                    agent_role: thread
+                        .agent_role
+                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_role")),
                 })
         })
         .collect();
@@ -101,6 +105,19 @@ fn thread_spawn_parent_thread_id(
         .get("parent_thread_id")?
         .as_str()?;
     ThreadId::from_string(parent_thread_id).ok()
+}
+
+fn thread_spawn_agent_metadata(
+    source: &codex_app_server_protocol::SessionSource,
+    field: &str,
+) -> Option<String> {
+    serde_json::to_value(source)
+        .ok()?
+        .get("subAgent")?
+        .get("thread_spawn")?
+        .get(field)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -214,6 +231,36 @@ mod tests {
                     agent_role: Some("worker".to_string()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn recovers_watchdog_metadata_from_thread_spawn_source() {
+        // Regression guard for the live `/agent` leak observed in May 2026: loaded watchdog
+        // helper threads could reach the TUI with empty top-level metadata even though their
+        // `ThreadSpawn` source still identified them as watchdogs. Without this recovery, the
+        // picker rendered selectable anonymous `Agent` rows instead of hiding watchdog helpers.
+        let primary_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
+        let watchdog_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000012").expect("valid thread");
+        let watchdog = test_thread(
+            watchdog_thread_id,
+            thread_spawn_source(primary_thread_id, /*depth*/ 1, "Pauli", "watchdog"),
+        );
+
+        let loaded = find_loaded_subagent_threads_for_primary(
+            vec![test_thread(primary_thread_id, SessionSource::Cli), watchdog],
+            primary_thread_id,
+        );
+
+        assert_eq!(
+            loaded,
+            vec![LoadedSubagentThread {
+                thread_id: watchdog_thread_id,
+                agent_nickname: Some("Pauli".to_string()),
+                agent_role: Some("watchdog".to_string()),
+            }]
         );
     }
 }

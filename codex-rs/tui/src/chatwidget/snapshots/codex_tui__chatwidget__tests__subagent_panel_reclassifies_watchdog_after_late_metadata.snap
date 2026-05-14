@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: screen
+---
+
+• Subagents (0s • no subagents running • esc to interrupt)
+• [#1] [watchdog] Pauli idle — Every time you start, respond with exactly pong.
+
+
+› Ask Codex to do anything
+
+  gpt-5.5 default · /tmp/project
