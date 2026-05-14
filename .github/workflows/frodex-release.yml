@@ -118,12 +118,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cargo_jobs=()
           if [[ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]]; then
             # Keep native ARM release builds within the hosted runner's memory budget.
-            cargo_jobs=(--jobs 1)
+            cargo build --jobs 1 --target ${{ matrix.target }} --release --bin codex
+          else
+            cargo build --target ${{ matrix.target }} --release --bin codex
           fi
-          cargo build "${cargo_jobs[@]}" --target ${{ matrix.target }} --release --bin codex
 
       - name: Stage archive
         shell: bash
