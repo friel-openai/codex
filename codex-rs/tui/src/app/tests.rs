@@ -1288,12 +1288,11 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
 }
 
 #[tokio::test]
-async fn watchdog_spawn_notification_caches_watchdog_metadata_without_thread_started() {
-    // Regression guard for the May 2026 `/agent` leak: a watchdog handle may not receive a later
-    // `ThreadStarted` update before the picker opens, so spawn-complete metadata must classify the
-    // cached row immediately instead of leaving an anonymous selectable `Agent`.
+async fn goal_supervisor_spawn_notification_is_hidden_without_thread_started() {
+    // Regression guard for internal supervisor helpers: a spawn-complete notification can arrive
+    // before ThreadStarted metadata. The /agent picker must still hide the helper immediately.
     let mut app = make_test_app().await;
-    let watchdog_thread_id =
+    let supervisor_thread_id =
         ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
 
     app.handle_thread_event_now(ThreadBufferedEvent::Notification(
@@ -1302,18 +1301,18 @@ async fn watchdog_spawn_notification_caches_watchdog_metadata_without_thread_sta
             turn_id: "turn-1".to_string(),
             completed_at_ms: 0,
             item: ThreadItem::CollabAgentToolCall {
-                id: "spawn-watchdog".to_string(),
+                id: "spawn-goal-supervisor".to_string(),
                 tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
                 sender_thread_id: ThreadId::new().to_string(),
-                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                receiver_agent_nickname: Some("Pauli".to_string()),
-                receiver_agent_role: Some("watchdog".to_string()),
-                prompt: Some("watch the parent".to_string()),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: Some("Goal supervisor".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
+                prompt: Some("supervise the goal".to_string()),
                 model: Some("gpt-5.4-ultrafast".to_string()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
                 agents_states: HashMap::from([(
-                    watchdog_thread_id.to_string(),
+                    supervisor_thread_id.to_string(),
                     codex_app_server_protocol::CollabAgentState {
                         status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
                         message: None,
@@ -1324,12 +1323,19 @@ async fn watchdog_spawn_notification_caches_watchdog_metadata_without_thread_sta
     ));
 
     assert_eq!(
-        app.agent_navigation.get(&watchdog_thread_id),
+        app.agent_navigation.get(&supervisor_thread_id),
         Some(&AgentPickerThreadEntry {
-            agent_nickname: Some("Pauli".to_string()),
-            agent_role: Some("watchdog".to_string()),
+            agent_nickname: Some("Goal supervisor".to_string()),
+            agent_role: Some("goal_supervisor".to_string()),
             is_closed: false,
         })
+    );
+    assert!(
+        app.agent_navigation
+            .selectable_threads(app.primary_thread_id)
+            .into_iter()
+            .all(|(thread_id, _)| thread_id != supervisor_thread_id),
+        "goal supervisor helpers must not appear in the /agent picker"
     );
 }
 

@@ -6,7 +6,6 @@ use crate::tools::handlers::goal_spec::create_update_goal_tool;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v2;
-use crate::tools::handlers::multi_agents_spec::create_compact_parent_context_tool;
 use crate::tools::handlers::multi_agents_spec::create_followup_task_tool;
 use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
 use crate::tools::handlers::multi_agents_spec::create_resume_agent_tool;
@@ -16,9 +15,6 @@ use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_wait_agent_tool_v2;
-use crate::tools::handlers::multi_agents_spec::create_watchdog_close_self_tool;
-use crate::tools::handlers::multi_agents_spec::create_watchdog_snooze_tool;
-use crate::tools::handlers::multi_agents_spec::create_watchdog_tools_namespace;
 use crate::tools::handlers::plan_spec::create_update_plan_tool;
 use crate::tools::handlers::request_user_input_spec::REQUEST_USER_INPUT_TOOL_NAME;
 use crate::tools::handlers::request_user_input_spec::create_request_user_input_tool;
@@ -252,15 +248,6 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         let spec = create_request_permissions_tool(request_permissions_tool_description());
         expected.insert(spec.name().to_string(), spec);
     }
-    if config.agent_watchdog {
-        let spec = create_watchdog_tools_namespace(vec![
-            create_watchdog_close_self_tool(),
-            create_watchdog_snooze_tool(),
-            create_compact_parent_context_tool(),
-        ]);
-        expected.insert(spec.name().to_string(), spec);
-    }
-
     assert_eq!(
         actual.keys().collect::<Vec<_>>(),
         expected.keys().collect::<Vec<_>>(),
@@ -440,51 +427,11 @@ fn goal_tools_require_goals_feature() {
 }
 
 #[test]
-fn watchdog_tools_are_eager_namespace_tools() {
-    let model_info = model_info();
-    let mut features = Features::with_defaults();
-    features.disable(Feature::Goals);
-    features.disable(Feature::GoalSupervisor);
-    features.enable(Feature::AgentWatchdog);
-    let available_models = Vec::new();
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
-        model_info: &model_info,
-        available_models: &available_models,
-        features: &features,
-        image_generation_tool_auth_allowed: true,
-        web_search_mode: Some(WebSearchMode::Cached),
-        session_source: SessionSource::Cli,
-        permission_profile: &PermissionProfile::Disabled,
-        windows_sandbox_level: WindowsSandboxLevel::Disabled,
-    });
-    let (tools, handlers) = build_specs(
-        &tools_config,
-        /*mcp_tools*/ None,
-        /*deferred_mcp_tools*/ None,
-        &[],
-    );
-
-    // Watchdog fallback keeps the watchdog namespace eager for every agent so
-    // parent and forked child requests have the same prompt-visible tool
-    // surface.
-    assert_eq!(
-        namespace_function_names(&tools, "watchdog"),
-        vec![
-            "close_self".to_string(),
-            "snooze".to_string(),
-            "compact_parent_context".to_string(),
-        ]
-    );
-    let _handlers = handlers;
-}
-
-#[test]
-fn goal_supervisor_tools_replace_watchdog_tools_when_goals_are_supervised() {
+fn goal_supervisor_tools_are_eager_namespace_tools() {
     let model_info = model_info();
     let mut features = Features::with_defaults();
     features.enable(Feature::Goals);
     features.enable(Feature::GoalSupervisor);
-    features.enable(Feature::AgentWatchdog);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
@@ -503,9 +450,8 @@ fn goal_supervisor_tools_replace_watchdog_tools_when_goals_are_supervised() {
         &[],
     );
 
-    // Supervisor mode is goal-backed. It keeps the model-visible supervisor
-    // lifecycle tools in every request for prompt-cache stability, but does
-    // not expose the old watchdog namespace.
+    // Supervisor mode keeps the model-visible supervisor lifecycle tools in every request for
+    // prompt-cache stability, and the legacy watchdog namespace is not available.
     assert_lacks_tool_name(&tools, "watchdog");
     assert_eq!(
         namespace_function_names(&tools, "supervisor"),

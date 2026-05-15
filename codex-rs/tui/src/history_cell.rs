@@ -739,7 +739,6 @@ pub(crate) struct SubagentPanelAgent {
     pub(crate) ordinal: i32,
     pub(crate) name: String,
     pub(crate) status: AgentStatus,
-    pub(crate) is_watchdog: bool,
     pub(crate) preview: String,
     pub(crate) latest_update_at: Instant,
 }
@@ -812,9 +811,6 @@ impl HistoryCell for SubagentStatusCell {
             let preview = truncate_text(agent.preview.trim(), preview_budget);
             let mut spans: Vec<Span<'static>> =
                 vec!["• ".dim(), format!("[#{}] ", agent.ordinal).dim()];
-            if agent.is_watchdog {
-                spans.push("[watchdog] ".magenta().dim());
-            }
             spans.push(Span::from(agent.name.clone()));
             spans.push(" ".into());
             spans.push(status_span_for_subagent_panel(&agent));
@@ -881,7 +877,6 @@ fn is_running_agent_status(status: &AgentStatus) -> bool {
 
 fn status_span_for_subagent_panel(agent: &SubagentPanelAgent) -> Span<'static> {
     match &agent.status {
-        AgentStatus::PendingInit if agent.is_watchdog => "idle".dim(),
         AgentStatus::PendingInit | AgentStatus::Running => "running".cyan().bold(),
         AgentStatus::Interrupted => "interrupted".magenta(),
         AgentStatus::Completed(_) => "completed".green(),
@@ -894,9 +889,6 @@ fn status_span_for_subagent_panel(agent: &SubagentPanelAgent) -> Span<'static> {
 const SUBAGENT_SHIMMER_WINDOW: Duration = Duration::from_secs(1);
 
 fn should_subagent_panel_shimmer(agent: &SubagentPanelAgent, now: Instant) -> bool {
-    if agent.is_watchdog && matches!(agent.status, AgentStatus::PendingInit) {
-        return false;
-    }
     is_running_agent_status(&agent.status)
         && now.saturating_duration_since(agent.latest_update_at) <= SUBAGENT_SHIMMER_WINDOW
 }
@@ -3852,48 +3844,6 @@ mod tests {
                 assert_eq!(span.style, Style::default());
             }
         }
-    }
-
-    #[test]
-    fn subagent_panel_renders_watchdog_handle_as_idle() {
-        let state = Arc::new(Mutex::new(SubagentPanelState {
-            started_at: Instant::now(),
-            total_agents: 1,
-            running_count: 0,
-            running_agents: vec![SubagentPanelAgent {
-                ordinal: 1,
-                name: "watchdog-agent".to_string(),
-                status: AgentStatus::PendingInit,
-                is_watchdog: true,
-                preview: "monitor parent progress".to_string(),
-                latest_update_at: Instant::now(),
-            }],
-        }));
-        let cell = SubagentStatusCell::new(state, /*animations_enabled*/ true);
-        let lines = render_lines(&cell.display_lines(/*width*/ 120));
-
-        assert!(lines[0].contains("no subagents running"));
-        assert!(lines[1].contains("[watchdog] watchdog-agent idle"));
-    }
-
-    #[test]
-    fn subagent_panel_animation_tick_ignores_idle_watchdogs() {
-        let state = Arc::new(Mutex::new(SubagentPanelState {
-            started_at: Instant::now(),
-            total_agents: 1,
-            running_count: 0,
-            running_agents: vec![SubagentPanelAgent {
-                ordinal: 1,
-                name: "watchdog-agent".to_string(),
-                status: AgentStatus::PendingInit,
-                is_watchdog: true,
-                preview: "monitor parent progress".to_string(),
-                latest_update_at: Instant::now(),
-            }],
-        }));
-        let cell = SubagentStatusCell::new(state, /*animations_enabled*/ true);
-
-        assert_eq!(cell.transcript_animation_tick(), None);
     }
 
     fn image_block(data: &str) -> serde_json::Value {

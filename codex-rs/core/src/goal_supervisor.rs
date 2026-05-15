@@ -159,7 +159,7 @@ pub(crate) async fn finish_supervisor_helper(
     session
         .services
         .agent_control
-        .finish_watchdog_helper_thread(helper_thread_id)
+        .finish_internal_helper_thread(helper_thread_id)
         .await
         .map_err(anyhow::Error::msg)?;
     Ok(true)

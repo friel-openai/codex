@@ -235,31 +235,39 @@ mod tests {
     }
 
     #[test]
-    fn recovers_watchdog_metadata_from_thread_spawn_source() {
-        // Regression guard for the live `/agent` leak observed in May 2026: loaded watchdog
-        // helper threads could reach the TUI with empty top-level metadata even though their
-        // `ThreadSpawn` source still identified them as watchdogs. Without this recovery, the
-        // picker rendered selectable anonymous `Agent` rows instead of hiding watchdog helpers.
+    fn recovers_goal_supervisor_metadata_from_thread_spawn_source() {
+        // Regression guard for internal supervisor helpers: loaded helper threads can reach the
+        // TUI with empty top-level metadata even though their ThreadSpawn source still identifies
+        // them as goal_supervisor. Without this recovery, the /agent picker can render selectable
+        // anonymous Agent rows instead of hiding goal supervisor helpers.
         let primary_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
-        let watchdog_thread_id =
+        let supervisor_thread_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000012").expect("valid thread");
-        let watchdog = test_thread(
-            watchdog_thread_id,
-            thread_spawn_source(primary_thread_id, /*depth*/ 1, "Pauli", "watchdog"),
+        let supervisor = test_thread(
+            supervisor_thread_id,
+            thread_spawn_source(
+                primary_thread_id,
+                /*depth*/ 1,
+                "Goal supervisor",
+                "goal_supervisor",
+            ),
         );
 
         let loaded = find_loaded_subagent_threads_for_primary(
-            vec![test_thread(primary_thread_id, SessionSource::Cli), watchdog],
+            vec![
+                test_thread(primary_thread_id, SessionSource::Cli),
+                supervisor,
+            ],
             primary_thread_id,
         );
 
         assert_eq!(
             loaded,
             vec![LoadedSubagentThread {
-                thread_id: watchdog_thread_id,
-                agent_nickname: Some("Pauli".to_string()),
-                agent_role: Some("watchdog".to_string()),
+                thread_id: supervisor_thread_id,
+                agent_nickname: Some("Goal supervisor".to_string()),
+                agent_role: Some("goal_supervisor".to_string()),
             }]
         );
     }

@@ -1,5 +1,5 @@
 use super::*;
-use crate::agent::WatchdogParentCompactionResult;
+use crate::agent::SupervisorParentCompactionResult;
 
 pub(crate) struct Handler;
 
@@ -33,7 +33,10 @@ impl ToolHandler for Handler {
             .map_err(|err| {
                 FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
             })?;
-        if !matches!(&result, WatchdogParentCompactionResult::NotWatchdogHelper) {
+        if !matches!(
+            &result,
+            SupervisorParentCompactionResult::NotSupervisorHelper
+        ) {
             let _ = session
                 .services
                 .agent_control
@@ -57,20 +60,20 @@ pub(crate) struct CompactParentContextResult {
     submission_id: Option<String>,
 }
 
-impl From<WatchdogParentCompactionResult> for CompactParentContextResult {
-    fn from(value: WatchdogParentCompactionResult) -> Self {
+impl From<SupervisorParentCompactionResult> for CompactParentContextResult {
+    fn from(value: SupervisorParentCompactionResult) -> Self {
         match value {
-            WatchdogParentCompactionResult::NotWatchdogHelper => Self {
+            SupervisorParentCompactionResult::NotSupervisorHelper => Self {
                 kind: "not_supervisor_helper",
                 parent_thread_id: None,
                 submission_id: None,
             },
-            WatchdogParentCompactionResult::ParentBusy { parent_thread_id } => Self {
+            SupervisorParentCompactionResult::ParentBusy { parent_thread_id } => Self {
                 kind: "parent_busy",
                 parent_thread_id: Some(parent_thread_id.to_string()),
                 submission_id: None,
             },
-            WatchdogParentCompactionResult::Submitted {
+            SupervisorParentCompactionResult::Submitted {
                 parent_thread_id,
                 submission_id,
             } => Self {

@@ -23,6 +23,11 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SupervisorSnoozeArgs = parse_arguments(&arguments)?;
+        let parent_thread_id = session
+            .services
+            .agent_control
+            .goal_supervisor_parent_for_helper(session.conversation_id)
+            .await;
         let Some(delay_seconds) = session
             .services
             .agent_control
@@ -35,6 +40,15 @@ impl ToolHandler for Handler {
             ));
         };
         let _ = args.reason;
+        if let Some(parent_thread_id) = parent_thread_id
+            && let Err(err) = session
+                .services
+                .agent_control
+                .send_goal_supervisor_snooze_event(parent_thread_id, delay_seconds)
+                .await
+        {
+            tracing::warn!("failed to publish goal supervisor snooze event: {err}");
+        }
         Ok(SupervisorSnoozeResult { delay_seconds })
     }
 }

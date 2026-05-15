@@ -59,7 +59,6 @@ pub(crate) fn parse_agent_id_targets(
 }
 
 pub(crate) use close_agent::Handler as CloseAgentHandler;
-pub(crate) use compact_parent_context::Handler as CompactParentContextHandler;
 pub(crate) use resume_agent::Handler as ResumeAgentHandler;
 pub(crate) use send_input::Handler as SendInputHandler;
 pub(crate) use spawn::Handler as SpawnAgentHandler;
@@ -67,11 +66,8 @@ pub(crate) use supervisor_compact_parent_context::Handler as SupervisorCompactPa
 pub(crate) use supervisor_self_close::Handler as SupervisorSelfCloseHandler;
 pub(crate) use supervisor_snooze::Handler as SupervisorSnoozeHandler;
 pub(crate) use wait::Handler as WaitAgentHandler;
-pub(crate) use watchdog_self_close::Handler as WatchdogSelfCloseHandler;
-pub(crate) use watchdog_snooze::Handler as WatchdogSnoozeHandler;
 
 pub(crate) mod close_agent;
-mod compact_parent_context;
 mod resume_agent;
 mod send_input;
 mod spawn;
@@ -79,8 +75,6 @@ mod supervisor_compact_parent_context;
 mod supervisor_self_close;
 mod supervisor_snooze;
 pub(crate) mod wait;
-mod watchdog_self_close;
-mod watchdog_snooze;
 
 #[cfg(test)]
 #[path = "multi_agents_tests.rs"]

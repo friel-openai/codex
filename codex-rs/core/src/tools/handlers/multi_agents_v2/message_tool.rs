@@ -97,35 +97,18 @@ async fn handle_message_submission(
     let receiver_thread_id = resolve_message_target(&session, &turn, &target).await?;
     let direct_parent_thread_id = direct_parent_thread_id(&turn.session_source);
     let is_direct_parent = direct_parent_thread_id == Some(receiver_thread_id);
-    let watchdog_owner_thread_id = session
-        .services
-        .agent_control
-        .watchdog_owner_for_active_helper(session.conversation_id)
-        .await;
-    let is_watchdog_parent = watchdog_owner_thread_id == Some(receiver_thread_id);
     let goal_supervisor_parent_thread_id = session
         .services
         .agent_control
         .goal_supervisor_parent_for_helper(session.conversation_id)
         .await;
     let is_goal_supervisor_parent = goal_supervisor_parent_thread_id == Some(receiver_thread_id);
-    let is_supervisor_parent = is_watchdog_parent || is_goal_supervisor_parent;
+    let is_supervisor_parent = is_goal_supervisor_parent;
     let receiver_agent = session
         .services
         .agent_control
         .get_agent_metadata(receiver_thread_id)
         .unwrap_or_default();
-    if session
-        .services
-        .agent_control
-        .is_watchdog_handle(receiver_thread_id)
-        .await
-    {
-        return Err(FunctionCallError::RespondToModel(
-            "watchdog handles can't receive send_message or followup_task; watchdog check-ins run on the idle timer. Use close_agent to stop a watchdog."
-                .to_string(),
-        ));
-    }
     if mode == MessageDeliveryMode::QueueOnly && is_supervisor_parent {
         return Err(FunctionCallError::RespondToModel(
             "supervisor check-in threads must use followup_task with target `parent` to message their parent."
@@ -228,23 +211,6 @@ async fn handle_message_submission(
         )
         .await;
     result?;
-    if mode == MessageDeliveryMode::TriggerTurn && is_watchdog_parent {
-        let _ = session
-            .services
-            .agent_control
-            .finish_watchdog_helper(session.conversation_id)
-            .await;
-        session
-            .services
-            .agent_control
-            .finish_watchdog_helper_thread(session.conversation_id)
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!(
-                    "failed to finish watchdog helper after followup_task: {err}"
-                ))
-            })?;
-    }
     if mode == MessageDeliveryMode::TriggerTurn && is_goal_supervisor_parent {
         let _ = session
             .services

@@ -76,14 +76,10 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
     depth > max_depth
 }
 
-pub(crate) fn is_watchdog_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
-    agent_metadata.agent_role.as_deref() == Some("watchdog")
-}
-
 fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
     matches!(
         agent_metadata.agent_role.as_deref(),
-        Some("watchdog" | crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+        Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
     )
 }
 
@@ -345,10 +341,6 @@ impl SpawnReservation {
     }
 
     pub(crate) fn commit(mut self, agent_metadata: AgentMetadata) {
-        if self.counted && is_watchdog_agent_metadata(&agent_metadata) {
-            self.state.total_count.fetch_sub(1, Ordering::AcqRel);
-            self.counted = false;
-        }
         self.reserved_agent_nickname = None;
         self.reserved_agent_path = None;
         self.state.register_spawned_thread(agent_metadata);

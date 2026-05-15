@@ -128,10 +128,6 @@ pub(crate) fn resolve_role_config<'a>(
         .or_else(|| built_in::configs().get(role_name))
 }
 
-pub(crate) fn watchdog_interval_for_role(config: &Config, role_name: Option<&str>) -> Option<i64> {
-    (role_name == Some("watchdog")).then_some(config.watchdog_interval_s)
-}
-
 fn preservation_policy(config: &Config, role_layer_toml: &TomlValue) -> (bool, bool) {
     let role_selects_provider = role_layer_toml.get("model_provider").is_some();
     let role_selects_profile = role_layer_toml.get("profile").is_some();

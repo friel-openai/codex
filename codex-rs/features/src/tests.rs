@@ -347,13 +347,6 @@ fn agent_prompt_injection_is_stable_and_enabled_by_default() {
 }
 
 #[test]
-fn agent_watchdog_is_stable_and_enabled_by_default() {
-    assert_eq!(Feature::AgentWatchdog.stage(), Stage::Stable);
-    assert_eq!(Feature::AgentWatchdog.default_enabled(), true);
-    assert!(Features::with_defaults().enabled(Feature::AgentWatchdog));
-}
-
-#[test]
 fn goals_is_experimental_and_enabled_by_default() {
     assert_eq!(feature_for_key("goals"), Some(Feature::Goals));
     assert!(matches!(Feature::Goals.stage(), Stage::Experimental { .. }));

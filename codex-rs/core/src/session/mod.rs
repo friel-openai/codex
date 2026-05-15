@@ -226,11 +226,10 @@ use self::turn_context::TurnSkillsContext;
 mod rollout_reconstruction_tests;
 
 const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
-const ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK: &str =
-    include_str!("../../root_agent_watchdog_prompt.md");
+const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
+    include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
 const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
-const WATCHDOG_AGENT_PROMPT_FALLBACK: &str = include_str!("../../watchdog_agent_prompt.md");
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -251,26 +250,17 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
 }
 
-async fn load_root_agent_watchdog_prompt(codex_home: &Path) -> String {
+async fn load_root_agent_supervisor_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(
         codex_home,
-        ROOT_AGENT_WATCHDOG_PROMPT_FALLBACK,
-        "AGENTS.root-watchdog.md",
+        ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK,
+        "AGENTS.root-supervisor.md",
     )
     .await
 }
 
 pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
-}
-
-pub(crate) async fn load_watchdog_agent_prompt(codex_home: &Path) -> String {
-    load_agent_prompt_fallback(
-        codex_home,
-        WATCHDOG_AGENT_PROMPT_FALLBACK,
-        "AGENTS.watchdog.md",
-    )
-    .await
 }
 
 pub(crate) async fn load_supervisor_agent_prompt(codex_home: &Path) -> String {
@@ -313,11 +303,6 @@ pub(crate) async fn load_agent_role_prompt(
         {
             load_supervisor_agent_prompt(&config.codex_home).await
         }
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
-            if agent_role.as_deref() == Some("watchdog") =>
-        {
-            load_watchdog_agent_prompt(&config.codex_home).await
-        }
         SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
         SessionSource::Cli
         | SessionSource::VSCode
@@ -330,7 +315,7 @@ pub(crate) async fn load_agent_role_prompt(
             if config.features.enabled(Feature::Goals)
                 && config.features.enabled(Feature::GoalSupervisor)
             {
-                let supervisor_prompt = load_root_agent_watchdog_prompt(&config.codex_home).await;
+                let supervisor_prompt = load_root_agent_supervisor_prompt(&config.codex_home).await;
                 if !supervisor_prompt.trim().is_empty() {
                     prompt.push_str("\n\n");
                     prompt.push_str(&supervisor_prompt);

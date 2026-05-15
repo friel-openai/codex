@@ -1578,8 +1578,8 @@ impl ChatWidget {
     ///
     /// Called by `App::upsert_agent_picker_thread` and `App::replace_chat_widget` to keep the
     /// rendering metadata in sync with the navigation cache. History cells emitted before this
-    /// metadata arrives keep their original label, but the live subagent panel is refreshed so a
-    /// placeholder watchdog row gains its watchdog role and nickname once `ThreadStarted` arrives.
+    /// metadata arrives keep their original label, but the live subagent panel is refreshed when
+    /// `ThreadStarted` provides a role and nickname.
     pub(crate) fn set_collab_agent_metadata(
         &mut self,
         thread_id: ThreadId,
