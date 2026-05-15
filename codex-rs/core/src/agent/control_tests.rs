@@ -24,6 +24,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadGoal;
+use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
@@ -153,6 +155,27 @@ fn request_tool_signatures(body: &serde_json::Value) -> std::collections::BTreeS
         }
     }
     signatures
+}
+
+async fn spawned_thread_id_after(
+    manager: &ThreadManager,
+    before_thread_ids: &[ThreadId],
+) -> ThreadId {
+    let mut spawned_thread_ids = manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|thread_id| !before_thread_ids.contains(thread_id))
+        .collect::<Vec<_>>();
+    spawned_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        spawned_thread_ids.len(),
+        1,
+        "spawn should add exactly one child thread"
+    );
+    spawned_thread_ids
+        .pop()
+        .expect("spawned thread id should be present")
 }
 
 #[test]
@@ -2360,9 +2383,145 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
         .expect("parent shutdown should submit");
 }
 
+#[tokio::test]
+#[serial(fork_env)]
+async fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt() {
+    let _previous_response_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("0"),
+    );
+    let harness = AgentControlHarness::new().await;
+    let mut parent_config = harness.config.clone();
+    let _ = parent_config.features.enable(Feature::AgentPromptInjection);
+    let _ = parent_config.features.enable(Feature::Goals);
+    let _ = parent_config.features.enable(Feature::GoalSupervisor);
+    let new_thread = harness
+        .manager
+        .start_thread(parent_config)
+        .await
+        .expect("start parent thread");
+    let parent_thread_id = new_thread.thread_id;
+    let parent_thread = new_thread.thread;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    parent_thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent_thread
+        .codex
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+    let goal = ThreadGoal {
+        thread_id: parent_thread_id,
+        objective: "Ship the active user goal.".to_string(),
+        status: ThreadGoalStatus::Active,
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        created_at: 1,
+        updated_at: 1,
+    };
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.codex.session,
+        "goal-supervisor-test",
+        &goal,
+    )
+    .await
+    .expect("goal supervisor helper should spawn");
+
+    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+    let helper_thread = harness
+        .manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("supervisor helper thread should be registered");
+    assert_eq!(
+        helper_thread.codex.session.prompt_cache_key(),
+        parent_thread.codex.session.prompt_cache_key(),
+        "goal supervisor helpers are internal full-history forks and must keep the parent prompt cache key"
+    );
+
+    let helper_history = helper_thread.codex.session.clone_history().await;
+    let supervisor_prompt =
+        crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
+    let supervisor_prompt_count = helper_history
+        .raw_items()
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && content.iter().any(|content_item| matches!(
+                            content_item,
+                            ContentItem::InputText { text } if text == &supervisor_prompt
+                        ))
+            )
+        })
+        .count();
+    assert_eq!(
+        supervisor_prompt_count, 1,
+        "the supervisor prompt should be injected once as the helper role prompt; duplicating it in the user assignment changes the post-fork context"
+    );
+    assert_eq!(
+        history_text_match_count(helper_history.raw_items(), "You are also a **watchdog**"),
+        0,
+        "goal supervisor helper history must not include the legacy watchdog role prompt"
+    );
+    assert!(
+        !helper_history.raw_items().iter().any(|item| matches!(
+            item,
+            ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
+                if call_id == "synthetic_watchdog_tool_search"
+        )),
+        "goal supervisor helpers use eager supervisor tools and must not inherit watchdog synthetic tool search context"
+    );
+    assert!(helper_history.raw_items().iter().any(|item| matches!(
+        item,
+        ResponseItem::FunctionCall { name, call_id, .. }
+            if name == "list_agents" && call_id == "synthetic_watchdog_list_agents"
+    )));
+
+    let captured_input = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(thread_id, op)| {
+            if thread_id != helper_thread_id {
+                return None;
+            }
+            match op {
+                Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                    UserInput::Text { text, .. } => Some(text),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                    _ => None,
+                }),
+                _ => None,
+            }
+        })
+        .expect("supervisor helper assignment should be submitted as user input");
+    assert!(captured_input.contains("# Goal Supervisor Assignment"));
+    assert!(captured_input.contains("Ship the active user goal."));
+    assert!(
+        !captured_input.contains("You are also a **goal supervisor**"),
+        "the supervisor role prompt must not be copied into the helper assignment"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial(fork_env)]
-async fn forked_spawn_first_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
+async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot()
+-> anyhow::Result<()> {
     let server = start_mock_server().await;
     let request_log = mount_sse_sequence(
         &server,
@@ -2515,16 +2674,18 @@ while True:
     let child_thread_id = control
         .spawn_agent_with_metadata(
             config,
-            text_input("child request boundary"),
+            text_input("supervisor request boundary"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: None,
-                agent_nickname: Some("worker".to_string()),
-                agent_role: None,
+                agent_path: Some(
+                    AgentPath::try_from("/root/goal_supervisor").expect("agent path should parse"),
+                ),
+                agent_nickname: None,
+                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
             })),
             SpawnAgentOptions {
-                fork_parent_spawn_call_id: Some("spawn-call-request-boundary".to_string()),
+                fork_parent_spawn_call_id: None,
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 ..Default::default()
             },
@@ -2558,11 +2719,19 @@ while True:
         child_body["prompt_cache_key"].as_str(),
         Some(expected_prompt_cache_key.as_str())
     );
+    assert_eq!(
+        child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
+        "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
+    );
+    assert_eq!(
+        child_body["tools"], parent_body["tools"],
+        "goal supervisor helpers must keep the same serialized tool definitions, order, namespaces, and schemas as their parent"
+    );
     let parent_tool_signatures = request_tool_signatures(&parent_body);
     let child_tool_signatures = request_tool_signatures(&child_body);
     assert_eq!(
         child_tool_signatures, parent_tool_signatures,
-        "forked children must keep the same eager tool surface as their parent so request prefixes stay cacheable"
+        "goal supervisor helpers are internal full-history forks and must keep the same eager tool surface as their parent so request prefixes stay cacheable"
     );
     for expected_tool in [
         "spawn_agent",

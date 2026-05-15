@@ -1,7 +1,6 @@
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
-use crate::session::load_supervisor_agent_prompt;
 use crate::session::session::Session;
 use chrono::Utc;
 use codex_protocol::AgentPath;
@@ -262,7 +261,7 @@ async fn spawn_supervisor_helper(
         agent_nickname: None,
         agent_role: Some(GOAL_SUPERVISOR_ROLE_NAME.to_string()),
     });
-    let prompt = supervisor_helper_prompt(session, goal).await;
+    let prompt = supervisor_helper_prompt(session, goal);
     let helper = session
         .services
         .agent_control
@@ -290,10 +289,9 @@ async fn spawn_supervisor_helper(
     Ok(helper.thread_id)
 }
 
-async fn supervisor_helper_prompt(session: &Arc<Session>, goal: &ThreadGoal) -> String {
-    let helper_prompt = load_supervisor_agent_prompt(&session.get_config().await.codex_home).await;
+fn supervisor_helper_prompt(session: &Arc<Session>, goal: &ThreadGoal) -> String {
     format!(
-        "{helper_prompt}\n\n# Goal Supervisor Assignment\n\nParent agent id: {}\n\nActive goal objective:\n\n{}\n\nEvaluate whether the parent should continue now, snooze, compact, or mark the goal complete.",
+        "# Goal Supervisor Assignment\n\nParent agent id: {}\n\nActive goal objective:\n\n{}\n\nEvaluate whether the parent should continue now, snooze, compact, or mark the goal complete.",
         session.conversation_id, goal.objective
     )
 }

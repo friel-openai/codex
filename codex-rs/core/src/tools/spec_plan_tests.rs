@@ -521,6 +521,8 @@ fn goal_supervisor_tools_replace_watchdog_tools_when_goals_are_supervised() {
 fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
     let model_info = search_capable_model_info();
     let mut features = Features::with_defaults();
+    features.enable(Feature::Goals);
+    features.enable(Feature::GoalSupervisor);
     features.enable(Feature::Apps);
     features.enable(Feature::Plugins);
     features.enable(Feature::ToolSearch);
@@ -561,18 +563,33 @@ fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
             "Plan events and schedules.",
         )])
     };
+    let mcp_tools = || {
+        Some(HashMap::from([(
+            ToolName::namespaced("mcp__sample__", "echo"),
+            mcp_tool("echo", "Echo from eager MCP", serde_json::json!({})),
+        )]))
+    };
+    let deferred_mcp_tools = || {
+        Some(vec![deferred_mcp_tool(
+            "search",
+            "mcp__deferred__",
+            "deferred",
+            Some("Deferred MCP"),
+            Some("Deferred MCP search tools."),
+        )])
+    };
     let (parent_tools, _) = build_specs_with_discoverable_tools(
         &parent_tools_config,
-        /*mcp_tools*/ None,
-        /*deferred_mcp_tools*/ None,
+        mcp_tools(),
+        deferred_mcp_tools(),
         discoverable_tools(),
         /*extension_tool_bundles*/ &[],
         &[],
     );
     let (supervisor_tools, _) = build_specs_with_discoverable_tools(
         &supervisor_tools_config,
-        /*mcp_tools*/ None,
-        /*deferred_mcp_tools*/ None,
+        mcp_tools(),
+        deferred_mcp_tools(),
         discoverable_tools(),
         /*extension_tool_bundles*/ &[],
         &[],
@@ -584,7 +601,9 @@ fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
     // this feature is meant to preserve. Include discoverable tools here
     // because request_plugin_install previously appeared in a fork but not in
     // its parent, which made the backend render a different developer tool
-    // block before the fork point.
+    // block before the fork point. Include eager MCP and deferred MCP inputs
+    // because supervisor helpers inherit the parent's MCP snapshot and must
+    // preserve both the model-visible MCP namespaces and `tool_search` prompt.
     assert_eq!(supervisor_tools, parent_tools);
 }
 

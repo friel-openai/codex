@@ -195,6 +195,269 @@ model_reasoning_effort = "minimal"
     role_name
 }
 
+async fn start_supervised_goal_parent_for_test() -> (
+    ThreadManager,
+    ThreadId,
+    Arc<crate::session::session::Session>,
+    crate::StateDbHandle,
+    String,
+    codex_protocol::protocol::ThreadGoal,
+) {
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = turn.config.as_ref().clone();
+    config
+        .features
+        .enable(Feature::Goals)
+        .expect("test config should allow goals feature update");
+    config
+        .features
+        .enable(Feature::GoalSupervisor)
+        .expect("test config should allow goal supervisor feature update");
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2 feature update");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow sqlite feature update");
+    config.watchdog_interval_s = 1;
+    let state_db = init_state_db(&config)
+        .await
+        .expect("state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let parent = manager
+        .start_thread(config)
+        .await
+        .expect("parent thread should start");
+    let parent_thread_id = parent.thread_id;
+    let parent_session = parent.thread.codex.session.clone();
+    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
+        parent_thread_id,
+        parent_session
+            .get_config()
+            .await
+            .codex_home
+            .join(format!("{parent_thread_id}.jsonl"))
+            .to_path_buf(),
+        chrono::Utc::now(),
+        SessionSource::Exec,
+    )
+    .build("openai");
+    state_db
+        .upsert_thread(&parent_metadata)
+        .await
+        .expect("parent thread metadata should exist before inserting a goal");
+    let goal = state_db
+        .replace_thread_goal(
+            parent_thread_id,
+            "Finish the supervised goal",
+            codex_state::ThreadGoalStatus::Active,
+            None,
+        )
+        .await
+        .expect("goal should be created");
+    let protocol_goal = crate::goals::protocol_goal_from_state(goal.clone());
+
+    (
+        manager,
+        parent_thread_id,
+        parent_session,
+        state_db,
+        goal.goal_id,
+        protocol_goal,
+    )
+}
+
+async fn start_goal_supervisor_helper_for_test() -> (
+    ThreadManager,
+    ThreadId,
+    Arc<crate::session::session::Session>,
+    crate::StateDbHandle,
+    String,
+) {
+    let (manager, parent_thread_id, parent_session, state_db, goal_id, protocol_goal) =
+        start_supervised_goal_parent_for_test().await;
+    let before_thread_ids = manager.list_thread_ids().await;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_session,
+        &goal_id,
+        &protocol_goal,
+    )
+    .await
+    .expect("supervisor helper should start");
+
+    let helper_thread_id = spawned_thread_id_after(&manager, &before_thread_ids).await;
+    let helper = manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("supervisor helper thread should exist");
+
+    (
+        manager,
+        parent_thread_id,
+        helper.codex.session.clone(),
+        state_db,
+        goal_id,
+    )
+}
+
+#[tokio::test]
+async fn goal_supervisor_checkin_spawns_hidden_full_history_helper_once() {
+    let (manager, parent_thread_id, helper_session, state_db, goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+    let parent_thread = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist");
+    let parent_session = parent_thread.codex.session.clone();
+
+    // Goal supervisors are implementation details, but they must still be
+    // full-history forks with the parent's prompt cache key. If this diverges,
+    // the supervisor request gets a different prompt prefix from its parent and
+    // loses the cache win that replaced watchdog pseudo-agents.
+    assert_eq!(
+        helper_session.prompt_cache_key(),
+        parent_session.prompt_cache_key()
+    );
+    assert_eq!(
+        manager
+            .agent_control()
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await,
+        Some(parent_thread_id)
+    );
+
+    let snapshot = manager
+        .agent_control()
+        .get_agent_config_snapshot(helper_thread_id)
+        .await
+        .expect("helper config snapshot should exist");
+    match snapshot.session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: actual_parent_thread_id,
+            depth,
+            agent_path,
+            agent_nickname,
+            agent_role,
+        }) => {
+            assert_eq!(actual_parent_thread_id, parent_thread_id);
+            assert_eq!(depth, 1);
+            assert_eq!(
+                agent_path,
+                Some(AgentPath::try_from("/root/goal_supervisor").expect("supervisor path"))
+            );
+            assert!(
+                agent_nickname.is_some(),
+                "AgentControl assigns a nickname to every ThreadSpawn entry, including hidden goal supervisor helpers"
+            );
+            assert_eq!(
+                agent_role,
+                Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string())
+            );
+        }
+        other => panic!("supervisor helper should use ThreadSpawn source, got {other:?}"),
+    }
+
+    let list_output = ListAgentsHandlerV2
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (list_content, success) = expect_text_output(list_output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&list_content).expect("list_agents result should be json");
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        result
+            .agents
+            .iter()
+            .map(|agent| agent.agent_name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["/root"],
+        "goal supervisor helpers must stay hidden from model-visible agent listings"
+    );
+
+    let before_second_checkin = manager.list_thread_ids().await;
+    let goal = state_db
+        .get_thread_goal(parent_thread_id)
+        .await
+        .expect("goal should read")
+        .expect("goal should exist");
+    let protocol_goal = crate::goals::protocol_goal_from_state(goal);
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_session,
+        &goal_id,
+        &protocol_goal,
+    )
+    .await
+    .expect("duplicate check-in should be a no-op while helper is active");
+    assert_eq!(
+        manager.list_thread_ids().await,
+        before_second_checkin,
+        "goal supervisor must not spawn duplicate helper threads while an active helper is still running"
+    );
+}
+
+#[tokio::test]
+async fn goal_supervisor_plain_completion_reschedules_checkin() {
+    let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+    let before_finish = manager.list_thread_ids().await;
+
+    assert!(
+        manager
+            .agent_control()
+            .finish_goal_supervisor_helper(helper_thread_id)
+            .await,
+        "completion of a goal supervisor helper should clear the active helper"
+    );
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+
+    timeout(Duration::from_secs(3), async {
+        loop {
+            let thread_ids = manager.list_thread_ids().await;
+            if thread_ids.iter().any(|id| !before_finish.contains(id)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect(
+        "a goal supervisor helper that exits without a supervisor tool must schedule the next check-in",
+    );
+
+    let after_finish = manager.list_thread_ids().await;
+    let new_helper_id = after_finish
+        .into_iter()
+        .find(|id| !before_finish.contains(id))
+        .expect("rescheduled supervisor helper should exist");
+    assert_eq!(
+        manager
+            .agent_control()
+            .goal_supervisor_parent_for_helper(new_helper_id)
+            .await,
+        Some(parent_thread_id)
+    );
+}
+
 fn expect_text_output<T>(output: T) -> (String, Option<bool>)
 where
     T: ToolOutput,
@@ -648,6 +911,34 @@ fn multi_agent_v2_spawn_watchdog_role_is_rejected_in_goal_supervisor_mode() {
 }
 
 #[test]
+fn spawn_agent_watchdog_role_is_rejected_in_goal_supervisor_mode() {
+    run_large_stack_async(|| async {
+        let (session, turn) = make_session_and_context().await;
+        let Err(err) = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+        else {
+            panic!("goal supervisor mode should reject public watchdog spawns");
+        };
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
+            )
+        );
+    });
+}
+
+#[test]
 fn multi_agent_v2_spawn_watchdog_role_ignores_thread_limit() {
     run_large_stack_async(|| async {
         let (mut session, mut turn) = make_session_and_context().await;
@@ -985,6 +1276,418 @@ async fn compact_parent_context_submits_compaction_for_idle_parent() {
             .iter()
             .any(|(thread_id, op)| *thread_id == helper_thread_id && matches!(op, Op::Shutdown)),
         "compact_parent_context should finish the helper turn without a shutdown op"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_followup_task_parent_wakes_parent_and_finishes_helper() {
+    let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+
+    let output = FollowupTaskHandlerV2
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "followup_task",
+            function_payload(json!({
+                "target": "parent",
+                "message": "continue the supervised goal"
+            })),
+        ))
+        .await
+        .expect("supervisor helper should wake its parent");
+    let (_, success) = expect_text_output(output);
+
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let expected = InterAgentCommunication::new(
+        AgentPath::try_from("/root/goal_supervisor").expect("supervisor path"),
+        AgentPath::root(),
+        Vec::new(),
+        "continue the supervised goal".to_string(),
+        /*trigger_turn*/ true,
+    );
+    assert!(manager.captured_ops().into_iter().any(|(thread_id, op)| {
+        thread_id == parent_thread_id
+            && matches!(op, Op::InterAgentCommunication { communication } if communication == expected)
+    }));
+}
+
+#[tokio::test]
+async fn supervisor_checkin_does_not_spawn_duplicate_helper_while_one_is_active() {
+    let (manager, parent_thread_id, helper_session, state_db, goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let parent_session = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist")
+        .codex
+        .session
+        .clone();
+    let goal = state_db
+        .get_thread_goal(parent_thread_id)
+        .await
+        .expect("goal should read")
+        .expect("goal should exist");
+    let protocol_goal = crate::goals::protocol_goal_from_state(goal);
+    let mut before_thread_ids = manager.list_thread_ids().await;
+    before_thread_ids.sort_by_key(ToString::to_string);
+
+    // A goal can receive several idle signals before the supervisor helper
+    // finishes. The second signal must observe `active_helper_id` and avoid
+    // creating another internal helper, or the parent sees duplicate guidance
+    // and prompt-cache behavior diverges between helpers.
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_session,
+        &goal_id,
+        &protocol_goal,
+    )
+    .await
+    .expect("duplicate supervisor check-in should be a no-op");
+
+    let mut after_thread_ids = manager.list_thread_ids().await;
+    after_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(after_thread_ids, before_thread_ids);
+    assert_ne!(
+        manager
+            .agent_control()
+            .get_status(helper_session.conversation_id)
+            .await,
+        AgentStatus::NotFound
+    );
+}
+
+#[tokio::test]
+async fn supervisor_checkin_waits_while_user_visible_subagent_is_running() {
+    let (manager, parent_thread_id, parent_session, _state_db, goal_id, protocol_goal) =
+        start_supervised_goal_parent_for_test().await;
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/worker").expect("worker path")),
+        agent_nickname: None,
+        agent_role: None,
+    });
+    manager
+        .agent_control()
+        .spawn_agent_with_metadata(
+            (*parent_session.get_config().await).clone(),
+            vec![UserInput::Text {
+                text: "real worker task".to_string(),
+                text_elements: Vec::new(),
+            }]
+            .into(),
+            Some(worker_source),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("worker should spawn");
+    let mut before_thread_ids = manager.list_thread_ids().await;
+    before_thread_ids.sort_by_key(ToString::to_string);
+
+    // Supervisor mode must not nudge the parent while real subagents are still
+    // running. Internal supervisor helpers are hidden, but ordinary worker
+    // agents remain user-visible work and should block the next helper spawn.
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_session,
+        &goal_id,
+        &protocol_goal,
+    )
+    .await
+    .expect("supervisor check-in should defer behind real subagents");
+
+    let mut after_thread_ids = manager.list_thread_ids().await;
+    after_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(after_thread_ids, before_thread_ids);
+}
+
+#[tokio::test]
+async fn supervisor_checkin_honors_persisted_snooze_before_spawning_helper() {
+    let (manager, parent_thread_id, parent_session, state_db, goal_id, protocol_goal) =
+        start_supervised_goal_parent_for_test().await;
+    state_db
+        .set_thread_goal_supervisor_snoozed_until_ms(
+            parent_thread_id,
+            &goal_id,
+            Some(chrono::Utc::now().timestamp_millis() + 60_000),
+        )
+        .await
+        .expect("snooze state should persist");
+    let mut before_thread_ids = manager.list_thread_ids().await;
+    before_thread_ids.sort_by_key(ToString::to_string);
+
+    // This covers the resume case: a new Session has no in-memory
+    // `snoozed_until`, so the scheduler must consult
+    // thread_goal_supervisor_state before creating another helper.
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_session,
+        &goal_id,
+        &protocol_goal,
+    )
+    .await
+    .expect("persisted supervisor snooze should defer helper spawn");
+
+    let mut after_thread_ids = manager.list_thread_ids().await;
+    after_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(after_thread_ids, before_thread_ids);
+}
+
+#[tokio::test]
+async fn supervisor_helper_is_hidden_from_list_agents() {
+    let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let parent_session = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist")
+        .codex
+        .session
+        .clone();
+
+    let output = ListAgentsHandlerV2
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "list_agents",
+            function_payload(json!({})),
+        ))
+        .await
+        .expect("list_agents should succeed");
+    let (content, success) = expect_text_output(output);
+    let result: ListAgentsResult =
+        serde_json::from_str(&content).expect("list_agents result should be json");
+
+    assert_eq!(success, Some(true));
+    assert!(
+        !result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == "/root/goal_supervisor"
+                || agent.agent_name == helper_session.conversation_id.to_string()),
+        "goal supervisor helpers are internal scheduling work and must not be targetable through list_agents"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_send_message_parent_is_rejected_and_keeps_helper_active() {
+    let (manager, _parent_thread_id, helper_session, _state_db, _goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+
+    let Err(err) = SendMessageHandlerV2
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "send_message",
+            function_payload(json!({
+                "target": "parent",
+                "message": "queued supervisor update"
+            })),
+        ))
+        .await
+    else {
+        panic!("supervisor helper send_message to parent should be rejected");
+    };
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "supervisor check-in threads must use followup_task with target `parent` to message their parent."
+                .to_string()
+        )
+    );
+    assert_ne!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+}
+
+#[tokio::test]
+async fn supervisor_snooze_finishes_helper_and_persists_snooze() {
+    let (manager, parent_thread_id, helper_session, state_db, goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+
+    let output = SupervisorSnoozeHandler
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "snooze",
+            function_payload(json!({
+                "delay_seconds": 30,
+                "reason": "worker is still active"
+            })),
+        ))
+        .await
+        .expect("supervisor helper should snooze");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value = serde_json::from_str(&content).expect("result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result, json!({"delay_seconds": 30}));
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        state_db
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id)
+            .await
+            .expect("snooze state should read")
+            .is_some(),
+        "supervisor.snooze must persist snooze state so a resumed session does not immediately retrigger"
+    );
+    assert!(
+        !manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| *thread_id == parent_thread_id
+                && matches!(op, Op::InterAgentCommunication { .. })),
+        "supervisor.snooze should not wake the parent"
+    );
+
+    let parent_thread = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist");
+    let before_idle_check = manager.list_thread_ids().await;
+    parent_thread
+        .codex
+        .session
+        .goal_runtime_apply(crate::goals::GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await
+        .expect("idle goal check should succeed");
+    assert_eq!(
+        manager.list_thread_ids().await,
+        before_idle_check,
+        "persisted supervisor snooze state must prevent an immediate replacement helper"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_snooze() {
+    let (manager, parent_thread_id, helper_session, state_db, goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+    state_db
+        .set_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id, Some(123_456))
+        .await
+        .expect("snooze state should persist before close");
+
+    let output = SupervisorSelfCloseHandler
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "close_self",
+            function_payload(json!({"message": "goal is complete"})),
+        ))
+        .await
+        .expect("supervisor helper should self-close");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value = serde_json::from_str(&content).expect("result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result, json!({"completed": true}));
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let goal = state_db
+        .get_thread_goal(parent_thread_id)
+        .await
+        .expect("goal should read")
+        .expect("goal should still exist");
+    assert_eq!(goal.status, codex_state::ThreadGoalStatus::Complete);
+    assert_eq!(
+        state_db
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id)
+            .await
+            .expect("snooze state should read"),
+        None,
+        "supervisor.close_self must clear persisted snooze state so a completed goal does not reschedule"
+    );
+    let parent_thread = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist");
+    let parent_pending_input = parent_thread.codex.session.get_pending_input().await;
+    assert!(
+        parent_pending_input.iter().any(|item| matches!(
+            item,
+            ResponseInputItem::Message { content, .. }
+                if InterAgentCommunication::from_message_content(content).is_some_and(|communication| {
+                    communication.author.as_str() == "/root/goal_supervisor"
+                        && communication.recipient == AgentPath::root()
+                        && communication.other_recipients.is_empty()
+                        && communication.content == "goal is complete"
+                        && communication.trigger_turn
+                })
+        )),
+        "supervisor.close_self with a message must queue a parent turn as /root/goal_supervisor; pending_input={parent_pending_input:#?}"
+    );
+    let before_idle_check = manager.list_thread_ids().await;
+    parent_thread
+        .codex
+        .session
+        .goal_runtime_apply(crate::goals::GoalRuntimeEvent::MaybeContinueIfIdle)
+        .await
+        .expect("idle goal check should succeed");
+    assert_eq!(
+        manager.list_thread_ids().await,
+        before_idle_check,
+        "completed goals must not schedule another supervisor helper after supervisor.close_self"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_compact_parent_context_submits_compaction_and_finishes_helper() {
+    let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+
+    let output = SupervisorCompactParentContextHandler
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "compact_parent_context",
+            function_payload(json!({
+                "reason": "parent is repeating the same step",
+                "evidence": "same command appeared in consecutive turns"
+            })),
+        ))
+        .await
+        .expect("supervisor helper should request parent compaction");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value =
+        serde_json::from_str(&content).expect("compact_parent_context result should be json");
+    let submission_id = result
+        .get("submission_id")
+        .and_then(|value| value.as_str())
+        .expect("submitted compaction should include a submission id");
+    assert!(!submission_id.is_empty());
+
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        result,
+        json!({
+            "kind": "submitted",
+            "parent_thread_id": parent_thread_id.to_string(),
+            "submission_id": submission_id,
+        })
+    );
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| { *thread_id == parent_thread_id && matches!(op, Op::Compact) })
     );
 }
 

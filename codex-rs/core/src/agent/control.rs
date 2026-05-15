@@ -1297,7 +1297,18 @@ impl AgentControl {
         )
         .await
         {
-            Ok(finished) => finished,
+            Ok(finished) => {
+                if finished
+                    && let Err(err) = parent_thread
+                        .codex
+                        .session
+                        .goal_runtime_apply(crate::goals::GoalRuntimeEvent::MaybeContinueIfIdle)
+                        .await
+                {
+                    warn!("failed to reschedule goal supervisor after helper finished: {err}");
+                }
+                finished
+            }
             Err(err) => {
                 warn!("failed to finish goal supervisor helper {helper_thread_id}: {err}");
                 false

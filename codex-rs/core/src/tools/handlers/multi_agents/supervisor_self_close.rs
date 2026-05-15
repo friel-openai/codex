@@ -45,15 +45,8 @@ impl ToolHandler for Handler {
             .get_thread(parent_thread_id)
             .await
             .map_err(|err| collab_agent_error(parent_thread_id, err))?;
-        let goal = crate::goal_supervisor::complete_supervised_goal(
-            &parent_thread.codex.session,
-            session.conversation_id,
-        )
-        .await
-        .map_err(|err| FunctionCallError::RespondToModel(format!("close_self failed: {err}")))?;
-        if let Some(message) = args.message
-            && !message.trim().is_empty()
-        {
+        let message = args.message.filter(|message| !message.trim().is_empty());
+        let agent_paths = if message.is_some() {
             let receiver_agent = session
                 .services
                 .agent_control
@@ -67,6 +60,19 @@ impl ToolHandler for Handler {
                 .await
                 .and_then(|snapshot| snapshot.session_source.get_agent_path())
                 .unwrap_or_else(AgentPath::root);
+            Some((sender_agent_path, receiver_agent_path))
+        } else {
+            None
+        };
+        let goal = crate::goal_supervisor::complete_supervised_goal(
+            &parent_thread.codex.session,
+            session.conversation_id,
+        )
+        .await
+        .map_err(|err| FunctionCallError::RespondToModel(format!("close_self failed: {err}")))?;
+        if let Some(message) = message
+            && let Some((sender_agent_path, receiver_agent_path)) = agent_paths
+        {
             let communication = InterAgentCommunication::new(
                 sender_agent_path,
                 receiver_agent_path,
