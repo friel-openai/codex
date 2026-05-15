@@ -4032,6 +4032,24 @@ impl ChatWidget {
             None
         };
 
+        if let ThreadItem::CollabAgentToolCall {
+            receiver_thread_ids,
+            receiver_agent_nickname,
+            receiver_agent_role,
+            ..
+        } = &item
+            && let Some(receiver_thread_id) = receiver_thread_ids
+                .first()
+                .and_then(|thread_id| ThreadId::from_string(thread_id).ok())
+            && (receiver_agent_nickname.is_some() || receiver_agent_role.is_some())
+        {
+            self.set_collab_agent_metadata(
+                receiver_thread_id,
+                receiver_agent_nickname.clone(),
+                receiver_agent_role.clone(),
+            );
+        }
+
         if let Some(cell) = multi_agents::tool_call_history_cell(
             &item,
             cached_spawn_request.as_ref(),
@@ -6254,6 +6272,8 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agent_nickname,
+                receiver_agent_role,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6265,6 +6285,8 @@ impl ChatWidget {
                     status,
                     sender_thread_id,
                     receiver_thread_ids,
+                    receiver_agent_nickname,
+                    receiver_agent_role,
                     prompt,
                     model,
                     reasoning_effort,
