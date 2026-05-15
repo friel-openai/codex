@@ -14,7 +14,7 @@ The objective should include:
 - Instructions for the supervisor to determine progress.
 - Do not instruct the supervisor to run test suites or processes. Tell it what tools and tests it should expect you to run, and what progress it should expect from you.
 
-The supervisor works best when there is some state on disk or a tool that can be defined up front. If there is no durable state, create it first. Unless instructed otherwise, put plan files in ~/.codex/plans. Do not use the plan tool for supervisor state.
+The supervisor works best when it can check progress from durable evidence: the conversation history, files, tools, tests, or logs. Do not create a state file merely because a goal exists. Create a plan file or state file only when it is useful and proportional for the user's goal. Unless instructed otherwise, put plan files in ~/.codex/plans. Do not use the plan tool for supervisor state.
 
 After creating the goal, begin working on the user's task immediately. The supervisor will only act after you end your turn. Its job is to keep work aligned with the user's goal if you ended your turn too early. Do not try to prove the supervisor is working.
 

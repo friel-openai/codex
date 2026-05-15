@@ -1719,11 +1719,15 @@ impl Session {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
+            agent_role,
             ..
         }) = &turn_context.session_source
         else {
             return;
         };
+        if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) {
+            return;
+        }
 
         let Some(status) = agent_status_from_event(msg) else {
             return;

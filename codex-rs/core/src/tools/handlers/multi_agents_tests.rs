@@ -1284,11 +1284,12 @@ async fn supervisor_followup_task_parent_wakes_parent_and_finishes_helper() {
     let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
         start_goal_supervisor_helper_for_test().await;
     let helper_thread_id = helper_session.conversation_id;
+    let helper_turn = helper_session.new_default_turn().await;
 
     let output = FollowupTaskHandlerV2
         .handle(invocation(
             helper_session.clone(),
-            helper_session.new_default_turn().await,
+            helper_turn.clone(),
             "followup_task",
             function_payload(json!({
                 "target": "parent",
@@ -1319,6 +1320,30 @@ async fn supervisor_followup_task_parent_wakes_parent_and_finishes_helper() {
         thread_id == parent_thread_id
             && matches!(op, Op::InterAgentCommunication { communication } if communication == expected)
     }));
+    helper_session
+        .send_event(
+            helper_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: helper_turn.sub_id.clone(),
+                last_agent_message: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !manager.captured_ops().into_iter().any(|(thread_id, op)| {
+            thread_id == parent_thread_id
+                && matches!(
+                    op,
+                    Op::InterAgentCommunication { communication }
+                        if communication.content.contains("<subagent_notification>")
+                )
+        }),
+        "regression guard: a goal supervisor helper's terminal TurnComplete must not enqueue generic subagent_notification messages after followup_task target=parent"
+    );
 }
 
 #[tokio::test]

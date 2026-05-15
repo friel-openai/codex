@@ -1798,11 +1798,15 @@ impl AgentControl {
         child_agent_path: Option<AgentPath>,
     ) {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
+            parent_thread_id,
+            agent_role,
+            ..
         })) = session_source
         else {
             return;
         };
+        let is_goal_supervisor_helper =
+            agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME);
         let control = self.clone();
         tokio::spawn(async move {
             let status = match control.subscribe_status(child_thread_id).await {
@@ -1829,6 +1833,9 @@ impl AgentControl {
                 return;
             }
             if control.finish_goal_supervisor_helper(child_thread_id).await {
+                return;
+            }
+            if is_goal_supervisor_helper {
                 return;
             }
 
