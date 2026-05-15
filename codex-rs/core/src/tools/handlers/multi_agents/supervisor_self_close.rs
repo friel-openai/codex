@@ -70,7 +70,8 @@ impl ToolHandler for Handler {
         )
         .await
         .map_err(|err| FunctionCallError::RespondToModel(format!("close_self failed: {err}")))?;
-        if let Some(message) = message
+        if goal.is_some()
+            && let Some(message) = message
             && let Some((sender_agent_path, receiver_agent_path)) = agent_paths
         {
             let communication = InterAgentCommunication::new(

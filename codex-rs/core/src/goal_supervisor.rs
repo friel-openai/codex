@@ -24,6 +24,7 @@ const MIN_SUPERVISOR_INTERVAL_SECONDS: u64 = 1;
 
 pub(crate) struct GoalSupervisorRuntimeState {
     active_helper_id: Mutex<Option<ThreadId>>,
+    active_goal_id: Mutex<Option<String>>,
     last_trigger: Mutex<Option<Instant>>,
     snoozed_until: Mutex<Option<Instant>>,
     scheduled_wakeup: Mutex<bool>,
@@ -33,6 +34,7 @@ impl GoalSupervisorRuntimeState {
     pub(crate) fn new() -> Self {
         Self {
             active_helper_id: Mutex::new(None),
+            active_goal_id: Mutex::new(None),
             last_trigger: Mutex::new(None),
             snoozed_until: Mutex::new(None),
             scheduled_wakeup: Mutex::new(false),
@@ -55,6 +57,7 @@ pub(crate) async fn maybe_start_supervisor_checkin(
     goal_id: &str,
     goal: &ThreadGoal,
 ) -> anyhow::Result<()> {
+    let mut finished_stale_helper = false;
     if let Some(helper_id) = *session
         .goal_runtime
         .supervisor
@@ -62,11 +65,23 @@ pub(crate) async fn maybe_start_supervisor_checkin(
         .lock()
         .await
     {
+        let active_goal_id = session
+            .goal_runtime
+            .supervisor
+            .active_goal_id
+            .lock()
+            .await
+            .clone();
         let status = session.services.agent_control.get_status(helper_id).await;
-        if matches!(status, AgentStatus::PendingInit | AgentStatus::Running) {
+        if matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+            && active_goal_id.as_deref() == Some(goal_id)
+        {
             return Ok(());
         }
         finish_supervisor_helper(session, helper_id).await?;
+        if active_goal_id.as_deref() != Some(goal_id) {
+            finished_stale_helper = true;
+        }
     }
 
     let now = Instant::now();
@@ -95,6 +110,9 @@ pub(crate) async fn maybe_start_supervisor_checkin(
 
     let due = {
         let mut last_trigger = session.goal_runtime.supervisor.last_trigger.lock().await;
+        if finished_stale_helper {
+            *last_trigger = None;
+        }
         match *last_trigger {
             Some(last_trigger) if now.duration_since(last_trigger) < interval => {
                 schedule_supervisor_wakeup(session, interval - now.duration_since(last_trigger))
@@ -118,6 +136,7 @@ pub(crate) async fn maybe_start_supervisor_checkin(
         .active_helper_id
         .lock()
         .await = Some(helper_id);
+    *session.goal_runtime.supervisor.active_goal_id.lock().await = Some(goal_id.to_string());
     Ok(())
 }
 
@@ -136,6 +155,7 @@ pub(crate) async fn finish_supervisor_helper(
     }
     *active_helper_id = None;
     drop(active_helper_id);
+    *session.goal_runtime.supervisor.active_goal_id.lock().await = None;
     session
         .services
         .agent_control
@@ -159,6 +179,17 @@ pub(crate) async fn snooze_supervisor_helper(
     if active_helper_id != Some(helper_thread_id) {
         return Ok(None);
     }
+    let active_goal_id = session
+        .goal_runtime
+        .supervisor
+        .active_goal_id
+        .lock()
+        .await
+        .clone();
+    let Some(active_goal_id) = active_goal_id else {
+        let _ = finish_supervisor_helper(session, helper_thread_id).await?;
+        return Ok(None);
+    };
     let config = session.get_config().await;
     let delay_seconds = delay_seconds
         .unwrap_or_else(|| supervisor_interval_seconds(&config))
@@ -166,10 +197,14 @@ pub(crate) async fn snooze_supervisor_helper(
     if let Some(state_db) = session.state_db_for_thread_goals().await?
         && let Some(goal) = state_db.get_thread_goal(session.conversation_id).await?
     {
+        if goal.goal_id != active_goal_id {
+            let _ = finish_supervisor_helper(session, helper_thread_id).await?;
+            return Ok(None);
+        }
         state_db
             .set_thread_goal_supervisor_snoozed_until_ms(
                 session.conversation_id,
-                &goal.goal_id,
+                &active_goal_id,
                 Some(Utc::now().timestamp_millis() + (delay_seconds as i64 * 1000)),
             )
             .await?;
@@ -194,10 +229,18 @@ pub(crate) async fn complete_supervised_goal(
     if active_helper_id != Some(helper_thread_id) {
         return Ok(None);
     }
-    let Some(state_db) = session.state_db_for_thread_goals().await? else {
+    let active_goal_id = session
+        .goal_runtime
+        .supervisor
+        .active_goal_id
+        .lock()
+        .await
+        .clone();
+    let Some(active_goal_id) = active_goal_id else {
+        let _ = finish_supervisor_helper(session, helper_thread_id).await?;
         return Ok(None);
     };
-    let Some(existing_goal) = state_db.get_thread_goal(session.conversation_id).await? else {
+    let Some(state_db) = session.state_db_for_thread_goals().await? else {
         return Ok(None);
     };
     let updated = state_db
@@ -207,7 +250,7 @@ pub(crate) async fn complete_supervised_goal(
                 objective: None,
                 status: Some(codex_state::ThreadGoalStatus::Complete),
                 token_budget: None,
-                expected_goal_id: Some(existing_goal.goal_id.clone()),
+                expected_goal_id: Some(active_goal_id.clone()),
             },
         )
         .await?
@@ -216,7 +259,7 @@ pub(crate) async fn complete_supervised_goal(
         state_db
             .set_thread_goal_supervisor_snoozed_until_ms(
                 session.conversation_id,
-                &existing_goal.goal_id,
+                &active_goal_id,
                 None,
             )
             .await?;

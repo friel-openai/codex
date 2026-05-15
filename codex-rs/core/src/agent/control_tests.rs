@@ -178,6 +178,37 @@ async fn spawned_thread_id_after(
         .expect("spawned thread id should be present")
 }
 
+async fn create_active_thread_goal_for_test(
+    state_db: &StateDbHandle,
+    parent_thread_id: ThreadId,
+    parent_session: &std::sync::Arc<crate::session::session::Session>,
+    objective: &str,
+) -> anyhow::Result<(String, ThreadGoal)> {
+    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
+        parent_thread_id,
+        parent_session
+            .get_config()
+            .await
+            .codex_home
+            .join(format!("{parent_thread_id}.jsonl"))
+            .to_path_buf(),
+        chrono::Utc::now(),
+        SessionSource::Exec,
+    )
+    .build("openai");
+    state_db.upsert_thread(&parent_metadata).await?;
+    let state_goal = state_db
+        .replace_thread_goal(
+            parent_thread_id,
+            objective,
+            codex_state::ThreadGoalStatus::Active,
+            None,
+        )
+        .await?;
+    let protocol_goal = crate::goals::protocol_goal_from_state(state_goal.clone());
+    Ok((state_goal.goal_id, protocol_goal))
+}
+
 #[test]
 fn fork_previous_response_id_env_value_parses_truthy_values() {
     for value in ["1", "true", "TRUE", "yes", "on"] {
@@ -2449,6 +2480,18 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt(
     );
 
     let helper_history = helper_thread.codex.session.clone_history().await;
+    assert!(
+        helper_history.raw_items().iter().any(|item| matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "user"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text == "parent seed context"
+                    ))
+        )),
+        "goal supervisor helpers must inherit the parent conversation prefix before their supervisor assignment"
+    );
     let supervisor_prompt =
         crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
     let supervisor_prompt_count = helper_history
@@ -2539,6 +2582,9 @@ async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot()
     .await;
     let (_home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::Sqlite);
     let _ = config.features.enable(Feature::AgentWatchdog);
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     config.model_provider.supports_websockets = false;
@@ -2631,13 +2677,16 @@ while True:
         )]))
         .expect("test config should allow MCP servers");
 
-    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+    let state_db = init_state_db(&config)
+        .await
+        .expect("state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         config.model_provider.clone(),
         config.codex_home.to_path_buf(),
         std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
     );
-    let control = manager.agent_control();
     let parent = manager.start_thread(config.clone()).await?;
     let parent_thread_id = parent.thread_id;
     let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
@@ -2670,28 +2719,22 @@ while True:
         .ensure_rollout_materialized()
         .await;
     parent.thread.codex.session.flush_rollout().await?;
+    let before_thread_ids = manager.list_thread_ids().await;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        &state_db,
+        parent_thread_id,
+        &parent.thread.codex.session,
+        "Supervise the parent with inherited MCP tools.",
+    )
+    .await?;
 
-    let child_thread_id = control
-        .spawn_agent_with_metadata(
-            config,
-            text_input("supervisor request boundary"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(
-                    AgentPath::try_from("/root/goal_supervisor").expect("agent path should parse"),
-                ),
-                agent_nickname: None,
-                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-            })),
-            SpawnAgentOptions {
-                fork_parent_spawn_call_id: None,
-                fork_mode: Some(SpawnAgentForkMode::FullHistory),
-                ..Default::default()
-            },
-        )
-        .await?
-        .thread_id;
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent.thread.codex.session,
+        &goal_id,
+        &goal,
+    )
+    .await?;
+    let child_thread_id = spawned_thread_id_after(&manager, &before_thread_ids).await;
     let child_thread = manager
         .get_thread(child_thread_id)
         .await
@@ -2754,6 +2797,140 @@ while True:
         "first forked child request should expose parent MCP snapshot tools: {child_body:#}"
     );
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial(fork_env)]
+async fn goal_supervisor_helper_websocket_request_inherits_parent_previous_response_id()
+-> anyhow::Result<()> {
+    let _previous_response_guard = EnvVarGuard::set(
+        CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV,
+        OsStr::new("1"),
+    );
+    let server = start_websocket_server(vec![
+        vec![
+            vec![
+                ev_response_created("warm-parent"),
+                ev_completed("warm-parent"),
+            ],
+            vec![
+                ev_response_created("resp-parent"),
+                ev_assistant_message("msg-parent", "parent done"),
+                ev_completed("resp-parent"),
+            ],
+        ],
+        vec![
+            vec![
+                ev_response_created("warm-supervisor"),
+                ev_completed("warm-supervisor"),
+            ],
+            vec![
+                ev_response_created("resp-supervisor"),
+                ev_completed("resp-supervisor"),
+            ],
+        ],
+    ])
+    .await;
+    let (_home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = true;
+
+    let state_db = init_state_db(&config)
+        .await
+        .expect("state db should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let parent = manager.start_thread(config).await?;
+    let parent_thread_id = parent.thread_id;
+    let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
+    parent.thread.submit(text_input("parent seed")).await?;
+    wait_for_turn_complete(parent.thread.as_ref()).await;
+    parent
+        .thread
+        .codex
+        .session
+        .ensure_rollout_materialized()
+        .await;
+    parent.thread.codex.session.flush_rollout().await?;
+    let before_thread_ids = manager.list_thread_ids().await;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        &state_db,
+        parent_thread_id,
+        &parent.thread.codex.session,
+        "Supervise the parent with previous response inheritance.",
+    )
+    .await?;
+    let state = manager
+        .agent_control()
+        .manager
+        .upgrade()
+        .expect("test manager state should stay alive");
+    let supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/goal_supervisor").expect("supervisor path")),
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+    assert!(
+        parent_response_continuation_for_source(&state, Some(&supervisor_source))
+            .await
+            .is_some(),
+        "goal supervisor helpers should be able to inherit parent response continuation before spawn"
+    );
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent.thread.codex.session,
+        &goal_id,
+        &goal,
+    )
+    .await?;
+    let child_thread_id = spawned_thread_id_after(&manager, &before_thread_ids).await;
+    let child_thread = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("supervisor helper thread should be registered");
+    wait_for_turn_complete(child_thread.as_ref()).await;
+
+    let connections = server.connections();
+    let supervisor_connection = connections
+        .get(1)
+        .expect("supervisor helper should use its own websocket connection");
+    let supervisor_generated_request = supervisor_connection
+        .iter()
+        .map(core_test_support::responses::WebSocketRequest::body_json)
+        .find(|body| body["generate"].as_bool() != Some(false))
+        .unwrap_or_else(|| {
+            panic!(
+                "goal supervisor helper should send a generated websocket request after warmup; supervisor requests={supervisor_connection:#?}"
+            )
+        });
+    assert_eq!(
+        supervisor_generated_request["previous_response_id"].as_str(),
+        Some("resp-parent"),
+        "goal supervisor helpers must preserve the parent previous_response_id through session startup and websocket warmup"
+    );
+    assert_eq!(
+        supervisor_generated_request["prompt_cache_key"].as_str(),
+        Some(parent_prompt_cache_key.to_string().as_str()),
+        "goal supervisor helpers must keep the parent prompt cache key when using previous_response_id"
+    );
+    assert!(
+        request_tool_signatures(&supervisor_generated_request).contains("supervisor.close_self"),
+        "goal supervisor helper websocket requests must retain the supervisor tool namespace"
+    );
+
+    server.shutdown().await;
     Ok(())
 }
 

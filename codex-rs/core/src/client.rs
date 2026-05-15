@@ -446,10 +446,13 @@ impl ModelClient {
     }
 
     pub(crate) fn set_window_generation(&self, window_generation: u64) {
-        self.state
+        let previous_window_generation = self
+            .state
             .window_generation
-            .store(window_generation, Ordering::Relaxed);
-        self.store_cached_websocket_session(WebsocketSession::default());
+            .swap(window_generation, Ordering::Relaxed);
+        if previous_window_generation != window_generation {
+            self.store_cached_websocket_session(WebsocketSession::default());
+        }
     }
 
     pub(crate) fn advance_window_generation(&self) {
@@ -1531,11 +1534,16 @@ impl ModelClientSession {
             }
 
             let mut ws_request = self.prepare_websocket_request(ws_payload, &request);
-            self.websocket_session.last_request = Some(request);
-            self.websocket_session.last_response = None;
+            if !warmup {
+                self.websocket_session.last_request = Some(request);
+                self.websocket_session.last_response = None;
+            }
             let inference_trace_attempt = if warmup {
                 // Prewarm sends `generate=false`; it is connection setup, not a
                 // model inference attempt that should appear in rollout traces.
+                // It also must not replace an inherited `previous_response_id`;
+                // forked agents use that inherited response for their first
+                // generated request.
                 InferenceTraceAttempt::disabled()
             } else {
                 inference_trace.start_attempt()
@@ -1566,10 +1574,14 @@ impl ModelClientSession {
                 stream_result,
                 session_telemetry.clone(),
                 inference_trace_attempt,
-                Some(Arc::clone(&self.client.state)),
-                self.websocket_session.last_request.clone(),
+                (!warmup).then(|| Arc::clone(&self.client.state)),
+                (!warmup)
+                    .then(|| self.websocket_session.last_request.clone())
+                    .flatten(),
             );
-            self.websocket_session.last_response_rx = Some(last_request_rx);
+            if !warmup {
+                self.websocket_session.last_response_rx = Some(last_request_rx);
+            }
             return Ok(WebsocketStreamOutcome::Stream(stream));
         }
     }

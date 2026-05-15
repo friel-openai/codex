@@ -1644,6 +1644,118 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
 }
 
 #[tokio::test]
+async fn supervisor_close_self_ignores_replaced_goal() {
+    let (manager, parent_thread_id, helper_session, state_db, old_goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+    let replacement_goal = state_db
+        .replace_thread_goal(
+            parent_thread_id,
+            "replacement goal",
+            codex_state::ThreadGoalStatus::Active,
+            None,
+        )
+        .await
+        .expect("replacement goal should persist");
+
+    let output = SupervisorSelfCloseHandler
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "close_self",
+            function_payload(json!({"message": "stale helper complete"})),
+        ))
+        .await
+        .expect("stale supervisor helper should finish without completing the replacement goal");
+    let (content, success) = expect_text_output(output);
+    let result: serde_json::Value = serde_json::from_str(&content).expect("result should be json");
+
+    assert_eq!(success, Some(true));
+    assert_eq!(result, json!({"completed": false}));
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    let current_goal = state_db
+        .get_thread_goal(parent_thread_id)
+        .await
+        .expect("goal should read")
+        .expect("replacement goal should still exist");
+    assert_eq!(current_goal, replacement_goal);
+    let parent_thread = manager
+        .get_thread(parent_thread_id)
+        .await
+        .expect("parent thread should exist");
+    let parent_pending_input = parent_thread.codex.session.get_pending_input().await;
+    assert!(
+        parent_pending_input.is_empty(),
+        "stale supervisor.close_self must not send its final message to the parent after the goal has been replaced; pending_input={parent_pending_input:#?}"
+    );
+    assert_ne!(
+        old_goal_id, replacement_goal.goal_id,
+        "test setup must create a distinct replacement goal"
+    );
+}
+
+#[tokio::test]
+async fn supervisor_snooze_does_not_snooze_replacement_goal() {
+    let (manager, parent_thread_id, helper_session, state_db, old_goal_id) =
+        start_goal_supervisor_helper_for_test().await;
+    let helper_thread_id = helper_session.conversation_id;
+    let replacement_goal = state_db
+        .replace_thread_goal(
+            parent_thread_id,
+            "replacement goal",
+            codex_state::ThreadGoalStatus::Active,
+            None,
+        )
+        .await
+        .expect("replacement goal should persist");
+
+    let Err(err) = SupervisorSnoozeHandler
+        .handle(invocation(
+            helper_session.clone(),
+            helper_session.new_default_turn().await,
+            "snooze",
+            function_payload(json!({"delay_seconds": 30})),
+        ))
+        .await
+    else {
+        panic!("stale supervisor helper should not snooze a replacement goal");
+    };
+
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "supervisor.snooze is only available in goal supervisor check-in threads.".to_string()
+        )
+    );
+    assert_eq!(
+        manager.agent_control().get_status(helper_thread_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        state_db
+            .get_thread_goal_supervisor_snoozed_until_ms(
+                parent_thread_id,
+                &replacement_goal.goal_id
+            )
+            .await
+            .expect("replacement snooze state should read"),
+        None,
+        "stale supervisor.snooze must not persist snooze state for the replacement goal"
+    );
+    assert_eq!(
+        state_db
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &old_goal_id)
+            .await
+            .expect("old snooze state should read"),
+        None,
+        "stale supervisor.snooze must not persist snooze state for the old goal either"
+    );
+}
+
+#[tokio::test]
 async fn supervisor_compact_parent_context_submits_compaction_and_finishes_helper() {
     let (manager, parent_thread_id, helper_session, _state_db, _goal_id) =
         start_goal_supervisor_helper_for_test().await;

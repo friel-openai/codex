@@ -80,6 +80,13 @@ pub(crate) fn is_watchdog_agent_metadata(agent_metadata: &AgentMetadata) -> bool
     agent_metadata.agent_role.as_deref() == Some("watchdog")
 }
 
+fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+    matches!(
+        agent_metadata.agent_role.as_deref(),
+        Some("watchdog" | crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+    )
+}
+
 impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
@@ -126,7 +133,7 @@ impl AgentRegistry {
                 .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
-                        && !is_watchdog_agent_metadata(&metadata)
+                        && !is_uncounted_agent_metadata(&metadata)
                 })
         };
         if removed_counted_agent {
