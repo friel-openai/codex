@@ -253,7 +253,12 @@ async fn handle_message_submission(
             .await;
     }
 
-    Ok(FunctionToolOutput::from_text(String::new(), Some(true)))
+    let output = FunctionToolOutput::from_text(String::new(), Some(true));
+    if mode == MessageDeliveryMode::TriggerTurn && is_goal_supervisor_parent {
+        Ok(output.into_terminal_no_response())
+    } else {
+        Ok(output)
+    }
 }
 
 async fn resolve_message_target(

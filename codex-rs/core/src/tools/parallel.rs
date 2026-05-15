@@ -24,6 +24,11 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 use codex_tools::ToolSpec;
 
+pub(crate) enum ToolCallResponse {
+    Response(ResponseInputItem),
+    TerminalNoResponse,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolCallRuntime {
     router: Arc<ToolRouter>,
@@ -65,15 +70,17 @@ impl ToolCallRuntime {
         self,
         call: ToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ResponseInputItem, CodexErr>> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResponse, CodexErr>> {
         let error_call = call.clone();
         let future =
             self.handle_tool_call_with_source(call, ToolCallSource::Direct, cancellation_token);
         async move {
             match future.await {
-                Ok(response) => Ok(response.into_response()),
+                Ok(response) => Ok(Self::response_for_tool_result(response)),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
-                Err(other) => Ok(Self::failure_response(error_call, other)),
+                Err(other) => Ok(ToolCallResponse::Response(Self::failure_response(
+                    error_call, other,
+                ))),
             }
         }
         .in_current_span()
@@ -143,6 +150,14 @@ impl ToolCallRuntime {
 }
 
 impl ToolCallRuntime {
+    fn response_for_tool_result(response: AnyToolResult) -> ToolCallResponse {
+        if response.terminal_no_response() {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(response.into_response())
+        }
+    }
+
     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
         let message = err.to_string();
         match call.payload {
@@ -192,5 +207,34 @@ impl ToolCallRuntime {
         } else {
             format!("aborted by user after {secs:.1}s")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tools::context::FunctionToolOutput;
+
+    #[test]
+    fn terminal_tool_result_does_not_create_response_item() {
+        let result = AnyToolResult {
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            result: Box::new(
+                FunctionToolOutput::from_text(String::new(), Some(true))
+                    .into_terminal_no_response(),
+            ),
+            post_tool_use_payload: None,
+        };
+
+        assert!(
+            matches!(
+                ToolCallRuntime::response_for_tool_result(result),
+                ToolCallResponse::TerminalNoResponse
+            ),
+            "regression guard: terminal supervisor tools must not generate a function_call_output because a tool response asks the helper model to keep sampling after snooze, close_self, compact_parent_context, or followup_task target=parent"
+        );
     }
 }

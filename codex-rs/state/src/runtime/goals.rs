@@ -1491,7 +1491,11 @@ mod tests {
         );
 
         runtime
-            .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id, None)
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                thread_id,
+                &goal.goal_id,
+                /*snoozed_until_ms*/ None,
+            )
             .await
             .expect("supervisor snooze should clear");
         assert_eq!(

@@ -1297,6 +1297,10 @@ async fn supervisor_followup_task_parent_wakes_parent_and_finishes_helper() {
         ))
         .await
         .expect("supervisor helper should wake its parent");
+    assert!(
+        output.terminal_no_response(),
+        "regression guard: supervisor followup_task target=parent must end the helper turn without a function_call_output; otherwise the helper can keep sampling and send duplicate parent instructions"
+    );
     let (_, success) = expect_text_output(output);
 
     assert_eq!(success, Some(true));
@@ -1524,6 +1528,10 @@ async fn supervisor_snooze_finishes_helper_and_persists_snooze() {
         ))
         .await
         .expect("supervisor helper should snooze");
+    assert!(
+        output.terminal_no_response(),
+        "regression guard: supervisor.snooze must end the helper turn without a function_call_output; otherwise a snoozed helper can keep sampling and emit an extra ping"
+    );
     let (content, success) = expect_text_output(output);
     let result: serde_json::Value = serde_json::from_str(&content).expect("result should be json");
 
@@ -1587,6 +1595,10 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
         ))
         .await
         .expect("supervisor helper should self-close");
+    assert!(
+        output.terminal_no_response(),
+        "regression guard: supervisor.close_self must end the helper turn without a function_call_output; otherwise a closed helper can run another turn"
+    );
     let (content, success) = expect_text_output(output);
     let result: serde_json::Value = serde_json::from_str(&content).expect("result should be json");
 
@@ -1773,6 +1785,10 @@ async fn supervisor_compact_parent_context_submits_compaction_and_finishes_helpe
         ))
         .await
         .expect("supervisor helper should request parent compaction");
+    assert!(
+        output.terminal_no_response(),
+        "regression guard: supervisor.compact_parent_context must end the helper turn without a function_call_output; otherwise a compacting helper can continue after scheduling compaction"
+    );
     let (content, success) = expect_text_output(output);
     let result: serde_json::Value =
         serde_json::from_str(&content).expect("compact_parent_context result should be json");

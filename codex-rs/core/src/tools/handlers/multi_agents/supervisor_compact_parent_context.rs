@@ -91,6 +91,10 @@ impl ToolOutput for CompactParentContextResult {
         true
     }
 
+    fn terminal_no_response(&self) -> bool {
+        self.kind != "not_supervisor_helper"
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "compact_parent_context")
     }
