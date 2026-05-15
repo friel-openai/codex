@@ -11,6 +11,7 @@ use crate::agent::status::is_final;
 use crate::agent::watchdog::final_message_requests_watchdog_close;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::find_thread_path_by_id_str;
+use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout::RolloutRecorder;
 use crate::session::emit_subagent_session_started;
@@ -221,6 +222,10 @@ fn is_watchdog_helper_source(session_source: &SessionSource) -> bool {
     )
 }
 
+fn is_internal_supervisor_helper_source(session_source: &SessionSource) -> bool {
+    is_watchdog_helper_source(session_source) || is_goal_supervisor_helper_source(session_source)
+}
+
 fn unix_timestamp_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -410,7 +415,7 @@ impl AgentControl {
         let state = self.upgrade()?;
         let mut reservation = if session_source
             .as_ref()
-            .is_some_and(is_watchdog_helper_source)
+            .is_some_and(is_internal_supervisor_helper_source)
         {
             self.state.reserve_uncounted_spawn_slot()
         } else {
@@ -568,12 +573,17 @@ impl AgentControl {
             && notification_source
                 .as_ref()
                 .is_some_and(is_watchdog_helper_source);
+        let is_goal_supervisor_helper = options.fork_mode.is_some()
+            && notification_source
+                .as_ref()
+                .is_some_and(is_goal_supervisor_helper_source);
         // Pathless MultiAgentV2 children cannot emit routed inter-agent completion messages.
         // Keep the completion watcher so their parent still receives the fallback notification.
         let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
         if (!is_watchdog_agent_metadata(&agent_metadata)
             && (!new_thread.thread.enabled(Feature::MultiAgentV2) || pathless_multi_agent_child))
             || is_watchdog_helper
+            || is_goal_supervisor_helper
         {
             let child_reference = agent_metadata
                 .agent_path
@@ -607,7 +617,7 @@ impl AgentControl {
         inherited_thread_state: InheritedThreadState,
     ) -> CodexResult<crate::thread_manager::NewThread> {
         if options.fork_parent_spawn_call_id.is_none()
-            && !is_watchdog_helper_source(&session_source)
+            && !is_internal_supervisor_helper_source(&session_source)
         {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
@@ -718,6 +728,16 @@ impl AgentControl {
             }
             forked_rollout_items.extend(
                 self.watchdog_boot_context_items(state, parent_thread_id)
+                    .await,
+            );
+        } else if is_goal_supervisor_helper_source(&session_source) {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(role_prompt_item(role_prompt));
+            }
+            forked_rollout_items.extend(
+                self.supervisor_boot_context_items(state, parent_thread_id)
                     .await,
             );
         } else if options.fork_mode.is_some() {
@@ -842,7 +862,7 @@ impl AgentControl {
         }
         let state = self.upgrade()?;
         let state_db_ctx = state.state_db();
-        let mut reservation = if is_watchdog_helper_source(&session_source) {
+        let mut reservation = if is_internal_supervisor_helper_source(&session_source) {
             self.state.reserve_uncounted_spawn_slot()
         } else {
             self.state.reserve_spawn_slot(config.agent_max_threads)?
@@ -1239,6 +1259,77 @@ impl AgentControl {
         true
     }
 
+    pub(crate) async fn goal_supervisor_parent_for_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let state = self.upgrade().ok()?;
+        let helper_thread = state.get_thread(helper_thread_id).await.ok()?;
+        let snapshot = helper_thread.codex.thread_config_snapshot().await;
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_role: Some(agent_role),
+            ..
+        }) = snapshot.session_source
+        else {
+            return None;
+        };
+        (agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+            .then_some(parent_thread_id)
+    }
+
+    pub(crate) async fn finish_goal_supervisor_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return false;
+        };
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        match crate::goal_supervisor::finish_supervisor_helper(
+            &parent_thread.codex.session,
+            helper_thread_id,
+        )
+        .await
+        {
+            Ok(finished) => finished,
+            Err(err) => {
+                warn!("failed to finish goal supervisor helper {helper_thread_id}: {err}");
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn snooze_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+        delay_seconds: Option<u64>,
+    ) -> Option<u64> {
+        let parent_thread_id = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await?;
+        let state = self.upgrade().ok()?;
+        let parent_thread = state.get_thread(parent_thread_id).await.ok()?;
+        match crate::goal_supervisor::snooze_supervisor_helper(
+            &parent_thread.codex.session,
+            helper_thread_id,
+            delay_seconds,
+        )
+        .await
+        {
+            Ok(delay_seconds) => delay_seconds,
+            Err(err) => {
+                warn!("failed to snooze goal supervisor helper {helper_thread_id}: {err}");
+                None
+            }
+        }
+    }
+
     fn watchdog_manager(&self) -> CodexResult<&Arc<WatchdogManager>> {
         self.watchdogs.as_ref().ok_or_else(|| {
             CodexErr::UnsupportedOperation("watchdog manager unavailable".to_string())
@@ -1289,6 +1380,37 @@ impl AgentControl {
         };
         self.reported_agent_status(agent_id, thread.agent_status().await)
             .await
+    }
+
+    pub(crate) async fn has_running_user_visible_descendant(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let state = self.upgrade()?;
+        let mut children_by_parent = self.live_thread_spawn_children().await?;
+        let mut stack = children_by_parent
+            .remove(&parent_thread_id)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+
+        while let Some((thread_id, metadata)) = stack.pop() {
+            if !is_internal_supervisor_role(metadata.agent_role.as_deref()) {
+                let thread = state.get_thread(thread_id).await?;
+                if matches!(
+                    thread.agent_status().await,
+                    AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+                ) {
+                    return Ok(true);
+                }
+            }
+            if let Some(children) = children_by_parent.remove(&thread_id) {
+                stack.extend(children.into_iter().rev());
+            }
+        }
+
+        Ok(false)
     }
 
     pub(crate) fn register_session_root(
@@ -1439,6 +1561,9 @@ impl AgentControl {
             {
                 continue;
             }
+            if is_internal_supervisor_role(metadata.agent_role.as_deref()) {
+                continue;
+            }
             if resolved_prefix
                 .as_ref()
                 .is_some_and(|prefix| !agent_matches_prefix(metadata.agent_path.as_ref(), prefix))
@@ -1564,6 +1689,38 @@ impl AgentControl {
             })
     }
 
+    pub(crate) async fn compact_parent_for_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> CodexResult<WatchdogParentCompactionResult> {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return Ok(WatchdogParentCompactionResult::NotWatchdogHelper);
+        };
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        if parent_thread
+            .codex
+            .session
+            .active_turn
+            .lock()
+            .await
+            .is_some()
+        {
+            return Ok(WatchdogParentCompactionResult::ParentBusy { parent_thread_id });
+        }
+
+        state
+            .send_op(parent_thread_id, Op::Compact)
+            .await
+            .map(|submission_id| WatchdogParentCompactionResult::Submitted {
+                parent_thread_id,
+                submission_id,
+            })
+    }
+
     async fn watchdog_boot_context_items(
         &self,
         state: &Arc<ThreadManagerState>,
@@ -1592,6 +1749,30 @@ impl AgentControl {
                 agents,
             ))
             .collect()
+    }
+
+    async fn supervisor_boot_context_items(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RolloutItem> {
+        let owner_source = match state.get_thread(owner_thread_id).await {
+            Ok(owner_thread) => {
+                owner_thread
+                    .codex
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
+            Err(_) => SessionSource::Cli,
+        };
+        self.register_session_root(owner_thread_id, &owner_source);
+        let agents = self
+            .list_agents(&owner_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+
+        synthetic_watchdog_list_agents_items(owner_thread_id, agents)
     }
 
     /// Starts a detached watcher for sub-agents spawned from another thread.
@@ -1634,6 +1815,9 @@ impl AgentControl {
                 .finalize_watchdog_helper(child_thread_id, status.clone())
                 .await
             {
+                return;
+            }
+            if control.finish_goal_supervisor_helper(child_thread_id).await {
                 return;
             }
 
@@ -1723,6 +1907,10 @@ impl AgentControl {
         self.manager
             .upgrade()
             .ok_or_else(|| CodexErr::UnsupportedOperation("thread manager dropped".to_string()))
+    }
+
+    pub(crate) fn upgrade_for_tools(&self) -> CodexResult<Arc<ThreadManagerState>> {
+        self.upgrade()
     }
 
     async fn inherited_shell_snapshot_for_source(
@@ -1867,6 +2055,13 @@ impl AgentControl {
 
         Ok(descendants)
     }
+}
+
+fn is_internal_supervisor_role(agent_role: Option<&str>) -> bool {
+    matches!(
+        agent_role,
+        Some("watchdog" | crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+    )
 }
 
 async fn parent_prompt_cache_key_for_source(

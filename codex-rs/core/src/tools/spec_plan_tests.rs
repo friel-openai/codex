@@ -37,6 +37,8 @@ use crate::tools::spec_plan_types::ToolRegistryBuildMcpTool;
 use codex_app_server_protocol::AppInfo;
 use codex_features::Feature;
 use codex_features::Features;
+use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
@@ -396,6 +398,7 @@ fn goal_tools_require_goals_feature() {
     let model_info = model_info();
     let available_models = Vec::new();
     let mut features = Features::with_defaults();
+    features.disable(Feature::Goals);
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
         available_models: &available_models,
@@ -440,6 +443,8 @@ fn goal_tools_require_goals_feature() {
 fn watchdog_tools_are_eager_namespace_tools() {
     let model_info = model_info();
     let mut features = Features::with_defaults();
+    features.disable(Feature::Goals);
+    features.disable(Feature::GoalSupervisor);
     features.enable(Feature::AgentWatchdog);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -459,8 +464,9 @@ fn watchdog_tools_are_eager_namespace_tools() {
         &[],
     );
 
-    // Frodex keeps the watchdog namespace eager for every agent so parent and
-    // forked child requests have the same prompt-visible tool surface.
+    // Watchdog fallback keeps the watchdog namespace eager for every agent so
+    // parent and forked child requests have the same prompt-visible tool
+    // surface.
     assert_eq!(
         namespace_function_names(&tools, "watchdog"),
         vec![
@@ -470,6 +476,116 @@ fn watchdog_tools_are_eager_namespace_tools() {
         ]
     );
     let _handlers = handlers;
+}
+
+#[test]
+fn goal_supervisor_tools_replace_watchdog_tools_when_goals_are_supervised() {
+    let model_info = model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Goals);
+    features.enable(Feature::GoalSupervisor);
+    features.enable(Feature::AgentWatchdog);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    // Supervisor mode is goal-backed. It keeps the model-visible supervisor
+    // lifecycle tools in every request for prompt-cache stability, but does
+    // not expose the old watchdog namespace.
+    assert_lacks_tool_name(&tools, "watchdog");
+    assert_eq!(
+        namespace_function_names(&tools, "supervisor"),
+        vec![
+            "close_self".to_string(),
+            "snooze".to_string(),
+            "compact_parent_context".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
+    let model_info = search_capable_model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Apps);
+    features.enable(Feature::Plugins);
+    features.enable(Feature::ToolSearch);
+    features.enable(Feature::ToolSuggest);
+    let available_models = Vec::new();
+    let parent_tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let supervisor_tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::default(),
+            depth: 1,
+            agent_path: Some(
+                AgentPath::try_from("/root/goal_supervisor").expect("agent path should parse"),
+            ),
+            agent_nickname: None,
+            agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+        }),
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let discoverable_tools = || {
+        Some(vec![discoverable_connector(
+            "connector_2128aebfecb84f64a069897515042a44",
+            "Google Calendar",
+            "Plan events and schedules.",
+        )])
+    };
+    let (parent_tools, _) = build_specs_with_discoverable_tools(
+        &parent_tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        discoverable_tools(),
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+    let (supervisor_tools, _) = build_specs_with_discoverable_tools(
+        &supervisor_tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        discoverable_tools(),
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+
+    // Goal supervisors are full-history forks of the parent. A different
+    // model-visible tool set, order, schema, or parallel-call setting changes
+    // the prompt prefix and breaks prompt-cache reuse at exactly the boundary
+    // this feature is meant to preserve. Include discoverable tools here
+    // because request_plugin_install previously appeared in a fork but not in
+    // its parent, which made the backend render a different developer tool
+    // block before the fork point.
+    assert_eq!(supervisor_tools, parent_tools);
 }
 
 #[test]

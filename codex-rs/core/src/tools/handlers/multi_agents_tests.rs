@@ -2,6 +2,7 @@ use super::*;
 use crate::ThreadManager;
 use crate::agent::WatchdogRegistration;
 use crate::config::AgentRoleConfig;
+use crate::config::Config;
 use crate::config::DEFAULT_AGENT_MAX_DEPTH;
 use crate::function_tool::FunctionCallError;
 use crate::init_state_db;
@@ -115,6 +116,21 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 
 fn parse_agent_id(id: &str) -> ThreadId {
     ThreadId::from_string(id).expect("agent id should be valid")
+}
+
+fn enable_legacy_watchdog_feature(config: &mut Config) {
+    config
+        .features
+        .disable(Feature::Goals)
+        .expect("test config should allow goals feature update");
+    config
+        .features
+        .disable(Feature::GoalSupervisor)
+        .expect("test config should allow goal supervisor feature update");
+    config
+        .features
+        .enable(Feature::AgentWatchdog)
+        .expect("test config should allow watchdog feature update");
 }
 
 fn thread_manager() -> ThreadManager {
@@ -561,10 +577,7 @@ fn multi_agent_v2_spawn_watchdog_role_returns_inert_handle_and_ignores_fork_turn
         session.services.agent_control = agent_control.clone();
         session.conversation_id = root.thread_id;
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -606,16 +619,42 @@ fn multi_agent_v2_spawn_watchdog_role_returns_inert_handle_and_ignores_fork_turn
 }
 
 #[test]
+fn multi_agent_v2_spawn_watchdog_role_is_rejected_in_goal_supervisor_mode() {
+    run_large_stack_async(|| async {
+        let (session, turn) = make_session_and_context().await;
+        let Err(err) = SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+        else {
+            panic!("goal supervisor mode should reject public watchdog spawns");
+        };
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
+            )
+        );
+    });
+}
+
+#[test]
 fn multi_agent_v2_spawn_watchdog_role_ignores_thread_limit() {
     run_large_stack_async(|| async {
         let (mut session, mut turn) = make_session_and_context().await;
         let manager = thread_manager();
         let mut config = (*turn.config).clone();
         config.agent_max_threads = Some(1);
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -673,10 +712,7 @@ fn multi_agent_v2_spawn_watchdog_role_does_not_count_against_thread_limit() {
         let manager = thread_manager();
         let mut config = (*turn.config).clone();
         config.agent_max_threads = Some(1);
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -822,10 +858,7 @@ fn spawn_agent_watchdog_role_returns_inert_handle() {
         let agent_control = manager.agent_control();
         session.services.agent_control = agent_control.clone();
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         turn.config = Arc::new(config);
 
         let output = SpawnAgentHandler::default()
@@ -998,10 +1031,7 @@ async fn watchdog_snooze_suppresses_helper_and_clears_active_helper() {
     session.conversation_id = helper_thread_id;
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
+    enable_legacy_watchdog_feature(&mut config);
     turn.config = Arc::new(config.clone());
 
     agent_control
@@ -1090,10 +1120,7 @@ async fn multi_agent_v2_watchdog_followup_task_parent_wakes_owner_and_finishes_h
     let helper_thread_id = session.conversation_id;
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow watchdog feature update");
+    enable_legacy_watchdog_feature(&mut config);
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -1182,10 +1209,7 @@ async fn multi_agent_v2_watchdog_send_message_parent_is_rejected() {
     let helper_thread_id = session.conversation_id;
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow watchdog feature update");
+    enable_legacy_watchdog_feature(&mut config);
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -1232,7 +1256,7 @@ async fn multi_agent_v2_watchdog_send_message_parent_is_rejected() {
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "watchdog check-in threads must use followup_task with target `parent` to message their parent."
+            "supervisor check-in threads must use followup_task with target `parent` to message their parent."
                 .to_string()
         )
     );
@@ -1256,10 +1280,7 @@ fn multi_agent_v2_followup_task_to_watchdog_handle_is_rejected() {
         session.services.agent_control = manager.agent_control();
         session.conversation_id = root.thread_id;
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow watchdog feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -1339,10 +1360,7 @@ fn multi_agent_v2_send_message_to_watchdog_handle_is_rejected() {
         session.services.agent_control = manager.agent_control();
         session.conversation_id = root.thread_id;
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow watchdog feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -1433,10 +1451,7 @@ async fn watchdog_close_self_notifies_owner_and_unregisters_handle() {
         .expect("watchdog handle should start");
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
+    enable_legacy_watchdog_feature(&mut config);
     turn.config = Arc::new(config.clone());
 
     agent_control
@@ -1563,10 +1578,7 @@ fn watchdog_close_self_removes_watchdog_handle_from_list_agents() {
             )
             .await;
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -2175,7 +2187,7 @@ async fn multi_agent_v2_followup_task_rejects_parent_target_from_non_watchdog_ch
     assert_eq!(
         err,
         FunctionCallError::RespondToModel(
-            "Only watchdog check-in threads can use followup_task with target `parent`; use send_message for parent updates."
+            "Only supervisor check-in threads can use followup_task with target `parent`; use send_message for parent updates."
                 .to_string()
         )
     );
@@ -2427,7 +2439,7 @@ async fn multi_agent_v2_list_agents_omits_closed_agents() {
 }
 
 #[test]
-fn watchdog_handle_is_listed_and_close_agent_removes_it() {
+fn watchdog_handle_is_hidden_and_close_agent_removes_it() {
     run_large_stack_async(|| async {
         let (mut session, mut turn) = make_session_and_context().await;
         let manager = thread_manager();
@@ -2439,10 +2451,7 @@ fn watchdog_handle_is_listed_and_close_agent_removes_it() {
         session.services.agent_control = agent_control.clone();
         session.conversation_id = root.thread_id;
         let mut config = (*turn.config).clone();
-        config
-            .features
-            .enable(Feature::AgentWatchdog)
-            .expect("test config should allow feature update");
+        enable_legacy_watchdog_feature(&mut config);
         config
             .features
             .enable(Feature::MultiAgentV2)
@@ -2505,17 +2514,18 @@ fn watchdog_handle_is_listed_and_close_agent_removes_it() {
                 function_payload(json!({})),
             ))
             .await
-            .expect("list_agents should include the watchdog handle");
+            .expect("list_agents should succeed");
         let (list_content, list_success) = expect_text_output(list_output);
         let list_result: ListAgentsResult =
             serde_json::from_str(&list_content).expect("list_agents result should be json");
         assert_eq!(list_success, Some(true));
-        let watchdog_listing = list_result
-            .agents
-            .iter()
-            .find(|agent| agent.agent_name == watchdog_id.to_string())
-            .expect("list_agents should include the watchdog handle");
-        assert_eq!(watchdog_listing.agent_status, json!("running"));
+        assert!(
+            !list_result
+                .agents
+                .iter()
+                .any(|agent| agent.agent_name == watchdog_id.to_string()),
+            "watchdog handles are lifecycle internals and should not be exposed as targetable list_agents entries"
+        );
         assert!(
             !list_result
                 .agents
@@ -3357,10 +3367,7 @@ async fn send_input_rejects_watchdog_handle() {
     session.services.agent_control = agent_control.clone();
     session.conversation_id = root.thread_id;
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow watchdog feature update");
+    enable_legacy_watchdog_feature(&mut config);
     turn.config = Arc::new(config.clone());
     agent_control
         .register_watchdog(WatchdogRegistration {
@@ -3602,10 +3609,7 @@ async fn resume_agent_rejects_watchdog_handle() {
     session.services.agent_control = agent_control.clone();
     session.conversation_id = root.thread_id;
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow watchdog feature update");
+    enable_legacy_watchdog_feature(&mut config);
     turn.config = Arc::new(config.clone());
     agent_control
         .register_watchdog(WatchdogRegistration {
@@ -4034,10 +4038,7 @@ async fn wait_agent_rejects_only_watchdog_handles() {
         .expect("watchdog handle should start");
     session.services.agent_control = agent_control.clone();
     let mut config = (*turn.config).clone();
-    config
-        .features
-        .enable(Feature::AgentWatchdog)
-        .expect("test config should allow feature update");
+    enable_legacy_watchdog_feature(&mut config);
     turn.config = Arc::new(config);
     agent_control
         .register_watchdog(WatchdogRegistration {

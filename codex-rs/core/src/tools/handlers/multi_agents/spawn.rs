@@ -71,6 +71,14 @@ impl ToolHandler for Handler {
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
+        if role_name == Some("watchdog")
+            && turn.config.features.enabled(Feature::Goals)
+            && turn.config.features.enabled(Feature::GoalSupervisor)
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string(),
+            ));
+        }
         let watchdog_interval_s = watchdog_interval_for_role(&turn.config, role_name);
         let is_watchdog = watchdog_interval_s.is_some();
         if is_watchdog && !turn.config.features.enabled(Feature::AgentWatchdog) {
@@ -104,7 +112,9 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        let effective_role_name = if args.fork_context && !is_watchdog {
+        let effective_role_name = if is_watchdog {
+            role_name
+        } else if args.fork_context {
             None
         } else {
             apply_requested_spawn_agent_model_overrides(

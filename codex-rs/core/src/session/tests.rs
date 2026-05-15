@@ -7943,6 +7943,10 @@ async fn active_goal_continuation_runs_again_after_no_tool_turn() -> anyhow::Res
             .features
             .enable(Feature::Goals)
             .expect("goal mode should be enableable in tests");
+        config
+            .features
+            .disable(Feature::GoalSupervisor)
+            .expect("direct goal continuation fallback should be disableable in tests");
     });
     let test = builder.build(&server).await?;
     let responses = mount_sse_sequence(
@@ -8038,6 +8042,10 @@ async fn pending_request_user_input_does_not_spawn_extra_goal_continuation() -> 
             .features
             .enable(Feature::Goals)
             .expect("goal mode should be enableable in tests");
+        config
+            .features
+            .disable(Feature::GoalSupervisor)
+            .expect("direct goal continuation fallback should be disableable in tests");
         config
             .features
             .enable(Feature::DefaultModeRequestUserInput)
@@ -9642,8 +9650,35 @@ async fn root_agent_prompt_is_inline_developer_context_not_session_instructions(
                     content_item,
                     ContentItem::InputText { text }
                         if text.contains("# You are the Root Agent")
+                            && text.contains("## Goal Supervisor")
                 ))
     )));
+}
+
+#[tokio::test]
+async fn supervisor_agent_prompt_is_loaded_for_goal_supervisor_helpers() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::default(),
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("Test Supervisor".to_string()),
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
+        .await
+        .expect("goal supervisor helpers need a role prompt");
+
+    assert!(prompt.contains("You are also a **goal supervisor**"));
+    assert!(prompt.contains("Call `supervisor.close_self`"));
+    assert!(prompt.contains("Call `followup_task` with `\"target\":\"parent\"`"));
+    assert!(!prompt.contains("You are also a **watchdog**"));
 }
 
 #[tokio::test]

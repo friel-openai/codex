@@ -103,6 +103,13 @@ async fn handle_message_submission(
         .watchdog_owner_for_active_helper(session.conversation_id)
         .await;
     let is_watchdog_parent = watchdog_owner_thread_id == Some(receiver_thread_id);
+    let goal_supervisor_parent_thread_id = session
+        .services
+        .agent_control
+        .goal_supervisor_parent_for_helper(session.conversation_id)
+        .await;
+    let is_goal_supervisor_parent = goal_supervisor_parent_thread_id == Some(receiver_thread_id);
+    let is_supervisor_parent = is_watchdog_parent || is_goal_supervisor_parent;
     let receiver_agent = session
         .services
         .agent_control
@@ -119,19 +126,19 @@ async fn handle_message_submission(
                 .to_string(),
         ));
     }
-    if mode == MessageDeliveryMode::QueueOnly && is_watchdog_parent {
+    if mode == MessageDeliveryMode::QueueOnly && is_supervisor_parent {
         return Err(FunctionCallError::RespondToModel(
-            "watchdog check-in threads must use followup_task with target `parent` to message their parent."
+            "supervisor check-in threads must use followup_task with target `parent` to message their parent."
                 .to_string(),
         ));
     }
     if mode == MessageDeliveryMode::TriggerTurn
         && is_direct_parent
-        && !is_watchdog_parent
+        && !is_supervisor_parent
         && target_is_parent
     {
         return Err(FunctionCallError::RespondToModel(
-            "Only watchdog check-in threads can use followup_task with target `parent`; use send_message for parent updates."
+            "Only supervisor check-in threads can use followup_task with target `parent`; use send_message for parent updates."
                 .to_string(),
         ));
     }
@@ -140,15 +147,15 @@ async fn handle_message_submission(
             .agent_path
             .as_ref()
             .is_some_and(AgentPath::is_root)
-        && !is_watchdog_parent
+        && !is_supervisor_parent
     {
         return Err(FunctionCallError::RespondToModel(
             "Tasks can't be assigned to the root agent".to_string(),
         ));
     }
-    if mode == MessageDeliveryMode::TriggerTurn && is_direct_parent && !is_watchdog_parent {
+    if mode == MessageDeliveryMode::TriggerTurn && is_direct_parent && !is_supervisor_parent {
         return Err(FunctionCallError::RespondToModel(
-            "Only watchdog check-in threads can use followup_task with target `parent`; use send_message for parent updates."
+            "Only supervisor check-in threads can use followup_task with target `parent`; use send_message for parent updates."
                 .to_string(),
         ));
     }
@@ -237,6 +244,13 @@ async fn handle_message_submission(
                     "failed to finish watchdog helper after followup_task: {err}"
                 ))
             })?;
+    }
+    if mode == MessageDeliveryMode::TriggerTurn && is_goal_supervisor_parent {
+        let _ = session
+            .services
+            .agent_control
+            .finish_goal_supervisor_helper(session.conversation_id)
+            .await;
     }
 
     Ok(FunctionToolOutput::from_text(String::new(), Some(true)))

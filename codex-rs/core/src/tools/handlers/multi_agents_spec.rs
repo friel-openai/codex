@@ -286,7 +286,7 @@ pub fn create_watchdog_close_self_tool() -> ToolSpec {
         description: "Watchdog-only: send an optional final message to the parent agent, stop future wakeups for this watchdog, and end the current check-in immediately. Use this tool, not a final assistant message, when the watchdog must shut down."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(close_agent_output_schema()),
     })
@@ -313,7 +313,7 @@ pub fn create_compact_parent_context_tool() -> ToolSpec {
         description: "Watchdog-only: request compaction for this watchdog helper's parent/root thread when it is idle and appears stuck."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: None,
     })
@@ -341,7 +341,7 @@ pub fn create_watchdog_snooze_tool() -> ToolSpec {
         description: "Watchdog-only: keep this watchdog running, skip reporting anything for this check-in, and wait before the next wakeup."
             .to_string(),
         strict: false,
-        defer_loading: Some(true),
+        defer_loading: None,
         parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
         output_schema: Some(watchdog_snooze_output_schema()),
     })
@@ -366,6 +366,102 @@ pub fn create_watchdog_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
         description:
             "Watchdog-only tools for parent-thread recovery and watchdog check-in lifecycle control."
                 .to_string(),
+        tools,
+    })
+}
+
+pub fn create_supervisor_close_self_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "message".to_string(),
+        JsonSchema::string(Some(
+            "Optional final message sent to the parent agent before marking the goal complete."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_self".to_string(),
+        description: "Supervisor-only: mark the active goal complete, optionally send a final message to the parent agent, and end this supervisor check-in immediately."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(close_agent_output_schema()),
+    })
+}
+
+pub fn create_supervisor_compact_parent_context_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Short reason why the parent thread should be compacted.".to_string(),
+            )),
+        ),
+        (
+            "evidence".to_string(),
+            JsonSchema::string(Some(
+                "Specific observation that the parent thread is idle or stuck.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Supervisor-only: request compaction for this supervisor helper's parent thread when it is idle and stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+pub fn create_supervisor_snooze_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "delay_seconds".to_string(),
+            JsonSchema::number(Some(
+                "Optional snooze delay in seconds. If omitted, the supervisor uses the configured interval."
+                    .to_string(),
+            )),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Optional short reason for snoozing this check-in.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "snooze".to_string(),
+        description: "Supervisor-only: keep the active goal supervised, send no message for the current check-in, and wait before the next check-in."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(watchdog_snooze_output_schema()),
+    })
+}
+
+pub fn create_supervisor_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Freeform(_)
+            | ToolSpec::ImageGeneration { .. }
+            | ToolSpec::LocalShell { .. }
+            | ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::WebSearch { .. } => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "supervisor".to_string(),
+        description: "Supervisor-only tools for active-goal lifecycle control.".to_string(),
         tools,
     })
 }

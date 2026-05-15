@@ -1696,6 +1696,69 @@ async fn get_status_returns_pending_init_for_new_thread() {
 }
 
 #[tokio::test]
+async fn supervisor_continuation_waits_for_user_visible_subagents() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+    let supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(
+            AgentPath::try_from("/root/goal_supervisor").expect("agent path should parse"),
+        ),
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+
+    harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("internal supervisor helper"),
+            Some(supervisor_source),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("internal supervisor helper should spawn");
+
+    // Goal supervisor check-ins must not trigger while real subagents are
+    // running, but internal supervisor helpers are implementation details and
+    // do not count as user-visible work.
+    assert!(
+        !harness
+            .control
+            .has_running_user_visible_descendant(parent_thread_id)
+            .await
+            .expect("descendant check should succeed")
+    );
+
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(AgentPath::try_from("/root/worker").expect("agent path should parse")),
+        agent_nickname: None,
+        agent_role: None,
+    });
+    harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("worker task"),
+            Some(worker_source),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("worker should spawn");
+
+    assert!(
+        harness
+            .control
+            .has_running_user_visible_descendant(parent_thread_id)
+            .await
+            .expect("descendant check should succeed")
+    );
+}
+
+#[tokio::test]
 async fn subscribe_status_errors_for_missing_thread() {
     let harness = AgentControlHarness::new().await;
     let thread_id = ThreadId::new();
@@ -2508,9 +2571,9 @@ while True:
         "wait_agent",
         "list_agents",
         "close_agent",
-        "watchdog.close_self",
-        "watchdog.snooze",
-        "watchdog.compact_parent_context",
+        "supervisor.close_self",
+        "supervisor.snooze",
+        "supervisor.compact_parent_context",
     ] {
         assert!(
             child_tool_signatures.contains(expected_tool),

@@ -354,6 +354,28 @@ fn agent_watchdog_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn goals_is_experimental_and_enabled_by_default() {
+    assert_eq!(feature_for_key("goals"), Some(Feature::Goals));
+    assert!(matches!(Feature::Goals.stage(), Stage::Experimental { .. }));
+    assert_eq!(Feature::Goals.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::Goals));
+}
+
+#[test]
+fn goal_supervisor_is_experimental_and_enabled_by_default() {
+    assert_eq!(
+        feature_for_key("goal_supervisor"),
+        Some(Feature::GoalSupervisor)
+    );
+    assert!(matches!(
+        Feature::GoalSupervisor.stage(),
+        Stage::Experimental { .. }
+    ));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::GoalSupervisor));
+}
+
+#[test]
 fn enable_fanout_is_under_development() {
     assert_eq!(Feature::SpawnCsv.stage(), Stage::UnderDevelopment);
     assert_eq!(Feature::SpawnCsv.default_enabled(), false);

@@ -211,6 +211,8 @@ pub enum Feature {
     GuardianApproval,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
+    /// Run active goals through an internal supervisor helper before waking the parent.
+    GoalSupervisor,
     /// Enable collaboration modes (Plan, Default).
     /// Kept for config backward compatibility; behavior is always collaboration-modes-enabled.
     CollaborationModes,
@@ -1086,7 +1088,17 @@ pub const FEATURES: &[FeatureSpec] = &[
             menu_description: "Set a persistent goal Codex can continue over time",
             announcement: "",
         },
-        default_enabled: false,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::GoalSupervisor,
+        key: "goal_supervisor",
+        stage: Stage::Experimental {
+            name: "Goal supervisor",
+            menu_description: "Use an internal supervisor helper for active goal continuation",
+            announcement: "",
+        },
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::CollaborationModes,
