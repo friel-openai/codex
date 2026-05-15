@@ -16055,6 +16055,20 @@
                   "null"
                 ]
               },
+              "newAgentNickname": {
+                "description": "Nickname assigned to the spawned agent, when applicable.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "newAgentRole": {
+                "description": "Role assigned to the spawned agent, when applicable.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "prompt": {
                 "description": "Prompt text sent as part of the collab tool call, when available.",
                 "type": [

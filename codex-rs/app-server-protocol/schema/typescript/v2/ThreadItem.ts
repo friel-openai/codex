@@ -85,6 +85,14 @@ senderThreadId: string,
  */
 receiverThreadIds: Array<string>,
 /**
+ * Nickname assigned to the spawned agent, when applicable.
+ */
+newAgentNickname: string | null,
+/**
+ * Role assigned to the spawned agent, when applicable.
+ */
+newAgentRole: string | null,
+/**
  * Prompt text sent as part of the collab tool call, when available.
  */
 prompt: string | null,

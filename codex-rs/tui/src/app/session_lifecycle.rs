@@ -29,17 +29,7 @@ impl App {
         let collab_enabled = self.config.features.enabled(Feature::Collab);
         let selectable_threads = self
             .agent_navigation
-            .ordered_threads()
-            .into_iter()
-            .filter(|(thread_id, entry)| {
-                let is_primary = Some(*thread_id) == self.primary_thread_id;
-                let is_watchdog = entry.agent_role.as_deref() == Some("watchdog");
-                let is_open_agent = !entry.is_closed && !is_watchdog;
-                let is_existing_replay_thread = self.thread_event_channels.contains_key(thread_id)
-                    && entry.agent_role.is_none();
-                is_primary || is_open_agent || (is_existing_replay_thread && !is_watchdog)
-            })
-            .collect::<Vec<_>>();
+            .selectable_threads(self.primary_thread_id);
         let has_non_primary_agent_thread = selectable_threads
             .iter()
             .any(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id);
@@ -159,16 +149,32 @@ impl App {
             Ok(thread) => {
                 self.upsert_agent_picker_thread(
                     thread_id,
-                    thread.agent_nickname.or_else(|| {
-                        existing_entry
-                            .as_ref()
-                            .and_then(|entry| entry.agent_nickname.clone())
-                    }),
-                    thread.agent_role.or_else(|| {
-                        existing_entry
-                            .as_ref()
-                            .and_then(|entry| entry.agent_role.clone())
-                    }),
+                    thread
+                        .agent_nickname
+                        .or_else(|| {
+                            super::loaded_threads::thread_spawn_agent_metadata(
+                                &thread.source,
+                                "agent_nickname",
+                            )
+                        })
+                        .or_else(|| {
+                            existing_entry
+                                .as_ref()
+                                .and_then(|entry| entry.agent_nickname.clone())
+                        }),
+                    thread
+                        .agent_role
+                        .or_else(|| {
+                            super::loaded_threads::thread_spawn_agent_metadata(
+                                &thread.source,
+                                "agent_role",
+                            )
+                        })
+                        .or_else(|| {
+                            existing_entry
+                                .as_ref()
+                                .and_then(|entry| entry.agent_role.clone())
+                        }),
                     matches!(
                         thread.status,
                         codex_app_server_protocol::ThreadStatus::NotLoaded

@@ -1576,10 +1576,10 @@ fn token_usage_info_from_app_server(token_usage: ThreadTokenUsage) -> TokenUsage
 impl ChatWidget {
     /// Stores or overwrites the cached nickname and role for a collab agent thread.
     ///
-    /// Called by `App::upsert_agent_picker_thread` and `App::replace_chat_widget` to keep the
-    /// rendering metadata in sync with the navigation cache. History cells emitted before this
-    /// metadata arrives keep their original label, but the live subagent panel is refreshed so a
-    /// placeholder watchdog row gains its watchdog role and nickname once `ThreadStarted` arrives.
+    /// Called by `App::upsert_agent_picker_thread`, `App::replace_chat_widget`, and spawn-complete
+    /// notifications to keep rendering metadata in sync with the navigation cache. The spawn item
+    /// itself now carries nickname/role metadata, so the first emitted watchdog history row can use
+    /// the correct label instead of waiting for a later `ThreadStarted` notification.
     pub(crate) fn set_collab_agent_metadata(
         &mut self,
         thread_id: ThreadId,
@@ -4046,6 +4046,8 @@ impl ChatWidget {
 
         let ThreadItem::CollabAgentToolCall {
             receiver_thread_ids,
+            new_agent_nickname,
+            new_agent_role,
             prompt,
             agents_states,
             ..
@@ -4060,6 +4062,13 @@ impl ChatWidget {
         match tool {
             CollabAgentTool::SpawnAgent => {
                 if update_subagent_panel && let Some(receiver_thread_id) = first_receiver {
+                    if new_agent_nickname.is_some() || new_agent_role.is_some() {
+                        self.set_collab_agent_metadata(
+                            receiver_thread_id,
+                            new_agent_nickname.clone(),
+                            new_agent_role.clone(),
+                        );
+                    }
                     let metadata = self.collab_agent_metadata(receiver_thread_id);
                     let status = agents_states
                         .get(&receiver_thread_id.to_string())
@@ -6254,6 +6263,8 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                new_agent_nickname,
+                new_agent_role,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6265,6 +6276,8 @@ impl ChatWidget {
                     status,
                     sender_thread_id,
                     receiver_thread_ids,
+                    new_agent_nickname,
+                    new_agent_role,
                     prompt,
                     model,
                     reasoning_effort,

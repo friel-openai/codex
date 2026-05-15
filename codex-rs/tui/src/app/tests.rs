@@ -1267,6 +1267,8 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1302,6 +1304,8 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::Failed,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -2308,6 +2312,39 @@ async fn open_agent_picker_allows_existing_agent_threads_when_feature_is_disable
     assert_matches!(
         app_event_rx.try_recv(),
         Ok(AppEvent::SelectAgentThread(selected_thread_id)) if selected_thread_id == thread_id
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn open_agent_picker_hides_closed_watchdog_replay_rows_when_feature_is_disabled() -> Result<()>
+{
+    // Regression guard for the May 14 `/agent` leak: an inert watchdog replay channel with empty
+    // live metadata must not become a selectable anonymous `Agent` row.
+    let (mut app, mut app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
+    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
+        app.chat_widget.config_ref(),
+    ))
+    .await
+    .expect("embedded app server");
+    let _ = app.config.features.disable(Feature::Collab);
+    let thread_id = ThreadId::new();
+    app.thread_event_channels
+        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    app.agent_navigation.upsert(
+        thread_id,
+        Some("Pauli".to_string()),
+        Some("watchdog".to_string()),
+        /*is_closed*/ true,
+    );
+
+    Box::pin(app.open_agent_picker(&mut app_server)).await;
+    app.chat_widget
+        .handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(
+        app_event_rx.try_recv(),
+        Ok(AppEvent::UpdateFeatureFlags { updates }) if updates == vec![(Feature::Collab, true)]
     );
     Ok(())
 }
@@ -4976,6 +5013,8 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            new_agent_nickname: None,
+                            new_agent_role: None,
                             prompt: None,
                             model: None,
                             reasoning_effort: None,

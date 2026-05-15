@@ -67,6 +67,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -86,6 +88,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -534,6 +538,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -557,6 +563,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -608,6 +616,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -628,6 +638,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -655,6 +667,57 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
 }
 
 #[tokio::test]
+async fn live_watchdog_spawn_uses_spawn_item_metadata_before_thread_started() {
+    // Regression guard for the May 14 watchdog transcript: the spawn-complete item arrived before
+    // a later thread metadata notification, so the TUI rendered a bare thread ID instead of a
+    // named `[watchdog]` spawn row.
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000002002").expect("valid thread id");
+    let watchdog_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000002003").expect("valid thread id");
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog-direct-metadata".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: Some("Pauli".to_string()),
+                new_agent_role: Some("watchdog".to_string()),
+                prompt: Some("Watch the parent.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    watchdog_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        inserted.contains("Spawned Pauli [watchdog]"),
+        "expected direct spawn metadata to classify the watchdog before ThreadStarted, got {inserted:?}"
+    );
+}
+
+#[tokio::test]
 async fn subagent_panel_mounts_watchdog_spawn() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let sender_thread_id =
@@ -678,6 +741,8 @@ async fn subagent_panel_mounts_watchdog_spawn() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: Some("watch-buildpando-rpc-context-tracing-spike".to_string()),
+                new_agent_role: Some("watchdog".to_string()),
                 prompt: Some(
                     "Watch /build/pando-rpc-context-tracing-spike work on Pando RPC accounting tracing spike. Goal: end-to-end no-explicit...".to_string(),
                 ),
@@ -730,6 +795,8 @@ async fn subagent_panel_reclassifies_watchdog_after_late_metadata() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Every time you start, respond with exactly pong.".to_string()),
                 model: Some("gpt-5.4".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::Low),
@@ -793,6 +860,8 @@ async fn subagent_panel_renders_subagent_and_watchdog_rows() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![worker_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(
                     "Audit the TUI app-server event flow and report visible regressions."
                         .to_string(),
@@ -827,6 +896,8 @@ async fn subagent_panel_renders_subagent_and_watchdog_rows() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Watch the worker for stalled progress.".to_string()),
                 model: Some("gpt-5.4".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::Low),
@@ -879,6 +950,8 @@ async fn subagent_notification_completion_hides_subagent_panel_row() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![worker_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Compute the answer.".to_string()),
                 model: Some("gpt-5.4".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::Low),
@@ -967,6 +1040,8 @@ async fn watchdog_goodbye_message_closes_subagent_panel_row() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(
                     "Every time you start, respond with exactly `ping $RANDOM ($SUM)`.".to_string(),
                 ),
@@ -1010,6 +1085,8 @@ async fn watchdog_goodbye_message_closes_subagent_panel_row() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,

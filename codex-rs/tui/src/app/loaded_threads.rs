@@ -107,7 +107,7 @@ fn thread_spawn_parent_thread_id(
     ThreadId::from_string(parent_thread_id).ok()
 }
 
-fn thread_spawn_agent_metadata(
+pub(crate) fn thread_spawn_agent_metadata(
     source: &codex_app_server_protocol::SessionSource,
     field: &str,
 ) -> Option<String> {

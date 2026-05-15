@@ -79,6 +79,8 @@ pub fn item_event_to_server_notification(
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(begin_event.prompt),
                 model: Some(begin_event.model),
                 reasoning_effort: Some(begin_event.reasoning_effort),
@@ -118,6 +120,8 @@ pub fn item_event_to_server_notification(
                 status,
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
+                new_agent_nickname: end_event.new_agent_nickname,
+                new_agent_role: end_event.new_agent_role,
                 prompt: Some(end_event.prompt),
                 model: Some(end_event.model),
                 reasoning_effort: Some(end_event.reasoning_effort),
@@ -138,6 +142,8 @@ pub fn item_event_to_server_notification(
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(begin_event.prompt),
                 model: None,
                 reasoning_effort: None,
@@ -166,6 +172,8 @@ pub fn item_event_to_server_notification(
                 status,
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id.clone()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(end_event.prompt),
                 model: None,
                 reasoning_effort: None,
@@ -190,6 +198,8 @@ pub fn item_event_to_server_notification(
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -226,6 +236,8 @@ pub fn item_event_to_server_notification(
                 status,
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -245,6 +257,8 @@ pub fn item_event_to_server_notification(
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -278,6 +292,8 @@ pub fn item_event_to_server_notification(
                 status,
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -297,6 +313,8 @@ pub fn item_event_to_server_notification(
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -330,6 +348,8 @@ pub fn item_event_to_server_notification(
                 status,
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -453,6 +473,8 @@ pub fn item_event_to_server_notification(
 mod tests {
     use super::*;
     use codex_protocol::ThreadId;
+    use codex_protocol::protocol::AgentStatus;
+    use codex_protocol::protocol::CollabAgentSpawnEndEvent;
     use codex_protocol::protocol::CollabResumeBeginEvent;
     use codex_protocol::protocol::CollabResumeEndEvent;
     use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
@@ -492,6 +514,61 @@ mod tests {
     }
 
     #[test]
+    fn collab_spawn_end_preserves_spawned_agent_metadata() {
+        // Regression guard for the May 2026 watchdog TUI bug: the core spawn-end event already
+        // carried the watchdog nickname and role, but app-server v2 dropped them before the TUI
+        // rendered the first live history row.
+        let event = CollabAgentSpawnEndEvent {
+            call_id: "call-watchdog".to_string(),
+            completed_at_ms: 456,
+            sender_thread_id: ThreadId::new(),
+            new_thread_id: Some(ThreadId::new()),
+            new_agent_nickname: Some("Pauli".to_string()),
+            new_agent_role: Some("watchdog".to_string()),
+            prompt: "Keep the parent moving.".to_string(),
+            model: "gpt-5.4".to_string(),
+            reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
+            status: AgentStatus::PendingInit,
+        };
+        let receiver_id = event
+            .new_thread_id
+            .expect("spawned watchdog thread")
+            .to_string();
+        let notification = item_event_to_server_notification(
+            EventMsg::CollabAgentSpawnEnd(event.clone()),
+            "thread-watchdog",
+            "turn-watchdog",
+        );
+
+        assert_item_completed_server_notification(
+            notification,
+            ItemCompletedNotification {
+                thread_id: "thread-watchdog".to_string(),
+                turn_id: "turn-watchdog".to_string(),
+                completed_at_ms: event.completed_at_ms,
+                item: ThreadItem::CollabAgentToolCall {
+                    id: event.call_id,
+                    tool: CollabAgentTool::SpawnAgent,
+                    status: CollabAgentToolCallStatus::Completed,
+                    sender_thread_id: event.sender_thread_id.to_string(),
+                    receiver_thread_ids: vec![receiver_id.clone()],
+                    new_agent_nickname: Some("Pauli".to_string()),
+                    new_agent_role: Some("watchdog".to_string()),
+                    prompt: Some("Keep the parent moving.".to_string()),
+                    model: Some("gpt-5.4".to_string()),
+                    reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                    agents_states: [(
+                        receiver_id,
+                        CollabAgentState::from(AgentStatus::PendingInit),
+                    )]
+                    .into_iter()
+                    .collect(),
+                },
+            },
+        );
+    }
+
+    #[test]
     fn collab_resume_begin_maps_to_item_started_resume_agent() {
         let event = CollabResumeBeginEvent {
             call_id: "call-1".to_string(),
@@ -519,6 +596,8 @@ mod tests {
                     status: CollabAgentToolCallStatus::InProgress,
                     sender_thread_id: event.sender_thread_id.to_string(),
                     receiver_thread_ids: vec![event.receiver_thread_id.to_string()],
+                    new_agent_nickname: None,
+                    new_agent_role: None,
                     prompt: None,
                     model: None,
                     reasoning_effort: None,
@@ -558,6 +637,8 @@ mod tests {
                     status: CollabAgentToolCallStatus::Failed,
                     sender_thread_id: event.sender_thread_id.to_string(),
                     receiver_thread_ids: vec![receiver_id.clone()],
+                    new_agent_nickname: None,
+                    new_agent_role: None,
                     prompt: None,
                     model: None,
                     reasoning_effort: None,

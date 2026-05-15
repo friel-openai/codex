@@ -197,6 +197,8 @@ pub(crate) fn tool_call_history_cell(
         tool,
         status,
         receiver_thread_ids,
+        new_agent_nickname,
+        new_agent_role,
         prompt,
         agents_states,
         ..
@@ -221,6 +223,8 @@ pub(crate) fn tool_call_history_cell(
                 first_receiver,
                 prompt,
                 spawn_request,
+                new_agent_nickname.as_deref(),
+                new_agent_role.as_deref(),
                 &mut agent_metadata,
             ))
         }
@@ -270,14 +274,23 @@ fn spawn_end(
     new_thread_id: Option<ThreadId>,
     prompt: &str,
     spawn_request: Option<&SpawnRequestSummary>,
+    new_agent_nickname: Option<&str>,
+    new_agent_role: Option<&str>,
     agent_metadata: &mut impl FnMut(ThreadId) -> AgentMetadata,
 ) -> PlainHistoryCell {
     let title = match new_thread_id {
-        Some(thread_id) => title_with_agent(
-            "Spawned",
-            agent_label(thread_id, &agent_metadata(thread_id)),
-            spawn_request,
-        ),
+        Some(thread_id) => {
+            let cached_metadata = agent_metadata(thread_id);
+            let metadata = AgentMetadata {
+                agent_nickname: new_agent_nickname
+                    .map(ToOwned::to_owned)
+                    .or(cached_metadata.agent_nickname),
+                agent_role: new_agent_role
+                    .map(ToOwned::to_owned)
+                    .or(cached_metadata.agent_role),
+            };
+            title_with_agent("Spawned", agent_label(thread_id, &metadata), spawn_request)
+        }
         None => title_text("Agent spawn failed"),
     };
 
@@ -628,6 +641,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Compute 11! and reply with just the integer result.".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -648,6 +663,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some("Please continue and return the answer only.".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -668,6 +685,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -685,6 +704,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string(), bob_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -711,6 +732,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -795,6 +818,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: Some(String::new()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -834,6 +859,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![robie_id.to_string()],
+                new_agent_nickname: None,
+                new_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
