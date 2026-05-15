@@ -78,17 +78,14 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
     let mut loaded_threads: Vec<LoadedSubagentThread> = included
         .into_iter()
         .filter_map(|thread_id| {
-            threads_by_id
-                .remove(&thread_id)
-                .map(|thread| LoadedSubagentThread {
+            threads_by_id.remove(&thread_id).map(|thread| {
+                let (agent_nickname, agent_role) = thread_agent_metadata(&thread);
+                LoadedSubagentThread {
                     thread_id,
-                    agent_nickname: thread
-                        .agent_nickname
-                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_nickname")),
-                    agent_role: thread
-                        .agent_role
-                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_role")),
-                })
+                    agent_nickname,
+                    agent_role,
+                }
+            })
         })
         .collect();
     loaded_threads.sort_by_key(|thread| thread.thread_id.to_string());
@@ -105,6 +102,19 @@ fn thread_spawn_parent_thread_id(
         .get("parent_thread_id")?
         .as_str()?;
     ThreadId::from_string(parent_thread_id).ok()
+}
+
+pub(crate) fn thread_agent_metadata(thread: &Thread) -> (Option<String>, Option<String>) {
+    (
+        thread
+            .agent_nickname
+            .clone()
+            .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_nickname")),
+        thread
+            .agent_role
+            .clone()
+            .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_role")),
+    )
 }
 
 fn thread_spawn_agent_metadata(

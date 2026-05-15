@@ -248,6 +248,26 @@ fn collab_receiver_thread_ids(notification: &ServerNotification) -> Option<&[Str
     }
 }
 
+fn collab_receiver_agents(
+    notification: &ServerNotification,
+) -> Option<&[codex_app_server_protocol::CollabAgentRef]> {
+    match notification {
+        ServerNotification::ItemStarted(notification) => match &notification.item {
+            ThreadItem::CollabAgentToolCall {
+                receiver_agents, ..
+            } => Some(receiver_agents),
+            _ => None,
+        },
+        ServerNotification::ItemCompleted(notification) => match &notification.item {
+            ThreadItem::CollabAgentToolCall {
+                receiver_agents, ..
+            } => Some(receiver_agents),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 fn collab_receiver_is_not_found(
     notification: &ServerNotification,
     receiver_thread_id: &str,

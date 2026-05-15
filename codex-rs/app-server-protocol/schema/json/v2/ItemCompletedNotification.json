@@ -24,6 +24,32 @@
       ],
       "type": "object"
     },
+    "CollabAgentRef": {
+      "properties": {
+        "agentNickname": {
+          "description": "Optional nickname assigned to the agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "agentRole": {
+          "description": "Optional role assigned to the agent.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "threadId": {
+          "description": "Thread ID of the receiver/new agent.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "threadId"
+      ],
+      "type": "object"
+    },
     "CollabAgentState": {
       "properties": {
         "message": {
@@ -1804,6 +1830,14 @@
                 }
               ],
               "description": "Reasoning effort requested for the spawned agent, when applicable."
+            },
+            "receiverAgents": {
+              "default": [],
+              "description": "Optional receiver metadata paired with `receiver_thread_ids`.\n\nLive watchdog spawn rendering relies on this metadata because the collab tool-call item can arrive before a later `thread/started` notification hydrates the thread cache.",
+              "items": {
+                "$ref": "#/definitions/CollabAgentRef"
+              },
+              "type": "array"
             },
             "receiverThreadIds": {
               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",

@@ -157,14 +157,16 @@ impl App {
             .await
         {
             Ok(thread) => {
+                let (agent_nickname, agent_role) =
+                    super::loaded_threads::thread_agent_metadata(&thread);
                 self.upsert_agent_picker_thread(
                     thread_id,
-                    thread.agent_nickname.or_else(|| {
+                    agent_nickname.or_else(|| {
                         existing_entry
                             .as_ref()
                             .and_then(|entry| entry.agent_nickname.clone())
                     }),
-                    thread.agent_role.or_else(|| {
+                    agent_role.or_else(|| {
                         existing_entry
                             .as_ref()
                             .and_then(|entry| entry.agent_role.clone())

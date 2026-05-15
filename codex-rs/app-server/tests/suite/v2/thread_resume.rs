@@ -3230,6 +3230,11 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
+                    thread_id: watchdog_thread_id.to_string(),
+                    agent_nickname: Some("Boyle".to_string()),
+                    agent_role: Some("watchdog".to_string()),
+                }],
                 prompt: Some("Every time you start, respond with goodbye.".to_string()),
                 model: Some("arcanine 1m".to_string()),
                 reasoning_effort: Some(ReasoningEffort::Low),
@@ -3253,6 +3258,11 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                receiver_agents: vec![codex_app_server_protocol::CollabAgentRef {
+                    thread_id: watchdog_thread_id.to_string(),
+                    agent_nickname: Some("Boyle".to_string()),
+                    agent_role: Some("watchdog".to_string()),
+                }],
                 prompt: None,
                 model: None,
                 reasoning_effort: None,

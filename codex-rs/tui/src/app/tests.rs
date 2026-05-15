@@ -31,6 +31,7 @@ use codex_app_server_protocol::AdditionalNetworkPermissions;
 use codex_app_server_protocol::AdditionalPermissionProfile;
 use codex_app_server_protocol::AgentMessageDeltaNotification;
 use codex_app_server_protocol::AskForApproval;
+use codex_app_server_protocol::CollabAgentRef;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::ConfigWarningNotification;
 use codex_app_server_protocol::FileChangeRequestApprovalParams;
@@ -1267,6 +1268,7 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agents: Vec::new(),
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1280,6 +1282,48 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
         Some(&AgentPickerThreadEntry {
             agent_nickname: None,
             agent_role: None,
+            is_closed: false,
+        })
+    );
+}
+
+#[tokio::test]
+async fn collab_spawn_notification_caches_watchdog_role_before_thread_read() {
+    let mut app = make_test_app().await;
+    let receiver_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+
+    app.handle_thread_event_now(ThreadBufferedEvent::Notification(
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: ThreadItem::CollabAgentToolCall {
+                id: "spawn-watchdog".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                sender_thread_id: ThreadId::new().to_string(),
+                receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                // This guards the live regression where the picker cached watchdog children as
+                // anonymous generic agents before a later thread read could repair the metadata.
+                receiver_agents: vec![CollabAgentRef {
+                    thread_id: receiver_thread_id.to_string(),
+                    agent_nickname: Some("Boyle".to_string()),
+                    agent_role: Some("watchdog".to_string()),
+                }],
+                prompt: Some("Keep watch.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: None,
+                agents_states: HashMap::new(),
+            },
+        }),
+    ));
+
+    assert_eq!(
+        app.agent_navigation.get(&receiver_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: Some("Boyle".to_string()),
+            agent_role: Some("watchdog".to_string()),
             is_closed: false,
         })
     );
@@ -1302,6 +1346,7 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::Failed,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agents: Vec::new(),
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -4976,6 +5021,7 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            receiver_agents: Vec::new(),
                             prompt: None,
                             model: None,
                             reasoning_effort: None,

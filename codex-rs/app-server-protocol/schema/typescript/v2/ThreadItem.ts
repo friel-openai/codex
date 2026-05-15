@@ -6,6 +6,7 @@ import type { MessagePhase } from "../MessagePhase";
 import type { ReasoningEffort } from "../ReasoningEffort";
 import type { ResponseItem } from "../ResponseItem";
 import type { JsonValue } from "../serde_json/JsonValue";
+import type { CollabAgentRef } from "./CollabAgentRef";
 import type { CollabAgentState } from "./CollabAgentState";
 import type { CollabAgentTool } from "./CollabAgentTool";
 import type { CollabAgentToolCallStatus } from "./CollabAgentToolCallStatus";
@@ -84,6 +85,13 @@ senderThreadId: string,
  * this corresponds to the newly spawned agent.
  */
 receiverThreadIds: Array<string>,
+/**
+ * Optional receiver metadata paired with `receiver_thread_ids`.
+ *
+ * Live watchdog spawn rendering relies on this metadata because the collab tool-call item
+ * can arrive before a later `thread/started` notification hydrates the thread cache.
+ */
+receiverAgents: Array<CollabAgentRef>,
 /**
  * Prompt text sent as part of the collab tool call, when available.
  */

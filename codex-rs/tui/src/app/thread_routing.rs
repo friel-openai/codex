@@ -855,6 +855,7 @@ impl App {
         let Some(receiver_thread_ids) = collab_receiver_thread_ids(notification) else {
             return;
         };
+        let receiver_agents = collab_receiver_agents(notification).unwrap_or_default();
 
         for receiver_thread_id in receiver_thread_ids {
             if collab_receiver_is_not_found(notification, receiver_thread_id) {
@@ -869,13 +870,26 @@ impl App {
                 continue;
             };
 
-            if self.agent_navigation.get(&thread_id).is_some() {
+            let existing = self.agent_navigation.get(&thread_id).cloned();
+            let receiver_agent = receiver_agents
+                .iter()
+                .find(|agent| agent.thread_id == *receiver_thread_id);
+            if existing.is_some() && receiver_agent.is_none() {
                 continue;
             }
-
             self.upsert_agent_picker_thread(
-                thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
-                /*is_closed*/ false,
+                thread_id,
+                receiver_agent
+                    .and_then(|agent| agent.agent_nickname.clone())
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .and_then(|entry| entry.agent_nickname.clone())
+                    }),
+                receiver_agent
+                    .and_then(|agent| agent.agent_role.clone())
+                    .or_else(|| existing.as_ref().and_then(|entry| entry.agent_role.clone())),
+                existing.as_ref().is_some_and(|entry| entry.is_closed),
             );
         }
     }
@@ -903,10 +917,12 @@ impl App {
         }
         session.message_history = None;
         session.rollout_path = rollout_path;
+        let (agent_nickname, agent_role) =
+            super::loaded_threads::thread_agent_metadata(&notification.thread);
         self.upsert_agent_picker_thread(
             thread_id,
-            notification.thread.agent_nickname.clone(),
-            notification.thread.agent_role.clone(),
+            agent_nickname,
+            agent_role,
             /*is_closed*/ false,
         );
         Some(session)

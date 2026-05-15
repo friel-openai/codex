@@ -23,6 +23,7 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::parse_command::ParsedCommand as CoreParsedCommand;
 use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
+use codex_protocol::protocol::CollabAgentRef as CoreCollabAgentRef;
 use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
 use codex_protocol::protocol::GuardianRiskLevel as CoreGuardianRiskLevel;
@@ -323,6 +324,12 @@ pub enum ThreadItem {
         /// Thread ID of the receiving agent, when applicable. In case of spawn operation,
         /// this corresponds to the newly spawned agent.
         receiver_thread_ids: Vec<String>,
+        /// Optional receiver metadata paired with `receiver_thread_ids`.
+        ///
+        /// Live watchdog spawn rendering relies on this metadata because the collab tool-call item
+        /// can arrive before a later `thread/started` notification hydrates the thread cache.
+        #[serde(default)]
+        receiver_agents: Vec<CollabAgentRef>,
         /// Prompt text sent as part of the collab tool call, when available.
         prompt: Option<String>,
         /// Model requested for the spawned agent, when applicable.
@@ -1012,6 +1019,28 @@ pub enum CollabAgentStatus {
     Errored,
     Shutdown,
     NotFound,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct CollabAgentRef {
+    /// Thread ID of the receiver/new agent.
+    pub thread_id: String,
+    /// Optional nickname assigned to the agent.
+    pub agent_nickname: Option<String>,
+    /// Optional role assigned to the agent.
+    pub agent_role: Option<String>,
+}
+
+impl From<&CoreCollabAgentRef> for CollabAgentRef {
+    fn from(value: &CoreCollabAgentRef) -> Self {
+        Self {
+            thread_id: value.thread_id.to_string(),
+            agent_nickname: value.agent_nickname.clone(),
+            agent_role: value.agent_role.clone(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]

@@ -4017,6 +4017,21 @@ impl ChatWidget {
         else {
             return;
         };
+        if let ThreadItem::CollabAgentToolCall {
+            receiver_agents, ..
+        } = &item
+        {
+            for receiver_agent in receiver_agents {
+                let Ok(thread_id) = ThreadId::from_string(&receiver_agent.thread_id) else {
+                    continue;
+                };
+                self.set_collab_agent_metadata(
+                    thread_id,
+                    receiver_agent.agent_nickname.clone(),
+                    receiver_agent.agent_role.clone(),
+                );
+            }
+        }
         if matches!(tool, CollabAgentTool::SpawnAgent)
             && let Some(spawn_request) = multi_agents::spawn_request_summary(&item)
         {
@@ -6254,6 +6269,7 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agents,
                 prompt,
                 model,
                 reasoning_effort,
@@ -6265,6 +6281,7 @@ impl ChatWidget {
                     status,
                     sender_thread_id,
                     receiver_thread_ids,
+                    receiver_agents,
                     prompt,
                     model,
                     reasoning_effort,
