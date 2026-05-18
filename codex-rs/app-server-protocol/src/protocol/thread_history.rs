@@ -630,6 +630,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort.clone()),
@@ -665,6 +667,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agent_nickname: payload.new_agent_nickname.clone(),
+            receiver_agent_role: payload.new_agent_role.clone(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort.clone()),
@@ -682,6 +686,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -706,6 +712,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -739,6 +747,8 @@ impl ThreadHistoryBuilder {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -774,6 +784,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -791,6 +803,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -817,6 +831,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -834,6 +850,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -863,6 +881,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -3017,6 +3037,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -3035,6 +3057,9 @@ mod tests {
 
     #[test]
     fn reconstructs_collab_spawn_end_item_with_model_metadata() {
+        // Rollout replay must preserve the
+        // spawn nickname and role that the live app-server notification exposes, or resumed TUI
+        // history regresses to a bare thread id.
         let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
         let spawned_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
@@ -3077,6 +3102,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agent_nickname: Some("Scout".into()),
+                receiver_agent_role: Some("explorer".into()),
                 prompt: Some("inspect the repo".into()),
                 model: Some("gpt-5.4-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
@@ -3094,13 +3121,13 @@ mod tests {
     }
 
     #[test]
-    fn reconstructs_inter_agent_raw_response_item_between_watchdog_spawn_and_close() {
+    fn reconstructs_inter_agent_raw_response_item_between_supervisor_spawn_and_close() {
         let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
-        let watchdog_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
-            .expect("valid watchdog thread id");
+        let supervisor_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
+            .expect("valid supervisor thread id");
         let communication = InterAgentCommunication::new(
-            AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+            AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
             AgentPath::root(),
             Vec::new(),
             "goodbye".to_string(),
@@ -3111,12 +3138,12 @@ mod tests {
         let items = vec![
             RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(
                 codex_protocol::protocol::CollabAgentSpawnEndEvent {
-                    call_id: "spawn-watchdog".into(),
+                    call_id: "spawn-supervisor".into(),
                     sender_thread_id,
-                    new_thread_id: Some(watchdog_thread_id),
-                    new_agent_nickname: Some("Boyle".into()),
-                    new_agent_role: Some("watchdog".into()),
-                    prompt: "Every time you start, respond with goodbye.".into(),
+                    new_thread_id: Some(supervisor_thread_id),
+                    new_agent_nickname: Some("Goal supervisor".into()),
+                    new_agent_role: Some("goal_supervisor".into()),
+                    prompt: "Inspect the active goal.".into(),
                     model: "arcanine 1m".into(),
                     reasoning_effort: codex_protocol::openai_models::ReasoningEffort::Low,
                     status: AgentStatus::PendingInit,
@@ -3126,11 +3153,11 @@ mod tests {
             RolloutItem::ResponseItem(response_item.clone()),
             RolloutItem::EventMsg(EventMsg::CollabCloseEnd(
                 codex_protocol::protocol::CollabCloseEndEvent {
-                    call_id: "watchdog-close".into(),
+                    call_id: "supervisor-close".into(),
                     sender_thread_id,
-                    receiver_thread_id: watchdog_thread_id,
-                    receiver_agent_nickname: Some("Boyle".into()),
-                    receiver_agent_role: Some("watchdog".into()),
+                    receiver_thread_id: supervisor_thread_id,
+                    receiver_agent_nickname: Some("Goal supervisor".into()),
+                    receiver_agent_role: Some("goal_supervisor".into()),
                     status: AgentStatus::Completed(Some("goodbye".into())),
                     completed_at_ms: 0,
                 },
@@ -3143,16 +3170,18 @@ mod tests {
             turns[0].items,
             vec![
                 ThreadItem::CollabAgentToolCall {
-                    id: "spawn-watchdog".into(),
+                    id: "spawn-supervisor".into(),
                     tool: CollabAgentTool::SpawnAgent,
                     status: CollabAgentToolCallStatus::Completed,
                     sender_thread_id: sender_thread_id.to_string(),
-                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                    prompt: Some("Every time you start, respond with goodbye.".into()),
+                    receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                    receiver_agent_nickname: Some("Goal supervisor".into()),
+                    receiver_agent_role: Some("goal_supervisor".into()),
+                    prompt: Some("Inspect the active goal.".into()),
                     model: Some("arcanine 1m".into()),
                     reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
                     agents_states: [(
-                        watchdog_thread_id.to_string(),
+                        supervisor_thread_id.to_string(),
                         CollabAgentState {
                             status: crate::protocol::v2::CollabAgentStatus::PendingInit,
                             message: None,
@@ -3166,16 +3195,18 @@ mod tests {
                     item: response_item,
                 },
                 ThreadItem::CollabAgentToolCall {
-                    id: "watchdog-close".into(),
+                    id: "supervisor-close".into(),
                     tool: CollabAgentTool::CloseAgent,
                     status: CollabAgentToolCallStatus::Completed,
                     sender_thread_id: sender_thread_id.to_string(),
-                    receiver_thread_ids: vec![watchdog_thread_id.to_string()],
+                    receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                    receiver_agent_nickname: Some("Goal supervisor".into()),
+                    receiver_agent_role: Some("goal_supervisor".into()),
                     prompt: None,
                     model: None,
                     reasoning_effort: None,
                     agents_states: [(
-                        watchdog_thread_id.to_string(),
+                        supervisor_thread_id.to_string(),
                         CollabAgentState {
                             status: crate::protocol::v2::CollabAgentStatus::Completed,
                             message: Some("goodbye".into()),
@@ -3244,6 +3275,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender.to_string(),
                 receiver_thread_ids: vec![receiver.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("new task".into()),
                 model: None,
                 reasoning_effort: None,

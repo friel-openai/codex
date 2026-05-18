@@ -191,6 +191,7 @@ impl AgentNavigationState {
             .into_iter()
             .filter(|(thread_id, entry)| {
                 Some(*thread_id) != primary_thread_id
+                    && !entry.is_goal_supervisor()
                     && entry
                         .agent_path
                         .as_deref()

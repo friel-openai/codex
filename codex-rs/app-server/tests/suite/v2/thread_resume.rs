@@ -3665,10 +3665,10 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_without_collab_lifecycl
     let persisted_rollout = std::fs::read_to_string(&rollout_file_path)?;
     let sender_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002")
         .expect("valid sender thread id");
-    let watchdog_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003")
-        .expect("valid watchdog thread id");
+    let supervisor_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003")
+        .expect("valid supervisor thread id");
     let communication = InterAgentCommunication::new(
-        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
         AgentPath::root(),
         Vec::new(),
         "goodbye".to_string(),
@@ -3679,13 +3679,13 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_without_collab_lifecycl
         RolloutLine {
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
-                call_id: "spawn-watchdog".to_string(),
+                call_id: "spawn-supervisor".to_string(),
                 completed_at_ms: 0,
                 sender_thread_id,
-                new_thread_id: Some(watchdog_thread_id),
-                new_agent_nickname: Some("Boyle".to_string()),
-                new_agent_role: Some("watchdog".to_string()),
-                prompt: "Every time you start, respond with goodbye.".to_string(),
+                new_thread_id: Some(supervisor_thread_id),
+                new_agent_nickname: Some("Goal supervisor".to_string()),
+                new_agent_role: Some("goal_supervisor".to_string()),
+                prompt: "Inspect the active goal.".to_string(),
                 model: "arcanine 1m".to_string(),
                 reasoning_effort: ReasoningEffort::Low,
                 status: AgentStatus::PendingInit,
@@ -3698,12 +3698,12 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_without_collab_lifecycl
         RolloutLine {
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
-                call_id: "watchdog-close".to_string(),
+                call_id: "supervisor-close".to_string(),
                 completed_at_ms: 0,
                 sender_thread_id,
-                receiver_thread_id: watchdog_thread_id,
-                receiver_agent_nickname: Some("Boyle".to_string()),
-                receiver_agent_role: Some("watchdog".to_string()),
+                receiver_thread_id: supervisor_thread_id,
+                receiver_agent_nickname: Some("Goal supervisor".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
                 status: AgentStatus::Completed(Some("goodbye".to_string())),
             })),
         },

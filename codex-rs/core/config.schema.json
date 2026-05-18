@@ -389,9 +389,6 @@
             "agent_prompt_injection": {
               "type": "boolean"
             },
-            "agent_watchdog": {
-              "type": "boolean"
-            },
             "apply_patch_freeform": {
               "type": "boolean"
             },
@@ -490,6 +487,9 @@
               "type": "boolean"
             },
             "fast_mode": {
+              "type": "boolean"
+            },
+            "goal_supervisor": {
               "type": "boolean"
             },
             "goals": {
@@ -4569,9 +4569,6 @@
         "agent_prompt_injection": {
           "type": "boolean"
         },
-        "agent_watchdog": {
-          "type": "boolean"
-        },
         "apply_patch_freeform": {
           "type": "boolean"
         },
@@ -4670,6 +4667,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "goal_supervisor": {
           "type": "boolean"
         },
         "goals": {

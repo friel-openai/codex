@@ -84,7 +84,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("items"));
@@ -271,7 +271,7 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(!properties.contains_key("interrupt"));
     assert!(!properties.contains_key("items"));
@@ -279,7 +279,9 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("target")
             .and_then(|schema| schema.description.as_deref()),
-        Some("Relative or canonical task name to message (from spawn_agent).")
+        Some(
+            "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned agent."
+        )
     );
     assert_eq!(
         parameters.required.as_ref(),
@@ -319,7 +321,7 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        Some(true)
+        None
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(
@@ -327,6 +329,32 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
         Some(&vec!["target".to_string(), "message".to_string()])
     );
     assert_eq!(output_schema, None);
+}
+
+#[test]
+fn supervisor_tools_do_not_mark_parameters_encrypted() {
+    for tool in [
+        create_supervisor_close_self_tool(),
+        create_supervisor_compact_parent_context_tool(),
+        create_supervisor_snooze_tool(),
+    ] {
+        let ToolSpec::Function(ResponsesApiTool {
+            name, parameters, ..
+        }) = tool
+        else {
+            panic!("supervisor tool should be a function tool");
+        };
+        for (property_name, schema) in parameters
+            .properties
+            .as_ref()
+            .expect("supervisor tool should use object params")
+        {
+            assert_eq!(
+                schema.encrypted, None,
+                "{name}.{property_name} should not use encrypted tool parameters"
+            );
+        }
+    }
 }
 
 #[test]

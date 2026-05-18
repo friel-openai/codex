@@ -87,11 +87,11 @@ impl App {
             .into_iter()
             .filter(|(thread_id, entry)| {
                 let is_primary = Some(*thread_id) == self.primary_thread_id;
-                let is_watchdog = entry.agent_role.as_deref() == Some("watchdog");
-                let is_open_agent = !entry.is_closed && !is_watchdog;
+                let is_supervisor = entry.is_goal_supervisor();
+                let is_open_agent = !entry.is_closed && !is_supervisor;
                 let is_existing_replay_thread = self.thread_event_channels.contains_key(thread_id)
                     && entry.agent_role.is_none();
-                is_primary || is_open_agent || (is_existing_replay_thread && !is_watchdog)
+                is_primary || is_open_agent || (is_existing_replay_thread && !is_supervisor)
             })
             .collect::<Vec<_>>();
         let has_non_primary_agent_thread = selectable_threads

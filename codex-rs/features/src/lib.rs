@@ -139,8 +139,6 @@ pub enum Feature {
     MultiAgentV2,
     /// Enable root/subagent developer prompt injection.
     AgentPromptInjection,
-    /// Enable idle-time watchdog handles for root agents.
-    AgentWatchdog,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
     /// Enable apps.
@@ -201,6 +199,8 @@ pub enum Feature {
     GuardianApproval,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
+    /// Use an internal supervisor helper for active goal continuation.
+    GoalSupervisor,
     /// Add current context-window metadata to model-visible context.
     TokenBudget,
     /// Route MCP tool approval prompts through the MCP elicitation request path.
@@ -981,12 +981,6 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: false,
     },
     FeatureSpec {
-        id: Feature::AgentWatchdog,
-        key: "agent_watchdog",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
         id: Feature::SpawnCsv,
         key: "enable_fanout",
         stage: Stage::UnderDevelopment,
@@ -996,7 +990,7 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::Apps,
         key: "apps",
         stage: Stage::Stable,
-        default_enabled: true,
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::EnableMcpApps,
@@ -1159,6 +1153,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         key: "goals",
         stage: Stage::Stable,
         default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::GoalSupervisor,
+        key: "goal_supervisor",
+        stage: Stage::Experimental {
+            name: "Goal supervisor",
+            menu_description: "Use an internal supervisor helper for active goal continuation.",
+            announcement: "",
+        },
+        default_enabled: false,
     },
     FeatureSpec {
         id: Feature::TokenBudget,
