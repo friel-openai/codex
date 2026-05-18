@@ -4,6 +4,7 @@ mod session;
 mod turn;
 
 pub(crate) use auto_compact_window::AutoCompactWindowSnapshot;
+pub(crate) use service::McpToolSnapshot;
 pub(crate) use service::SessionServices;
 pub(crate) use session::SessionState;
 pub(crate) use turn::ActiveTurn;

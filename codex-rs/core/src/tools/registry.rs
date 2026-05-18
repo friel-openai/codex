@@ -173,6 +173,10 @@ impl AnyToolResult {
         result.to_response_item(&call_id, &payload)
     }
 
+    pub(crate) fn terminal_no_response(&self) -> bool {
+        self.result.terminal_no_response()
+    }
+
     pub(crate) fn code_mode_result(self) -> serde_json::Value {
         let Self {
             payload, result, ..

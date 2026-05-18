@@ -690,7 +690,11 @@ impl Session {
                 .skills_for_config(&skills_input, fs)
                 .await,
         );
-        let goal_tools_supported = !per_turn_config.ephemeral && self.state_db().is_some();
+        let is_goal_supervisor_helper = crate::goal_supervisor::is_goal_supervisor_helper_source(
+            &session_configuration.session_source,
+        );
+        let goal_tools_supported =
+            (!per_turn_config.ephemeral && self.state_db().is_some()) || is_goal_supervisor_helper;
         let mut turn_context: TurnContext = Self::make_turn_context(
             self.thread_id(),
             self.session_id(),

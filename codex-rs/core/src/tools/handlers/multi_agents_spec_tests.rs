@@ -237,7 +237,9 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("target")
             .and_then(|schema| schema.description.as_deref()),
-        Some("Relative or canonical task name to message (from spawn_agent).")
+        Some(
+            "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned agent."
+        )
     );
     assert_eq!(
         parameters.required.as_ref(),

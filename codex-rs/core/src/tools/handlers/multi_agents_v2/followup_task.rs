@@ -28,6 +28,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
             MessageDeliveryMode::TriggerTurn,
             args.target,
             args.message,
+            args.interrupt,
         )
         .await
         .map(boxed_tool_output)
