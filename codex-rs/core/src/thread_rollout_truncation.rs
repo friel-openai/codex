@@ -21,6 +21,40 @@ pub(crate) fn initial_history_has_prior_user_turns(conversation_history: &Initia
     conversation_history.scan_rollout_items(rollout_item_is_user_turn_boundary)
 }
 
+pub(crate) fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
+    match item {
+        RolloutItem::ResponseItem(ResponseItem::Message { role, .. }) => match role.as_str() {
+            "system" | "developer" | "user" => true,
+            "assistant" => true,
+            _ => false,
+        },
+        RolloutItem::ResponseItem(
+            ResponseItem::Reasoning { .. }
+            | ResponseItem::LocalShellCall { .. }
+            | ResponseItem::FunctionCall { .. }
+            | ResponseItem::ToolSearchCall { .. }
+            | ResponseItem::FunctionCallOutput { .. }
+            | ResponseItem::CustomToolCall { .. }
+            | ResponseItem::CustomToolCallOutput { .. }
+            | ResponseItem::ToolSearchOutput { .. }
+            | ResponseItem::WebSearchCall { .. }
+            | ResponseItem::ImageGenerationCall { .. }
+            | ResponseItem::Compaction { .. }
+            | ResponseItem::CompactionTrigger
+            | ResponseItem::ContextCompaction { .. }
+            | ResponseItem::Other,
+        ) => false,
+        // A forked child gets its own runtime config, including spawned-agent
+        // instructions, so it must establish a fresh context diff baseline.
+        RolloutItem::TurnContext(_) => false,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::SessionMeta(_) => true,
+    }
+}
+
 fn rollout_item_is_user_turn_boundary(item: &RolloutItem) -> bool {
     match item {
         RolloutItem::ResponseItem(item) => is_user_turn_boundary(item),

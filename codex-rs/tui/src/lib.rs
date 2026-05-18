@@ -786,6 +786,7 @@ pub async fn run_main(
     arg0_paths: Arg0DispatchPaths,
     loader_overrides: LoaderOverrides,
     explicit_remote_endpoint: Option<RemoteAppServerEndpoint>,
+    embedded: bool,
 ) -> std::io::Result<AppExitInfo> {
     let strict_config = cli.strict_config;
     let (sandbox_mode, approval_policy) = if cli.dangerously_bypass_approvals_and_sandbox {
@@ -834,6 +835,7 @@ pub async fn run_main(
 
     let remote_endpoint = match explicit_remote_endpoint {
         Some(endpoint) => Some(endpoint),
+        None if embedded => None,
         None => maybe_probe_default_daemon_socket(&codex_home)
             .await
             .map(|socket_path| RemoteAppServerEndpoint::UnixSocket { socket_path }),

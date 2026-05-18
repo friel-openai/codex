@@ -502,8 +502,9 @@ async fn spawned_child_receives_forked_parent_context_impl() -> Result<()> {
     .await;
 
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
-        "fork_context": true,
+        "fork_turns": "all",
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,

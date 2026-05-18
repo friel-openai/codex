@@ -6,6 +6,8 @@ use crate::tools::handlers::goal_spec::create_update_goal_tool;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v2;
+use crate::tools::handlers::multi_agents_spec::create_followup_task_tool;
+use crate::tools::handlers::multi_agents_spec::create_list_agents_tool;
 use crate::tools::handlers::multi_agents_spec::create_resume_agent_tool;
 use crate::tools::handlers::multi_agents_spec::create_send_input_tool_v1;
 use crate::tools::handlers::multi_agents_spec::create_send_message_tool;
@@ -234,8 +236,10 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         vec![
             create_spawn_agent_tool_v2(spawn_agent_tool_options(&config)),
             create_send_message_tool(),
+            create_followup_task_tool(),
             create_wait_agent_tool_v2(wait_agent_timeout_options()),
             create_close_agent_tool_v2(),
+            create_list_agents_tool(),
         ]
     } else {
         vec![
@@ -257,7 +261,6 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         let spec = create_request_permissions_tool(request_permissions_tool_description());
         expected.insert(spec.name().to_string(), spec);
     }
-
     assert_eq!(
         actual.keys().collect::<Vec<_>>(),
         expected.keys().collect::<Vec<_>>(),
@@ -354,6 +357,7 @@ fn apply_patch_spec_includes_environment_id_only_for_multiple_selected_environme
 fn test_build_specs_collab_tools_enabled() {
     let model_info = model_info();
     let mut features = Features::with_defaults();
+    features.disable(Feature::MultiAgentV2);
     features.enable(Feature::Collab);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -394,6 +398,7 @@ fn goal_tools_require_goals_feature() {
     let model_info = model_info();
     let available_models = Vec::new();
     let mut features = Features::with_defaults();
+    features.disable(Feature::Goals);
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,
         available_models: &available_models,
@@ -432,6 +437,133 @@ fn goal_tools_require_goals_feature() {
         &[],
     );
     assert_contains_tool_names(&tools, &["get_goal", "create_goal", "update_goal"]);
+}
+
+#[test]
+fn goal_supervisor_tools_are_eager_namespace_tools() {
+    let model_info = model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Goals);
+    features.enable(Feature::GoalSupervisor);
+    let available_models = Vec::new();
+    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let (tools, _) = build_specs(
+        &tools_config,
+        /*mcp_tools*/ None,
+        /*deferred_mcp_tools*/ None,
+        &[],
+    );
+
+    // Supervisor mode keeps the model-visible supervisor lifecycle tools in every request for
+    // prompt-cache stability, and the legacy watchdog namespace is not available.
+    assert_lacks_tool_name(&tools, "watchdog");
+    assert_eq!(
+        namespace_function_names(&tools, "supervisor"),
+        vec![
+            "close_self".to_string(),
+            "snooze".to_string(),
+            "compact_parent_context".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
+    let model_info = search_capable_model_info();
+    let mut features = Features::with_defaults();
+    features.enable(Feature::Goals);
+    features.enable(Feature::GoalSupervisor);
+    features.enable(Feature::Apps);
+    features.enable(Feature::Plugins);
+    features.enable(Feature::ToolSearch);
+    features.enable(Feature::ToolSuggest);
+    let available_models = Vec::new();
+    let parent_tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::Cli,
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let supervisor_tools_config = ToolsConfig::new(&ToolsConfigParams {
+        model_info: &model_info,
+        available_models: &available_models,
+        features: &features,
+        image_generation_tool_auth_allowed: true,
+        web_search_mode: Some(WebSearchMode::Cached),
+        session_source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::default(),
+            depth: 1,
+            agent_path: Some(
+                AgentPath::try_from("/root/goal_supervisor").expect("agent path should parse"),
+            ),
+            agent_nickname: None,
+            agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+        }),
+        permission_profile: &PermissionProfile::Disabled,
+        windows_sandbox_level: WindowsSandboxLevel::Disabled,
+    });
+    let discoverable_tools = || {
+        Some(vec![discoverable_connector(
+            "connector_2128aebfecb84f64a069897515042a44",
+            "Google Calendar",
+            "Plan events and schedules.",
+        )])
+    };
+    let mcp_tools = || {
+        Some(HashMap::from([(
+            ToolName::namespaced("mcp__sample__", "echo"),
+            mcp_tool("echo", "Echo from eager MCP", serde_json::json!({})),
+        )]))
+    };
+    let deferred_mcp_tools = || {
+        Some(vec![deferred_mcp_tool(
+            "search",
+            "mcp__deferred__",
+            "deferred",
+            Some("Deferred MCP"),
+            Some("Deferred MCP search tools."),
+        )])
+    };
+    let (parent_tools, _) = build_specs_with_discoverable_tools(
+        &parent_tools_config,
+        mcp_tools(),
+        deferred_mcp_tools(),
+        discoverable_tools(),
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+    let (supervisor_tools, _) = build_specs_with_discoverable_tools(
+        &supervisor_tools_config,
+        mcp_tools(),
+        deferred_mcp_tools(),
+        discoverable_tools(),
+        /*extension_tool_bundles*/ &[],
+        &[],
+    );
+
+    // Goal supervisors are full-history forks of the parent. A different
+    // model-visible tool set, order, schema, or parallel-call setting changes
+    // the prompt prefix and breaks prompt-cache reuse at exactly the boundary
+    // this feature is meant to preserve. Include discoverable tools here
+    // because request_plugin_install previously appeared in a fork but not in
+    // its parent, which made the backend render a different developer tool
+    // block before the fork point. Include eager MCP and deferred MCP inputs
+    // because supervisor helpers inherit the parent's MCP snapshot and must
+    // preserve both the model-visible MCP namespaces and `tool_search` prompt.
+    assert_eq!(supervisor_tools, parent_tools);
 }
 
 #[test]
@@ -716,9 +848,11 @@ fn test_build_specs_enable_fanout_enables_agent_jobs_and_collab_tools() {
         &tools,
         &[
             "spawn_agent",
-            "send_input",
+            "send_message",
+            "followup_task",
             "wait_agent",
             "close_agent",
+            "list_agents",
             "spawn_agents_on_csv",
         ],
     );
@@ -895,10 +1029,11 @@ fn test_build_specs_agent_job_worker_tools_enabled() {
         &tools,
         &[
             "spawn_agent",
-            "send_input",
-            "resume_agent",
+            "send_message",
+            "followup_task",
             "wait_agent",
             "close_agent",
+            "list_agents",
             "spawn_agents_on_csv",
             "report_agent_job_result",
             REQUEST_USER_INPUT_TOOL_NAME,
