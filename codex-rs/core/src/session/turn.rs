@@ -53,6 +53,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolRouterParams;
@@ -1661,13 +1662,14 @@ async fn handle_assistant_item_done_in_plan_mode(
 }
 
 async fn drain_in_flight(
-    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallResponse>>>,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let mut terminal_no_response = false;
     while let Some(res) = in_flight.next().await {
         match res {
-            Ok(response_input) => {
+            Ok(ToolCallResponse::Response(response_input)) => {
                 let response_item = response_input.into();
                 sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
                     .await;
@@ -1678,12 +1680,15 @@ async fn drain_in_flight(
                 )
                 .await;
             }
+            Ok(ToolCallResponse::TerminalNoResponse) => {
+                terminal_no_response = true;
+            }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
             }
         }
     }
-    Ok(())
+    Ok(terminal_no_response)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1732,7 +1737,7 @@ async fn try_run_sampling_request(
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallResponse>>> =
         FuturesOrdered::new();
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
@@ -2146,7 +2151,9 @@ async fn try_run_sampling_request(
         client_session.send_response_processed(response_id).await;
     }
 
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+    if drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await? {
+        return Err(CodexErr::TurnAborted);
+    }
 
     if should_emit_token_count {
         // A tool call such as request_user_input can intentionally pause the turn. Emit token

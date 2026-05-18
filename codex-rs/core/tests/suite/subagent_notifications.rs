@@ -1,4 +1,6 @@
 use anyhow::Result;
+use codex_config::types::ToolSuggestDiscoverable;
+use codex_config::types::ToolSuggestDiscoverableType;
 use codex_core::StartThreadOptions;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::config::AgentRoleConfig;
@@ -19,6 +21,7 @@ use core_test_support::hooks::trust_discovered_hooks;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::ev_tool_search_call;
@@ -132,6 +135,49 @@ fn has_subagent_notification(req: &ResponsesRequest) -> bool {
         .any(|text| text.contains("<subagent_notification>"))
 }
 
+async fn mount_fork_marker_child_response(
+    server: &MockServer,
+    response_body: String,
+) -> RawRequestRecorder {
+    let child_request_log = RawRequestRecorder::new();
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .and(|req: &wiremock::Request| {
+            let body = request_body_text(req).unwrap_or_default();
+            body.contains(r#""previous_response_id":"resp-turn1-1""#)
+                || (body.contains("# Subagent Assignment") && body.contains(CHILD_PROMPT))
+        })
+        .and(child_request_log.clone())
+        .respond_with(sse_response(response_body))
+        .with_priority(4)
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    child_request_log
+}
+
+fn run_large_fork_request_test<F, Fut>(name: &'static str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            runtime.block_on(test())
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
 fn tool_parameter_description(tool: &Value, parameter_name: &str) -> Option<String> {
     tool.get("parameters")
         .and_then(|parameters| parameters.get("properties"))
@@ -178,6 +224,63 @@ fn write_home_skill(codex_home: &Path, dir: &str, name: &str, description: &str)
     let contents = format!("---\nname: {name}\ndescription: {description}\n---\n\n# Body\n");
     fs::write(skill_dir.join("SKILL.md"), contents)?;
     Ok(())
+}
+
+fn write_discoverable_plugin(codex_home: &Path, plugin_name: &str) -> Result<()> {
+    let curated_root = curated_plugins_repo_path(codex_home);
+    let plugin_root = curated_root.join("plugins").join(plugin_name);
+    let marketplace_plugin = format!(
+        r#"{{
+      "name": "{plugin_name}",
+      "source": {{
+        "source": "local",
+        "path": "./plugins/{plugin_name}"
+      }}
+    }}"#
+    );
+    fs::create_dir_all(curated_root.join(".agents/plugins"))?;
+    fs::write(
+        curated_root.join(".agents/plugins/marketplace.json"),
+        format!(
+            r#"{{
+  "name": "{OPENAI_CURATED_MARKETPLACE_NAME}",
+  "plugins": [
+{marketplace_plugin}
+  ]
+}}"#
+        ),
+    )?;
+    fs::create_dir_all(plugin_root.join(".codex-plugin"))?;
+    fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        format!(
+            r#"{{
+  "name": "{plugin_name}",
+  "description": "Plugin suggested only through request_plugin_install"
+}}"#
+        ),
+    )?;
+    Ok(())
+}
+
+async fn mount_empty_apps_directory(server: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/connectors/directory/list"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apps": [],
+            "nextToken": null
+        })))
+        .mount(server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/connectors/directory/list_workspace"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apps": [],
+            "nextToken": null
+        })))
+        .mount(server)
+        .await;
 }
 
 fn write_subagent_lifecycle_hooks(
@@ -921,8 +1024,9 @@ async fn spawned_child_receives_forked_parent_context_impl() -> Result<()> {
     .await;
 
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
-        "fork_context": true,
+        "fork_turns": "all",
     }))?;
     let spawn_turn = mount_sse_once_match(
         &server,
@@ -1036,22 +1140,20 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
     let chatgpt_base_url = server.uri();
     let mut builder = test_codex()
         .with_pre_build_hook(move |codex_home| {
-            write_discoverable_plugin(codex_home, plugin_name)
-                .expect("discoverable plugin fixture should be written");
+            if let Err(err) = write_discoverable_plugin(codex_home, plugin_name) {
+                panic!("discoverable plugin fixture should be written: {err}");
+            }
         })
         .with_config(move |config| {
-            config
-                .features
-                .enable(Feature::Apps)
-                .expect("test config should allow feature update");
-            config
-                .features
-                .enable(Feature::Plugins)
-                .expect("test config should allow feature update");
-            config
-                .features
-                .enable(Feature::ToolSuggest)
-                .expect("test config should allow feature update");
+            if let Err(err) = config.features.enable(Feature::Apps) {
+                panic!("test config should allow feature update: {err}");
+            }
+            if let Err(err) = config.features.enable(Feature::Plugins) {
+                panic!("test config should allow feature update: {err}");
+            }
+            if let Err(err) = config.features.enable(Feature::ToolSuggest) {
+                panic!("test config should allow feature update: {err}");
+            }
             config.chatgpt_base_url = chatgpt_base_url;
             config.tool_suggest.discoverables = vec![ToolSuggestDiscoverable {
                 kind: ToolSuggestDiscoverableType::Plugin,
@@ -1144,6 +1246,16 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -
     )
     .await;
 
+    let mut builder = test_codex().with_config(|config| {
+        if let Err(err) = config.features.enable(Feature::Collab) {
+            panic!("test config should allow feature update: {err}");
+        }
+        if let Err(err) = config.features.enable(Feature::MultiAgentV2) {
+            panic!("test config should allow feature update: {err}");
+        }
+        config.developer_instructions = Some("Parent developer instructions.".to_string());
+    });
+    let test = builder.build(&server).await?;
     let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
@@ -1169,10 +1281,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let child_requests = wait_for_requests(&child_request_log).await?;
-    let child_request = child_requests
-        .last()
-        .expect("child request log should capture at least one request");
+    let child_request = child_request_log.single_request();
     assert!(child_request.body_contains_text("Parent developer instructions."));
     assert!(child_request.body_contains_text(CHILD_PROMPT));
 
@@ -1211,7 +1320,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child_impl() ->
     )
     .await;
 
-    let child_request_log = mount_sse_once_match(
+    let _child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
             body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
@@ -1264,12 +1373,9 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child_impl() ->
     assert!(!parent_request.body_contains_text("<skills_instructions>"));
     assert!(!parent_request.body_contains_text("demo-skill"));
 
-    let child_requests = wait_for_requests(&child_request_log).await?;
-    let child_request = child_requests
-        .last()
-        .expect("child request log should capture at least one request");
-    assert!(!child_request.body_contains_text("<skills_instructions>"));
-    assert!(!child_request.body_contains_text("demo-skill"));
+    let child_request = child_request_log.single_request();
+    assert!(!body_contains(&child_request, "<skills_instructions>"));
+    assert!(!body_contains(&child_request, "demo-skill"));
 
     Ok(())
 }
