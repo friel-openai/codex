@@ -61,6 +61,11 @@ impl ToolHandler for Handler {
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
         let max_depth = turn.config.agent_max_depth;
+        if role_name == Some("watchdog") {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string(),
+            ));
+        }
         if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
             return Err(FunctionCallError::RespondToModel(
                 "Agent depth limit reached. Solve the task yourself.".to_string(),
@@ -82,12 +87,8 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if args.fork_context {
-            reject_full_fork_spawn_overrides(
-                role_name,
-                args.model.as_deref(),
-                args.reasoning_effort,
-            )?;
+        let effective_role_name = if args.fork_context {
+            None
         } else {
             apply_requested_spawn_agent_model_overrides(
                 &session,
@@ -100,24 +101,27 @@ impl ToolHandler for Handler {
             apply_role_to_config(&mut config, role_name)
                 .await
                 .map_err(FunctionCallError::RespondToModel)?;
-        }
+            role_name
+        };
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
+        let spawn_source = thread_spawn_source(
+            session.conversation_id,
+            &turn.session_source,
+            child_depth,
+            effective_role_name,
+            /*task_name*/ None,
+        )?;
         let result = Box::pin(session.services.agent_control.spawn_agent_with_metadata(
             config,
             input_items,
-            Some(thread_spawn_source(
-                session.conversation_id,
-                &turn.session_source,
-                child_depth,
-                role_name,
-                /*task_name*/ None,
-            )?),
+            Some(spawn_source),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
                 fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
                 environments: Some(turn.environments.to_selections()),
+                initial_task_message: args.fork_context.then_some(prompt.clone()),
             },
         ))
         .await

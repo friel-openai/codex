@@ -40,20 +40,20 @@ impl SubagentInfo {
         }
     }
 
-    fn is_watchdog(&self) -> bool {
-        self.role.as_deref() == Some("watchdog")
+    fn is_internal_supervisor(&self) -> bool {
+        self.role.as_deref() == Some("goal_supervisor")
     }
 
     fn is_visible_in_panel(&self) -> bool {
-        if self.is_watchdog() {
-            return matches!(self.status, AgentStatus::PendingInit | AgentStatus::Running);
+        if self.is_internal_supervisor() {
+            return false;
         }
         matches!(self.status, AgentStatus::PendingInit | AgentStatus::Running)
     }
 
     fn is_running_for_panel(&self) -> bool {
-        if self.is_watchdog() {
-            return matches!(self.status, AgentStatus::Running);
+        if self.is_internal_supervisor() {
+            return false;
         }
         matches!(self.status, AgentStatus::PendingInit | AgentStatus::Running)
     }
@@ -90,10 +90,6 @@ impl SubagentPanelRegistry {
         prompt: &str,
         status: AgentStatus,
     ) {
-        if role.as_deref() == Some("watchdog") {
-            self.prune_superseded_watchdogs(thread_id);
-        }
-
         let ordinal = self.ordinal_for(thread_id);
         let name = nickname
             .filter(|nickname| !nickname.trim().is_empty())
@@ -106,6 +102,23 @@ impl SubagentPanelRegistry {
         info.name = name;
         info.role = role;
         info.update_status(status);
+    }
+
+    pub(crate) fn update_metadata(
+        &mut self,
+        thread_id: ThreadId,
+        nickname: Option<String>,
+        role: Option<String>,
+    ) -> bool {
+        let Some(info) = self.agents.get_mut(&thread_id) else {
+            return false;
+        };
+
+        if let Some(nickname) = nickname.filter(|nickname| !nickname.trim().is_empty()) {
+            info.name = nickname;
+        }
+        info.role = role;
+        true
     }
 
     pub(crate) fn update_status(&mut self, thread_id: ThreadId, status: AgentStatus) {
@@ -152,7 +165,6 @@ impl SubagentPanelRegistry {
                 ordinal: info.ordinal,
                 name: info.name.clone(),
                 status: info.status.clone(),
-                is_watchdog: info.is_watchdog(),
                 preview: info.latest_preview.clone(),
                 latest_update_at: info.latest_update_at,
             })
@@ -188,19 +200,6 @@ impl SubagentPanelRegistry {
         i32::try_from(self.order.len())
             .unwrap_or(i32::MAX - 1)
             .saturating_add(1)
-    }
-
-    fn prune_superseded_watchdogs(&mut self, keep_thread_id: ThreadId) {
-        let superseded = self
-            .agents
-            .iter()
-            .filter_map(|(thread_id, info)| {
-                (info.is_watchdog() && *thread_id != keep_thread_id).then_some(*thread_id)
-            })
-            .collect::<Vec<_>>();
-        for thread_id in superseded {
-            self.close(thread_id);
-        }
     }
 }
 

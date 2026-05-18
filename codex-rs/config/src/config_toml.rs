@@ -374,6 +374,10 @@ pub struct ConfigToml {
     /// Agent-related settings (thread limits, etc.).
     pub agents: Option<AgentsToml>,
 
+    /// Default interval in seconds for idle-time watchdog check-ins.
+    #[schemars(range(min = 1))]
+    pub watchdog_interval_s: Option<i64>,
+
     /// Memories subsystem settings.
     pub memories: Option<MemoriesToml>,
 
@@ -670,6 +674,7 @@ pub struct AgentsToml {
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[serde(deny_unknown_fields)]
 #[schemars(deny_unknown_fields)]
 pub struct AgentRoleToml {
     /// Human-facing role documentation used in spawn tool guidance.

@@ -373,6 +373,72 @@ WHERE thread_id = ?
         Ok(result.rows_affected() > 0)
     }
 
+    pub async fn get_thread_goal_supervisor_snoozed_until_ms(
+        &self,
+        thread_id: ThreadId,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"
+SELECT snoozed_until_ms
+FROM thread_goal_supervisor_state
+WHERE thread_id = ? AND goal_id = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(goal_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        Ok(row.map(|row| row.try_get("snoozed_until_ms")).transpose()?)
+    }
+
+    pub async fn set_thread_goal_supervisor_snoozed_until_ms(
+        &self,
+        thread_id: ThreadId,
+        goal_id: &str,
+        snoozed_until_ms: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        match snoozed_until_ms {
+            Some(snoozed_until_ms) => {
+                sqlx::query(
+                    r#"
+INSERT INTO thread_goal_supervisor_state (
+    thread_id,
+    goal_id,
+    snoozed_until_ms,
+    updated_at_ms
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    goal_id = excluded.goal_id,
+    snoozed_until_ms = excluded.snoozed_until_ms,
+    updated_at_ms = excluded.updated_at_ms
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(goal_id)
+                .bind(snoozed_until_ms)
+                .bind(now_ms)
+                .execute(self.pool.as_ref())
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    r#"
+DELETE FROM thread_goal_supervisor_state
+WHERE thread_id = ? AND goal_id = ?
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(goal_id)
+                .execute(self.pool.as_ref())
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn account_thread_goal_usage(
         &self,
         thread_id: ThreadId,
@@ -1388,6 +1454,57 @@ mod tests {
             .expect("goal should exist");
         assert_eq!(100, goal.tokens_used);
         assert_eq!(10, goal.time_used_seconds);
+    }
+
+    #[tokio::test]
+    async fn supervisor_snooze_state_is_scoped_to_current_goal_id() {
+        let runtime = test_runtime().await;
+        let thread_id = test_thread_id();
+        upsert_test_thread(&runtime, thread_id).await;
+        let goal = runtime
+            .replace_thread_goal(
+                thread_id,
+                "persist supervisor snooze",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("goal replacement should succeed");
+
+        runtime
+            .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id, Some(123_456))
+            .await
+            .expect("supervisor snooze should persist");
+        assert_eq!(
+            Some(123_456),
+            runtime
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await
+                .expect("supervisor snooze should read")
+        );
+        assert_eq!(
+            None,
+            runtime
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, "stale-goal-id")
+                .await
+                .expect("stale supervisor snooze should be ignored")
+        );
+
+        runtime
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                thread_id,
+                &goal.goal_id,
+                /*snoozed_until_ms*/ None,
+            )
+            .await
+            .expect("supervisor snooze should clear");
+        assert_eq!(
+            None,
+            runtime
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await
+                .expect("supervisor snooze should be cleared")
+        );
     }
 
     #[tokio::test]

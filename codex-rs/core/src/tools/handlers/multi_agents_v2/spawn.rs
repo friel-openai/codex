@@ -2,6 +2,7 @@ use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
+use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
@@ -53,18 +54,28 @@ impl ToolHandler for Handler {
         } = invocation;
         let arguments = function_arguments(payload)?;
         let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-        let fork_mode = args.fork_mode()?;
         let role_name = args
             .agent_type
             .as_deref()
             .map(str::trim)
             .filter(|role| !role.is_empty());
 
-        let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
-        let prompt = render_input_preview(&initial_operation);
-
         let session_source = turn.session_source.clone();
         let child_depth = next_thread_spawn_depth(&session_source);
+        let max_depth = turn.config.agent_max_depth;
+        if role_name == Some("watchdog") {
+            return Err(FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string(),
+            ));
+        }
+        if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
+            return Err(FunctionCallError::RespondToModel(
+                "Agent depth limit reached. Solve the task yourself.".to_string(),
+            ));
+        }
+        let fork_mode = args.fork_mode()?;
+        let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
+        let prompt = render_input_preview(&initial_operation);
         session
             .send_event(
                 &turn,
@@ -81,12 +92,8 @@ impl ToolHandler for Handler {
             .await;
         let mut config =
             build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-        if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
-            reject_full_fork_spawn_overrides(
-                role_name,
-                args.model.as_deref(),
-                args.reasoning_effort,
-            )?;
+        let effective_role_name = if matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory)) {
+            None
         } else {
             apply_requested_spawn_agent_model_overrides(
                 &session,
@@ -99,7 +106,8 @@ impl ToolHandler for Handler {
             apply_role_to_config(&mut config, role_name)
                 .await
                 .map_err(FunctionCallError::RespondToModel)?;
-        }
+            role_name
+        };
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
@@ -107,7 +115,7 @@ impl ToolHandler for Handler {
             session.conversation_id,
             &turn.session_source,
             child_depth,
-            role_name,
+            effective_role_name,
             Some(args.task_name.clone()),
         )?;
         let result = session
@@ -138,8 +146,9 @@ impl ToolHandler for Handler {
                 Some(spawn_source),
                 SpawnAgentOptions {
                     fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                    fork_mode,
+                    fork_mode: fork_mode.clone(),
                     environments: Some(turn.environments.to_selections()),
+                    initial_task_message: fork_mode.as_ref().map(|_| prompt.clone()),
                 },
             )
             .await

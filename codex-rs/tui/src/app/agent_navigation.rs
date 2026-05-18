@@ -141,8 +141,9 @@ impl AgentNavigationState {
 
     /// Returns selectable picker rows in first-seen order.
     ///
-    /// The primary thread stays selectable even when it is the only row. Closed agents and watchdog
-    /// handles are hidden because neither is a useful target for `/agent` thread selection.
+    /// The primary thread stays selectable even when it is the only row. Closed agents and
+    /// supervisor helper agents are hidden because neither is a useful target for `/agent` thread
+    /// selection.
     pub(crate) fn selectable_threads(
         &self,
         primary_thread_id: Option<ThreadId>,
@@ -151,7 +152,7 @@ impl AgentNavigationState {
             .into_iter()
             .filter(|(thread_id, entry)| {
                 Some(*thread_id) == primary_thread_id
-                    || (!entry.is_closed && entry.agent_role.as_deref() != Some("watchdog"))
+                    || (!entry.is_closed && entry.agent_role.as_deref() != Some("goal_supervisor"))
             })
             .collect()
     }
@@ -386,9 +387,9 @@ mod tests {
     }
 
     #[test]
-    fn selectable_threads_hide_closed_agents_and_watchdogs() {
+    fn selectable_threads_hide_closed_agents_and_goal_supervisors() {
         let (mut state, main_thread_id, first_agent_id, second_agent_id) = populated_state();
-        let watchdog_id =
+        let supervisor_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000104").expect("valid thread");
         state.upsert(
             first_agent_id,
@@ -397,9 +398,9 @@ mod tests {
             /*is_closed*/ true,
         );
         state.upsert(
-            watchdog_id,
-            Some("Watcher".to_string()),
-            Some("watchdog".to_string()),
+            supervisor_id,
+            Some("Supervisor".to_string()),
+            Some("goal_supervisor".to_string()),
             /*is_closed*/ false,
         );
 

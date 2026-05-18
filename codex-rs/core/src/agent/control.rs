@@ -5,7 +5,10 @@ use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
 use crate::agent::status::is_final;
 use crate::codex_thread::ThreadConfigSnapshot;
+use crate::find_thread_path_by_id_str;
+use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::inherited_thread_state::InheritedThreadState;
+use crate::rollout::RolloutRecorder;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
@@ -21,8 +24,11 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
@@ -32,14 +38,18 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::WarningEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::ReadThreadParams;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Weak;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tokio::sync::watch;
 use tracing::warn;
 
@@ -47,6 +57,11 @@ const AGENT_NAMES: &str = include_str!("agent_names.txt");
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
+const CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY";
+const CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY";
+const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SpawnAgentForkMode {
@@ -59,6 +74,7 @@ pub(crate) struct SpawnAgentOptions {
     pub(crate) fork_parent_spawn_call_id: Option<String>,
     pub(crate) fork_mode: Option<SpawnAgentForkMode>,
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+    pub(crate) initial_task_message: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +89,18 @@ pub(crate) struct ListedAgent {
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorParentCompactionResult {
+    NotSupervisorHelper,
+    ParentBusy {
+        parent_thread_id: ThreadId,
+    },
+    Submitted {
+        parent_thread_id: ThreadId,
+        submission_id: String,
+    },
 }
 
 fn default_agent_nickname_list() -> Vec<&'static str> {
@@ -134,13 +162,107 @@ fn keep_forked_rollout_item(item: &RolloutItem) -> bool {
     }
 }
 
+fn full_history_fork_reference_items(
+    rollout_path: PathBuf,
+    source_items: &[RolloutItem],
+) -> Vec<RolloutItem> {
+    let source_meta = source_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => Some(meta),
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::ForkReference(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::TurnContext(_) => None,
+    });
+    source_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
+            RolloutItem::Compacted(_)
+            | RolloutItem::EventMsg(_)
+            | RolloutItem::ForkReference(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::TurnContext(_) => None,
+        })
+        .into_iter()
+        .chain(std::iter::once(RolloutItem::ForkReference(
+            ForkReferenceItem {
+                rollout_path,
+                thread_id: source_meta.map(|meta| meta.meta.id),
+                segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
+                nth_user_message: usize::MAX,
+            },
+        )))
+        .collect()
+}
+
+fn is_internal_supervisor_helper_source(session_source: &SessionSource) -> bool {
+    is_goal_supervisor_helper_source(session_source)
+}
+
+fn unix_timestamp_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn synthetic_supervisor_list_agents_items(
+    owner_thread_id: ThreadId,
+    agents: Vec<ListedAgent>,
+) -> Vec<RolloutItem> {
+    let envelope = serde_json::json!({
+        "source": "pre_injected_agents_list",
+        "generated_at": unix_timestamp_seconds(),
+        "owner_thread_id": owner_thread_id.to_string(),
+        "agents": agents,
+    });
+    let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
+    output.success = Some(true);
+
+    vec![
+        RolloutItem::ResponseItem(ResponseItem::FunctionCall {
+            id: None,
+            name: "list_agents".to_string(),
+            namespace: None,
+            arguments: "{}".to_string(),
+            call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+        }),
+        RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput {
+            call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+            output,
+        }),
+    ]
+}
+
+fn role_prompt_item(prompt: String) -> RolloutItem {
+    RolloutItem::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText { text: prompt }],
+        phase: None,
+    })
+}
+
+fn subagent_assignment_item(session_source: &SessionSource, message: String) -> RolloutItem {
+    let agent_path = session_source
+        .get_agent_path()
+        .map(String::from)
+        .unwrap_or_else(|| "this subagent".to_string());
+    role_prompt_item(format!(
+        "# Subagent Assignment\n\nYou are `{agent_path}`. Your direct assignment from your parent agent is:\n\n{message}"
+    ))
+}
+
 /// Control-plane handle for multi-agent operations.
 /// `AgentControl` is held by each session (via `SessionServices`). It provides capability to
 /// spawn new agents and the inter-agent communication layer.
 /// An `AgentControl` instance is intended to be created at most once per root thread/session
 /// tree. That same `AgentControl` is then shared with every sub-agent spawned from that root,
 /// which keeps the registry scoped to that root thread rather than the entire `ThreadManager`.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct AgentControl {
     /// ID shared by the whole agent control session. This means every sub-agents from a common
     /// root share the same session ID.
@@ -152,12 +274,23 @@ pub(crate) struct AgentControl {
     state: Arc<AgentRegistry>,
 }
 
+impl Default for AgentControl {
+    fn default() -> Self {
+        Self {
+            session_id: SessionId::default(),
+            manager: Weak::new(),
+            state: Arc::new(AgentRegistry::default()),
+        }
+    }
+}
+
 impl AgentControl {
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
     pub(crate) fn new(manager: Weak<ThreadManagerState>) -> Self {
         Self {
+            session_id: SessionId::default(),
             manager,
-            ..Default::default()
+            state: Arc::new(AgentRegistry::default()),
         }
     }
 
@@ -171,7 +304,7 @@ impl AgentControl {
     }
 
     /// Spawn a new agent thread and submit the initial prompt.
-    #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) async fn spawn_agent(
         &self,
         config: crate::config::Config,
@@ -208,7 +341,14 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
-        let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let mut reservation = if session_source
+            .as_ref()
+            .is_some_and(is_internal_supervisor_helper_source)
+        {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(config.agent_max_threads)?
+        };
         let inherited_shell_snapshot = self
             .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
             .await;
@@ -356,9 +496,17 @@ impl AgentControl {
         )
         .await;
 
-        self.send_input(new_thread.thread_id, initial_operation)
-            .await?;
-        if !new_thread.thread.enabled(Feature::MultiAgentV2) {
+        Box::pin(self.send_input(new_thread.thread_id, initial_operation)).await?;
+        let is_goal_supervisor_helper = options.fork_mode.is_some()
+            && notification_source
+                .as_ref()
+                .is_some_and(is_goal_supervisor_helper_source);
+        // Pathless MultiAgentV2 children cannot emit routed inter-agent completion messages.
+        // Keep the completion watcher so their parent still receives the fallback notification.
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if (!new_thread.thread.enabled(Feature::MultiAgentV2) || pathless_multi_agent_child)
+            || is_goal_supervisor_helper
+        {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -390,7 +538,9 @@ impl AgentControl {
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         inherited_thread_state: InheritedThreadState,
     ) -> CodexResult<crate::thread_manager::NewThread> {
-        if options.fork_parent_spawn_call_id.is_none() {
+        if options.fork_parent_spawn_call_id.is_none()
+            && !is_internal_supervisor_helper_source(&session_source)
+        {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
@@ -418,36 +568,43 @@ impl AgentControl {
             parent_thread.flush_rollout().await?;
         }
 
-        let parent_history = state
-            .read_stored_thread(ReadThreadParams {
-                thread_id: parent_thread_id,
-                include_archived: true,
-                include_history: true,
-            })
-            .await?
-            .history
+        let rollout_path = parent_thread
+            .as_ref()
+            .and_then(|parent_thread| parent_thread.rollout_path())
+            .or(find_thread_path_by_id_str(
+                config.codex_home.as_path(),
+                &parent_thread_id.to_string(),
+                /*state_db_ctx*/ None,
+            )
+            .await?)
             .ok_or_else(|| {
                 CodexErr::Fatal(format!(
-                    "parent thread history unavailable for fork: {parent_thread_id}"
+                    "parent thread rollout unavailable for fork: {parent_thread_id}"
                 ))
             })?;
 
         let response_continuation = inherited_thread_state.response_continuation();
         let use_response_continuation_baseline =
             response_continuation.is_some() && matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        let source_items = RolloutRecorder::get_rollout_history(&rollout_path)
+            .await?
+            .get_rollout_items();
         let mut forked_rollout_items = if let (Some(response_continuation), true) =
             (&response_continuation, use_response_continuation_baseline)
         {
             previous_response_fork_rollout_items(
-                parent_history.items,
+                source_items,
                 response_continuation.fork_baseline_input(),
             )
         } else {
-            let mut items = parent_history.items;
-            if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-                items = truncate_rollout_to_last_n_fork_turns(&items, *last_n_turns);
+            match fork_mode {
+                SpawnAgentForkMode::FullHistory => {
+                    full_history_fork_reference_items(rollout_path.clone(), &source_items)
+                }
+                SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                    truncate_rollout_to_last_n_fork_turns(&source_items, *last_n_turns)
+                }
             }
-            items
         };
         if !use_response_continuation_baseline {
             // MultiAgentV2 root/subagent usage hints are injected as standalone developer
@@ -484,6 +641,29 @@ impl AgentControl {
 
                 keep_forked_rollout_item(item)
             });
+        }
+        if is_goal_supervisor_helper_source(&session_source) {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(role_prompt_item(role_prompt));
+            }
+            forked_rollout_items.extend(
+                self.supervisor_boot_context_items(state, parent_thread_id)
+                    .await,
+            );
+        } else if options.fork_mode.is_some() {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(role_prompt_item(role_prompt));
+            }
+            if let Some(initial_task_message) = options.initial_task_message.clone() {
+                forked_rollout_items.push(subagent_assignment_item(
+                    &session_source,
+                    initial_task_message,
+                ));
+            }
         }
 
         state
@@ -594,7 +774,11 @@ impl AgentControl {
         }
         let state = self.upgrade()?;
         let state_db_ctx = state.state_db();
-        let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
+        let mut reservation = if is_internal_supervisor_helper_source(&session_source) {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(config.agent_max_threads)?
+        };
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -664,7 +848,10 @@ impl AgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
-        if !resumed_thread.thread.enabled(Feature::MultiAgentV2) {
+        // Pathless MultiAgentV2 children cannot emit routed inter-agent completion messages.
+        // Keep the completion watcher so their parent still receives the fallback notification.
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if !resumed_thread.thread.enabled(Feature::MultiAgentV2) || pathless_multi_agent_child {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -789,6 +976,111 @@ impl AgentControl {
         result
     }
 
+    pub(crate) async fn finish_internal_helper_thread(
+        &self,
+        agent_id: ThreadId,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        if let Ok(thread) = state.get_thread(agent_id).await {
+            if let Some(state_db_ctx) = thread.state_db()
+                && let Err(err) = state_db_ctx
+                    .set_thread_spawn_edge_status(
+                        agent_id,
+                        DirectionalThreadSpawnEdgeStatus::Closed,
+                    )
+                    .await
+            {
+                warn!("failed to persist thread-spawn edge status for {agent_id}: {err}");
+            }
+            thread.codex.session.flush_rollout().await?;
+        }
+        let _ = state.remove_thread(&agent_id).await;
+        self.state.release_spawned_thread(agent_id);
+        Ok(())
+    }
+
+    pub(crate) async fn goal_supervisor_parent_for_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> Option<ThreadId> {
+        let state = self.upgrade().ok()?;
+        let helper_thread = state.get_thread(helper_thread_id).await.ok()?;
+        let snapshot = helper_thread.codex.thread_config_snapshot().await;
+        let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            agent_role: Some(agent_role),
+            ..
+        }) = snapshot.session_source
+        else {
+            return None;
+        };
+        (agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+            .then_some(parent_thread_id)
+    }
+
+    pub(crate) async fn finish_goal_supervisor_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return false;
+        };
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        match crate::goal_supervisor::finish_supervisor_helper(
+            &parent_thread.codex.session,
+            helper_thread_id,
+        )
+        .await
+        {
+            Ok(finished) => {
+                if finished
+                    && let Err(err) = parent_thread
+                        .codex
+                        .session
+                        .goal_runtime_apply(crate::goals::GoalRuntimeEvent::MaybeContinueIfIdle)
+                        .await
+                {
+                    warn!("failed to reschedule goal supervisor after helper finished: {err}");
+                }
+                finished
+            }
+            Err(err) => {
+                warn!("failed to finish goal supervisor helper {helper_thread_id}: {err}");
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn snooze_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+        delay_seconds: Option<u64>,
+    ) -> Option<u64> {
+        let parent_thread_id = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await?;
+        let state = self.upgrade().ok()?;
+        let parent_thread = state.get_thread(parent_thread_id).await.ok()?;
+        match crate::goal_supervisor::snooze_supervisor_helper(
+            &parent_thread.codex.session,
+            helper_thread_id,
+            delay_seconds,
+        )
+        .await
+        {
+            Ok(delay_seconds) => delay_seconds,
+            Err(err) => {
+                warn!("failed to snooze goal supervisor helper {helper_thread_id}: {err}");
+                None
+            }
+        }
+    }
+
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
     /// agent and any live descendants reached from the in-memory tree.
     pub(crate) async fn close_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
@@ -827,6 +1119,37 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
+    }
+
+    pub(crate) async fn has_running_user_visible_descendant(
+        &self,
+        parent_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let state = self.upgrade()?;
+        let mut children_by_parent = self.live_thread_spawn_children().await?;
+        let mut stack = children_by_parent
+            .remove(&parent_thread_id)
+            .unwrap_or_default()
+            .into_iter()
+            .rev()
+            .collect::<Vec<_>>();
+
+        while let Some((thread_id, metadata)) = stack.pop() {
+            if !is_internal_supervisor_role(metadata.agent_role.as_deref()) {
+                let thread = state.get_thread(thread_id).await?;
+                if matches!(
+                    thread.agent_status().await,
+                    AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted
+                ) {
+                    return Ok(true);
+                }
+            }
+            if let Some(children) = children_by_parent.remove(&thread_id) {
+                stack.extend(children.into_iter().rev());
+            }
+        }
+
+        Ok(false)
     }
 
     pub(crate) fn register_session_root(
@@ -967,6 +1290,9 @@ impl AgentControl {
             let Some(thread_id) = metadata.agent_id else {
                 continue;
             };
+            if is_internal_supervisor_role(metadata.agent_role.as_deref()) {
+                continue;
+            }
             if resolved_prefix
                 .as_ref()
                 .is_some_and(|prefix| !agent_matches_prefix(metadata.agent_path.as_ref(), prefix))
@@ -993,6 +1319,87 @@ impl AgentControl {
         Ok(agents)
     }
 
+    pub(crate) async fn compact_parent_for_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> CodexResult<SupervisorParentCompactionResult> {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return Ok(SupervisorParentCompactionResult::NotSupervisorHelper);
+        };
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        if parent_thread
+            .codex
+            .session
+            .active_turn
+            .lock()
+            .await
+            .is_some()
+        {
+            return Ok(SupervisorParentCompactionResult::ParentBusy { parent_thread_id });
+        }
+
+        state
+            .send_op(parent_thread_id, Op::Compact)
+            .await
+            .map(
+                |submission_id| SupervisorParentCompactionResult::Submitted {
+                    parent_thread_id,
+                    submission_id,
+                },
+            )
+    }
+
+    pub(crate) async fn send_goal_supervisor_snooze_event(
+        &self,
+        parent_thread_id: ThreadId,
+        delay_seconds: u64,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        parent_thread
+            .codex
+            .session
+            .send_event_raw(Event {
+                id: format!("goal-supervisor-snooze-{}", ThreadId::new()),
+                msg: codex_protocol::protocol::EventMsg::Warning(WarningEvent {
+                    message: format!(
+                        "Supervisor snoozed for {}.",
+                        format_supervisor_snooze_duration(delay_seconds)
+                    ),
+                }),
+            })
+            .await;
+        Ok(())
+    }
+
+    async fn supervisor_boot_context_items(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RolloutItem> {
+        let owner_source = match state.get_thread(owner_thread_id).await {
+            Ok(owner_thread) => {
+                owner_thread
+                    .codex
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
+            Err(_) => SessionSource::Cli,
+        };
+        self.register_session_root(owner_thread_id, &owner_source);
+        let agents = self
+            .list_agents(&owner_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+
+        synthetic_supervisor_list_agents_items(owner_thread_id, agents)
+    }
+
     /// Starts a detached watcher for sub-agents spawned from another thread.
     ///
     /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
@@ -1001,15 +1408,19 @@ impl AgentControl {
         &self,
         child_thread_id: ThreadId,
         session_source: Option<SessionSource>,
-        child_reference: String,
+        _child_reference: String,
         child_agent_path: Option<AgentPath>,
     ) {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
+            parent_thread_id,
+            agent_role,
+            ..
         })) = session_source
         else {
             return;
         };
+        let is_goal_supervisor_helper =
+            agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME);
         let control = self.clone();
         tokio::spawn(async move {
             let status = match control.subscribe_status(child_thread_id).await {
@@ -1029,21 +1440,27 @@ impl AgentControl {
             if !is_final(&status) {
                 return;
             }
+            if control.finish_goal_supervisor_helper(child_thread_id).await {
+                return;
+            }
+            if is_goal_supervisor_helper {
+                return;
+            }
 
             let Ok(state) = control.upgrade() else {
                 return;
             };
             let child_thread = state.get_thread(child_thread_id).await.ok();
-            let message = format_subagent_notification_message(child_reference.as_str(), &status);
-            if child_agent_path.is_some()
+            // The TUI indexes live subagent rows by ThreadId. Use the child ThreadId in this
+            // hidden notification so final status updates remove the correct panel row.
+            let message =
+                format_subagent_notification_message(&child_thread_id.to_string(), &status);
+            if let Some(child_agent_path) = child_agent_path.clone()
                 && child_thread
                     .as_ref()
                     .map(|thread| thread.enabled(Feature::MultiAgentV2))
                     .unwrap_or(true)
             {
-                let Some(child_agent_path) = child_agent_path.clone() else {
-                    return;
-                };
                 let Some(parent_agent_path) = child_agent_path
                     .as_str()
                     .rsplit_once('/')
@@ -1116,6 +1533,10 @@ impl AgentControl {
         self.manager
             .upgrade()
             .ok_or_else(|| CodexErr::UnsupportedOperation("thread manager dropped".to_string()))
+    }
+
+    pub(crate) fn upgrade_for_tools(&self) -> CodexResult<Arc<ThreadManagerState>> {
+        self.upgrade()
     }
 
     async fn inherited_shell_snapshot_for_source(
@@ -1262,10 +1683,21 @@ impl AgentControl {
     }
 }
 
+fn is_internal_supervisor_role(agent_role: Option<&str>) -> bool {
+    matches!(
+        agent_role,
+        Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+    )
+}
+
 async fn parent_prompt_cache_key_for_source(
     state: &Arc<ThreadManagerState>,
     session_source: Option<&SessionSource>,
 ) -> Option<ThreadId> {
+    if !fork_parent_prompt_cache_key_enabled() {
+        return None;
+    }
+
     let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id, ..
     })) = session_source
@@ -1278,6 +1710,28 @@ async fn parent_prompt_cache_key_for_source(
         .await
         .ok()
         .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
+}
+
+fn fork_parent_prompt_cache_key_enabled() -> bool {
+    let parent_named_value =
+        std::env::var(CODEX_EXPERIMENTAL_FORK_PARENT_PROMPT_CACHE_KEY_ENV).ok();
+    let legacy_value = std::env::var(CODEX_EXPERIMENTAL_FORK_PROMPT_CACHE_KEY_ENV).ok();
+    fork_parent_prompt_cache_key_value_enabled(
+        parent_named_value.as_deref(),
+        legacy_value.as_deref(),
+    )
+}
+
+fn fork_parent_prompt_cache_key_value_enabled(
+    parent_named_value: Option<&str>,
+    legacy_value: Option<&str>,
+) -> bool {
+    parent_named_value.or(legacy_value).is_none_or(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn previous_response_fork_rollout_items(
@@ -1342,15 +1796,17 @@ async fn parent_mcp_tool_snapshot_for_source(
 }
 
 fn fork_previous_response_id_enabled() -> bool {
-    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
-        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+    let value = std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV).ok();
+    fork_previous_response_id_value_enabled(value.as_deref())
 }
 
-fn fork_previous_response_id_value_enabled(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+fn fork_previous_response_id_value_enabled(value: Option<&str>) -> bool {
+    value.is_none_or(|value| {
+        matches!(
+            value.to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 async fn parent_response_continuation_for_source(
@@ -1395,6 +1851,16 @@ fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> b
                 .strip_prefix(prefix.as_str())
                 .is_some_and(|suffix| suffix.starts_with('/'))
     })
+}
+
+fn format_supervisor_snooze_duration(delay_seconds: u64) -> String {
+    let minutes = delay_seconds / 60;
+    let seconds = delay_seconds % 60;
+    match (minutes, seconds) {
+        (0, seconds) => format!("{seconds}s"),
+        (minutes, 0) => format!("{minutes}m"),
+        (minutes, seconds) => format!("{minutes}m {seconds}s"),
+    }
 }
 
 pub(crate) fn render_input_preview(initial_operation: &Op) -> String {

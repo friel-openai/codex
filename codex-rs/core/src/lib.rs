@@ -38,6 +38,7 @@ mod exec_policy;
 mod flags;
 #[cfg(test)]
 mod git_info_tests;
+mod goal_supervisor;
 mod goals;
 pub use goals::ExternalGoalPreviousStatus;
 pub use goals::ExternalGoalSet;
