@@ -185,6 +185,7 @@ pub struct FunctionToolOutput {
     pub body: Vec<FunctionCallOutputContentItem>,
     pub success: Option<bool>,
     pub post_tool_use_response: Option<JsonValue>,
+    pub terminal_no_response: bool,
 }
 
 impl FunctionToolOutput {
@@ -193,6 +194,7 @@ impl FunctionToolOutput {
             body: vec![FunctionCallOutputContentItem::InputText { text }],
             success,
             post_tool_use_response: None,
+            terminal_no_response: false,
         }
     }
 
@@ -204,11 +206,17 @@ impl FunctionToolOutput {
             body: content,
             success,
             post_tool_use_response: None,
+            terminal_no_response: false,
         }
     }
 
     pub fn into_text(self) -> String {
         function_call_output_content_items_to_text(&self.body).unwrap_or_default()
+    }
+
+    pub fn into_terminal_no_response(mut self) -> Self {
+        self.terminal_no_response = true;
+        self
     }
 }
 
@@ -221,6 +229,10 @@ impl ToolOutput for FunctionToolOutput {
 
     fn success_for_logging(&self) -> bool {
         self.success.unwrap_or(true)
+    }
+
+    fn terminal_no_response(&self) -> bool {
+        self.terminal_no_response
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {

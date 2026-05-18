@@ -266,7 +266,6 @@ pub(crate) fn parse_agent_role_file_contents(
         parsed.config.developer_instructions.as_deref(),
         role_name_hint.is_none(),
     )?;
-
     let role_name = parsed
         .name
         .as_deref()
