@@ -2,4 +2,4 @@
 source: tui/src/chatwidget/tests/app_server.rs
 expression: rendered
 ---
-• Agent message: ping 21 (21) from /root/watchdog
+• Agent message: ping 21 (21) from /root/goal_supervisor

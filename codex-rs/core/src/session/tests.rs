@@ -3609,7 +3609,7 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
     let archived_old_rollout_path = config
         .codex_home
         .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
-        .join(sess.conversation_id.to_string())
+        .join(sess.thread_id.to_string())
         .join(old_segment_id.to_string())
         .join(
             old_rollout_path
@@ -3622,19 +3622,19 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
         .file_name()
         .and_then(|file_name| file_name.to_str())
         .and_then(|file_name| file_name.strip_prefix("rollout-"))
-        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.conversation_id)))
+        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.thread_id)))
         .expect("old rollout timestamp");
     let (new_items, new_thread_id, _) =
         RolloutRecorder::load_rollout_items(new_rollout_path.as_path())
             .await
             .expect("load new rollout segment");
-    assert_eq!(new_thread_id, Some(sess.conversation_id));
+    assert_eq!(new_thread_id, Some(sess.thread_id));
     assert!(new_items.iter().any(|item| {
         matches!(
             item,
             RolloutItem::RolloutReference(reference)
                 if reference.rollout_path.as_path() == archived_old_rollout_path.as_path()
-                    && reference.thread_id == Some(sess.conversation_id)
+                    && reference.thread_id == Some(sess.thread_id)
                     && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
         )
     }));
@@ -5026,6 +5026,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     };
@@ -7094,6 +7095,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     });
@@ -10124,11 +10126,11 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     .await
     .expect("write subagent override");
     tokio::fs::write(
-        codex_home.path().join("AGENTS.watchdog.md"),
-        "custom watchdog",
+        codex_home.path().join("AGENTS.supervisor.md"),
+        "custom supervisor",
     )
     .await
-    .expect("write watchdog override");
+    .expect("write supervisor override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -10139,8 +10141,8 @@ async fn agent_prompt_loader_prefers_home_overrides() {
         "custom subagent"
     );
     assert_eq!(
-        load_watchdog_agent_prompt(codex_home.path()).await,
-        "custom watchdog"
+        load_supervisor_agent_prompt(codex_home.path()).await,
+        "custom supervisor"
     );
 }
 

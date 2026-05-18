@@ -143,7 +143,6 @@ use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::RotateThreadSegmentParams;
-use codex_thread_store::ThreadEventPersistenceMode;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_utils_output_truncation::TruncationPolicy;
@@ -234,7 +233,10 @@ use self::turn_context::TurnSkillsContext;
 mod rollout_reconstruction_tests;
 
 const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
+const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
+    include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -255,8 +257,26 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
 }
 
+async fn load_root_agent_supervisor_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK,
+        "AGENTS.root-supervisor.md",
+    )
+    .await
+}
+
 pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_supervisor_agent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        SUPERVISOR_AGENT_PROMPT_FALLBACK,
+        "AGENTS.supervisor.md",
+    )
+    .await
 }
 
 fn history_contains_developer_text(
@@ -285,6 +305,11 @@ pub(crate) async fn load_agent_role_prompt(
     }
 
     let role_prompt = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
+            if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
+        {
+            load_supervisor_agent_prompt(&config.codex_home).await
+        }
         SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
         SessionSource::Cli
         | SessionSource::VSCode
@@ -292,7 +317,19 @@ pub(crate) async fn load_agent_role_prompt(
         | SessionSource::Mcp
         | SessionSource::Custom(_)
         | SessionSource::Internal(_)
-        | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
+        | SessionSource::Unknown => {
+            let mut prompt = load_root_agent_prompt(&config.codex_home).await;
+            if config.features.enabled(Feature::Goals)
+                && config.features.enabled(Feature::GoalSupervisor)
+            {
+                let supervisor_prompt = load_root_agent_supervisor_prompt(&config.codex_home).await;
+                if !supervisor_prompt.trim().is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&supervisor_prompt);
+                }
+            }
+            prompt
+        }
     };
 
     if role_prompt.trim().is_empty() {
@@ -400,6 +437,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ResponseInputItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
@@ -1179,12 +1217,6 @@ impl Session {
         self.services.model_client.prompt_cache_key()
     }
 
-    pub(crate) fn response_continuation_for_fork(
-        &self,
-    ) -> Option<crate::client::ResponseContinuation> {
-        self.services.model_client.response_continuation_for_fork()
-    }
-
     /// Flush rollout writes and return the final durability-barrier result.
     pub(crate) async fn flush_rollout(&self) -> std::io::Result<()> {
         if let Some(live_thread) = self.live_thread() {
@@ -1834,11 +1866,15 @@ impl Session {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
+            agent_role,
             ..
         }) = &turn_context.session_source
         else {
             return;
         };
+        if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) {
+            return;
+        }
 
         let Some(status) = agent_status_from_event(msg) else {
             return;
@@ -1875,7 +1911,7 @@ impl Session {
         // The TUI indexes live subagent rows by ThreadId. Use the child ThreadId in this
         // hidden notification so final status updates remove the correct panel row.
         let message =
-            format_subagent_notification_message(&self.conversation_id.to_string(), &status);
+            format_subagent_notification_message(&self.thread_id.to_string(), &status);
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
         let trace_message = self
@@ -2828,11 +2864,6 @@ impl Session {
         let params = {
             let state = self.state.lock().await;
             let session_configuration = &state.session_configuration;
-            let event_persistence_mode = if session_configuration.persist_extended_history {
-                ThreadEventPersistenceMode::Extended
-            } else {
-                ThreadEventPersistenceMode::Limited
-            };
             RotateThreadSegmentParams {
                 source: session_configuration.session_source.clone(),
                 base_instructions: BaseInstructions {
@@ -2840,7 +2871,7 @@ impl Session {
                 },
                 dynamic_tools: session_configuration.dynamic_tools.clone(),
                 metadata: ThreadPersistenceMetadata {
-                    cwd: Some(session_configuration.cwd.to_path_buf()),
+                    cwd: Some(session_configuration.cwd().to_path_buf()),
                     model_provider: session_configuration
                         .original_config_do_not_use
                         .model_provider_id
@@ -2855,7 +2886,6 @@ impl Session {
                         ThreadMemoryMode::Disabled
                     },
                 },
-                event_persistence_mode,
                 initial_items,
                 previous_segment_reference_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             }

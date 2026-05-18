@@ -88,10 +88,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     .get_agent_path()
                     .or_else(|| {
                         agent_control
-                            .get_agent_metadata(session.conversation_id)
+                            .get_agent_metadata(session.thread_id)
                             .and_then(|metadata| metadata.agent_path)
                     })
-                    .unwrap_or_else(|| fallback_agent_path(session.conversation_id));
+                    .unwrap_or_else(|| fallback_agent_path(session.thread_id));
                 let receiver_path = receiver_agent
                     .agent_path
                     .clone()

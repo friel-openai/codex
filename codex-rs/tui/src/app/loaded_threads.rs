@@ -82,8 +82,12 @@ pub(crate) fn find_loaded_subagent_threads_for_primary(
                 .remove(&thread_id)
                 .map(|thread| LoadedSubagentThread {
                     thread_id,
-                    agent_nickname: thread.agent_nickname,
-                    agent_role: thread.agent_role,
+                    agent_nickname: thread
+                        .agent_nickname
+                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_nickname")),
+                    agent_role: thread
+                        .agent_role
+                        .or_else(|| thread_spawn_agent_metadata(&thread.source, "agent_role")),
                 })
         })
         .collect();
@@ -101,6 +105,19 @@ fn thread_spawn_parent_thread_id(
         .get("parent_thread_id")?
         .as_str()?;
     ThreadId::from_string(parent_thread_id).ok()
+}
+
+fn thread_spawn_agent_metadata(
+    source: &codex_app_server_protocol::SessionSource,
+    field: &str,
+) -> Option<String> {
+    serde_json::to_value(source)
+        .ok()?
+        .get("subAgent")?
+        .get("thread_spawn")?
+        .get(field)?
+        .as_str()
+        .map(ToOwned::to_owned)
 }
 
 #[cfg(test)]
@@ -215,6 +232,44 @@ mod tests {
                     agent_role: Some("worker".to_string()),
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn recovers_goal_supervisor_metadata_from_thread_spawn_source() {
+        // Regression guard for internal supervisor helpers: loaded helper threads can reach the
+        // TUI with empty top-level metadata even though their ThreadSpawn source still identifies
+        // them as goal_supervisor. Without this recovery, the /agent picker can render selectable
+        // anonymous Agent rows instead of hiding goal supervisor helpers.
+        let primary_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000011").expect("valid thread");
+        let supervisor_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000012").expect("valid thread");
+        let supervisor = test_thread(
+            supervisor_thread_id,
+            thread_spawn_source(
+                primary_thread_id,
+                /*depth*/ 1,
+                "Goal supervisor",
+                "goal_supervisor",
+            ),
+        );
+
+        let loaded = find_loaded_subagent_threads_for_primary(
+            vec![
+                test_thread(primary_thread_id, SessionSource::Cli),
+                supervisor,
+            ],
+            primary_thread_id,
+        );
+
+        assert_eq!(
+            loaded,
+            vec![LoadedSubagentThread {
+                thread_id: supervisor_thread_id,
+                agent_nickname: Some("Goal supervisor".to_string()),
+                agent_role: Some("goal_supervisor".to_string()),
+            }]
         );
     }
 }

@@ -1103,11 +1103,9 @@ impl ModelClientSession {
         let turn_metadata_header = parse_turn_metadata_header(turn_metadata_header);
         let session_id = self.client.state.session_id.to_string();
         let thread_id = self.client.state.thread_id.to_string();
-        let prompt_cache_key = self.client.prompt_cache_key().to_string();
         ApiResponsesOptions {
             session_id: Some(session_id),
             thread_id: Some(thread_id),
-            prompt_cache_key: Some(prompt_cache_key),
             session_source: Some(self.client.state.session_source.clone()),
             extra_headers: {
                 let mut headers = build_responses_headers(

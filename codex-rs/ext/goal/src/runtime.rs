@@ -369,7 +369,16 @@ impl GoalRuntimeHandle {
             self.inner.accounting_state.clear_active_goal();
             return Ok(());
         }
-        let item = continuation_steering_item(&protocol_goal_from_state(goal));
+        let goal_id = goal.goal_id.clone();
+        let goal = protocol_goal_from_state(goal);
+        if thread
+            .maybe_start_goal_supervisor_checkin(goal_id.as_str(), &goal)
+            .await
+            .map_err(|err| err.to_string())?
+        {
+            return Ok(());
+        }
+        let item = continuation_steering_item(&goal);
 
         if let Err(err) = thread.try_start_turn_if_idle(vec![item]).await {
             let reason = err.reason();

@@ -2715,7 +2715,7 @@ async fn send_input_from_subagent_message_uses_inter_agent_communication() {
     session
         .services
         .agent_control
-        .register_session_root(parent_thread_id, &SessionSource::Cli);
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     let sender_path = AgentPath::try_from("/root/worker").expect("valid sender path");
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,

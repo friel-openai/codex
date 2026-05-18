@@ -30,6 +30,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::TurnEnvironmentSelections;
@@ -308,6 +309,19 @@ impl CodexThread {
         items: Vec<ResponseItem>,
     ) -> Result<(), TryStartTurnIfIdleError> {
         self.codex.session.try_start_turn_if_idle(items).await
+    }
+
+    pub async fn maybe_start_goal_supervisor_checkin(
+        &self,
+        goal_id: &str,
+        goal: &ThreadGoal,
+    ) -> anyhow::Result<bool> {
+        if !self.enabled(Feature::GoalSupervisor) {
+            return Ok(false);
+        }
+        crate::goal_supervisor::maybe_start_supervisor_checkin(&self.codex.session, goal_id, goal)
+            .await?;
+        Ok(true)
     }
 
     pub async fn set_app_server_client_info(

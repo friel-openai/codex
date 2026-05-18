@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: inserted
+---
+• Spawned Goal supervisor [goal_supervisor] (gpt-5.4-ultrafast low)
+  └ Inspect the goal and decide whether to continue the parent.

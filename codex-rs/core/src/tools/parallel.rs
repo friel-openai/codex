@@ -70,7 +70,7 @@ impl ToolCallRuntime {
             self.handle_tool_call_with_source(call, ToolCallSource::Direct, cancellation_token);
         async move {
             match future.await {
-                Ok(response) => Ok(response.into_response()),
+                Ok(response) => Ok(Self::response_for_tool_result(response)),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
                 Err(other) => Ok(Self::failure_response(error_call, other)),
             }
@@ -208,6 +208,10 @@ impl ToolCallRuntime {
                 },
             },
         }
+    }
+
+    fn response_for_tool_result(result: AnyToolResult) -> ResponseInputItem {
+        result.into_response()
     }
 
     fn aborted_response(call: &ToolCall, secs: f32) -> AnyToolResult {

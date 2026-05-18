@@ -139,8 +139,6 @@ pub enum Feature {
     MultiAgentV2,
     /// Enable root/subagent developer prompt injection.
     AgentPromptInjection,
-    /// Enable idle-time watchdog handles for root agents.
-    AgentWatchdog,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
     /// Enable apps.
@@ -199,6 +197,8 @@ pub enum Feature {
     GuardianApproval,
     /// Enable persisted thread goals and automatic goal continuation.
     Goals,
+    /// Use an internal supervisor helper for active goal continuation.
+    GoalSupervisor,
     /// Route MCP tool approval prompts through the MCP elicitation request path.
     ToolCallMcpElicitation,
     /// Prompt Codex Apps connector auth failures through MCP URL elicitations.
@@ -967,20 +967,14 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::MultiAgentV2,
         key: "multi_agent_v2",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::AgentPromptInjection,
         key: "agent_prompt_injection",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
-    },
-    FeatureSpec {
-        id: Feature::AgentWatchdog,
-        key: "agent_watchdog",
-        stage: Stage::UnderDevelopment,
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::SpawnCsv,
@@ -1152,6 +1146,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::Goals,
         key: "goals",
         stage: Stage::Stable,
+        default_enabled: true,
+    },
+    FeatureSpec {
+        id: Feature::GoalSupervisor,
+        key: "goal_supervisor",
+        stage: Stage::Experimental {
+            name: "Goal supervisor",
+            menu_description: "Use an internal supervisor helper for active goal continuation.",
+            announcement: "",
+        },
         default_enabled: true,
     },
     FeatureSpec {

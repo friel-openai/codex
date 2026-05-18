@@ -120,8 +120,6 @@ pub struct RotateThreadSegmentParams {
     pub dynamic_tools: Vec<DynamicToolSpec>,
     /// Metadata captured for the new segment.
     pub metadata: ThreadPersistenceMetadata,
-    /// Whether persistence should include the extended event surface.
-    pub event_persistence_mode: ThreadEventPersistenceMode,
     /// Items written immediately after the new segment metadata.
     pub initial_items: Vec<RolloutItem>,
     /// Maximum number of rollout-reference segments materialized through the new segment.
