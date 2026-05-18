@@ -1,9 +1,6 @@
 use super::AuthRequestTelemetryContext;
-use super::LastResponse;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
-use super::ResponseContinuation;
-use super::ResponsesApiRequest;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -27,8 +24,6 @@ use codex_otel::SessionTelemetry;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
-use codex_protocol::models::ReasoningItemContent;
-use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::InternalSessionSource;
@@ -220,66 +215,6 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
     }
 }
 
-fn user_message_item(text: &str) -> ResponseItem {
-    ResponseItem::Message {
-        id: None,
-        role: "user".to_string(),
-        content: vec![ContentItem::InputText {
-            text: text.to_string(),
-        }],
-        phase: None,
-    }
-}
-
-fn reasoning_item(id: &str, text: &str) -> ResponseItem {
-    ResponseItem::Reasoning {
-        id: id.to_string(),
-        summary: vec![ReasoningItemReasoningSummary::SummaryText {
-            text: "summary".to_string(),
-        }],
-        content: Some(vec![ReasoningItemContent::ReasoningText {
-            text: text.to_string(),
-        }]),
-        encrypted_content: None,
-    }
-}
-
-#[test]
-fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() {
-    let user_message = user_message_item("hello");
-    let old_reasoning = reasoning_item("rs-old", "old analysis");
-    let latest_reasoning = reasoning_item("rs-latest", "latest analysis");
-    let latest_message = output_message("msg-latest", "assistant output");
-    let response_continuation = ResponseContinuation {
-        request: ResponsesApiRequest {
-            model: "gpt-test".to_string(),
-            instructions: "base instructions".to_string(),
-            input: vec![user_message.clone(), old_reasoning],
-            tools: Vec::new(),
-            tool_choice: "auto".to_string(),
-            parallel_tool_calls: false,
-            reasoning: None,
-            store: false,
-            stream: true,
-            include: Vec::new(),
-            service_tier: None,
-            prompt_cache_key: Some(ThreadId::new().to_string()),
-            text: None,
-            client_metadata: None,
-        },
-        last_response: LastResponse {
-            response_id: "parent-resp".to_string(),
-            items_added: vec![latest_reasoning.clone(), latest_message.clone()],
-        },
-    }
-    .for_fork();
-
-    assert_eq!(
-        response_continuation.fork_baseline_input(),
-        vec![user_message, latest_reasoning, latest_message]
-    );
-}
-
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
     let mut rollout = replay_bundle(temp.path())?;
     for _ in 0..50 {
@@ -423,8 +358,6 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         api_stream,
         test_session_telemetry(),
         attempt,
-        /*client_state*/ None,
-        /*request*/ None,
     );
 
     let observed = stream
@@ -474,8 +407,6 @@ async fn response_stream_records_last_model_feedback_ids() {
         api_stream,
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
-        /*client_state*/ None,
-        /*request*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -517,8 +448,6 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         api_stream,
         test_session_telemetry(),
         attempt,
-        /*client_state*/ None,
-        /*request*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output

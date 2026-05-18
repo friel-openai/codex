@@ -6,8 +6,10 @@
 
 use crate::StateDbHandle;
 use crate::context::ContextualUserFragment;
+use crate::context::GoalContext;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
+use crate::goal_supervisor::GoalSupervisorRuntimeState;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -150,11 +152,13 @@ pub(crate) struct GoalRuntimeState {
     accounting_lock: Semaphore,
     accounting: Mutex<GoalAccountingSnapshot>,
     pub(crate) continuation_lock: Semaphore,
+    pub(crate) supervisor: GoalSupervisorRuntimeState,
 }
 
 struct GoalContinuationCandidate {
     goal_id: String,
     items: Vec<ResponseItem>,
+    goal: ThreadGoal,
 }
 
 impl GoalRuntimeState {
@@ -165,6 +169,7 @@ impl GoalRuntimeState {
             accounting_lock: Semaphore::new(/*permits*/ 1),
             accounting: Mutex::new(GoalAccountingSnapshot::new()),
             continuation_lock: Semaphore::new(/*permits*/ 1),
+            supervisor: GoalSupervisorRuntimeState::new(),
         }
     }
 }
@@ -1299,6 +1304,20 @@ impl Session {
                 .await;
             return;
         }
+        if self.enabled(Feature::GoalSupervisor) {
+            self.clear_reserved_goal_continuation_turn(&turn_state)
+                .await;
+            if let Err(err) = crate::goal_supervisor::maybe_start_supervisor_checkin(
+                self,
+                &candidate.goal_id,
+                &candidate.goal,
+            )
+            .await
+            {
+                tracing::warn!("failed to start goal supervisor check-in: {err}");
+            }
+            return;
+        }
         self.input_queue
             .extend_pending_input_for_turn_state(
                 turn_state.as_ref(),
@@ -1388,15 +1407,17 @@ impl Session {
         }
         let goal_id = goal.goal_id.clone();
         let goal = protocol_goal_from_state(goal);
+        let items = vec![goal_context_input_item(continuation_prompt(&goal))];
         Some(GoalContinuationCandidate {
             goal_id,
-            items: vec![goal_context_input_item(continuation_prompt(&goal))],
+            items,
+            goal,
         })
     }
 }
 
 impl Session {
-    async fn state_db_for_thread_goals(&self) -> anyhow::Result<Option<StateDbHandle>> {
+    pub(crate) async fn state_db_for_thread_goals(&self) -> anyhow::Result<Option<StateDbHandle>> {
         let config = self.get_config().await;
         if config.ephemeral {
             return Ok(None);

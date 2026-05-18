@@ -2,6 +2,7 @@ use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
+use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
@@ -119,8 +120,12 @@ async fn handle_spawn_agent(
     let result = Box::pin(
         session.services.agent_control.spawn_agent_with_metadata(
             config,
-            match (spawn_source.get_agent_path(), initial_operation) {
-                (Some(recipient), Op::UserInput { items, .. })
+            match (
+                spawn_source.get_agent_path(),
+                fork_mode.as_ref(),
+                initial_operation,
+            ) {
+                (Some(recipient), None, Op::UserInput { items, .. })
                     if items
                         .iter()
                         .all(|item| matches!(item, UserInput::Text { .. })) =>
@@ -137,7 +142,7 @@ async fn handle_spawn_agent(
                         ),
                     }
                 }
-                (_, initial_operation) => initial_operation,
+                (_, _, initial_operation) => initial_operation,
             },
             Some(spawn_source),
             SpawnAgentOptions {

@@ -80,7 +80,6 @@ impl ToolExecutor<ToolInvocation> for Handler {
                 agent_role: agent_metadata.agent_role,
             });
         }
-
         let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
         let timeout_ms = match timeout_ms {
             ms if ms <= 0 => {

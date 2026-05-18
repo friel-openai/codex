@@ -3023,7 +3023,6 @@ impl Config {
         let agent_roles =
             agent_roles::load_agent_roles(fs, &cfg, &config_layer_stack, &mut startup_warnings)
                 .await?;
-
         let openai_base_url = cfg
             .openai_base_url
             .clone()
