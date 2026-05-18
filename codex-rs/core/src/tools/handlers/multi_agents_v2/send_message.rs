@@ -28,6 +28,7 @@ impl ToolExecutor<ToolInvocation> for Handler {
             MessageDeliveryMode::QueueOnly,
             args.target,
             args.message,
+            /*interrupt*/ false,
         )
         .await
         .map(boxed_tool_output)

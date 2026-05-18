@@ -1134,6 +1134,8 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1149,6 +1151,58 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
             agent_role: None,
             is_closed: false,
         })
+    );
+}
+
+#[tokio::test]
+async fn goal_supervisor_spawn_notification_is_hidden_without_thread_started() {
+    // Regression guard for internal supervisor helpers: a spawn-complete notification can arrive
+    // before ThreadStarted metadata. The /agent picker must still hide the helper immediately.
+    let mut app = make_test_app().await;
+    let supervisor_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+
+    app.handle_thread_event_now(ThreadBufferedEvent::Notification(
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: ThreadItem::CollabAgentToolCall {
+                id: "spawn-goal-supervisor".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                sender_thread_id: ThreadId::new().to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: Some("Goal supervisor".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
+                prompt: Some("supervise the goal".to_string()),
+                model: Some("gpt-5.4-ultrafast".to_string()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    codex_app_server_protocol::CollabAgentState {
+                        status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+    ));
+
+    assert_eq!(
+        app.agent_navigation.get(&supervisor_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: Some("Goal supervisor".to_string()),
+            agent_role: Some("goal_supervisor".to_string()),
+            is_closed: false,
+        })
+    );
+    assert!(
+        app.agent_navigation
+            .selectable_threads(app.primary_thread_id)
+            .into_iter()
+            .all(|(thread_id, _)| thread_id != supervisor_thread_id),
+        "goal supervisor helpers must not appear in the /agent picker"
     );
 }
 
@@ -1169,6 +1223,8 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::Failed,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -5012,6 +5068,8 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            receiver_agent_nickname: None,
+                            receiver_agent_role: None,
                             prompt: None,
                             model: None,
                             reasoning_effort: None,

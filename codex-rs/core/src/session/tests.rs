@@ -164,6 +164,7 @@ use opentelemetry_sdk::metrics::data::AggregatedMetrics;
 use opentelemetry_sdk::metrics::data::Metric;
 use opentelemetry_sdk::metrics::data::MetricData;
 use opentelemetry_sdk::metrics::data::ResourceMetrics;
+use std::ffi::OsString;
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::Semaphore;
@@ -180,6 +181,32 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 mod guardian_tests;
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 struct InstructionsTestCase {
     slug: &'static str,
@@ -5137,6 +5164,44 @@ async fn resumed_subagent_session_keeps_inherited_session_id() {
 }
 
 #[tokio::test]
+#[serial_test::serial(fork_env)]
+async fn resumed_subagent_session_can_use_own_thread_id_as_session_id() {
+    let _shared_session_id_guard =
+        EnvVarGuard::set("CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID", "0");
+    let parent_thread_id = ThreadId::new();
+    let parent_session_id = SessionId::from(parent_thread_id);
+    let thread_id = ThreadId::new();
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let (session, rx_event) = make_session_with_history_source_and_agent_control_and_rx(
+        InitialHistory::Resumed(ResumedHistory {
+            conversation_id: thread_id,
+            history: Vec::new(),
+            rollout_path: None,
+        }),
+        session_source,
+        AgentControl::default().with_session_id(parent_session_id),
+    )
+    .await
+    .expect("resume should succeed");
+
+    assert_eq!(session.thread_id(), thread_id);
+    assert_eq!(session.session_id(), SessionId::from(thread_id));
+
+    let event = rx_event.recv().await.expect("session configured event");
+    let EventMsg::SessionConfigured(event) = event.msg else {
+        panic!("expected session configured event");
+    };
+    assert_eq!(event.session_id, SessionId::from(thread_id));
+    assert_eq!(event.thread_id, thread_id);
+}
+
+#[tokio::test]
 async fn notify_request_permissions_response_ignores_unmatched_call_id() {
     let (session, _turn_context) = make_session_and_context().await;
     *session.active_turn.lock().await = Some(ActiveTurn::default());
@@ -8635,6 +8700,10 @@ async fn active_goal_continuation_runs_again_after_no_tool_turn() -> anyhow::Res
             .features
             .enable(Feature::Goals)
             .expect("goal mode should be enableable in tests");
+        config
+            .features
+            .disable(Feature::GoalSupervisor)
+            .expect("direct goal continuation fallback should be disableable in tests");
     });
     let test = builder.build(&server).await?;
     let responses = mount_sse_sequence(
@@ -8731,6 +8800,10 @@ async fn pending_request_user_input_does_not_spawn_extra_goal_continuation() -> 
             .features
             .enable(Feature::Goals)
             .expect("goal mode should be enableable in tests");
+        config
+            .features
+            .disable(Feature::GoalSupervisor)
+            .expect("direct goal continuation fallback should be disableable in tests");
         config
             .features
             .enable(Feature::DefaultModeRequestUserInput)
@@ -10499,31 +10572,6 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 }
 
 #[tokio::test]
-async fn watchdog_prompt_is_loaded_for_watchdog_subagents() {
-    let codex_home = tempfile::tempdir().expect("create temp dir");
-    let mut config = build_test_config(codex_home.path()).await;
-    config
-        .features
-        .enable(Feature::AgentPromptInjection)
-        .expect("test config should enable prompt injection");
-    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::default(),
-        depth: 1,
-        agent_path: None,
-        agent_nickname: Some("Test Watchdog".to_string()),
-        agent_role: Some("watchdog".to_string()),
-    });
-
-    let prompt = load_agent_role_prompt(&config, &session_source)
-        .await
-        .expect("watchdog subagents need a role prompt");
-
-    assert!(prompt.contains("You are also a **watchdog**"));
-    assert!(prompt.contains("Call `watchdog.close_self`"));
-    assert!(prompt.contains("Call `followup_task` with `\"target\":\"parent\"`"));
-}
-
-#[tokio::test]
 async fn agent_prompt_loader_prefers_home_overrides() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     tokio::fs::write(codex_home.path().join("AGENTS.root.md"), "custom root")
@@ -10536,11 +10584,11 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     .await
     .expect("write subagent override");
     tokio::fs::write(
-        codex_home.path().join("AGENTS.watchdog.md"),
-        "custom watchdog",
+        codex_home.path().join("AGENTS.supervisor.md"),
+        "custom supervisor",
     )
     .await
-    .expect("write watchdog override");
+    .expect("write supervisor override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -10551,8 +10599,8 @@ async fn agent_prompt_loader_prefers_home_overrides() {
         "custom subagent"
     );
     assert_eq!(
-        load_watchdog_agent_prompt(codex_home.path()).await,
-        "custom watchdog"
+        load_supervisor_agent_prompt(codex_home.path()).await,
+        "custom supervisor"
     );
 }
 
@@ -10583,53 +10631,37 @@ async fn root_agent_prompt_is_inline_developer_context_not_session_instructions(
                     content_item,
                     ContentItem::InputText { text }
                         if text.contains("# You are the Root Agent")
+                            && text.contains("## Goal Supervisor")
+                            && text.contains("If the user explicitly asks you to create a goal, call `create_goal`")
+                            && text.contains("Do not create watchdogs or supervisor substitutes with `spawn_agent`")
                 ))
     )));
 }
 
 #[tokio::test]
-async fn watchdog_agent_prompt_is_inline_developer_context_for_watchdog_threads() {
-    let session = make_session_with_config(|config| {
-        config
-            .features
-            .enable(Feature::AgentPromptInjection)
-            .expect("test config should enable prompt injection");
-    })
-    .await
-    .expect("session should build");
+async fn supervisor_agent_prompt_is_loaded_for_goal_supervisor_helpers() {
+    let codex_home = tempfile::tempdir().expect("create temp dir");
+    let mut config = build_test_config(codex_home.path()).await;
+    config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("test config should enable prompt injection");
     let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::new(),
+        parent_thread_id: ThreadId::default(),
         depth: 1,
-        agent_path: Some(AgentPath::try_from("/root/watchdog").expect("agent path should parse")),
-        agent_nickname: Some("Test Watchdog".to_string()),
-        agent_role: Some("watchdog".to_string()),
+        agent_path: None,
+        agent_nickname: Some("Test Supervisor".to_string()),
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
     });
-    session
-        .state
-        .lock()
+
+    let prompt = load_agent_role_prompt(&config, &session_source)
         .await
-        .session_configuration
-        .session_source = session_source.clone();
+        .expect("goal supervisor helpers need a role prompt");
 
-    let mut turn_context = session.new_default_turn().await;
-    Arc::get_mut(&mut turn_context)
-        .expect("turn context should not be shared")
-        .session_source = session_source;
-    let initial_context = session.build_initial_context(turn_context.as_ref()).await;
-
-    let developer_texts = developer_input_texts(&initial_context);
-    assert!(
-        developer_texts
-            .iter()
-            .any(|text| text.contains("You are also a **watchdog**")),
-        "watchdog prompt must be visible as developer context so watchdog helpers do not act like the parent agent: {developer_texts:?}"
-    );
-    assert!(
-        !developer_texts
-            .iter()
-            .any(|text| text.contains("# You are the Root Agent")),
-        "watchdog helper current-turn developer context must not inject root prompt: {developer_texts:?}"
-    );
+    assert!(prompt.contains("You are also a **goal supervisor**"));
+    assert!(prompt.contains("Call `supervisor.close_self`"));
+    assert!(prompt.contains("Call `followup_task` with `\"target\":\"parent\"`"));
+    assert!(!prompt.contains("You are also a **watchdog**"));
 }
 
 #[tokio::test]

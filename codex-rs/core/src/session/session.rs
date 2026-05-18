@@ -14,12 +14,26 @@ use codex_protocol::protocol::TurnEnvironmentSelection;
 use tokio::sync::Semaphore;
 
 const CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+const CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID";
 
 fn materialize_ephemeral_rollouts_for_debug() -> bool {
     std::env::var(CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV).is_ok_and(|value| {
         let value = value.trim();
         !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
     })
+}
+
+fn fork_shared_session_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID_ENV)
+        .ok()
+        .as_deref()
+        .is_none_or(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 /// Context for an initialized model agent
@@ -962,7 +976,9 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            let session_id = if session_configuration.session_source.is_non_root_agent() {
+            let session_id = if session_configuration.session_source.is_non_root_agent()
+                && fork_shared_session_id_enabled()
+            {
                 agent_control.session_id()
             } else {
                 SessionId::from(thread_id)
@@ -1032,7 +1048,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
-                model_client: ModelClient::new_with_response_continuation(
+                model_client: ModelClient::new(
                     Some(Arc::clone(&auth_manager)),
                     session_id,
                     thread_id,
@@ -1045,7 +1061,6 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                     attestation_provider,
-                    inherited_thread_state.response_continuation(),
                 ),
                 code_mode_service: crate::tools::code_mode::CodeModeService::new(),
                 environment_manager,

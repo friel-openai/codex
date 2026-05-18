@@ -259,6 +259,34 @@ fn collab_receiver_thread_ids(notification: &ServerNotification) -> Option<&[Str
     }
 }
 
+fn collab_receiver_agent_metadata(
+    notification: &ServerNotification,
+    receiver_thread_id: &str,
+) -> (Option<String>, Option<String>) {
+    let item = match notification {
+        ServerNotification::ItemStarted(notification) => &notification.item,
+        ServerNotification::ItemCompleted(notification) => &notification.item,
+        _ => return (None, None),
+    };
+    let ThreadItem::CollabAgentToolCall {
+        receiver_thread_ids,
+        receiver_agent_nickname,
+        receiver_agent_role,
+        ..
+    } = item
+    else {
+        return (None, None);
+    };
+    if receiver_thread_ids
+        .iter()
+        .any(|candidate| candidate == receiver_thread_id)
+    {
+        (receiver_agent_nickname.clone(), receiver_agent_role.clone())
+    } else {
+        (None, None)
+    }
+}
+
 fn collab_receiver_is_not_found(
     notification: &ServerNotification,
     receiver_thread_id: &str,
