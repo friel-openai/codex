@@ -18,6 +18,17 @@ pub trait ToolOutput: Send {
 
     fn success_for_logging(&self) -> bool;
 
+    /// Return true when the tool side effect ends the current model turn and
+    /// the tool output must not be added back to conversation history.
+    ///
+    /// Supervisor check-in tools use this for terminal control actions such as
+    /// `supervisor.snooze`: recording a normal tool output would cause the
+    /// helper to keep sampling and could make the helper send a second parent
+    /// instruction after it already snoozed or closed itself.
+    fn terminal_no_response(&self) -> bool {
+        false
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem;
 
     /// Returns the tool call id exposed to `PostToolUse` hooks for this output.
@@ -56,6 +67,10 @@ where
 
     fn success_for_logging(&self) -> bool {
         (**self).success_for_logging()
+    }
+
+    fn terminal_no_response(&self) -> bool {
+        (**self).terminal_no_response()
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {

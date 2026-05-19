@@ -33,6 +33,8 @@ use codex_extension_api::ToolExecutor;
 use codex_features::Feature;
 use codex_features::Features;
 use codex_mcp::ToolInfo;
+use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
@@ -470,8 +472,8 @@ fn goal_supervisor_tools_are_eager_namespace_tools() {
         namespace_function_names(&tools, "supervisor"),
         vec![
             "close_self".to_string(),
-            "snooze".to_string(),
             "compact_parent_context".to_string(),
+            "snooze".to_string(),
         ]
     );
 }
@@ -537,7 +539,7 @@ fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
             Some("Deferred MCP search tools."),
         )])
     };
-    let (parent_tools, _) = build_specs_with_discoverable_tools(
+    let (parent_tools, _) = build_specs_with_inputs_for_test(
         &parent_tools_config,
         mcp_tools(),
         deferred_mcp_tools(),
@@ -545,7 +547,7 @@ fn goal_supervisor_helpers_receive_same_tool_names_as_parent() {
         /*extension_tool_bundles*/ &[],
         &[],
     );
-    let (supervisor_tools, _) = build_specs_with_discoverable_tools(
+    let (supervisor_tools, _) = build_specs_with_inputs_for_test(
         &supervisor_tools_config,
         mcp_tools(),
         deferred_mcp_tools(),

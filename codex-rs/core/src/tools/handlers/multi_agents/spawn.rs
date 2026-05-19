@@ -57,6 +57,7 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    reject_removed_watchdog_role(role_name)?;
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = render_input_preview(&input_items);
     let session_source = turn.session_source.clone();
@@ -122,6 +123,7 @@ async fn handle_spawn_agent(
             fork_parent_spawn_call_id: args.fork_context.then(|| call_id.clone()),
             fork_mode: args.fork_context.then_some(SpawnAgentForkMode::FullHistory),
             environments: Some(turn.environments.to_selections()),
+            initial_task_message: args.fork_context.then_some(prompt.clone()),
         },
     ))
     .await

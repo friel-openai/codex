@@ -61,12 +61,19 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
+    reject_removed_watchdog_role(role_name)?;
 
     let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
     let prompt = render_input_preview(&initial_operation);
 
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
+    let max_depth = turn.config.agent_max_depth;
+    if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
+        return Err(FunctionCallError::RespondToModel(
+            "Agent depth limit reached. Solve the task yourself.".to_string(),
+        ));
+    }
     session
         .send_event(
             &turn,
@@ -145,8 +152,9 @@ async fn handle_spawn_agent(
             Some(spawn_source),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                fork_mode,
+                fork_mode: fork_mode.clone(),
                 environments: Some(turn.environments.to_selections()),
+                initial_task_message: fork_mode.as_ref().map(|_| prompt.clone()),
             },
         ),
     )

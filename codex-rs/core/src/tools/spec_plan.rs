@@ -516,17 +516,9 @@ fn collect_tool_executors(
     }
 
     if config.goal_supervisor {
-        builder.push_spec(
-            create_supervisor_tools_namespace(vec![
-                create_supervisor_close_self_tool(),
-                create_supervisor_snooze_tool(),
-                create_supervisor_compact_parent_context_tool(),
-            ]),
-            /*supports_parallel_tool_calls*/ false,
-        );
-        builder.register_handler(Arc::new(SupervisorSelfCloseHandler));
-        builder.register_handler(Arc::new(SupervisorSnoozeHandler));
-        builder.register_handler(Arc::new(SupervisorCompactParentContextHandler));
+        executors.push(Arc::new(SupervisorSelfCloseHandler));
+        executors.push(Arc::new(SupervisorSnoozeHandler));
+        executors.push(Arc::new(SupervisorCompactParentContextHandler));
     }
 
     if config.agent_jobs_tools {

@@ -81,6 +81,7 @@ impl ChatWidget {
             &chat_keymap.edit_queued_message,
             current_terminal_info,
         );
+        let animations_enabled = config.animations;
         pets::start_configured_pet_load_if_needed(
             &config,
             /*ambient_pet_missing*/ true,
@@ -135,6 +136,8 @@ impl ChatWidget {
             running_commands: HashMap::new(),
             collab_agent_metadata: HashMap::new(),
             pending_collab_spawn_requests: HashMap::new(),
+            subagent_panel: None,
+            subagent_panel_registry: SubagentPanelRegistry::new(animations_enabled),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
             unified_exec_wait_streak: None,
@@ -161,6 +164,7 @@ impl ChatWidget {
             status_state: StatusState::default(),
             review: ReviewState::default(),
             active_hook_cell: None,
+            last_replayed_inter_agent_message: None,
             ambient_pet: None,
             pet_picker_preview_state: crate::pets::PetPickerPreviewState::default(),
             pet_picker_preview_pet: None,

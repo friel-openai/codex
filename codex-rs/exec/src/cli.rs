@@ -20,6 +20,12 @@ pub struct Cli {
     #[arg(long = "strict-config", global = true, default_value_t = false)]
     pub strict_config: bool,
 
+    /// Fork from an existing session id (or thread name) before sending the prompt.
+    ///
+    /// This creates a new session with copied history, similar to `codex fork`.
+    #[arg(long = "fork", value_name = "SESSION_ID")]
+    pub fork_session_id: Option<String>,
+
     #[clap(flatten)]
     pub shared: ExecSharedCliOptions,
 

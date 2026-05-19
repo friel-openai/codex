@@ -41,6 +41,7 @@ pub(crate) fn static_model_catalog() -> ModelsResponse {
 fn gpt_5_4_cmb_bedrock_model(priority: i32) -> ModelInfo {
     ModelInfo {
         slug: AMAZON_BEDROCK_GPT_5_4_MODEL_ID.to_string(),
+        request_model: None,
         display_name: "gpt-5.4".to_string(),
         description: Some("Strong model for everyday coding.".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),

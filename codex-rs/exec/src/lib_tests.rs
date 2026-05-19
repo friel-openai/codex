@@ -636,13 +636,17 @@ fn sample_thread_start_response() -> ThreadStartResponse {
 async fn session_configured_from_thread_fork_response_preserves_permission_profile() {
     let codex_home = tempdir().expect("create temp codex home");
     let cwd = tempdir().expect("create temp cwd");
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .fallback_cwd(Some(cwd.path().to_path_buf()))
         .build()
         .await
         .expect("build config");
     let permission_profile = PermissionProfile::Disabled;
+    config
+        .permissions
+        .set_permission_profile(permission_profile.clone())
+        .expect("test config should allow disabled permission profile");
     let response = ThreadForkResponse {
         thread: codex_app_server_protocol::Thread {
             id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
@@ -669,6 +673,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
         model_provider: "openai".to_string(),
         service_tier: None,
         cwd: test_path_buf("/tmp").abs(),
+        runtime_workspace_roots: Vec::new(),
         instruction_sources: Vec::new(),
         approval_policy: codex_app_server_protocol::AskForApproval::OnRequest,
         approvals_reviewer: codex_app_server_protocol::ApprovalsReviewer::AutoReview,
@@ -678,7 +683,6 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         },
-        permission_profile: Some(permission_profile.clone().into()),
         active_permission_profile: None,
         reasoning_effort: None,
     };
