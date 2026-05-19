@@ -174,6 +174,7 @@ async fn create_active_thread_goal_for_test(
     .build("openai");
     state_db.upsert_thread(&parent_metadata).await?;
     let state_goal = state_db
+        .thread_goals()
         .replace_thread_goal(
             parent_thread_id,
             objective,
@@ -1320,6 +1321,7 @@ while True:
                 enabled: true,
                 required: false,
                 supports_parallel_tool_calls: false,
+                oauth: None,
                 disabled_reason: None,
                 startup_timeout_sec: Some(Duration::from_secs(5)),
                 tool_timeout_sec: None,

@@ -136,6 +136,7 @@ pub use exec_events::TurnStartedEvent;
 pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::io::Read;
 use std::path::Path;
@@ -245,6 +246,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let Cli {
         command,
         strict_config,
+        fork_session_id,
         shared,
         skip_git_repo_check,
         ephemeral,
@@ -1070,6 +1072,47 @@ fn approvals_reviewer_override_from_config(
     Some(config.approvals_reviewer.into())
 }
 
+fn config_request_overrides_from_config(
+    config: &Config,
+) -> Option<HashMap<String, serde_json::Value>> {
+    let mut overrides = HashMap::new();
+    let mut insert = |key: &str, value: Option<String>| {
+        if let Some(value) = value {
+            overrides.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    };
+    insert(
+        "model_reasoning_effort",
+        config
+            .model_reasoning_effort
+            .map(|effort| effort.to_string()),
+    );
+    insert(
+        "model_reasoning_summary",
+        config
+            .model_reasoning_summary
+            .map(|summary| summary.to_string()),
+    );
+    insert(
+        "model_verbosity",
+        config
+            .model_verbosity
+            .map(|verbosity| verbosity.to_string()),
+    );
+    insert(
+        "personality",
+        config.personality.map(|personality| personality.to_string()),
+    );
+    insert(
+        "web_search",
+        Some(config.web_search_mode.value().to_string()),
+    );
+    if config.bypass_hook_trust {
+        overrides.insert("bypass_hook_trust".to_string(), true.into());
+    }
+    Some(overrides)
+}
+
 fn thread_fork_params_from_config(
     config: &Config,
     thread_id: &str,
@@ -1078,7 +1121,7 @@ fn thread_fork_params_from_config(
     let permissions = permissions_selection_from_config(config);
     let sandbox = permissions.is_none().then(|| {
         sandbox_mode_from_permission_profile(
-            &config.permissions.permission_profile(),
+            config.permissions.permission_profile(),
             config.cwd.as_path(),
         )
     });
@@ -1165,6 +1208,7 @@ fn session_configured_from_thread_fork_response(
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
+        response.thread.thread_source.map(Into::into),
         response.thread.name.clone(),
         response.thread.path.clone(),
         response.model.clone(),
@@ -1172,11 +1216,7 @@ fn session_configured_from_thread_fork_response(
         response.service_tier.clone(),
         response.approval_policy.to_core(),
         response.approvals_reviewer.to_core(),
-        response
-            .permission_profile
-            .clone()
-            .map(Into::into)
-            .unwrap_or_else(|| config.permissions.permission_profile()),
+        config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
         response.cwd.clone(),
         response.reasoning_effort,

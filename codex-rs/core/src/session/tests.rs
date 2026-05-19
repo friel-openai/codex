@@ -2406,6 +2406,8 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
         .expect("test thread id should be valid");
     let inherited_tool = codex_mcp::ToolInfo {
         server_name: "snapshot".to_string(),
+        supports_parallel_tool_calls: false,
+        server_origin: None,
         callable_name: "echo".to_string(),
         callable_namespace: "mcp__snapshot__".to_string(),
         namespace_description: None,
@@ -4769,6 +4771,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -6647,6 +6650,7 @@ where
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,

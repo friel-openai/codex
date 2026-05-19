@@ -29,8 +29,8 @@ use crate::LoadThreadHistoryParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
-use crate::SearchThreadsParams;
 use crate::RotateThreadSegmentParams;
+use crate::SearchThreadsParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
@@ -311,13 +311,11 @@ mod tests {
     use codex_protocol::protocol::ThreadMemoryMode;
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
-    use tokio::sync::Notify;
 
     use super::*;
     use crate::LiveThread;
     use crate::ThreadEventPersistenceMode;
     use crate::ThreadPersistenceMetadata;
-    use crate::ThreadSortKey;
     use crate::local::test_support::test_config;
     use crate::local::test_support::write_archived_session_file;
     use crate::local::test_support::write_session_file;

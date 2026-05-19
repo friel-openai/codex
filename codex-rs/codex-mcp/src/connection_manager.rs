@@ -426,6 +426,7 @@ impl McpConnectionManager {
         &self,
     ) -> impl Future<Output = HashMap<String, ToolInfo>> + Send + 'static {
         let clients = self.clients.values().cloned().collect::<Vec<_>>();
+        let prefix_mcp_tool_names = self.prefix_mcp_tool_names;
         async move {
             let mut tools = Vec::new();
             for managed_client in clients {
@@ -434,7 +435,7 @@ impl McpConnectionManager {
                 };
                 tools.extend(server_tools);
             }
-            normalize_tools_for_model(tools)
+            normalize_tools_for_model_with_prefix(tools, prefix_mcp_tool_names)
                 .into_iter()
                 .map(|tool| (tool.canonical_tool_name().to_string(), tool))
                 .collect()

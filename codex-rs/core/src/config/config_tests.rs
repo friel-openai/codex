@@ -7772,7 +7772,10 @@ async fn custom_models_reject_duplicate_aliases() -> std::io::Result<()> {
     .expect_err("duplicate custom alias should fail config load");
 
     assert_eq!(err.kind(), ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("duplicate custom model alias: alias"));
+    assert!(
+        err.to_string()
+            .contains("duplicate custom model alias: alias")
+    );
     Ok(())
 }
 

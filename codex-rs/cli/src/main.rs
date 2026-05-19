@@ -2028,6 +2028,7 @@ async fn run_interactive_tui(
             arg0_paths.clone(),
             codex_config::LoaderOverrides::default(),
             remote_endpoint.clone(),
+            /*embedded*/ false,
         )
     };
     let mut attempted_repair = false;
