@@ -73,7 +73,7 @@ const ZELLIJ_FORK_PANE_OPTIONS: &[ForkPaneOption] = &[
 
 pub(crate) fn fork_pane_options(multiplexer: &Multiplexer) -> &'static [ForkPaneOption] {
     match multiplexer {
-        Multiplexer::Zellij {} => ZELLIJ_FORK_PANE_OPTIONS,
+        Multiplexer::Zellij { .. } => ZELLIJ_FORK_PANE_OPTIONS,
         Multiplexer::Tmux { .. } => TMUX_FORK_PANE_OPTIONS,
     }
 }
@@ -269,7 +269,7 @@ fn fork_spawn_config(
 ) -> MultiplexerSpawnConfig {
     let command = fork_command_parts(exe, thread_id, config, additional_writable_roots);
     match multiplexer {
-        Multiplexer::Zellij {} => MultiplexerSpawnConfig {
+        Multiplexer::Zellij { .. } => MultiplexerSpawnConfig {
             program: PathBuf::from("zellij"),
             args: build_zellij_new_pane_args(&command, thread_id, placement),
         },
@@ -307,7 +307,7 @@ fn validate_fork_placement_for_multiplexer(
     placement: Option<ForkPanePlacement>,
 ) -> Result<(), String> {
     match multiplexer {
-        Multiplexer::Zellij {} => {
+        Multiplexer::Zellij { .. } => {
             if placement.is_none_or(|placement| {
                 ZELLIJ_FORK_PANE_OPTIONS
                     .iter()
@@ -405,7 +405,7 @@ mod tests {
     fn validate_zellij_fork_placement_rejects_left() {
         assert_eq!(
             validate_fork_placement_for_multiplexer(
-                &Multiplexer::Zellij {},
+                &Multiplexer::Zellij { version: None },
                 Some(ForkPanePlacement::Left),
             ),
             Err(ZELLIJ_UNSUPPORTED_MESSAGE.to_string())
@@ -435,7 +435,7 @@ mod tests {
         );
         assert_snapshot!(
             "fork_command_usage_zellij",
-            fork_command_usage(Some(&Multiplexer::Zellij {}))
+            fork_command_usage(Some(&Multiplexer::Zellij { version: None }))
         );
     }
 

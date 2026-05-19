@@ -2027,7 +2027,7 @@ async fn slash_fork_opens_tmux_popup() {
 async fn slash_fork_opens_zellij_popup() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
 
-    chat.dispatch_fork_command(Some(&Multiplexer::Zellij {}));
+    chat.dispatch_fork_command(Some(&Multiplexer::Zellij { version: None }));
 
     assert!(
         rx.try_recv().is_err(),
