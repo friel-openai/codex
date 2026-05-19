@@ -57,7 +57,9 @@ use core_test_support::TempDirExt;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
+use serial_test::serial;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -241,11 +243,12 @@ async fn start_supervised_goal_parent_for_test() -> (
         .await
         .expect("parent thread metadata should exist before inserting a goal");
     let goal = state_db
+        .thread_goals()
         .replace_thread_goal(
             parent_thread_id,
             "Finish the supervised goal",
             codex_state::ThreadGoalStatus::Active,
-            None,
+            /*token_budget*/ None,
         )
         .await
         .expect("goal should be created");
@@ -378,6 +381,7 @@ async fn goal_supervisor_checkin_spawns_hidden_full_history_helper_once() {
 
     let before_second_checkin = manager.list_thread_ids().await;
     let goal = state_db
+        .thread_goals()
         .get_thread_goal(parent_thread_id)
         .await
         .expect("goal should read")
@@ -734,12 +738,7 @@ async fn spawn_agent_uses_explorer_role_and_preserves_approval_policy() {
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_context_ignores_agent_type_override() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
-
+async fn spawn_agent_fork_context_rejects_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
     let role_name = install_role_with_model_override(&mut turn).await;
     let manager = thread_manager();
@@ -773,12 +772,7 @@ async fn spawn_agent_fork_context_ignores_agent_type_override() {
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_context_ignores_child_model_overrides() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
-
+async fn spawn_agent_fork_context_rejects_child_model_overrides() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -788,7 +782,7 @@ async fn spawn_agent_fork_context_ignores_child_model_overrides() {
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
 
-    let output = SpawnAgentHandler::default()
+    let err = SpawnAgentHandler::default()
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
@@ -806,7 +800,7 @@ async fn spawn_agent_fork_context_ignores_child_model_overrides() {
 
     assert_eq!(
         err,
-            FunctionCallError::RespondToModel(
+        FunctionCallError::RespondToModel(
             "Full-history forked agents inherit the parent agent type, model, and reasoning effort; omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.".to_string(),
         )
     );
@@ -1434,6 +1428,63 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
     );
 }
 
+#[test]
+fn multi_agent_v2_spawn_watchdog_role_is_rejected_in_goal_supervisor_mode() {
+    run_large_stack_async(|| async {
+        let (session, turn) = make_session_and_context().await;
+        let Err(err) = SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "task_name": "watchdog",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+        else {
+            panic!("goal supervisor mode should reject public watchdog spawns");
+        };
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
+            )
+        );
+    });
+}
+
+#[test]
+fn spawn_agent_watchdog_role_is_rejected_in_goal_supervisor_mode() {
+    run_large_stack_async(|| async {
+        let (session, turn) = make_session_and_context().await;
+        let Err(err) = SpawnAgentHandler::default()
+            .handle(invocation(
+                Arc::new(session),
+                Arc::new(turn),
+                "spawn_agent",
+                function_payload(json!({
+                    "message": "check in later",
+                    "agent_type": "watchdog"
+                })),
+            ))
+            .await
+        else {
+            panic!("goal supervisor mode should reject public watchdog spawns");
+        };
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
+            )
+        );
+    });
+}
+
 #[tokio::test]
 async fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     let (mut session, mut turn) = make_session_and_context().await;
@@ -1679,6 +1730,7 @@ async fn supervisor_checkin_does_not_spawn_duplicate_helper_while_one_is_active(
         .session
         .clone();
     let goal = state_db
+        .thread_goals()
         .get_thread_goal(parent_thread_id)
         .await
         .expect("goal should read")
@@ -1760,6 +1812,7 @@ async fn supervisor_checkin_honors_persisted_snooze_before_spawning_helper() {
     let (manager, parent_thread_id, parent_session, state_db, goal_id, protocol_goal) =
         start_supervised_goal_parent_for_test().await;
     state_db
+        .thread_goals()
         .set_thread_goal_supervisor_snoozed_until_ms(
             parent_thread_id,
             &goal_id,
@@ -1893,6 +1946,7 @@ async fn supervisor_snooze_finishes_helper_and_persists_snooze() {
     );
     assert!(
         state_db
+            .thread_goals()
             .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id)
             .await
             .expect("snooze state should read")
@@ -1985,6 +2039,7 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
         start_goal_supervisor_helper_for_test().await;
     let helper_thread_id = helper_session.conversation_id;
     state_db
+        .thread_goals()
         .set_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id, Some(123_456))
         .await
         .expect("snooze state should persist before close");
@@ -2012,6 +2067,7 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
         AgentStatus::NotFound
     );
     let goal = state_db
+        .thread_goals()
         .get_thread_goal(parent_thread_id)
         .await
         .expect("goal should read")
@@ -2019,6 +2075,7 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
     assert_eq!(goal.status, codex_state::ThreadGoalStatus::Complete);
     assert_eq!(
         state_db
+            .thread_goals()
             .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &goal_id)
             .await
             .expect("snooze state should read"),
@@ -2038,8 +2095,8 @@ async fn supervisor_close_self_marks_goal_complete_notifies_parent_and_clears_sn
     assert!(
         parent_pending_input.iter().any(|item| matches!(
             item,
-            crate::session::TurnInput::ResponseInputItem(
-                ResponseInputItem::Message { content, .. },
+            crate::session::TurnInput::ResponseItem(
+                ResponseItem::Message { content, .. },
             )
                 if InterAgentCommunication::from_message_content(content).is_some_and(|communication| {
                     communication.author.as_str() == "/root/goal_supervisor"
@@ -2071,11 +2128,12 @@ async fn supervisor_close_self_ignores_replaced_goal() {
         start_goal_supervisor_helper_for_test().await;
     let helper_thread_id = helper_session.conversation_id;
     let replacement_goal = state_db
+        .thread_goals()
         .replace_thread_goal(
             parent_thread_id,
             "replacement goal",
             codex_state::ThreadGoalStatus::Active,
-            None,
+            /*token_budget*/ None,
         )
         .await
         .expect("replacement goal should persist");
@@ -2099,6 +2157,7 @@ async fn supervisor_close_self_ignores_replaced_goal() {
         AgentStatus::NotFound
     );
     let current_goal = state_db
+        .thread_goals()
         .get_thread_goal(parent_thread_id)
         .await
         .expect("goal should read")
@@ -2130,11 +2189,12 @@ async fn supervisor_snooze_does_not_snooze_replacement_goal() {
         start_goal_supervisor_helper_for_test().await;
     let helper_thread_id = helper_session.conversation_id;
     let replacement_goal = state_db
+        .thread_goals()
         .replace_thread_goal(
             parent_thread_id,
             "replacement goal",
             codex_state::ThreadGoalStatus::Active,
-            None,
+            /*token_budget*/ None,
         )
         .await
         .expect("replacement goal should persist");
@@ -2163,6 +2223,7 @@ async fn supervisor_snooze_does_not_snooze_replacement_goal() {
     );
     assert_eq!(
         state_db
+            .thread_goals()
             .get_thread_goal_supervisor_snoozed_until_ms(
                 parent_thread_id,
                 &replacement_goal.goal_id
@@ -2174,6 +2235,7 @@ async fn supervisor_snooze_does_not_snooze_replacement_goal() {
     );
     assert_eq!(
         state_db
+            .thread_goals()
             .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, &old_goal_id)
             .await
             .expect("old snooze state should read"),

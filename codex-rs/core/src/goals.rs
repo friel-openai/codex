@@ -1419,9 +1419,6 @@ impl Session {
 impl Session {
     pub(crate) async fn state_db_for_thread_goals(&self) -> anyhow::Result<Option<StateDbHandle>> {
         let config = self.get_config().await;
-        if config.ephemeral {
-            return Ok(None);
-        }
 
         self.try_ensure_rollout_materialized()
             .await

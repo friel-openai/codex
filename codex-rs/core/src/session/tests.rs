@@ -2578,14 +2578,15 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
         .expect("test thread id should be valid");
     let inherited_tool = codex_mcp::ToolInfo {
         server_name: "snapshot".to_string(),
+        supports_parallel_tool_calls: false,
+        server_origin: None,
         callable_name: "echo".to_string(),
-        callable_namespace: "mcp__snapshot__".to_string(),
+        callable_namespace: "mcp__snapshot".to_string(),
         namespace_description: None,
-        tool: rmcp::model::Tool {
-            name: "echo".to_string().into(),
-            title: None,
-            description: Some("Echo from the inherited MCP snapshot".to_string().into()),
-            input_schema: std::sync::Arc::new(rmcp::model::object(json!({
+        tool: rmcp::model::Tool::new(
+            "echo".to_string(),
+            "Echo from the inherited MCP snapshot".to_string(),
+            std::sync::Arc::new(rmcp::model::object(json!({
                 "type": "object",
                 "properties": {
                     "message": { "type": "string" }
@@ -2593,23 +2594,16 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
                 "required": ["message"],
                 "additionalProperties": false
             }))),
-            output_schema: None,
-            annotations: None,
-            execution: None,
-            icons: None,
-            meta: None,
-        },
+        ),
         connector_id: None,
         connector_name: None,
         plugin_display_names: Vec::new(),
     };
+    let inherited_tool_name = inherited_tool.canonical_tool_name().to_string();
     let inherited_thread_state = crate::inherited_thread_state::InheritedThreadState::builder()
         .prompt_cache_key(Some(inherited_prompt_cache_key))
         .mcp_tool_snapshot(Some(crate::state::McpToolSnapshot {
-            tools: std::collections::HashMap::from([(
-                "mcp__snapshot__echo".to_string(),
-                inherited_tool,
-            )]),
+            tools: std::collections::HashMap::from([(inherited_tool_name, inherited_tool)]),
         }))
         .build();
     let (session, rx_event) = make_session_with_config_inherited_and_rx(
@@ -2629,10 +2623,10 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
     session
         .spawn_task(
             Arc::clone(&turn_context),
-            vec![UserInput::Text {
+            vec![TurnInput::UserInput(vec![UserInput::Text {
                 text: "use inherited state".to_string(),
                 text_elements: Vec::new(),
-            }],
+            }])],
             crate::tasks::RegularTask::new(),
         )
         .await;
@@ -2678,7 +2672,7 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
         Some(expected_prompt_cache_key.as_str())
     );
     assert!(
-        namespace_child_tool(&body, "mcp__snapshot__", "echo").is_some(),
+        namespace_child_tool(&body, "mcp__snapshot", "echo").is_some(),
         "first request should expose inherited MCP snapshot tools: {body:#}"
     );
 
@@ -4964,6 +4958,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -7102,6 +7097,7 @@ where
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,

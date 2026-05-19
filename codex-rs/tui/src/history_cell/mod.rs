@@ -121,6 +121,7 @@ mod request_user_input;
 mod search;
 mod separators;
 mod session;
+mod subagents;
 
 pub(crate) use approvals::*;
 pub(crate) use base::*;
@@ -137,6 +138,7 @@ pub(crate) use request_user_input::*;
 pub(crate) use search::*;
 pub(crate) use separators::*;
 pub(crate) use session::*;
+pub(crate) use subagents::*;
 
 #[cfg(test)]
 mod tests;

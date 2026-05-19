@@ -85,7 +85,12 @@ pub(crate) async fn maybe_start_supervisor_checkin(
     goal_id: &str,
     goal: &ThreadGoal,
 ) -> anyhow::Result<()> {
-    let active_helper_id = *session.goal_runtime.supervisor.active_helper_id.lock().await;
+    let active_helper_id = *session
+        .goal_runtime
+        .supervisor
+        .active_helper_id
+        .lock()
+        .await;
     if let Some(helper_id) = active_helper_id {
         let active_goal_id = session
             .goal_runtime
@@ -132,7 +137,12 @@ pub(crate) async fn finish_supervisor_helper(
     helper_thread_id: ThreadId,
 ) -> anyhow::Result<bool> {
     let cleared_active_helper = {
-        let mut active_helper_id = session.goal_runtime.supervisor.active_helper_id.lock().await;
+        let mut active_helper_id = session
+            .goal_runtime
+            .supervisor
+            .active_helper_id
+            .lock()
+            .await;
         if *active_helper_id != Some(helper_thread_id) {
             false
         } else {
@@ -180,13 +190,17 @@ pub(crate) async fn snooze_supervisor_helper(
     };
     let delay_seconds = delay_seconds.max(MIN_SUPERVISOR_SNOOZE_SECONDS);
     if let Some(state_db) = session.state_db_for_thread_goals().await?
-        && let Some(goal) = state_db.get_thread_goal(session.conversation_id).await?
+        && let Some(goal) = state_db
+            .thread_goals()
+            .get_thread_goal(session.conversation_id)
+            .await?
     {
         if goal.goal_id != active_goal_id {
             let _ = finish_supervisor_helper(session, helper_thread_id).await?;
             return Ok(None);
         }
         state_db
+            .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
                 session.conversation_id,
                 &active_goal_id,
@@ -274,6 +288,7 @@ pub(crate) async fn complete_supervised_goal(
         return Ok(None);
     };
     let updated = state_db
+        .thread_goals()
         .update_thread_goal(
             session.conversation_id,
             codex_state::GoalUpdate {
@@ -287,10 +302,11 @@ pub(crate) async fn complete_supervised_goal(
         .map(crate::goals::protocol_goal_from_state);
     if let Some(goal) = updated.as_ref() {
         state_db
+            .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
                 session.conversation_id,
                 &active_goal_id,
-                None,
+                /*snoozed_until_ms*/ None,
             )
             .await?;
         session
@@ -348,6 +364,7 @@ async fn spawn_supervisor_helper(
                 }],
                 final_output_json_schema: None,
                 responsesapi_client_metadata: None,
+                additional_context: Default::default(),
                 thread_settings: Default::default(),
             },
             Some(session_source),
@@ -443,6 +460,7 @@ async fn persisted_snooze_delay(
         return Ok(None);
     };
     let Some(snoozed_until_ms) = state_db
+        .thread_goals()
         .get_thread_goal_supervisor_snoozed_until_ms(session.conversation_id, goal_id)
         .await?
     else {
@@ -451,7 +469,12 @@ async fn persisted_snooze_delay(
     let now_ms = Utc::now().timestamp_millis();
     if snoozed_until_ms <= now_ms {
         state_db
-            .set_thread_goal_supervisor_snoozed_until_ms(session.conversation_id, goal_id, None)
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                session.conversation_id,
+                goal_id,
+                /*snoozed_until_ms*/ None,
+            )
             .await?;
         return Ok(None);
     }

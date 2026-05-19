@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use chrono::SecondsFormat;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::BaseInstructions;
@@ -44,6 +45,7 @@ use super::list::parse_cursor;
 use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
 use super::session_index::find_thread_names_by_ids;
+use crate::EventPersistenceMode;
 use crate::config::RolloutConfigView;
 use crate::default_client::originator;
 use crate::state_db;
@@ -705,6 +707,7 @@ impl RolloutRecorder {
 
                 let session_meta = SessionMeta {
                     id: session_id,
+                    segment_id: Some(SegmentId::new()),
                     forked_from_id,
                     parent_thread_id,
                     timestamp,
@@ -726,6 +729,34 @@ impl RolloutRecorder {
                     memory_mode: (!config.generate_memories()).then_some("disabled".to_string()),
                     multi_agent_version,
                 };
+
+                (None, Some(log_file_info), path, Some(session_meta))
+            }
+            RolloutRecorderParams::CreateAtPath {
+                path,
+                conversation_id,
+                forked_from_id,
+                source,
+                base_instructions,
+                dynamic_tools,
+                session_timestamp,
+                event_persistence_mode: _,
+            } => {
+                let log_file_info = LogFileInfo {
+                    path: path.clone(),
+                    conversation_id,
+                    timestamp: OffsetDateTime::now_utc(),
+                };
+                let session_meta = create_session_meta(
+                    config,
+                    &log_file_info,
+                    forked_from_id,
+                    source,
+                    /*thread_source*/ None,
+                    base_instructions,
+                    dynamic_tools,
+                    session_timestamp,
+                )?;
 
                 (None, Some(log_file_info), path, Some(session_meta))
             }

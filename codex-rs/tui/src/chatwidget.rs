@@ -78,8 +78,8 @@ use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
-use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::subagent_panel::SubagentPanelRegistry;
+use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_title::SetTerminalTitleResult;
 use crate::terminal_title::clear_terminal_title;
 use crate::terminal_title::set_terminal_title;
@@ -162,6 +162,7 @@ use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::plan_tool::PlanItemArg as UpdatePlanItemArg;
 use codex_protocol::plan_tool::StepStatus as UpdatePlanItemStatus;
 use codex_protocol::protocol::AgentStatus;
@@ -234,6 +235,74 @@ fn app_server_collab_state_to_core(state: &CollabAgentState) -> AgentStatus {
         CollabAgentStatus::Shutdown => AgentStatus::Shutdown,
         CollabAgentStatus::NotFound => AgentStatus::NotFound,
     }
+}
+
+fn inter_agent_message_from_item(item: &ResponseItem) -> Option<(String, String, String)> {
+    let ResponseItem::Message { content, .. } = item else {
+        return None;
+    };
+    let communication = InterAgentCommunication::from_message_content(content)?;
+    let raw_content = communication.content.clone();
+    Some((
+        communication.author.to_string(),
+        raw_content.clone(),
+        display_inter_agent_message_content(&raw_content),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SubagentNotificationPayload {
+    agent_path: Option<String>,
+    status: AgentStatus,
+}
+
+fn text_from_message_content(content: &[ContentItem]) -> Option<&str> {
+    content.iter().find_map(|item| match item {
+        ContentItem::InputText { text } | ContentItem::OutputText { text } => Some(text.as_str()),
+        ContentItem::InputImage { .. } => None,
+    })
+}
+
+fn display_inter_agent_message_content(content: &str) -> String {
+    parse_subagent_notification(content)
+        .map(|payload| display_subagent_notification_status(payload.status))
+        .unwrap_or_else(|| content.to_string())
+}
+
+fn display_subagent_notification_status(status: AgentStatus) -> String {
+    match status {
+        AgentStatus::Completed(Some(message)) => message,
+        AgentStatus::Completed(None) => "completed".to_string(),
+        AgentStatus::Errored(message) => format!("errored: {message}"),
+        AgentStatus::Interrupted => "interrupted".to_string(),
+        AgentStatus::Shutdown => "shutdown".to_string(),
+        AgentStatus::NotFound => "not found".to_string(),
+        AgentStatus::PendingInit => "pending init".to_string(),
+        AgentStatus::Running => "running".to_string(),
+    }
+}
+
+fn parse_subagent_notification(content: &str) -> Option<SubagentNotificationPayload> {
+    const START_MARKER: &str = "<subagent_notification>";
+    const END_MARKER: &str = "</subagent_notification>";
+
+    let trimmed = content.trim();
+    if !trimmed
+        .get(..START_MARKER.len())
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(START_MARKER))
+    {
+        return None;
+    }
+    let without_start = &trimmed[START_MARKER.len()..];
+    let end_start = without_start.len().checked_sub(END_MARKER.len())?;
+    if !without_start
+        .get(end_start..)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(END_MARKER))
+    {
+        return None;
+    }
+    let body = without_start[..end_start].trim();
+    serde_json::from_str::<SubagentNotificationPayload>(body).ok()
 }
 
 /// Choose the keybinding used to edit the most-recently queued message.
@@ -849,10 +918,6 @@ impl ThreadItemRenderSource {
             Self::Replay(replay_kind) => Some(replay_kind),
         }
     }
-
-    fn should_update_subagent_panel(self) -> bool {
-        !matches!(self, Self::Replay(ReplayKind::ResumeInitialMessages))
-    }
 }
 
 fn exec_approval_request_from_params(
@@ -958,6 +1023,11 @@ impl ChatWidget {
             .get(&thread_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    fn refresh_subagent_panel(&mut self) {
+        self.subagent_panel = self.subagent_panel_registry.rebuild_panel();
+        self.request_redraw();
     }
 
     fn realtime_conversation_enabled(&self) -> bool {
@@ -1575,7 +1645,8 @@ impl ChatWidget {
     }
 
     fn rename_confirmation_cell(name: &str, thread_id: Option<ThreadId>) -> PlainHistoryCell {
-        let mut line = vec![
+        let name = name.to_string();
+        let line = vec![
             "• ".into(),
             "Session renamed to ".into(),
             name.to_string().cyan(),

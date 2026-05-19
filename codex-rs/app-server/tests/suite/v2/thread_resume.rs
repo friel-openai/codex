@@ -156,6 +156,7 @@ fn user_message_item(text: &str) -> RolloutItem {
         images: None,
         local_images: Vec::new(),
         text_elements: Vec::new(),
+        ..Default::default()
     }))
 }
 
@@ -3602,6 +3603,8 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
                 prompt: Some("Every time you start, respond with goodbye.".to_string()),
                 model: Some("arcanine 1m".to_string()),
                 reasoning_effort: Some(ReasoningEffort::Low),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 agents_states: [(
                     watchdog_thread_id.to_string(),
                     CollabAgentState {
@@ -3625,6 +3628,8 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 agents_states: [(
                     watchdog_thread_id.to_string(),
                     CollabAgentState {

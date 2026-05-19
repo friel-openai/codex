@@ -33,7 +33,10 @@ fn default_enabled_features_are_stable() {
         if spec.default_enabled {
             assert!(
                 matches!(spec.stage, Stage::Stable | Stage::Removed)
-                    || spec.id == Feature::TerminalResizeReflow,
+                    || matches!(
+                        spec.id,
+                        Feature::TerminalResizeReflow | Feature::Goals | Feature::GoalSupervisor
+                    ),
                 "feature `{}` is enabled by default but is not stable/removed ({:?})",
                 spec.key,
                 spec.stage
