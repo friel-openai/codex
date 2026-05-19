@@ -3,9 +3,6 @@ source: tui/src/chatwidget/tests/app_server.rs
 expression: screen
 ---
 
-• Subagents (0s • 1 subagent running • esc to interrupt)
-• [#1] Explorer running — Audit the TUI app-server event flow and report visible regressions.
-
 
 › Ask Codex to do anything
 

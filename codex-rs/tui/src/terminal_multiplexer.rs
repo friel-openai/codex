@@ -1,5 +1,6 @@
 use crate::app_event::ForkPanePlacement;
 use crate::legacy_core::config::Config;
+use codex_app_server_protocol::ConfigLayerSource;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::protocol::AskForApproval;
@@ -73,7 +74,7 @@ const ZELLIJ_FORK_PANE_OPTIONS: &[ForkPaneOption] = &[
 
 pub(crate) fn fork_pane_options(multiplexer: &Multiplexer) -> &'static [ForkPaneOption] {
     match multiplexer {
-        Multiplexer::Zellij {} => ZELLIJ_FORK_PANE_OPTIONS,
+        Multiplexer::Zellij { .. } => ZELLIJ_FORK_PANE_OPTIONS,
         Multiplexer::Tmux { .. } => TMUX_FORK_PANE_OPTIONS,
     }
 }
@@ -166,7 +167,7 @@ fn fork_command_parts(
         }
     }
 
-    if let Some(profile) = config.active_profile.as_deref() {
+    if let Some(profile) = active_user_profile_from_config(config) {
         args.push("-p".to_string());
         args.push(profile.to_string());
     }
@@ -188,6 +189,14 @@ fn fork_command_parts(
     args.push(thread_id.to_string());
 
     args
+}
+
+fn active_user_profile_from_config(config: &Config) -> Option<&str> {
+    let user_layer = config.config_layer_stack.get_active_user_layer()?;
+    let ConfigLayerSource::User { profile, .. } = &user_layer.name else {
+        return None;
+    };
+    profile.as_deref()
 }
 
 fn sandbox_mode_arg(policy: &SandboxPolicy) -> Option<&'static str> {
@@ -269,7 +278,7 @@ fn fork_spawn_config(
 ) -> MultiplexerSpawnConfig {
     let command = fork_command_parts(exe, thread_id, config, additional_writable_roots);
     match multiplexer {
-        Multiplexer::Zellij {} => MultiplexerSpawnConfig {
+        Multiplexer::Zellij { .. } => MultiplexerSpawnConfig {
             program: PathBuf::from("zellij"),
             args: build_zellij_new_pane_args(&command, thread_id, placement),
         },
@@ -307,7 +316,7 @@ fn validate_fork_placement_for_multiplexer(
     placement: Option<ForkPanePlacement>,
 ) -> Result<(), String> {
     match multiplexer {
-        Multiplexer::Zellij {} => {
+        Multiplexer::Zellij { .. } => {
             if placement.is_none_or(|placement| {
                 ZELLIJ_FORK_PANE_OPTIONS
                     .iter()
@@ -405,7 +414,7 @@ mod tests {
     fn validate_zellij_fork_placement_rejects_left() {
         assert_eq!(
             validate_fork_placement_for_multiplexer(
-                &Multiplexer::Zellij {},
+                &Multiplexer::Zellij { version: None },
                 Some(ForkPanePlacement::Left),
             ),
             Err(ZELLIJ_UNSUPPORTED_MESSAGE.to_string())
@@ -435,7 +444,7 @@ mod tests {
         );
         assert_snapshot!(
             "fork_command_usage_zellij",
-            fork_command_usage(Some(&Multiplexer::Zellij {}))
+            fork_command_usage(Some(&Multiplexer::Zellij { version: None }))
         );
     }
 
@@ -447,7 +456,17 @@ mod tests {
             .build()
             .await
             .expect("config");
-        config.active_profile = Some("work".to_string());
+        let user_config_file = config
+            .config_layer_stack
+            .get_user_config_file()
+            .expect("user config file")
+            .clone();
+        let profile = "work".parse().expect("profile-v2 name");
+        config.config_layer_stack = config.config_layer_stack.with_user_config_profile(
+            &user_config_file,
+            Some(&profile),
+            toml::Value::Table(toml::map::Map::new()),
+        );
         config.model = Some("gpt-5".to_string());
         config.cwd =
             AbsolutePathBuf::from_absolute_path(PathBuf::from("/repo")).expect("absolute repo cwd");

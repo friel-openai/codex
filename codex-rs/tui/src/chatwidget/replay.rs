@@ -175,21 +175,31 @@ impl ChatWidget {
                 status,
                 sender_thread_id,
                 receiver_thread_ids,
+                receiver_agent_nickname,
+                receiver_agent_role,
                 prompt,
                 model,
                 reasoning_effort,
                 agents_states,
-            } => self.on_collab_agent_tool_call(ThreadItem::CollabAgentToolCall {
-                id,
-                tool,
-                status,
-                sender_thread_id,
-                receiver_thread_ids,
-                prompt,
-                model,
-                reasoning_effort,
-                agents_states,
-            }),
+            } => self.on_collab_agent_tool_call(
+                ThreadItem::CollabAgentToolCall {
+                    id,
+                    tool,
+                    status,
+                    sender_thread_id,
+                    receiver_thread_ids,
+                    receiver_agent_nickname,
+                    receiver_agent_role,
+                    prompt,
+                    model,
+                    reasoning_effort,
+                    agents_states,
+                },
+                /*update_subagent_panel*/ false,
+            ),
+            ThreadItem::RawResponseItem { item, .. } => {
+                self.on_raw_response_item(item, /*from_replay*/ true)
+            }
             ThreadItem::DynamicToolCall { .. } => {}
         }
 

@@ -380,7 +380,6 @@ pub fn create_supervisor_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
             ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
             ToolSpec::Freeform(_)
             | ToolSpec::ImageGeneration { .. }
-            | ToolSpec::LocalShell { .. }
             | ToolSpec::Namespace(_)
             | ToolSpec::ToolSearch { .. }
             | ToolSpec::WebSearch { .. } => None,

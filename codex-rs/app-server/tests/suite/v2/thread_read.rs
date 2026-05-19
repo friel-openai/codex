@@ -564,6 +564,7 @@ async fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> 
                     images: None,
                     local_images: Vec::new(),
                     text_elements: Vec::new(),
+                    ..Default::default()
                 })),
             ],
         })
@@ -581,6 +582,7 @@ async fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> 
         config: Arc::new(config),
         cli_overrides: Vec::new(),
         loader_overrides,
+        strict_config: false,
         cloud_requirements: CloudRequirementsLoader::default(),
         thread_config_loader: Arc::new(codex_config::NoopThreadConfigLoader),
         feedback: CodexFeedback::new(),

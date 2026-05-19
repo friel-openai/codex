@@ -94,6 +94,7 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::models::format_allow_prefixes;
@@ -567,7 +568,7 @@ impl Codex {
 
     async fn spawn_internal(args: CodexSpawnArgs) -> CodexResult<CodexSpawnOk> {
         let CodexSpawnArgs {
-            config,
+            mut config,
             installation_id,
             auth_manager,
             models_manager,

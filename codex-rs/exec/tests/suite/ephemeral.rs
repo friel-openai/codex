@@ -66,13 +66,16 @@ async fn does_not_persist_rollout_file_in_ephemeral_mode() -> anyhow::Result<()>
     Ok(())
 }
 
-#[test]
-fn materializes_rollout_file_for_ephemeral_mode_when_debug_env_is_enabled() -> anyhow::Result<()> {
-    let test = test_codex_exec();
-    let fixture = find_resource!("tests/fixtures/cli_responses_fixture.sse")?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn materializes_rollout_file_for_ephemeral_mode_when_debug_env_is_enabled()
+-> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
 
-    test.cmd()
-        .env("CODEX_RS_SSE_FIXTURE", &fixture)
+    let test = test_codex_exec();
+    let server = MockServer::start().await;
+    let _response_mock = responses::mount_sse_once(&server, exec_sse_response()).await;
+
+    test.cmd_with_server(&server)
         .env("CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS", "1")
         .arg("--skip-git-repo-check")
         .arg("--ephemeral")

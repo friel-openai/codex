@@ -412,6 +412,7 @@ impl AgentControl {
                     &options,
                     inherited_shell_snapshot,
                     inherited_exec_policy,
+                    inherited_thread_state,
                 ))
                 .await?
             }
@@ -428,6 +429,7 @@ impl AgentControl {
                     inherited_shell_snapshot,
                     inherited_exec_policy,
                     options.environments.clone(),
+                    Default::default(),
                 ))
                 .await?
             }

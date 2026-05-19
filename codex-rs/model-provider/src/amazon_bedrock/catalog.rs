@@ -99,20 +99,6 @@ mod tests {
                 .iter()
                 .map(|model| model.request_model.as_deref())
                 .collect::<Vec<_>>(),
-            vec![None, None, None]
-        );
-    }
-
-    #[test]
-    fn catalog_models_use_their_slugs_as_request_models() {
-        let catalog = static_model_catalog();
-
-        assert_eq!(
-            catalog
-                .models
-                .iter()
-                .map(|model| model.request_model.as_deref())
-                .collect::<Vec<_>>(),
             vec![None, None]
         );
     }

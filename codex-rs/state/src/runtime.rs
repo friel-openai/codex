@@ -654,6 +654,8 @@ mod tests {
             ignore_missing: false,
             locking: STATE_MIGRATOR.locking,
             no_tx: STATE_MIGRATOR.no_tx,
+            table_name: STATE_MIGRATOR.table_name.clone(),
+            create_schemas: STATE_MIGRATOR.create_schemas.clone(),
         }
         .run(&pool)
         .await
@@ -862,7 +864,7 @@ INSERT INTO thread_goal_supervisor_state (
             .await
             .expect("create codex home");
         let state_path = state_db_path(codex_home.as_path());
-        seed_frodex_supervisor_state_migration(state_path.as_path(), 34).await;
+        seed_frodex_supervisor_state_migration(state_path.as_path(), /*recorded_version*/ 34).await;
 
         let strict_pool = open_db_pool(state_path.as_path()).await;
         let strict_err = STATE_MIGRATOR
@@ -905,8 +907,11 @@ INSERT INTO thread_goal_supervisor_state (
             .await
             .expect("create codex home");
         let state_path = state_db_path(codex_home.as_path());
-        let (thread_id, goal_id) =
-            seed_frodex_supervisor_state_migration(state_path.as_path(), 33).await;
+        let (thread_id, goal_id) = seed_frodex_supervisor_state_migration(
+            state_path.as_path(),
+            /*recorded_version*/ 33,
+        )
+        .await;
 
         let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await

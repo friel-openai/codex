@@ -1165,7 +1165,7 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
         .set_app_server_client_info(
             Some("codex-tui".to_string()),
             Some("test-client-version".to_string()),
-            false,
+            /*mcp_elicitations_auto_deny*/ false,
         )
         .await?;
 
