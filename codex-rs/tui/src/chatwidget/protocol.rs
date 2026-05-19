@@ -1,6 +1,58 @@
 use super::*;
 
 impl ChatWidget {
+    fn apply_subagent_notification_text(&mut self, text: &str) -> bool {
+        let Some(payload) = parse_subagent_notification(text) else {
+            return false;
+        };
+        let Some(agent_path) = payload.agent_path else {
+            return true;
+        };
+        let Ok(thread_id) = ThreadId::from_string(&agent_path) else {
+            return true;
+        };
+        self.subagent_panel_registry
+            .update_status(thread_id, payload.status);
+        self.refresh_subagent_panel();
+        true
+    }
+
+    pub(super) fn on_raw_response_item(&mut self, item: ResponseItem, from_replay: bool) {
+        let direct_message_text = match &item {
+            ResponseItem::Message { content, .. } => text_from_message_content(content),
+            _ => None,
+        }
+        .map(str::to_owned);
+        if let Some(text) = direct_message_text.as_deref() {
+            self.apply_subagent_notification_text(text);
+        }
+
+        let Some((sender, raw_message, message)) = inter_agent_message_from_item(&item) else {
+            if from_replay {
+                self.last_replayed_inter_agent_message = None;
+            }
+            return;
+        };
+        self.apply_subagent_notification_text(&raw_message);
+
+        let replay_key = (sender.clone(), message.clone());
+        if from_replay {
+            if self.last_replayed_inter_agent_message.as_ref() == Some(&replay_key) {
+                return;
+            }
+            self.last_replayed_inter_agent_message = Some(replay_key);
+        } else {
+            self.last_replayed_inter_agent_message = None;
+        }
+
+        let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
+        self.add_to_history(history_cell::new_info_event(
+            format!("Agent message: {message}"),
+            hint,
+        ));
+        self.request_redraw();
+    }
+
     pub(crate) fn handle_server_notification(
         &mut self,
         notification: ServerNotification,
@@ -336,10 +388,8 @@ impl ChatWidget {
                 },
                 !from_replay,
             ),
-            ThreadItem::EnteredReviewMode { review, .. } => {
-                if !from_replay {
-                    self.enter_review_mode_with_hint(review, /*from_replay*/ false);
-                }
+            ThreadItem::EnteredReviewMode { review, .. } if !from_replay => {
+                self.enter_review_mode_with_hint(review, /*from_replay*/ false);
             }
             _ => {}
         }

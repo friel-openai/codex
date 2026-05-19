@@ -1,12 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use anyhow::Context;
-use codex_utils_cargo_bin::find_resource;
+use core_test_support::responses;
+use core_test_support::skip_if_no_network;
 use core_test_support::test_codex_exec::test_codex_exec;
 use serde_json::Value;
 use std::string::ToString;
 use uuid::Uuid;
 use walkdir::WalkDir;
+use wiremock::MockServer;
 
 /// Utility: scan the sessions dir for a rollout file that contains `marker`
 /// in any response_item.message.content entry. Returns the absolute path.
@@ -100,21 +102,33 @@ fn extract_fork_reference(path: &std::path::Path) -> Option<(String, usize)> {
     })
 }
 
-fn exec_fixture() -> anyhow::Result<std::path::PathBuf> {
-    Ok(find_resource!("tests/fixtures/cli_responses_fixture.sse")?)
+fn exec_sse_response(response_id: &str, message_id: &str) -> String {
+    responses::sse(vec![
+        responses::ev_response_created(response_id),
+        responses::ev_assistant_message(message_id, "fixture response"),
+        responses::ev_completed(response_id),
+    ])
 }
 
-#[test]
-fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Result<()> {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Result<()> {
+    skip_if_no_network!(Ok(()));
+
     let test = test_codex_exec();
-    let fixture = exec_fixture()?;
+    let server = MockServer::start().await;
+    let _response_mock = responses::mount_sse_sequence(
+        &server,
+        vec![
+            exec_sse_response("resp-fork-base", "msg-fork-base"),
+            exec_sse_response("resp-fork-follow-up", "msg-fork-follow-up"),
+        ],
+    )
+    .await;
 
     let marker = format!("fork-base-{}", Uuid::new_v4());
     let prompt = format!("echo {marker}");
 
-    test.cmd()
-        .env("CODEX_RS_SSE_FIXTURE", &fixture)
-        .env("OPENAI_BASE_URL", "http://unused.local")
+    test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg(&prompt)
         .assert()
@@ -128,9 +142,7 @@ fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Result<(
     let marker2 = format!("fork-follow-up-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
 
-    test.cmd()
-        .env("CODEX_RS_SSE_FIXTURE", &fixture)
-        .env("OPENAI_BASE_URL", "http://unused.local")
+    test.cmd_with_server(&server)
         .arg("--skip-git-repo-check")
         .arg("--fork")
         .arg(&session_id)

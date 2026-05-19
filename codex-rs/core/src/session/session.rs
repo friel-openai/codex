@@ -1040,7 +1040,7 @@ impl Session {
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
                 mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
-                model_client: ModelClient::new_with_response_continuation(
+                model_client: ModelClient::new(
                     Some(Arc::clone(&auth_manager)),
                     session_id,
                     thread_id,
@@ -1054,7 +1054,6 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                     attestation_provider,
-                    inherited_thread_state.response_continuation(),
                 )
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(

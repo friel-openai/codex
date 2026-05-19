@@ -16,6 +16,7 @@ use codex_config::types::McpServerTransportConfig;
 use codex_features::Feature;
 use codex_login::CodexAuth;
 use codex_protocol::AgentPath;
+use codex_protocol::ToolName;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
@@ -180,7 +181,7 @@ async fn create_active_thread_goal_for_test(
             parent_thread_id,
             objective,
             codex_state::ThreadGoalStatus::Active,
-            None,
+            /*token_budget*/ None,
         )
         .await?;
     let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
@@ -1563,8 +1564,8 @@ while True:
                 enabled: true,
                 required: false,
                 supports_parallel_tool_calls: false,
-                disabled_reason: None,
                 oauth: None,
+                disabled_reason: None,
                 startup_timeout_sec: Some(Duration::from_secs(5)),
                 tool_timeout_sec: None,
                 default_tools_approval_mode: None,
@@ -1606,8 +1607,9 @@ while True:
     };
     let parent_mcp_tools = list_all_tools.await;
     let startup_failures = required_startup_failures.await;
+    let expected_parent_mcp_tool_name = ToolName::namespaced("mcp__rmcp", "echo").to_string();
     assert!(
-        parent_mcp_tools.contains_key("mcp__rmcp__echo"),
+        parent_mcp_tools.contains_key(&expected_parent_mcp_tool_name),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}; failures={startup_failures:#?}"
     );
     parent.thread.submit(text_input("parent seed")).await?;
@@ -1740,7 +1742,7 @@ while True:
         );
     }
     assert!(
-        namespace_child_tool(&child_body, "mcp__rmcp__", "echo").is_some(),
+        namespace_child_tool(&child_body, "mcp__rmcp", "echo").is_some(),
         "first forked child request should expose parent MCP snapshot tools: {child_body:#}"
     );
 
