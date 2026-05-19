@@ -27,6 +27,7 @@ use crate::tools::router::ToolRouter;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 
+#[derive(Debug, PartialEq)]
 pub(crate) enum ToolCallResponse {
     Response(ResponseInputItem),
     TerminalNoResponse,
@@ -175,6 +176,14 @@ impl ToolCallRuntime {
 impl ToolCallRuntime {
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
+    }
+
+    fn response_for_tool_result(response: AnyToolResult) -> ToolCallResponse {
+        if response.terminal_no_response() {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(response.into_response())
+        }
     }
 
     fn failure_response(call: ToolCall, err: FunctionCallError) -> ResponseInputItem {
@@ -360,7 +369,7 @@ mod tests {
                 success: Some(true),
             },
         };
-        assert_eq!(expected_response, response);
+        assert_eq!(ToolCallResponse::Response(expected_response), response);
 
         let actual = records
             .lock()

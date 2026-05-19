@@ -1692,6 +1692,7 @@ mod tests {
         let thread_id = test_thread_id();
         upsert_test_thread(&runtime, thread_id).await;
         let goal = runtime
+            .thread_goals()
             .replace_thread_goal(
                 thread_id,
                 "persist supervisor snooze",
@@ -1702,12 +1703,14 @@ mod tests {
             .expect("goal replacement should succeed");
 
         runtime
+            .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id, Some(123_456))
             .await
             .expect("supervisor snooze should persist");
         assert_eq!(
             Some(123_456),
             runtime
+                .thread_goals()
                 .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
                 .await
                 .expect("supervisor snooze should read")
@@ -1715,12 +1718,14 @@ mod tests {
         assert_eq!(
             None,
             runtime
+                .thread_goals()
                 .get_thread_goal_supervisor_snoozed_until_ms(thread_id, "stale-goal-id")
                 .await
                 .expect("stale supervisor snooze should be ignored")
         );
 
         runtime
+            .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
                 thread_id,
                 &goal.goal_id,
@@ -1731,6 +1736,7 @@ mod tests {
         assert_eq!(
             None,
             runtime
+                .thread_goals()
                 .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
                 .await
                 .expect("supervisor snooze should be cleared")

@@ -1,49 +1,66 @@
 use super::*;
 use crate::agent::SupervisorParentCompactionResult;
+use crate::tools::handlers::multi_agents_spec::create_supervisor_compact_parent_context_tool;
+use crate::tools::handlers::multi_agents_spec::create_supervisor_tools_namespace;
+use codex_tools::ToolSpec;
 
 pub(crate) struct Handler;
 
-impl ToolHandler for Handler {
-    type Output = CompactParentContextResult;
-
+#[async_trait::async_trait]
+impl ToolExecutor<ToolInvocation> for Handler {
     fn tool_name(&self) -> ToolName {
         ToolName::namespaced("supervisor", "compact_parent_context")
     }
 
-    fn kind(&self) -> ToolKind {
-        ToolKind::Function
+    fn spec(&self) -> Option<ToolSpec> {
+        Some(create_supervisor_tools_namespace(vec![
+            create_supervisor_compact_parent_context_tool(),
+        ]))
     }
 
-    fn matches_kind(&self, payload: &ToolPayload) -> bool {
-        matches!(payload, ToolPayload::Function { .. })
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<Box<dyn crate::tools::context::ToolOutput>, FunctionCallError> {
+        handle_compact_parent_context(invocation)
+            .await
+            .map(boxed_tool_output)
     }
+}
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<Self::Output, FunctionCallError> {
-        let ToolInvocation {
-            session, payload, ..
-        } = invocation;
-        let arguments = function_arguments(payload)?;
-        let args: CompactParentContextArgs = parse_arguments(&arguments)?;
-        let _ = (args.reason, args.evidence);
-        let result = session
+async fn handle_compact_parent_context(
+    invocation: ToolInvocation,
+) -> Result<CompactParentContextResult, FunctionCallError> {
+    let ToolInvocation {
+        session, payload, ..
+    } = invocation;
+    let arguments = function_arguments(payload)?;
+    let args: CompactParentContextArgs = parse_arguments(&arguments)?;
+    let _ = (args.reason, args.evidence);
+    let result = session
+        .services
+        .agent_control
+        .compact_parent_for_goal_supervisor_helper(session.conversation_id)
+        .await
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
+        })?;
+    if !matches!(
+        &result,
+        SupervisorParentCompactionResult::NotSupervisorHelper
+    ) {
+        let _ = session
             .services
             .agent_control
-            .compact_parent_for_goal_supervisor_helper(session.conversation_id)
-            .await
-            .map_err(|err| {
-                FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
-            })?;
-        if !matches!(
-            &result,
-            SupervisorParentCompactionResult::NotSupervisorHelper
-        ) {
-            let _ = session
-                .services
-                .agent_control
-                .finish_goal_supervisor_helper(session.conversation_id)
-                .await;
-        }
-        Ok(CompactParentContextResult::from(result))
+            .finish_goal_supervisor_helper(session.conversation_id)
+            .await;
+    }
+    Ok(CompactParentContextResult::from(result))
+}
+
+impl CoreToolRuntime for Handler {
+    fn matches_kind(&self, payload: &ToolPayload) -> bool {
+        matches!(payload, ToolPayload::Function { .. })
     }
 }
 
