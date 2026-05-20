@@ -26,6 +26,7 @@ use crate::model::epoch_millis_to_datetime;
 use crate::paths::file_modified_time_utc;
 use crate::telemetry::DbKind;
 use crate::telemetry::DbTelemetry;
+use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
@@ -259,6 +260,9 @@ async fn open_sqlite(
         &pool_result,
     );
     let pool = pool_result?;
+    if matches!(db, DbKind::State) {
+        repair_frodex_migration_33_collision(&pool, migrator).await?;
+    }
     let started = Instant::now();
     let migrate_result = migrator.run(&pool).await.map_err(anyhow::Error::from);
     crate::telemetry::record_init_result(
@@ -270,6 +274,109 @@ async fn open_sqlite(
     );
     migrate_result?;
     Ok(pool)
+}
+
+async fn repair_frodex_migration_33_collision(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let Some(migration_33) = migrator.iter().find(|migration| migration.version == 33) else {
+        return Ok(());
+    };
+    let Some(migration_34) = migrator.iter().find(|migration| migration.version == 34) else {
+        return Ok(());
+    };
+    if migration_33.description.as_ref() != "thread goal stopped statuses"
+        || migration_34.description.as_ref() != "thread goal supervisor state"
+    {
+        return Ok(());
+    }
+
+    let migrations_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if migrations_table_exists == 0 {
+        return Ok(());
+    }
+
+    let Some(applied_33) = sqlx::query(
+        "SELECT description, checksum, success FROM _sqlx_migrations WHERE version = ?",
+    )
+    .bind(33_i64)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(());
+    };
+    let applied_33_description: String = applied_33.get("description");
+    let applied_33_checksum: Vec<u8> = applied_33.get("checksum");
+    let applied_33_success: bool = applied_33.get("success");
+    if applied_33_description != "thread goal supervisor state"
+        || applied_33_checksum.as_slice() != migration_34.checksum.as_ref()
+        || !applied_33_success
+    {
+        return Ok(());
+    }
+
+    let applied_34_exists: Option<i64> =
+        sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE version = ?")
+            .bind(34_i64)
+            .fetch_optional(pool)
+            .await?;
+    if applied_34_exists.is_some() {
+        return Ok(());
+    }
+
+    let thread_goals_schema: Option<String> =
+        sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+            .bind("thread_goals")
+            .fetch_optional(pool)
+            .await?;
+    let Some(thread_goals_schema) = thread_goals_schema else {
+        return Ok(());
+    };
+    if thread_goals_schema.contains("'blocked'") || thread_goals_schema.contains("'usage_limited'")
+    {
+        return Ok(());
+    }
+
+    let supervisor_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if supervisor_table_exists == 0 {
+        return Ok(());
+    }
+
+    let mut tx = pool.begin().await?;
+    sqlx::raw_sql(migration_33.sql.as_ref())
+        .execute(&mut *tx)
+        .await
+        .context("repairing frodex migration 33 schema")?;
+    sqlx::query("UPDATE _sqlx_migrations SET description = ?, checksum = ? WHERE version = ?")
+        .bind(migration_33.description.as_ref())
+        .bind(migration_33.checksum.as_ref())
+        .bind(33_i64)
+        .execute(&mut *tx)
+        .await
+        .context("repairing frodex migration 33 metadata")?;
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(34_i64)
+    .bind(migration_34.description.as_ref())
+    .bind(true)
+    .bind(migration_34.checksum.as_ref())
+    .bind(0_i64)
+    .execute(&mut *tx)
+    .await
+    .context("recording frodex migration 34 metadata")?;
+    tx.commit().await?;
+    warn!("repaired frodex state DB migration 33/34 collision");
+    Ok(())
 }
 
 pub(super) async fn ensure_backfill_state_row_in_pool(
@@ -338,7 +445,10 @@ mod tests {
     use pretty_assertions::assert_eq;
     use sqlx::SqlitePool;
     use sqlx::migrate::MigrateError;
+    use sqlx::migrate::Migration;
+    use sqlx::migrate::Migrator;
     use sqlx::sqlite::SqliteConnectOptions;
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::path::Path;
@@ -481,6 +591,98 @@ mod tests {
         .await
         .expect("runtime migrator should tolerate newer applied migrations");
         tolerant_pool.close().await;
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn open_state_sqlite_repairs_frodex_migration_33_collision() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let state_path = state_db_path(codex_home.as_path());
+        let pool = SqlitePool::connect_with(
+            SqliteConnectOptions::new()
+                .filename(&state_path)
+                .create_if_missing(true),
+        )
+        .await
+        .expect("open state db");
+        let migrations_through_32 = STATE_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= 32)
+            .cloned()
+            .collect::<Vec<Migration>>();
+        Migrator {
+            migrations: Cow::Owned(migrations_through_32),
+            ignore_missing: false,
+            locking: STATE_MIGRATOR.locking,
+            no_tx: STATE_MIGRATOR.no_tx,
+        }
+        .run(&pool)
+        .await
+        .expect("apply migrations through 32");
+
+        let supervisor_migration = STATE_MIGRATOR
+            .iter()
+            .find(|migration| migration.version == 34)
+            .expect("current supervisor migration");
+        sqlx::raw_sql(supervisor_migration.sql.as_ref())
+            .execute(&pool)
+            .await
+            .expect("apply supervisor table migration");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(33_i64)
+        .bind(supervisor_migration.description.as_ref())
+        .bind(true)
+        .bind(supervisor_migration.checksum.as_ref())
+        .bind(0_i64)
+        .execute(&pool)
+        .await
+        .expect("record supervisor migration as 33");
+        pool.close().await;
+
+        let strict_pool = open_db_pool(state_path.as_path()).await;
+        let strict_err = STATE_MIGRATOR
+            .run(&strict_pool)
+            .await
+            .expect_err("strict migrator should reject the old frodex migration 33");
+        assert!(matches!(strict_err, MigrateError::VersionMismatch(33)));
+        strict_pool.close().await;
+
+        let tolerant_migrator = runtime_state_migrator();
+        let repaired_pool = open_state_sqlite(
+            state_path.as_path(),
+            &tolerant_migrator,
+            /*telemetry_override*/ None,
+        )
+        .await
+        .expect("runtime migrator should repair the frodex migration 33 collision");
+        let applied = sqlx::query_as::<_, (i64, String)>(
+            "SELECT version, description FROM _sqlx_migrations WHERE version IN (33, 34) ORDER BY version",
+        )
+        .fetch_all(&repaired_pool)
+        .await
+        .expect("read repaired migrations");
+        assert_eq!(
+            applied,
+            vec![
+                (33, "thread goal stopped statuses".to_string()),
+                (34, "thread goal supervisor state".to_string()),
+            ]
+        );
+        let thread_goals_schema: String =
+            sqlx::query_scalar("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
+                .bind("thread_goals")
+                .fetch_one(&repaired_pool)
+                .await
+                .expect("read thread_goals schema");
+        assert!(thread_goals_schema.contains("'blocked'"));
+        assert!(thread_goals_schema.contains("'usage_limited'"));
+        repaired_pool.close().await;
 
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
