@@ -31,6 +31,7 @@ use tracing::warn;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
+use super::list::ArchivedThreadRolloutDisposition;
 use super::list::Cursor;
 use super::list::SortDirection;
 use super::list::ThreadItem;
@@ -480,6 +481,20 @@ impl RolloutRecorder {
         )
         .await;
         if let Some(db_page) = db_page {
+            if archived {
+                repair_legacy_rotated_archived_rows(
+                    codex_home,
+                    state_db_ctx.as_deref(),
+                    &db_page.items,
+                )
+                .await?;
+                let page = page_from_filesystem_scan(fs_page, sort_direction, page_size, sort_key);
+                return Ok(fill_missing_thread_item_metadata_from_state_db(
+                    state_db_ctx.as_deref(),
+                    page,
+                )
+                .await);
+            }
             if search_term.is_some() && (!db_page.items.is_empty() || cursor.is_some()) {
                 for item in &db_page.items {
                     state_db::reconcile_rollout(
@@ -1207,20 +1222,64 @@ async fn list_threads_from_files_desc_unfiltered(
 ) -> std::io::Result<ThreadsPage> {
     if archived {
         let root = codex_home.join(ARCHIVED_SESSIONS_SUBDIR);
-        get_threads_in_root(
-            root,
-            page_size,
-            cursor,
-            sort_key,
-            ThreadListConfig {
-                allowed_sources,
-                model_providers,
-                cwd_filters,
-                default_provider,
-                layout: ThreadListLayout::Flat,
-            },
-        )
-        .await
+        let mut canonical_items = Vec::with_capacity(page_size);
+        let mut num_scanned_files = 0usize;
+        let mut reached_scan_cap = false;
+        let mut page_cursor = cursor.cloned();
+
+        loop {
+            let page = get_threads_in_root(
+                root.clone(),
+                page_size,
+                page_cursor.as_ref(),
+                sort_key,
+                ThreadListConfig {
+                    allowed_sources,
+                    model_providers,
+                    cwd_filters,
+                    default_provider,
+                    layout: ThreadListLayout::Flat,
+                },
+            )
+            .await?;
+            num_scanned_files = num_scanned_files.saturating_add(page.num_scanned_files);
+            reached_scan_cap |= page.reached_scan_cap;
+            for item in page.items {
+                if matches!(
+                    super::list::classify_archived_thread_rollout(
+                        codex_home,
+                        item.path.as_path(),
+                        /*state_db_ctx*/ None,
+                    )
+                    .await?,
+                    ArchivedThreadRolloutDisposition::CanonicalArchivedThread
+                ) {
+                    canonical_items.push(item);
+                    if canonical_items.len() == page_size {
+                        break;
+                    }
+                }
+            }
+            page_cursor = page.next_cursor;
+            if canonical_items.len() == page_size || page_cursor.is_none() || reached_scan_cap {
+                break;
+            }
+        }
+
+        let more_matches_available = page_cursor.is_some() || reached_scan_cap;
+        let next_cursor = if more_matches_available {
+            canonical_items
+                .last()
+                .and_then(|item| cursor_from_thread_item(item, sort_key))
+        } else {
+            None
+        };
+        Ok(ThreadsPage {
+            items: canonical_items,
+            next_cursor,
+            num_scanned_files,
+            reached_scan_cap,
+        })
     } else {
         get_threads(
             codex_home,
@@ -1311,6 +1370,35 @@ async fn list_threads_from_files_asc(
         num_scanned_files: scanned_files,
         reached_scan_cap,
     })
+}
+
+async fn repair_legacy_rotated_archived_rows(
+    codex_home: &Path,
+    state_db_ctx: Option<&StateRuntime>,
+    items: &[codex_state::ThreadMetadata],
+) -> std::io::Result<()> {
+    for item in items {
+        let ArchivedThreadRolloutDisposition::LegacyRotatedSegment { live_rollout_path } =
+            super::list::classify_archived_thread_rollout(
+                codex_home,
+                item.rollout_path.as_path(),
+                state_db_ctx,
+            )
+            .await?
+        else {
+            continue;
+        };
+        if let Some(live_rollout_path) = live_rollout_path {
+            state_db::read_repair_rollout_path(
+                state_db_ctx,
+                Some(item.id),
+                Some(false),
+                live_rollout_path.as_path(),
+            )
+            .await;
+        }
+    }
+    Ok(())
 }
 
 async fn filter_thread_items_by_search_term(
