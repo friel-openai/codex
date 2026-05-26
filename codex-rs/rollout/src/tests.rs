@@ -310,6 +310,81 @@ async fn rollout_reference_prefers_segment_id_over_live_path_with_same_thread_ti
     assert_eq!(resolved, archived_path);
 }
 
+#[tokio::test]
+async fn rollout_reference_prefers_existing_prior_segment_path_without_segment_id() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = temp.path();
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let live_segment_id = SegmentId::new();
+    let ts = "2025-01-03T13-00-00";
+    let file_name = format!("rollout-{ts}-{uuid}.jsonl");
+    let active_path = home.join(format!("sessions/2025/01/03/{file_name}"));
+    let legacy_rotated_path = home.join("archived_sessions").join(file_name);
+    write_session_meta(active_path.as_path(), thread_id, live_segment_id, ts);
+    write_session_meta(
+        legacy_rotated_path.as_path(),
+        thread_id,
+        SegmentId::new(),
+        ts,
+    );
+
+    let resolved = crate::resolve_rollout_reference_rollout_path(
+        home,
+        &RolloutReferenceItem {
+            rollout_path: legacy_rotated_path.clone(),
+            thread_id: Some(thread_id),
+            rollout_timestamp: Some(ts.to_string()),
+            segment_id: None,
+            max_depth: 2,
+        },
+    )
+    .await
+    .expect("resolve rollout reference");
+
+    assert_eq!(resolved, legacy_rotated_path);
+}
+
+#[tokio::test]
+async fn rollout_reference_resolves_rotated_segment_file_by_segment_id() {
+    let temp = TempDir::new().expect("tempdir");
+    let home = temp.path();
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let referenced_segment_id = SegmentId::new();
+    let live_segment_id = SegmentId::new();
+    let ts = "2025-01-03T13-00-00";
+    let file_name = format!("rollout-{ts}-{uuid}.jsonl");
+    let active_path = home.join(format!("sessions/2025/01/03/{file_name}"));
+    let rotated_segment_path = home
+        .join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(referenced_segment_id.to_string())
+        .join(file_name);
+    write_session_meta(active_path.as_path(), thread_id, live_segment_id, ts);
+    write_session_meta(
+        rotated_segment_path.as_path(),
+        thread_id,
+        referenced_segment_id,
+        ts,
+    );
+
+    let resolved = crate::resolve_rollout_reference_rollout_path(
+        home,
+        &RolloutReferenceItem {
+            rollout_path: active_path,
+            thread_id: Some(thread_id),
+            rollout_timestamp: Some(ts.to_string()),
+            segment_id: Some(referenced_segment_id),
+            max_depth: 2,
+        },
+    )
+    .await
+    .expect("resolve rollout reference");
+
+    assert_eq!(resolved, rotated_segment_path);
+}
+
 fn write_session_meta(path: &Path, thread_id: ThreadId, segment_id: SegmentId, timestamp: &str) {
     fs::create_dir_all(path.parent().expect("rollout parent")).expect("create rollout parent");
     let line = RolloutLine {
