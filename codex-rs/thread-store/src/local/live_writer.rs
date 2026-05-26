@@ -265,37 +265,35 @@ pub(super) async fn rotate_thread_segment(
         });
     }
 
-    let archived_path = archived_segment_path(
+    let rotated_segment_path = rotated_segment_path(
         store.config.codex_home.as_path(),
         thread_id,
         old_meta.meta.segment_id,
         old_rollout_path.as_path(),
     )?;
-    fs::create_dir_all(
-        archived_path
-            .parent()
-            .ok_or_else(|| ThreadStoreError::Internal {
-                message: format!(
-                    "archived rollout segment path {} does not have a parent",
-                    archived_path.display()
-                ),
-            })?,
-    )
+    fs::create_dir_all(rotated_segment_path.parent().ok_or_else(|| {
+        ThreadStoreError::Internal {
+            message: format!(
+                "rotated rollout segment path {} does not have a parent",
+                rotated_segment_path.display()
+            ),
+        }
+    })?)
     .await
     .map_err(thread_store_io_error)?;
-    fs::copy(old_rollout_path.as_path(), archived_path.as_path())
+    fs::copy(old_rollout_path.as_path(), rotated_segment_path.as_path())
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!(
                 "failed to copy previous rollout segment {} to {}: {err}",
                 old_rollout_path.display(),
-                archived_path.display()
+                rotated_segment_path.display()
             ),
         })?;
 
     let mut initial_items = Vec::with_capacity(params.initial_items.len() + 1);
     initial_items.push(RolloutItem::RolloutReference(RolloutReferenceItem {
-        rollout_path: archived_path.clone(),
+        rollout_path: rotated_segment_path.clone(),
         thread_id: Some(thread_id),
         rollout_timestamp: rollout_timestamp_from_path(old_rollout_path.as_path()),
         segment_id: old_meta.meta.segment_id,
@@ -323,7 +321,7 @@ pub(super) async fn rotate_thread_segment(
         Err(err) => {
             remove_rotation_artifacts(
                 staged_rollout_path.as_path(),
-                archived_path.as_path(),
+                rotated_segment_path.as_path(),
                 "staged recorder initialization",
             )
             .await;
@@ -339,7 +337,7 @@ pub(super) async fn rotate_thread_segment(
         let _ = staged_recorder.shutdown().await;
         remove_rotation_artifacts(
             staged_rollout_path.as_path(),
-            archived_path.as_path(),
+            rotated_segment_path.as_path(),
             "staged recorder write",
         )
         .await;
@@ -349,7 +347,7 @@ pub(super) async fn rotate_thread_segment(
         let _ = staged_recorder.shutdown().await;
         remove_rotation_artifacts(
             staged_rollout_path.as_path(),
-            archived_path.as_path(),
+            rotated_segment_path.as_path(),
             "staged recorder flush",
         )
         .await;
@@ -358,7 +356,7 @@ pub(super) async fn rotate_thread_segment(
     if let Err(err) = staged_recorder.shutdown().await {
         remove_rotation_artifacts(
             staged_rollout_path.as_path(),
-            archived_path.as_path(),
+            rotated_segment_path.as_path(),
             "staged recorder shutdown",
         )
         .await;
@@ -375,7 +373,7 @@ pub(super) async fn rotate_thread_segment(
     {
         remove_rotation_artifacts(
             staged_rollout_path.as_path(),
-            archived_path.as_path(),
+            rotated_segment_path.as_path(),
             "staged recorder install",
         )
         .await;
@@ -455,7 +453,7 @@ fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
     }
 }
 
-fn archived_segment_path(
+fn rotated_segment_path(
     codex_home: &Path,
     thread_id: ThreadId,
     segment_id: Option<SegmentId>,
@@ -469,14 +467,14 @@ fn archived_segment_path(
                 old_rollout_path.display()
             ),
         })?;
-    let archived_root = codex_home.join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR);
-    Ok(match segment_id {
-        Some(segment_id) => archived_root
-            .join(thread_id.to_string())
-            .join(segment_id.to_string())
-            .join(old_file_name),
-        None => archived_root.join(old_file_name),
-    })
+    let segment_key = segment_id
+        .map(|segment_id| segment_id.to_string())
+        .unwrap_or_else(|| "initial".to_string());
+    Ok(codex_home
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_key)
+        .join(old_file_name))
 }
 
 fn staged_rollout_path(live_rollout_path: &Path) -> ThreadStoreResult<PathBuf> {

@@ -22,6 +22,7 @@ pub(crate) use codex_protocol::protocol;
 
 pub const SESSIONS_SUBDIR: &str = "sessions";
 pub const ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
+pub const ROTATED_ROLLOUT_SEGMENTS_SUBDIR: &str = "rotated_rollout_segments";
 pub static INTERACTIVE_SESSION_SOURCES: LazyLock<Vec<SessionSource>> = LazyLock::new(|| {
     vec![
         SessionSource::Cli,
@@ -35,6 +36,7 @@ pub use codex_protocol::protocol::SessionMeta;
 pub use config::Config;
 pub use config::RolloutConfig;
 pub use config::RolloutConfigView;
+pub use list::ArchivedThreadRolloutDisposition;
 pub use list::Cursor;
 pub use list::SortDirection;
 pub use list::ThreadItem;
@@ -42,6 +44,7 @@ pub use list::ThreadListConfig;
 pub use list::ThreadListLayout;
 pub use list::ThreadSortKey;
 pub use list::ThreadsPage;
+pub use list::classify_archived_thread_rollout;
 pub use list::find_archived_thread_path_by_id_str;
 pub use list::find_rollout_path_by_segment_id;
 pub use list::find_thread_path_by_id_str;
