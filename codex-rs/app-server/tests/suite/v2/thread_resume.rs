@@ -919,6 +919,7 @@ async fn thread_resume_materializes_rollout_references_for_scrollback() -> Resul
             rollout_timestamp: Some(old_ts.to_string()),
             segment_id: None,
             max_depth: 2,
+            nth_user_message: None,
         }),
         RolloutItem::EventMsg(EventMsg::ContextCompacted(ContextCompactedEvent {})),
         user_message_item("after compaction"),

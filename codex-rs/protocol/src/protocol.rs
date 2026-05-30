@@ -2757,7 +2757,6 @@ fn multi_agent_version_from_items(
         items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
             RolloutItem::SessionMeta(_)
-            | RolloutItem::ForkReference(_)
             | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::Compacted(_)
@@ -2853,16 +2852,6 @@ pub struct SessionMetaLine {
     pub git: Option<GitInfo>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
-pub struct ForkReferenceItem {
-    pub rollout_path: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub thread_id: Option<ThreadId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub segment_id: Option<SegmentId>,
-    pub nth_user_message: usize,
-}
-
 pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
 
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
@@ -2876,6 +2865,8 @@ pub struct RolloutReferenceItem {
     pub segment_id: Option<SegmentId>,
     #[serde(default = "default_rollout_reference_depth")]
     pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
 }
 
 fn default_rollout_reference_depth() -> usize {
@@ -2886,7 +2877,7 @@ fn default_rollout_reference_depth() -> usize {
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
-    ForkReference(ForkReferenceItem),
+    #[serde(alias = "fork_reference")]
     RolloutReference(RolloutReferenceItem),
     ResponseItem(ResponseItem),
     Compacted(CompactedItem),

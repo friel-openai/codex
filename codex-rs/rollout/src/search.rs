@@ -273,7 +273,6 @@ fn conversation_text_from_item(item: &RolloutItem) -> Option<String> {
             }
         }
         RolloutItem::SessionMeta(_)
-        | RolloutItem::ForkReference(_)
         | RolloutItem::RolloutReference(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_)

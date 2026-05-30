@@ -3579,8 +3579,7 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
         .expect("load pre-compaction rollout segment");
     let old_segment_id = old_items.iter().find_map(|item| match item {
         RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
-        RolloutItem::ForkReference(_)
-        | RolloutItem::RolloutReference(_)
+        RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)

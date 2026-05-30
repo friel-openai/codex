@@ -1182,8 +1182,12 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
         child_rollout
             .get_rollout_items()
             .iter()
-            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
-        "full-history forks should store a compact ForkReference so fork rollout files do not copy parent rollout history"
+            .any(|item| matches!(
+                item,
+                RolloutItem::RolloutReference(reference)
+                    if reference.nth_user_message.is_some()
+            )),
+        "full-history forks should store a compact RolloutReference so fork rollout files do not copy parent rollout history"
     );
 
     let history = child_thread.codex.session.clone_history().await;

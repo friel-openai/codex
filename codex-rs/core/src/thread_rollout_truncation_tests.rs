@@ -5,7 +5,7 @@ use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
-use codex_protocol::protocol::ForkReferenceItem;
+use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::RolloutReferenceItem;
@@ -155,8 +155,31 @@ fn truncation_max_keeps_full_rollout() {
     );
 }
 
+#[test]
+fn legacy_fork_reference_decodes_as_rollout_reference() {
+    let item: RolloutItem = serde_json::from_value(serde_json::json!({
+        "type": "fork_reference",
+        "payload": {
+            "rollout_path": "/tmp/legacy.jsonl",
+            "nth_user_message": 3
+        }
+    }))
+    .expect("deserialize legacy fork reference");
+
+    let RolloutItem::RolloutReference(reference) = item else {
+        panic!("legacy fork reference should decode as rollout reference");
+    };
+    assert_eq!(reference.rollout_path, PathBuf::from("/tmp/legacy.jsonl"));
+    assert_eq!(reference.max_depth, DEFAULT_ROLLOUT_REFERENCE_DEPTH);
+    assert_eq!(reference.nth_user_message, Some(3));
+
+    let value = serde_json::to_value(RolloutItem::RolloutReference(reference))
+        .expect("serialize rollout reference");
+    assert_eq!(value["type"], "rollout_reference");
+}
+
 #[tokio::test]
-async fn materializes_fork_reference_before_replay() {
+async fn materializes_prefix_truncated_rollout_reference_before_replay() {
     let temp = tempfile::tempdir().expect("tempdir");
     let source_path = temp
         .path()
@@ -169,17 +192,19 @@ async fn materializes_fork_reference_before_replay() {
     ];
     write_rollout(&source_path, &source_items).await;
 
-    let compact_fork = vec![
-        RolloutItem::ForkReference(ForkReferenceItem {
+    let compact_reference = vec![
+        RolloutItem::RolloutReference(RolloutReferenceItem {
             rollout_path: source_path.clone(),
             thread_id: None,
+            rollout_timestamp: None,
             segment_id: None,
-            nth_user_message: 1,
+            max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: Some(1),
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
 
-    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_fork).await;
+    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_reference).await;
 
     let expected = vec![
         RolloutItem::ResponseItem(user_msg("u1")),
@@ -193,7 +218,7 @@ async fn materializes_fork_reference_before_replay() {
 }
 
 #[tokio::test]
-async fn materializes_fork_reference_by_segment_id_after_source_rollover() {
+async fn materializes_prefix_truncated_rollout_reference_by_segment_id_after_source_rollover() {
     let temp = tempfile::tempdir().expect("tempdir");
     let thread_id = ThreadId::new();
     let old_segment_id = SegmentId::new();
@@ -238,17 +263,19 @@ async fn materializes_fork_reference_by_segment_id_after_source_rollover() {
     )
     .await;
 
-    let compact_fork = vec![
-        RolloutItem::ForkReference(ForkReferenceItem {
+    let compact_reference = vec![
+        RolloutItem::RolloutReference(RolloutReferenceItem {
             rollout_path: old_active_path,
             thread_id: Some(thread_id),
+            rollout_timestamp: None,
             segment_id: Some(old_segment_id),
-            nth_user_message: usize::MAX,
+            max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: Some(usize::MAX),
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
 
-    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_fork).await;
+    let materialized = materialize_rollout_items_for_replay(temp.path(), &compact_reference).await;
     let text = serde_json::to_string(&materialized).expect("serialize materialized rollout");
 
     assert!(text.contains("old segment request"));
@@ -257,7 +284,7 @@ async fn materializes_fork_reference_by_segment_id_after_source_rollover() {
 }
 
 #[tokio::test]
-async fn materializes_fork_reference_before_truncating_rollout_references() {
+async fn materializes_prefix_truncated_reference_before_bounded_rollout_references() {
     let temp = tempfile::tempdir().expect("tempdir");
     let thread_id = ThreadId::new();
     let old_segment_id = SegmentId::new();
@@ -285,6 +312,7 @@ async fn materializes_fork_reference_before_truncating_rollout_references() {
                 rollout_timestamp: None,
                 segment_id: None,
                 max_depth: 2,
+                nth_user_message: None,
             }),
             RolloutItem::ResponseItem(user_msg("u2")),
             RolloutItem::ResponseItem(assistant_msg("a2")),
@@ -293,17 +321,19 @@ async fn materializes_fork_reference_before_truncating_rollout_references() {
     )
     .await;
 
-    let fork_items = vec![
-        RolloutItem::ForkReference(ForkReferenceItem {
+    let reference_items = vec![
+        RolloutItem::RolloutReference(RolloutReferenceItem {
             rollout_path: current_path,
             thread_id: Some(thread_id),
+            rollout_timestamp: None,
             segment_id: Some(current_segment_id),
-            nth_user_message: 2,
+            max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: Some(2),
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
 
-    let materialized = materialize_rollout_items_for_replay(temp.path(), &fork_items).await;
+    let materialized = materialize_rollout_items_for_replay(temp.path(), &reference_items).await;
     let text = serde_json::to_string(&materialized).expect("serialize materialized rollout");
 
     assert!(text.contains("u1"));
@@ -323,6 +353,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
     let oldest_path = temp.path().join("oldest.jsonl");
     let old_path = temp.path().join("old.jsonl");
     let middle_path = temp.path().join("middle.jsonl");
+    let current_path = temp.path().join("current.jsonl");
 
     write_rollout(
         &oldest_path,
@@ -342,6 +373,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
                 rollout_timestamp: None,
                 segment_id: None,
                 max_depth: 2,
+                nth_user_message: None,
             }),
             RolloutItem::ResponseItem(user_msg("old segment request")),
         ],
@@ -357,6 +389,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
                 rollout_timestamp: None,
                 segment_id: None,
                 max_depth: 2,
+                nth_user_message: None,
             }),
             RolloutItem::ResponseItem(user_msg("middle segment request")),
         ],
@@ -370,9 +403,11 @@ async fn materializes_rollout_reference_with_bounded_depth() {
             rollout_timestamp: None,
             segment_id: None,
             max_depth: 2,
+            nth_user_message: None,
         }),
         RolloutItem::ResponseItem(user_msg("current segment request")),
     ];
+    write_rollout(&current_path, &current_items).await;
     let materialized = materialize_rollout_items_for_replay(temp.path(), &current_items).await;
     let text = serde_json::to_string(&materialized).expect("serialize materialized rollout");
 
@@ -380,6 +415,20 @@ async fn materializes_rollout_reference_with_bounded_depth() {
     assert!(text.contains("old segment request"));
     assert!(text.contains("middle segment request"));
     assert!(text.contains("current segment request"));
+
+    let fork_items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: current_path,
+        thread_id: None,
+        rollout_timestamp: None,
+        segment_id: None,
+        max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: Some(usize::MAX),
+    })];
+    let fork_materialized = materialize_rollout_items_for_replay(temp.path(), &fork_items).await;
+    assert_eq!(
+        serde_json::to_value(&fork_materialized).unwrap(),
+        serde_json::to_value(&materialized).unwrap()
+    );
 }
 
 #[test]
