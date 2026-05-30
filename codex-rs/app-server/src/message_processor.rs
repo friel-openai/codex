@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicBool;
 use crate::attestation::app_server_attestation_provider;
 use crate::config_manager::ConfigManager;
 use crate::connection_rpc_gate::ConnectionRpcGate;
+use crate::error_code::internal_error;
 use crate::error_code::invalid_request;
 use crate::extensions::app_server_extension_event_sink;
 use crate::extensions::guardian_agent_spawner;
@@ -854,7 +855,25 @@ impl MessageProcessor {
         Ok(())
     }
 
-    async fn handle_initialized_client_request(
+    fn handle_initialized_client_request(
+        self: Arc<Self>,
+        connection_request_id: ConnectionRequestId,
+        codex_request: ClientRequest,
+        request_context: RequestContext,
+        app_server_client_name: Option<String>,
+        client_version: Option<String>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), JSONRPCErrorError>> + Send>>
+    {
+        Box::pin(self.handle_initialized_client_request_inner(
+            connection_request_id,
+            codex_request,
+            request_context,
+            app_server_client_name,
+            client_version,
+        ))
+    }
+
+    async fn handle_initialized_client_request_inner(
         self: Arc<Self>,
         connection_request_id: ConnectionRequestId,
         codex_request: ClientRequest,
@@ -990,24 +1009,42 @@ impl MessageProcessor {
                     .await
             }
             ClientRequest::ThreadResume { params, .. } => {
-                self.thread_processor
-                    .thread_resume(
-                        request_id.clone(),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
-                    )
-                    .await
+                let processor = Arc::clone(&self);
+                let thread_request_id = request_id.clone();
+                join_initialized_request_task(
+                    "thread/resume",
+                    tokio::spawn(async move {
+                        processor
+                            .thread_processor
+                            .thread_resume(
+                                thread_request_id,
+                                params,
+                                app_server_client_name.clone(),
+                                client_version.clone(),
+                            )
+                            .await
+                    }),
+                )
+                .await
             }
             ClientRequest::ThreadFork { params, .. } => {
-                self.thread_processor
-                    .thread_fork(
-                        request_id.clone(),
-                        params,
-                        app_server_client_name.clone(),
-                        client_version.clone(),
-                    )
-                    .await
+                let processor = Arc::clone(&self);
+                let thread_request_id = request_id.clone();
+                join_initialized_request_task(
+                    "thread/fork",
+                    tokio::spawn(async move {
+                        processor
+                            .thread_processor
+                            .thread_fork(
+                                thread_request_id,
+                                params,
+                                app_server_client_name.clone(),
+                                client_version.clone(),
+                            )
+                            .await
+                    }),
+                )
+                .await
             }
             ClientRequest::ThreadArchive { params, .. } => {
                 self.thread_processor
@@ -1084,10 +1121,24 @@ impl MessageProcessor {
                 self.thread_processor.thread_loaded_list(params).await
             }
             ClientRequest::ThreadRead { params, .. } => {
-                self.thread_processor.thread_read(params).await
+                let processor = Arc::clone(&self);
+                join_initialized_request_task(
+                    "thread/read",
+                    tokio::spawn(
+                        async move { processor.thread_processor.thread_read(params).await },
+                    ),
+                )
+                .await
             }
             ClientRequest::ThreadTurnsList { params, .. } => {
-                self.thread_processor.thread_turns_list(params).await
+                let processor = Arc::clone(&self);
+                join_initialized_request_task(
+                    "thread/turns/list",
+                    tokio::spawn(async move {
+                        processor.thread_processor.thread_turns_list(params).await
+                    }),
+                )
+                .await
             }
             ClientRequest::ThreadTurnsItemsList { params, .. } => {
                 self.thread_processor.thread_turns_items_list(params).await
@@ -1350,9 +1401,15 @@ impl MessageProcessor {
 
         match result {
             Ok(Some(response)) => {
-                self.outgoing
-                    .send_response_as(request_id.clone(), response)
-                    .await;
+                let outgoing = Arc::clone(&self.outgoing);
+                let request_id = request_id.clone();
+                if let Err(err) = tokio::spawn(async move {
+                    outgoing.send_response_as(request_id, response).await;
+                })
+                .await
+                {
+                    tracing::warn!("failed to join app-server response task: {err}");
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -1361,6 +1418,14 @@ impl MessageProcessor {
         }
         Ok(())
     }
+}
+
+async fn join_initialized_request_task<T>(
+    method: &str,
+    task: tokio::task::JoinHandle<Result<T, JSONRPCErrorError>>,
+) -> Result<T, JSONRPCErrorError> {
+    task.await
+        .map_err(|err| internal_error(format!("{method} request task failed: {err}")))?
 }
 
 #[cfg(test)]

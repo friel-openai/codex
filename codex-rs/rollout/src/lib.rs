@@ -56,7 +56,6 @@ pub use list::parse_cursor;
 pub use list::read_head_for_summary;
 pub use list::read_session_meta_line;
 pub use list::read_thread_item_from_rollout;
-pub use list::resolve_fork_reference_rollout_path;
 pub use list::resolve_rollout_reference_rollout_path;
 pub use list::rollout_date_parts;
 pub use metadata::builder_from_items;

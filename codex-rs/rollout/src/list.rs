@@ -1144,7 +1144,7 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     summary.saw_session_meta = true;
                 }
             }
-            RolloutItem::ForkReference(_) | RolloutItem::RolloutReference(_) => {
+            RolloutItem::RolloutReference(_) => {
                 // Not included in summaries; skip.
             }
             RolloutItem::ResponseItem(_) => {
@@ -1214,8 +1214,7 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                         head.push(value);
                     }
                 }
-                RolloutItem::ForkReference(_)
-                | RolloutItem::RolloutReference(_)
+                RolloutItem::RolloutReference(_)
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::EventMsg(_) => {}
@@ -1517,14 +1516,7 @@ pub async fn classify_archived_thread_rollout(
         return Ok(ArchivedThreadRolloutDisposition::CanonicalArchivedThread);
     };
     if relative_path.components().count() != 1 {
-        return Ok(ArchivedThreadRolloutDisposition::LegacyRotatedSegment {
-            live_rollout_path: find_live_rollout_path_for_archived_candidate(
-                codex_home,
-                rollout_path,
-                state_db_ctx,
-            )
-            .await?,
-        });
+        return Ok(ArchivedThreadRolloutDisposition::CanonicalArchivedThread);
     }
 
     let live_rollout_path =
@@ -1613,52 +1605,6 @@ async fn find_rollout_path_by_segment_id_in_subdir(
     }
 
     Ok(None)
-}
-
-pub async fn resolve_fork_reference_rollout_path(
-    codex_home: &Path,
-    reference: &codex_protocol::protocol::ForkReferenceItem,
-) -> io::Result<PathBuf> {
-    if let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id)
-        && let Some(path) =
-            find_rollout_path_by_segment_id(codex_home, thread_id, segment_id).await?
-    {
-        return Ok(path);
-    }
-
-    let rollout_path = reference.rollout_path.as_path();
-    if tokio::fs::try_exists(rollout_path).await.unwrap_or(false) {
-        return Ok(rollout_path.to_path_buf());
-    }
-
-    let Some(file_name) = rollout_path
-        .file_name()
-        .and_then(|file_name| file_name.to_str())
-    else {
-        return Ok(rollout_path.to_path_buf());
-    };
-    let Some((_, uuid)) = parse_timestamp_uuid_from_filename(file_name) else {
-        return Ok(rollout_path.to_path_buf());
-    };
-    let archived_path = codex_home.join(ARCHIVED_SESSIONS_SUBDIR).join(file_name);
-    if tokio::fs::try_exists(archived_path.as_path())
-        .await
-        .unwrap_or(false)
-    {
-        return Ok(archived_path);
-    }
-    let id = uuid.to_string();
-    if let Some(path) =
-        find_thread_path_by_id_str(codex_home, id.as_str(), /*state_db_ctx*/ None).await?
-    {
-        return Ok(path);
-    }
-    if let Some(path) =
-        find_archived_thread_path_by_id_str(codex_home, id.as_str(), /*state_db_ctx*/ None).await?
-    {
-        return Ok(path);
-    }
-    Ok(rollout_path.to_path_buf())
 }
 
 pub async fn resolve_rollout_reference_rollout_path(
