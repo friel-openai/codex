@@ -115,10 +115,12 @@ async fn fork_thread_twice_drops_to_first_message() {
     // GetHistory on fork1 flushed; the file is ready.
     let fork1_raw_items = read_rollout_items(&fork1_path);
     assert!(
-        fork1_raw_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
-        "forked rollout should keep a compact ForkReference instead of copying parent history"
+        fork1_raw_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.nth_user_message.is_some()
+        )),
+        "forked rollout should keep a compact RolloutReference instead of copying parent history"
     );
     let fork1_items =
         materialize_rollout_items_for_replay(test.config.codex_home.as_path(), &fork1_raw_items)
@@ -130,7 +132,7 @@ async fn fork_thread_twice_drops_to_first_message() {
     );
 
     // Fork again with n=0. The first fork's raw rollout only contains a
-    // ForkReference, but truncation still applies to the materialized history
+    // RolloutReference, but truncation still applies to the materialized history
     // referenced by that item.
     let NewThread {
         thread: codex_fork2,
@@ -156,10 +158,12 @@ async fn fork_thread_twice_drops_to_first_message() {
     let expected_after_second = fork1_items[..cut2].to_vec();
     let fork2_raw_items = read_rollout_items(&fork2_path);
     assert!(
-        fork2_raw_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
-        "re-forked rollout should keep a compact ForkReference instead of copying parent history"
+        fork2_raw_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.nth_user_message.is_some()
+        )),
+        "re-forked rollout should keep a compact RolloutReference instead of copying parent history"
     );
     let fork2_items =
         materialize_rollout_items_for_replay(test.config.codex_home.as_path(), &fork2_raw_items)

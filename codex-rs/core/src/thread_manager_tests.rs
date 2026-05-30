@@ -1476,10 +1476,12 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .expect("read re-forked rollout history");
     let reforked_raw_items = reforked_history.get_rollout_items();
     assert!(
-        reforked_raw_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::ForkReference(_))),
-        "re-forked interrupted snapshots should keep compact ForkReference history"
+        reforked_raw_items.iter().any(|item| matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.nth_user_message.is_some()
+        )),
+        "re-forked interrupted snapshots should keep compact RolloutReference history"
     );
     let materialized_reforked_items =
         materialize_rollout_items_for_replay(config.codex_home.as_path(), &reforked_raw_items)

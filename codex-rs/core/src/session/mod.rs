@@ -1330,12 +1330,9 @@ impl Session {
             let state = self.state.lock().await;
             state.session_configuration.codex_home().clone()
         };
-        let replay_rollout_items = if conversation_history.scan_rollout_items(|item| {
-            matches!(
-                item,
-                RolloutItem::ForkReference(_) | RolloutItem::RolloutReference(_)
-            )
-        }) {
+        let replay_rollout_items = if conversation_history
+            .scan_rollout_items(|item| matches!(item, RolloutItem::RolloutReference(_)))
+        {
             Some(
                 materialize_rollout_items_for_replay(
                     codex_home.as_path(),

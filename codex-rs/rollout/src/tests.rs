@@ -262,6 +262,7 @@ async fn rollout_reference_resolves_archived_file_by_stable_thread_and_timestamp
             rollout_timestamp: Some(ts.to_string()),
             segment_id: None,
             max_depth: 2,
+            nth_user_message: None,
         },
     )
     .await
@@ -302,6 +303,7 @@ async fn rollout_reference_prefers_segment_id_over_live_path_with_same_thread_ti
             rollout_timestamp: Some(ts.to_string()),
             segment_id: Some(referenced_segment_id),
             max_depth: 2,
+            nth_user_message: None,
         },
     )
     .await
@@ -337,6 +339,7 @@ async fn rollout_reference_prefers_existing_prior_segment_path_without_segment_i
             rollout_timestamp: Some(ts.to_string()),
             segment_id: None,
             max_depth: 2,
+            nth_user_message: None,
         },
     )
     .await
@@ -377,6 +380,7 @@ async fn rollout_reference_resolves_rotated_segment_file_by_segment_id() {
             rollout_timestamp: Some(ts.to_string()),
             segment_id: Some(referenced_segment_id),
             max_depth: 2,
+            nth_user_message: None,
         },
     )
     .await

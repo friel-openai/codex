@@ -83,13 +83,15 @@ fn extract_forked_from_id(path: &std::path::Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn extract_fork_reference(path: &std::path::Path) -> Option<(String, usize)> {
+fn extract_rollout_reference_with_prefix_truncation(
+    path: &std::path::Path,
+) -> Option<(String, usize)> {
     let Ok(content) = std::fs::read_to_string(path) else {
         return None;
     };
     content.lines().skip(1).find_map(|line| {
         let item = serde_json::from_str::<Value>(line).ok()?;
-        if item.get("type").and_then(Value::as_str) != Some("fork_reference") {
+        if item.get("type").and_then(Value::as_str) != Some("rollout_reference") {
             return None;
         }
         let payload = item.get("payload")?;
@@ -163,14 +165,14 @@ async fn exec_fork_by_id_creates_new_session_with_copied_history() -> anyhow::Re
         extract_forked_from_id(&forked_path).as_deref(),
         Some(session_id.as_str())
     );
-    let fork_reference =
-        extract_fork_reference(&forked_path).context("forked rollout should record a reference")?;
-    let referenced_path = std::path::PathBuf::from(&fork_reference.0);
+    let rollout_reference = extract_rollout_reference_with_prefix_truncation(&forked_path)
+        .context("forked rollout should record a reference")?;
+    let referenced_path = std::path::PathBuf::from(&rollout_reference.0);
     assert_eq!(
         std::fs::canonicalize(&referenced_path)?,
         std::fs::canonicalize(&original_path)?,
     );
-    assert_eq!(fork_reference.1, usize::MAX);
+    assert_eq!(rollout_reference.1, usize::MAX);
     assert!(
         !forked_content.contains(&marker),
         "forked session should reference ancestor rollout history instead of copying it"

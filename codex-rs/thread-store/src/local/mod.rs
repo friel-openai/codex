@@ -494,7 +494,6 @@ mod tests {
             .find_map(|item| match item {
                 RolloutItem::RolloutReference(reference) => Some(reference.rollout_path.clone()),
                 RolloutItem::SessionMeta(_)
-                | RolloutItem::ForkReference(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)

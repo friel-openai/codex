@@ -6,7 +6,6 @@
 use crate::context_manager::is_user_turn_boundary;
 use crate::event_mapping;
 use crate::rollout::RolloutRecorder;
-use crate::rollout::resolve_fork_reference_rollout_path;
 use crate::rollout::resolve_rollout_reference_rollout_path;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
@@ -161,65 +160,70 @@ pub async fn materialize_rollout_items_for_replay(
     codex_home: &Path,
     rollout_items: &[RolloutItem],
 ) -> Vec<RolloutItem> {
-    materialize_rollout_items_for_replay_at_depth(codex_home, rollout_items, /*depth*/ 0).await
-}
+    const MAX_REFERENCE_DEPTH: usize = 8;
 
-async fn materialize_rollout_items_for_replay_at_depth(
-    codex_home: &Path,
-    rollout_items: &[RolloutItem],
-    depth: usize,
-) -> Vec<RolloutItem> {
-    const MAX_FORK_REFERENCE_DEPTH: usize = 8;
-    if depth >= MAX_FORK_REFERENCE_DEPTH {
-        warn!("fork reference materialization reached max depth");
-        return rollout_items.to_vec();
+    enum Work {
+        Items {
+            rollout_items: Vec<RolloutItem>,
+            reference_depth: usize,
+            rollout_reference_depth: usize,
+        },
+        Item {
+            item: Box<RolloutItem>,
+            reference_depth: usize,
+            rollout_reference_depth: usize,
+        },
+        TruncateSuffix {
+            start: usize,
+            nth_user_message: usize,
+        },
     }
 
     let mut materialized = Vec::new();
-    for item in rollout_items {
-        match item {
-            RolloutItem::ForkReference(reference) => {
-                let resolved_path =
-                    match resolve_fork_reference_rollout_path(codex_home, reference).await {
-                        Ok(path) => path,
-                        Err(err) => {
-                            warn!(
-                                "failed to resolve fork reference {}: {err}",
-                                reference.rollout_path.display()
-                            );
-                            reference.rollout_path.clone()
-                        }
-                    };
-                match RolloutRecorder::load_rollout_items(&resolved_path).await {
-                    Ok((parent_items, _, _)) => {
-                        let parent_materialized =
-                            Box::pin(materialize_rollout_items_for_replay_at_depth(
-                                codex_home,
-                                &parent_items,
-                                depth + 1,
-                            ))
-                            .await;
-                        let parent_prefix = truncate_rollout_before_nth_user_message_from_start(
-                            &parent_materialized,
-                            reference.nth_user_message,
-                        );
-                        materialized.extend(parent_prefix);
-                    }
-                    Err(err) => {
-                        warn!(
-                            "failed to load fork reference {}: {err}",
-                            resolved_path.display()
-                        );
-                    }
+    let mut work = vec![Work::Items {
+        rollout_items: rollout_items.to_vec(),
+        reference_depth: 0,
+        rollout_reference_depth: 0,
+    }];
+    while let Some(next) = work.pop() {
+        match next {
+            Work::Items {
+                rollout_items,
+                reference_depth,
+                rollout_reference_depth,
+            } => {
+                if reference_depth >= MAX_REFERENCE_DEPTH {
+                    warn!("rollout reference materialization reached max depth");
+                    materialized.extend(rollout_items);
+                    continue;
+                }
+                for item in rollout_items.into_iter().rev() {
+                    work.push(Work::Item {
+                        item: Box::new(item),
+                        reference_depth,
+                        rollout_reference_depth,
+                    });
                 }
             }
-            RolloutItem::RolloutReference(reference) => {
-                if depth >= reference.max_depth {
+            Work::Item {
+                item,
+                reference_depth,
+                rollout_reference_depth,
+            } => {
+                let reference = match *item {
+                    RolloutItem::RolloutReference(reference) => reference,
+                    item => {
+                        materialized.push(item);
+                        continue;
+                    }
+                };
+                let has_prefix_truncation = reference.nth_user_message.is_some();
+                if !has_prefix_truncation && rollout_reference_depth >= reference.max_depth {
                     warn!("rollout reference materialization reached max depth");
                     continue;
                 }
                 let resolved_path =
-                    match resolve_rollout_reference_rollout_path(codex_home, reference).await {
+                    match resolve_rollout_reference_rollout_path(codex_home, &reference).await {
                         Ok(path) => path,
                         Err(err) => {
                             warn!(
@@ -231,14 +235,22 @@ async fn materialize_rollout_items_for_replay_at_depth(
                     };
                 match RolloutRecorder::load_rollout_items(&resolved_path).await {
                     Ok((reference_items, _, _)) => {
-                        let reference_materialized =
-                            Box::pin(materialize_rollout_items_for_replay_at_depth(
-                                codex_home,
-                                &reference_items,
-                                depth + 1,
-                            ))
-                            .await;
-                        materialized.extend(reference_materialized);
+                        let next_rollout_reference_depth = if has_prefix_truncation {
+                            rollout_reference_depth
+                        } else {
+                            rollout_reference_depth + 1
+                        };
+                        if let Some(nth_user_message) = reference.nth_user_message {
+                            work.push(Work::TruncateSuffix {
+                                start: materialized.len(),
+                                nth_user_message,
+                            });
+                        }
+                        work.push(Work::Items {
+                            rollout_items: reference_items,
+                            reference_depth: reference_depth + 1,
+                            rollout_reference_depth: next_rollout_reference_depth,
+                        });
                     }
                     Err(err) => {
                         warn!(
@@ -248,7 +260,17 @@ async fn materialize_rollout_items_for_replay_at_depth(
                     }
                 }
             }
-            other => materialized.push(other.clone()),
+            Work::TruncateSuffix {
+                start,
+                nth_user_message,
+            } => {
+                let suffix = truncate_rollout_before_nth_user_message_from_start(
+                    &materialized[start..],
+                    nth_user_message,
+                );
+                materialized.truncate(start);
+                materialized.extend(suffix);
+            }
         }
     }
     materialized

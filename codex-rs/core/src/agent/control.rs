@@ -28,14 +28,15 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::Event;
-use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
@@ -161,13 +162,12 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         RolloutItem::TurnContext(_) => preserve_reference_context_item,
         RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::ForkReference(_)
         | RolloutItem::RolloutReference(_)
         | RolloutItem::SessionMeta(_) => true,
     }
 }
 
-fn full_history_fork_reference_items(
+fn full_history_rollout_reference_items(
     rollout_path: PathBuf,
     source_items: &[RolloutItem],
 ) -> Vec<RolloutItem> {
@@ -175,7 +175,6 @@ fn full_history_fork_reference_items(
         RolloutItem::SessionMeta(meta) => Some(meta),
         RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::ForkReference(_)
         | RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::TurnContext(_) => None,
@@ -186,18 +185,19 @@ fn full_history_fork_reference_items(
             RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
             RolloutItem::Compacted(_)
             | RolloutItem::EventMsg(_)
-            | RolloutItem::ForkReference(_)
             | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::TurnContext(_) => None,
         })
         .into_iter()
-        .chain(std::iter::once(RolloutItem::ForkReference(
-            ForkReferenceItem {
+        .chain(std::iter::once(RolloutItem::RolloutReference(
+            RolloutReferenceItem {
                 rollout_path,
                 thread_id: source_meta.map(|meta| meta.meta.id),
+                rollout_timestamp: None,
                 segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
-                nth_user_message: usize::MAX,
+                max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                nth_user_message: Some(usize::MAX),
             },
         )))
         .collect()
@@ -613,7 +613,7 @@ impl AgentControl {
             .get_rollout_items();
         let mut forked_rollout_items = match fork_mode {
             SpawnAgentForkMode::FullHistory => {
-                full_history_fork_reference_items(rollout_path.clone(), &source_items)
+                full_history_rollout_reference_items(rollout_path.clone(), &source_items)
             }
             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
                 truncate_rollout_to_last_n_fork_turns(&source_items, *last_n_turns)

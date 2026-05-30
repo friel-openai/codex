@@ -37,14 +37,15 @@ use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ForkReferenceItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -930,7 +931,7 @@ impl ThreadManager {
         };
         let source_items = history.get_rollout_items();
         let reference_history = source_rollout_path.and_then(|rollout_path| {
-            fork_reference_history_for_snapshot(
+            rollout_reference_history_for_snapshot(
                 snapshot,
                 rollout_path,
                 &source_items,
@@ -1624,7 +1625,7 @@ fn fork_history_from_snapshot(
     }
 }
 
-fn fork_reference_history_for_snapshot(
+fn rollout_reference_history_for_snapshot(
     snapshot: ForkSnapshot,
     rollout_path: PathBuf,
     source_items: &[RolloutItem],
@@ -1646,7 +1647,6 @@ fn fork_reference_history_for_snapshot(
         RolloutItem::SessionMeta(meta) => Some(meta),
         RolloutItem::Compacted(_)
         | RolloutItem::EventMsg(_)
-        | RolloutItem::ForkReference(_)
         | RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::TurnContext(_) => None,
@@ -1658,18 +1658,19 @@ fn fork_reference_history_for_snapshot(
             RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
             RolloutItem::Compacted(_)
             | RolloutItem::EventMsg(_)
-            | RolloutItem::ForkReference(_)
             | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::TurnContext(_) => None,
         })
         .into_iter()
-        .chain(std::iter::once(RolloutItem::ForkReference(
-            ForkReferenceItem {
+        .chain(std::iter::once(RolloutItem::RolloutReference(
+            RolloutReferenceItem {
                 rollout_path,
                 thread_id: source_meta.map(|meta| meta.meta.id),
+                rollout_timestamp: None,
                 segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
-                nth_user_message,
+                max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                nth_user_message: Some(nth_user_message),
             },
         )))
         .collect();

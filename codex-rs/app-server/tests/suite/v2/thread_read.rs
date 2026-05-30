@@ -558,6 +558,7 @@ async fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> 
                     rollout_timestamp: None,
                     segment_id: None,
                     max_depth: 2,
+                    nth_user_message: None,
                 }),
                 RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
                     message: "history after segment rotation".to_string(),
