@@ -784,7 +784,17 @@ async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
     )
     .await;
 
-    let mut builder = test_codex().with_config(configure_search_capable_model);
+    let mut builder = test_codex().with_config(|config| {
+        configure_search_capable_model(config);
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+    });
     let test = builder.build(&server).await?;
     test.submit_turn_with_approval_and_permission_profile(
         "Find the spawn agent tool",

@@ -8,6 +8,7 @@ use crate::event_mapping;
 use crate::rollout::RolloutRecorder;
 use crate::rollout::resolve_rollout_reference_rollout_path;
 use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
@@ -234,7 +235,16 @@ pub async fn materialize_rollout_items_for_replay(
                         }
                     };
                 match RolloutRecorder::load_rollout_items(&resolved_path).await {
-                    Ok((reference_items, _, _)) => {
+                    Ok((mut reference_items, _, _)) => {
+                        if let Some(filter_texts) = reference
+                            .compacted_replacement_history_filter_texts
+                            .as_deref()
+                        {
+                            apply_compacted_replacement_history_filter(
+                                &mut reference_items,
+                                filter_texts,
+                            );
+                        }
                         let next_rollout_reference_depth = if has_prefix_truncation {
                             rollout_reference_depth
                         } else {
@@ -274,6 +284,44 @@ pub async fn materialize_rollout_items_for_replay(
         }
     }
     materialized
+}
+
+fn apply_compacted_replacement_history_filter(
+    rollout_items: &mut [RolloutItem],
+    filter_texts: &[String],
+) {
+    for item in rollout_items {
+        match item {
+            RolloutItem::Compacted(compacted) => {
+                if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                    replacement_history.retain(|response_item| {
+                        !matches_filtered_developer_message(response_item, filter_texts)
+                    });
+                }
+            }
+            RolloutItem::RolloutReference(reference) => {
+                reference.compacted_replacement_history_filter_texts = Some(filter_texts.to_vec());
+            }
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::ResponseItem(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+}
+
+fn matches_filtered_developer_message(item: &ResponseItem, filter_texts: &[String]) -> bool {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return false;
+    };
+    if role != "developer" {
+        return false;
+    }
+    let [ContentItem::InputText { text }] = content.as_slice() else {
+        return false;
+    };
+
+    filter_texts.iter().any(|filter_text| filter_text == text)
 }
 
 fn is_real_user_message_boundary(item: &ResponseItem) -> bool {

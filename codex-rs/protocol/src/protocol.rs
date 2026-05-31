@@ -2741,6 +2741,8 @@ pub struct RolloutReferenceItem {
     pub max_depth: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
 }
 
 fn default_rollout_reference_depth() -> usize {

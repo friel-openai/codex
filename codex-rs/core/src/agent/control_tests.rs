@@ -949,7 +949,7 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
     );
 
     let history = child_thread.codex.session.clone_history().await;
-    let _subagent_prompt = crate::session::load_subagent_prompt(&harness.config.codex_home).await;
+    let subagent_prompt = crate::session::load_subagent_prompt(&harness.config.codex_home).await;
     let expected_history = [
         ResponseItem::Message {
             id: None,
@@ -977,6 +977,15 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
         },
         assistant_message("parent commentary", Some(MessagePhase::Commentary)),
         assistant_message("parent final answer", Some(MessagePhase::FinalAnswer)),
+        assistant_message("parent unknown phase", /*phase*/ None),
+        ResponseItem::Reasoning {
+            id: String::new(),
+            summary: Vec::new(),
+            content: None,
+            encrypted_content: None,
+        },
+        trigger_message.to_response_input_item().into(),
+        spawn_agent_call(&parent_spawn_call_id),
         ResponseItem::Message {
             id: None,
             role: "developer".to_string(),
@@ -985,11 +994,27 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
             }],
             phase: None,
         },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: subagent_prompt,
+            }],
+            phase: None,
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "# Subagent Assignment\n\nYou are `this subagent`. Your direct assignment from your parent agent is:\n\nchild task".to_string(),
+            }],
+            phase: None,
+        },
     ];
     assert_eq!(
         history.raw_items(),
         &expected_history,
-        "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
+        "full-history forked child history should replace parent usage hints with the child subagent context while preserving the parent transcript up to the fork point"
     );
     assert_eq!(
         serde_json::to_value(child_thread.codex.session.reference_context_item().await)
@@ -1767,6 +1792,11 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     assert!(
         history_contains_text(history.raw_items(), "Child subagent guidance."),
         "full-history forked child should add the child subagent hint after compacted-history sanitization"
+    );
+    let subagent_prompt = crate::session::load_subagent_prompt(&harness.config.codex_home).await;
+    assert!(
+        history_contains_text(history.raw_items(), subagent_prompt.as_str()),
+        "full-history forked child should add the subagent role prompt after compacted-history sanitization"
     );
 
     let _ = harness

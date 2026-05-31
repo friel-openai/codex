@@ -187,7 +187,13 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         "request_user_input",
         "apply_patch",
         "view_image",
-        "tool_search",
+        "spawn_agent",
+        "send_message",
+        "followup_task",
+        "wait_agent",
+        "close_agent",
+        "list_agents",
+        "supervisor",
         "web_search",
     ]);
     let body0 = req1.single_request().body_json();
@@ -635,11 +641,16 @@ async fn override_before_first_turn_emits_environment_context() -> anyhow::Resul
             if role != "developer" {
                 return None;
             }
-            msg["content"]
-                .as_array()
-                .and_then(|content| content.first())
-                .and_then(|item| item["text"].as_str())
+            Some(
+                msg["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|item| item["text"].as_str())
+                    .collect::<Vec<_>>(),
+            )
         })
+        .flatten()
         .collect();
     assert!(
         permissions_texts.iter().any(|text| {

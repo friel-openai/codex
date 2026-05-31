@@ -41,6 +41,7 @@ const PROXY_ENV_KEYS: &[&str] = &[
 ];
 
 const PROXY_SOCKET_DIR_PREFIX: &str = "codex-linux-sandbox-proxy-";
+const PROXY_SOCKET_PARENT_DIR_PREFIX: &str = "codex-linux-sandbox-proxy-parent-";
 const HOST_BRIDGE_READY: u8 = 1;
 const LOOPBACK_INTERFACE_NAME: &[u8] = b"lo";
 
@@ -300,12 +301,14 @@ fn create_proxy_socket_dir() -> io::Result<PathBuf> {
 }
 
 fn proxy_socket_parent_dir() -> PathBuf {
-    if let Some(codex_home) = std::env::var_os("CODEX_HOME") {
-        let candidate = PathBuf::from(codex_home).join("tmp");
-        if ensure_private_proxy_socket_parent_dir(candidate.as_path()).is_ok() {
-            return candidate;
-        }
+    let candidate = PathBuf::from("/tmp")
+        .join(format!("{PROXY_SOCKET_PARENT_DIR_PREFIX}{}", unsafe {
+            libc::geteuid()
+        }));
+    if ensure_private_proxy_socket_parent_dir(candidate.as_path()).is_ok() {
+        return candidate;
     }
+
     std::env::temp_dir()
 }
 
@@ -652,6 +655,7 @@ fn close_fd(fd: libc::c_int) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::PROXY_SOCKET_DIR_PREFIX;
+    use super::PROXY_SOCKET_PARENT_DIR_PREFIX;
     use super::ProxyRouteEntry;
     use super::ProxyRouteSpec;
     use super::cleanup_proxy_socket_dir;
@@ -661,6 +665,7 @@ mod tests {
     use super::parse_loopback_proxy_endpoint;
     use super::parse_proxy_socket_dir_owner_pid;
     use super::plan_proxy_routes;
+    use super::proxy_socket_parent_dir;
     use super::rewrite_proxy_env_value;
     use pretty_assertions::assert_eq;
     use std::collections::HashMap;
@@ -798,5 +803,17 @@ mod tests {
         assert_eq!(dead_dir.exists(), false);
         assert_eq!(alive_dir.exists(), true);
         assert_eq!(unrelated_dir.exists(), true);
+    }
+
+    #[test]
+    fn proxy_socket_parent_dir_uses_short_private_tmp_path() {
+        let socket_parent = proxy_socket_parent_dir();
+
+        assert_eq!(
+            socket_parent,
+            PathBuf::from("/tmp").join(format!("{PROXY_SOCKET_PARENT_DIR_PREFIX}{}", unsafe {
+                libc::geteuid()
+            }))
+        );
     }
 }

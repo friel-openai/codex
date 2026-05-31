@@ -2986,7 +2986,9 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
+        "fork_turns": "none",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
     }))?;
@@ -2995,12 +2997,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         |req: &wiremock::Request| body_contains(req, PARENT_PROMPT),
         responses::sse(vec![
             responses::ev_response_created("resp-turn1-1"),
-            responses::ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "multi_agent_v1",
-                "spawn_agent",
-                &spawn_args,
-            ),
+            responses::ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             responses::ev_completed("resp-turn1-1"),
         ]),
     )
@@ -3033,7 +3030,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::MultiAgentV2, true)]),
     )?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
@@ -3190,7 +3187,9 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
+        "fork_turns": "none",
         "agent_type": "custom",
         "model": REQUESTED_MODEL,
         "reasoning_effort": REQUESTED_REASONING_EFFORT,
@@ -3200,12 +3199,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
         |req: &wiremock::Request| body_contains(req, PARENT_PROMPT),
         responses::sse(vec![
             responses::ev_response_created("resp-turn1-1"),
-            responses::ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "multi_agent_v1",
-                "spawn_agent",
-                &spawn_args,
-            ),
+            responses::ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             responses::ev_completed("resp-turn1-1"),
         ]),
     )
@@ -3238,7 +3232,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::MultiAgentV2, true)]),
     )?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),

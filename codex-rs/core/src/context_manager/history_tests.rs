@@ -1075,6 +1075,29 @@ fn record_items_truncates_custom_tool_call_output_content() {
 }
 
 #[test]
+fn record_items_preserves_code_mode_exec_output_content() {
+    let mut history = ContextManager::new();
+    let policy = TruncationPolicy::Tokens(1_000);
+    let output = "custom output that is very long\n".repeat(2_500);
+    let call = ResponseItem::CustomToolCall {
+        id: None,
+        status: None,
+        call_id: "tool-200".to_string(),
+        name: crate::tools::code_mode::PUBLIC_TOOL_NAME.to_string(),
+        input: "text('done')".to_string(),
+    };
+    let item = ResponseItem::CustomToolCallOutput {
+        call_id: "tool-200".to_string(),
+        name: None,
+        output: FunctionCallOutputPayload::from_text(output),
+    };
+
+    history.record_items([&call, &item], policy);
+
+    assert_eq!(history.items, vec![call, item]);
+}
+
+#[test]
 fn record_items_respects_custom_token_limit() {
     let mut history = ContextManager::new();
     let policy = TruncationPolicy::Tokens(10);

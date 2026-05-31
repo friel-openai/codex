@@ -25,7 +25,6 @@ use core_test_support::responses::ev_apply_patch_custom_tool_call;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_function_call;
-use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_once_match;
@@ -2371,19 +2370,16 @@ async fn spawned_subagent_execpolicy_amendment_propagates_to_parent_session() ->
     let _ = fs::remove_file(&child_file);
 
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
+        "fork_turns": "none",
     }))?;
     mount_sse_once_match(
         &server,
         |req: &Request| body_contains(req, PARENT_PROMPT),
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "multi_agent_v1",
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-parent-1"),
         ]),
     )

@@ -20,7 +20,6 @@ use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::mount_sse_once;
-use core_test_support::responses::namespace_child_tool;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
@@ -29,11 +28,14 @@ use std::time::Duration;
 use std::time::Instant;
 use tokio::time::sleep;
 
-const MULTI_AGENT_V1_NAMESPACE: &str = "multi_agent_v1";
 const SPAWN_AGENT_TOOL_NAME: &str = "spawn_agent";
 
 fn spawn_agent_description(body: &Value) -> Option<String> {
-    namespace_child_tool(body, MULTI_AGENT_V1_NAMESPACE, SPAWN_AGENT_TOOL_NAME)
+    body.get("tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|tool| tool.get("name").and_then(Value::as_str) == Some(SPAWN_AGENT_TOOL_NAME))
         .and_then(|tool| tool.get("description"))
         .and_then(Value::as_str)
         .map(str::to_string)
@@ -161,7 +163,7 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         .with_config(|config| {
             config
                 .features
-                .enable(Feature::Collab)
+                .enable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
         });
     let test = builder.build(&server).await?;
@@ -189,12 +191,6 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         "expected inherited-model guidance in spawn_agent description: {description:?}"
     );
     assert!(
-        description.contains(
-            "Do not set the `model` field unless the user explicitly asks for a different model or there is a clear task-specific reason."
-        ),
-        "expected model override usage guidance in spawn_agent description: {description:?}"
-    );
-    assert!(
         description.contains("Reasoning efforts: low, medium (default), high."),
         "expected default reasoning effort in spawn_agent description: {description:?}"
     );
@@ -205,24 +201,6 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
     assert!(
         !description.contains("hidden-model"),
         "hidden picker model should be omitted from spawn_agent description: {description:?}"
-    );
-    assert!(
-        description.contains(
-            "Only use `spawn_agent` if and only if the user explicitly asks for sub-agents, delegation, or parallel agent work."
-        ),
-        "expected explicit authorization rule in spawn_agent description: {description:?}"
-    );
-    assert!(
-        description.contains(
-            "Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn."
-        ),
-        "expected non-authorization clarification in spawn_agent description: {description:?}"
-    );
-    assert!(
-        description.contains(
-            "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
-        ),
-        "expected agent-role clarification in spawn_agent description: {description:?}"
     );
     assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),

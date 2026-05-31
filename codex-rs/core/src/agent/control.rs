@@ -193,6 +193,7 @@ fn full_history_rollout_reference_items(
                 segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
                 max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                 nth_user_message: Some(usize::MAX),
+                compacted_replacement_history_filter_texts: None,
             },
         )))
         .collect()
@@ -652,15 +653,27 @@ impl AgentControl {
                 )
         });
         for item in &mut forked_rollout_items {
-            if let RolloutItem::Compacted(compacted) = item
-                && let Some(replacement_history) = compacted.replacement_history.as_mut()
-            {
-                replacement_history.retain(|response_item| {
-                    !is_multi_agent_v2_usage_hint_message(
-                        response_item,
-                        &multi_agent_v2_usage_hint_texts_to_filter,
-                    )
-                });
+            match item {
+                RolloutItem::Compacted(compacted) => {
+                    if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                        replacement_history.retain(|response_item| {
+                            !is_multi_agent_v2_usage_hint_message(
+                                response_item,
+                                &multi_agent_v2_usage_hint_texts_to_filter,
+                            )
+                        });
+                    }
+                }
+                RolloutItem::RolloutReference(reference) if preserve_reference_context_item => {
+                    reference.compacted_replacement_history_filter_texts =
+                        (!multi_agent_v2_usage_hint_texts_to_filter.is_empty())
+                            .then(|| multi_agent_v2_usage_hint_texts_to_filter.clone());
+                }
+                RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::EventMsg(_) => {}
             }
         }
         if preserve_reference_context_item

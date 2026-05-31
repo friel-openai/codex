@@ -200,6 +200,7 @@ async fn materializes_prefix_truncated_rollout_reference_before_replay() {
             segment_id: None,
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: Some(1),
+            compacted_replacement_history_filter_texts: None,
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
@@ -271,6 +272,7 @@ async fn materializes_prefix_truncated_rollout_reference_by_segment_id_after_sou
             segment_id: Some(old_segment_id),
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: Some(usize::MAX),
+            compacted_replacement_history_filter_texts: None,
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
@@ -313,6 +315,7 @@ async fn materializes_prefix_truncated_reference_before_bounded_rollout_referenc
                 segment_id: None,
                 max_depth: 2,
                 nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
             }),
             RolloutItem::ResponseItem(user_msg("u2")),
             RolloutItem::ResponseItem(assistant_msg("a2")),
@@ -329,6 +332,7 @@ async fn materializes_prefix_truncated_reference_before_bounded_rollout_referenc
             segment_id: Some(current_segment_id),
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: Some(2),
+            compacted_replacement_history_filter_texts: None,
         }),
         RolloutItem::ResponseItem(user_msg("child request")),
     ];
@@ -374,6 +378,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
                 segment_id: None,
                 max_depth: 2,
                 nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
             }),
             RolloutItem::ResponseItem(user_msg("old segment request")),
         ],
@@ -390,6 +395,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
                 segment_id: None,
                 max_depth: 2,
                 nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
             }),
             RolloutItem::ResponseItem(user_msg("middle segment request")),
         ],
@@ -404,6 +410,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
             segment_id: None,
             max_depth: 2,
             nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
         }),
         RolloutItem::ResponseItem(user_msg("current segment request")),
     ];
@@ -423,6 +430,7 @@ async fn materializes_rollout_reference_with_bounded_depth() {
         segment_id: None,
         max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
         nth_user_message: Some(usize::MAX),
+        compacted_replacement_history_filter_texts: None,
     })];
     let fork_materialized = materialize_rollout_items_for_replay(temp.path(), &fork_items).await;
     assert_eq!(

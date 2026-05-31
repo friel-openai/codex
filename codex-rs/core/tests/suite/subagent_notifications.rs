@@ -582,6 +582,10 @@ async fn setup_turn_one_with_custom_spawned_child(
             .features
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
         config.model = Some(INHERITED_MODEL.to_string());
         config.model_reasoning_effort = Some(INHERITED_REASONING_EFFORT);
     }));
@@ -705,6 +709,10 @@ async fn subagent_start_replaces_session_start_and_injects_context() -> Result<(
             config
                 .features
                 .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
         })
         .build(&server)
@@ -854,6 +862,10 @@ async fn subagent_stop_replaces_stop_and_skips_internal_subagents() -> Result<()
             config
                 .features
                 .enable(Feature::Collab)
+                .expect("test config should allow feature update");
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
                 .expect("test config should allow feature update");
         })
         .build(&server)
@@ -1033,12 +1045,7 @@ async fn spawned_child_receives_forked_parent_context_impl() -> Result<()> {
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-turn1-1"),
         ]),
     )
@@ -1102,6 +1109,7 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
     let server = start_mock_server().await;
     mount_empty_apps_directory(&server).await;
     let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
         "message": CHILD_PROMPT,
         "fork_turns": "all",
     }))?;
@@ -1235,12 +1243,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-turn1-1"),
         ]),
     )
@@ -1259,7 +1262,14 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -
     let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+            body_contains(req, CHILD_PROMPT)
+                && body_contains(req, "# Subagent Assignment")
+                && !body_contains(req, SPAWN_CALL_ID)
+                && req
+                    .headers
+                    .get("x-openai-subagent")
+                    .and_then(|header| header.to_str().ok())
+                    == Some("collab_spawn")
         },
         sse(vec![
             ev_response_created("resp-child-1"),
@@ -1281,7 +1291,9 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context_impl() -
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    let child_request = child_request_log.single_request();
+    let Some(child_request) = child_request_log.requests().into_iter().next() else {
+        panic!("expected at least one spawned child request");
+    };
     assert!(child_request.body_contains_text("Parent developer instructions."));
     assert!(child_request.body_contains_text(CHILD_PROMPT));
 
@@ -1309,12 +1321,7 @@ async fn skills_toggle_skips_instructions_for_parent_and_spawned_child_impl() ->
         |req: &wiremock::Request| body_contains(req, TURN_1_PROMPT),
         sse(vec![
             ev_response_created("resp-turn1-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                MULTI_AGENT_V1_NAMESPACE,
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-turn1-1"),
         ]),
     )
@@ -1455,6 +1462,10 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
         config
             .features
             .enable(Feature::Collab)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
         let role_path = config.codex_home.join("custom-role.toml");
         std::fs::write(

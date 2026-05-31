@@ -1597,6 +1597,7 @@ fn rollout_reference_history_for_snapshot(
                 segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
                 max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                 nth_user_message: Some(nth_user_message),
+                compacted_replacement_history_filter_texts: None,
             },
         )))
         .collect();

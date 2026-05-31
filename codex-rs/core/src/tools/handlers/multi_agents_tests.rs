@@ -1423,63 +1423,6 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
 }
 
 #[test]
-fn multi_agent_v2_spawn_watchdog_role_is_rejected_in_goal_supervisor_mode() {
-    run_large_stack_async(|| async {
-        let (session, turn) = make_session_and_context().await;
-        let Err(err) = SpawnAgentHandlerV2::default()
-            .handle(invocation(
-                Arc::new(session),
-                Arc::new(turn),
-                "spawn_agent",
-                function_payload(json!({
-                    "message": "check in later",
-                    "task_name": "watchdog",
-                    "agent_type": "watchdog"
-                })),
-            ))
-            .await
-        else {
-            panic!("goal supervisor mode should reject public watchdog spawns");
-        };
-
-        assert_eq!(
-            err,
-            FunctionCallError::RespondToModel(
-                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
-            )
-        );
-    });
-}
-
-#[test]
-fn spawn_agent_watchdog_role_is_rejected_in_goal_supervisor_mode() {
-    run_large_stack_async(|| async {
-        let (session, turn) = make_session_and_context().await;
-        let Err(err) = SpawnAgentHandler::default()
-            .handle(invocation(
-                Arc::new(session),
-                Arc::new(turn),
-                "spawn_agent",
-                function_payload(json!({
-                    "message": "check in later",
-                    "agent_type": "watchdog"
-                })),
-            ))
-            .await
-        else {
-            panic!("goal supervisor mode should reject public watchdog spawns");
-        };
-
-        assert_eq!(
-            err,
-            FunctionCallError::RespondToModel(
-                "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string()
-            )
-        );
-    });
-}
-
-#[test]
 fn multi_agent_v2_spawn_partial_fork_turns_allows_agent_type_override() {
     run_large_stack_async(|| async {
         let (mut session, mut turn) = make_session_and_context().await;
@@ -2411,7 +2354,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             "spawn_agent",
             function_payload(json!({
                 "message": "inspect this repo",
-                "task_name": "test_process"
+                "task_name": "test_process",
+                "fork_turns": "none"
             })),
         ))
         .await

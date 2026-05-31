@@ -251,17 +251,6 @@ pub(crate) fn reject_full_fork_spawn_overrides(
     Ok(())
 }
 
-pub(crate) fn reject_removed_watchdog_role(
-    agent_type: Option<&str>,
-) -> Result<(), FunctionCallError> {
-    if agent_type.is_some_and(|agent_type| agent_type == "watchdog") {
-        return Err(FunctionCallError::RespondToModel(
-            "watchdogs have been replaced by goal supervisor mode; use create_goal or /goal to supervise long-running work".to_string(),
-        ));
-    }
-    Ok(())
-}
-
 /// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
 ///
 /// These values are chosen by the live turn rather than persisted config, so leaving them stale

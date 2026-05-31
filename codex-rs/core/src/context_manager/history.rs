@@ -3,6 +3,7 @@ use crate::event_mapping::has_non_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_dev_message_content;
 use crate::event_mapping::is_contextual_user_message_content;
 use crate::session::turn_context::TurnContext;
+use crate::tools::code_mode::PUBLIC_TOOL_NAME;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_protocol::models::BaseInstructions;
@@ -393,7 +394,13 @@ impl ContextManager {
             } => ResponseItem::CustomToolCallOutput {
                 call_id: call_id.clone(),
                 name: name.clone(),
-                output: truncate_function_output_payload(output, policy_with_serialization_budget),
+                output: if name.as_deref() == Some(PUBLIC_TOOL_NAME)
+                    || self.last_item_is_code_mode_exec_call(call_id)
+                {
+                    output.clone()
+                } else {
+                    truncate_function_output_payload(output, policy_with_serialization_budget)
+                },
             },
             ResponseItem::Message { .. }
             | ResponseItem::Reasoning { .. }
@@ -409,6 +416,17 @@ impl ContextManager {
             | ResponseItem::ContextCompaction { .. }
             | ResponseItem::Other => item.clone(),
         }
+    }
+
+    fn last_item_is_code_mode_exec_call(&self, call_id: &str) -> bool {
+        matches!(
+            self.items.last(),
+            Some(ResponseItem::CustomToolCall {
+                call_id: recorded_call_id,
+                name,
+                ..
+            }) if recorded_call_id == call_id && name == PUBLIC_TOOL_NAME
+        )
     }
 
     /// Walk backward from a rollback cut and trim contiguous pre-turn context-update items.
