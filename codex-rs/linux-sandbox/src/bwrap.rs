@@ -271,6 +271,10 @@ fn create_bwrap_flags_full_filesystem(command: Vec<String>, options: BwrapOption
         "--bind".to_string(),
         "/".to_string(),
         "/".to_string(),
+        // The proxy-only path still enters a fresh user namespace, so bind a
+        // usable minimal `/dev` after rebinding the host filesystem.
+        "--dev".to_string(),
+        "/dev".to_string(),
         // Always enter a fresh user namespace so root inside a container does
         // not need ambient CAP_SYS_ADMIN to create the remaining namespaces.
         "--unshare-user".to_string(),
@@ -1400,6 +1404,8 @@ mod tests {
                 "--bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
+                "--dev".to_string(),
+                "/dev".to_string(),
                 "--unshare-user".to_string(),
                 "--unshare-pid".to_string(),
                 "--unshare-net".to_string(),

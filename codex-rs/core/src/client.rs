@@ -263,7 +263,6 @@ struct WebsocketSession {
     connection: Option<ApiWebSocketConnection>,
     last_request: Option<ResponsesApiRequest>,
     last_response_rx: Option<oneshot::Receiver<LastResponse>>,
-    last_response: Option<LastResponse>,
     last_response_from_untraced_warmup: bool,
     connection_reused: StdMutex<bool>,
 }
@@ -972,7 +971,6 @@ impl ModelClientSession {
         self.websocket_session.connection = None;
         self.websocket_session.last_request = None;
         self.websocket_session.last_response_rx = None;
-        self.websocket_session.last_response = None;
         self.websocket_session.last_response_from_untraced_warmup = false;
         self.websocket_session
             .set_connection_reused(/*connection_reused*/ false);
@@ -1064,16 +1062,13 @@ impl ModelClientSession {
     }
 
     fn get_last_response(&mut self) -> Option<LastResponse> {
-        if let Some(mut receiver) = self.websocket_session.last_response_rx.take() {
-            match receiver.try_recv() {
-                Ok(last_response) => {
-                    self.websocket_session.last_response = Some(last_response.clone());
-                    return Some(last_response);
-                }
-                Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => {}
-            }
-        }
-        self.websocket_session.last_response.clone()
+        self.websocket_session
+            .last_response_rx
+            .take()
+            .and_then(|mut receiver| match receiver.try_recv() {
+                Ok(last_response) => Some(last_response),
+                Err(TryRecvError::Closed) | Err(TryRecvError::Empty) => None,
+            })
     }
 
     fn prepare_websocket_request(
@@ -1183,9 +1178,7 @@ impl ModelClientSession {
         };
 
         if needs_new {
-            if self.websocket_session.last_response.is_none() {
-                self.websocket_session.last_request = None;
-            }
+            self.websocket_session.last_request = None;
             self.websocket_session.last_response_rx = None;
             self.websocket_session.last_response_from_untraced_warmup = false;
             let turn_state = options
@@ -1859,12 +1852,11 @@ where
                         &token_usage,
                         &items_added,
                     );
-                    let last_response = LastResponse {
-                        response_id: response_id.clone(),
-                        items_added: std::mem::take(&mut items_added),
-                    };
                     if let Some(sender) = tx_last_response.take() {
-                        let _ = sender.send(last_response);
+                        let _ = sender.send(LastResponse {
+                            response_id: response_id.clone(),
+                            items_added: std::mem::take(&mut items_added),
+                        });
                     }
                     if tx_event
                         .send(Ok(ResponseEvent::Completed {

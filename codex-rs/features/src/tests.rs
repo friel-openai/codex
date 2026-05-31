@@ -397,9 +397,9 @@ fn agent_prompt_injection_is_stable_and_enabled_by_default() {
 }
 
 #[test]
-fn goals_is_experimental_and_enabled_by_default() {
+fn goals_is_stable_and_enabled_by_default() {
     assert_eq!(feature_for_key("goals"), Some(Feature::Goals));
-    assert!(matches!(Feature::Goals.stage(), Stage::Experimental { .. }));
+    assert_eq!(Feature::Goals.stage(), Stage::Stable);
     assert_eq!(Feature::Goals.default_enabled(), true);
     assert!(Features::with_defaults().enabled(Feature::Goals));
 }

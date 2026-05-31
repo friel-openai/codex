@@ -1134,6 +1134,16 @@ pub const FEATURES: &[FeatureSpec] = &[
         default_enabled: true,
     },
     FeatureSpec {
+        id: Feature::GoalSupervisor,
+        key: "goal_supervisor",
+        stage: Stage::Experimental {
+            name: "Goal supervisor",
+            menu_description: "Use an internal supervisor helper for active goal continuation",
+            announcement: "",
+        },
+        default_enabled: true,
+    },
+    FeatureSpec {
         id: Feature::CollaborationModes,
         key: "collaboration_modes",
         stage: Stage::Removed,

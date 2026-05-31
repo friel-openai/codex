@@ -13,7 +13,7 @@ use core_test_support::responses::ResponseMock;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
-use core_test_support::responses::ev_function_call_with_namespace;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::sse;
@@ -37,7 +37,11 @@ async fn responses_api_parent_and_subagent_requests_include_identity_headers() -
 
     let server = start_mock_server().await;
 
-    let spawn_args = serde_json::to_string(&json!({ "message": CHILD_PROMPT }))?;
+    let spawn_args = serde_json::to_string(&json!({
+        "task_name": "child",
+        "message": CHILD_PROMPT,
+        "fork_turns": "none",
+    }))?;
     let parent_mock = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
@@ -46,12 +50,7 @@ async fn responses_api_parent_and_subagent_requests_include_identity_headers() -
         },
         sse(vec![
             ev_response_created("resp-parent-1"),
-            ev_function_call_with_namespace(
-                SPAWN_CALL_ID,
-                "multi_agent_v1",
-                "spawn_agent",
-                &spawn_args,
-            ),
+            ev_function_call(SPAWN_CALL_ID, "spawn_agent", &spawn_args),
             ev_completed("resp-parent-1"),
         ]),
     )

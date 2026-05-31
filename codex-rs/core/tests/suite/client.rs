@@ -104,6 +104,42 @@ fn message_input_texts(item: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
+fn first_message_with_role<'a>(
+    request_body: &'a serde_json::Value,
+    role: &str,
+) -> &'a serde_json::Value {
+    let Some(input) = request_body["input"].as_array() else {
+        panic!("expected input array in {:?}", request_body["input"]);
+    };
+
+    input
+        .iter()
+        .find(|item| item.get("role").and_then(serde_json::Value::as_str) == Some(role))
+        .unwrap_or_else(|| panic!("expected {role} message in {:?}", request_body["input"]))
+}
+
+fn message_text_with_role_contains<'a>(
+    request_body: &'a serde_json::Value,
+    role: &str,
+    needle: &str,
+) -> &'a str {
+    let Some(input) = request_body["input"].as_array() else {
+        panic!("expected input array in {:?}", request_body["input"]);
+    };
+
+    input
+        .iter()
+        .filter(|item| item.get("role").and_then(serde_json::Value::as_str) == Some(role))
+        .flat_map(message_input_texts)
+        .find(|text| text.contains(needle))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected {role} message containing {needle:?} in {:?}",
+                request_body["input"]
+            )
+        })
+}
+
 fn message_input_text_contains(request: &ResponsesRequest, role: &str, needle: &str) -> bool {
     request
         .message_input_texts(role)
@@ -1217,17 +1253,16 @@ async fn includes_user_instructions_message_in_request() {
             .unwrap()
             .contains("be nice")
     );
-    assert_message_role(&request_body["input"][0], "developer");
-    let permissions_text = request_body["input"][0]["content"][0]["text"]
-        .as_str()
-        .expect("invalid permissions message content");
+    let permissions_text =
+        message_text_with_role_contains(&request_body, "developer", "`sandbox_mode`");
     assert!(
         permissions_text.contains("`sandbox_mode`"),
         "expected permissions message to mention sandbox_mode, got {permissions_text:?}"
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
+    let user_context_message = first_message_with_role(&request_body, "user");
+    assert_message_role(user_context_message, "user");
+    let user_context_texts = message_input_texts(user_context_message);
     assert!(
         user_context_texts
             .iter()
@@ -2244,9 +2279,8 @@ async fn includes_developer_instructions_message_in_request() {
     let request = resp_mock.single_request();
     let request_body = request.body_json();
 
-    let permissions_text = request_body["input"][0]["content"][0]["text"]
-        .as_str()
-        .expect("invalid permissions message content");
+    let permissions_text =
+        message_text_with_role_contains(&request_body, "developer", "`sandbox_mode`");
 
     assert!(
         !request_body["instructions"]
@@ -2254,7 +2288,6 @@ async fn includes_developer_instructions_message_in_request() {
             .unwrap()
             .contains("be nice")
     );
-    assert_message_role(&request_body["input"][0], "developer");
     assert!(
         permissions_text.contains("`sandbox_mode`"),
         "expected permissions message to mention sandbox_mode, got {permissions_text:?}"
@@ -2274,8 +2307,9 @@ async fn includes_developer_instructions_message_in_request() {
         request_body["input"]
     );
 
-    assert_message_role(&request_body["input"][1], "user");
-    let user_context_texts = message_input_texts(&request_body["input"][1]);
+    let user_context_message = first_message_with_role(&request_body, "user");
+    assert_message_role(user_context_message, "user");
+    let user_context_texts = message_input_texts(user_context_message);
     assert!(
         user_context_texts
             .iter()

@@ -16,12 +16,26 @@ use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
 const CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+const CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID";
 
 fn materialize_ephemeral_rollouts_for_debug() -> bool {
     std::env::var(CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV).is_ok_and(|value| {
         let value = value.trim();
         !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
     })
+}
+
+fn fork_shared_session_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_SHARED_SESSION_ID_ENV)
+        .ok()
+        .as_deref()
+        .is_none_or(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
 }
 
 /// Context for an initialized model agent
@@ -967,7 +981,9 @@ impl Session {
                     config.analytics_enabled,
                 )
             });
-            let session_id = if session_configuration.session_source.is_non_root_agent() {
+            let session_id = if session_configuration.session_source.is_non_root_agent()
+                && fork_shared_session_id_enabled()
+            {
                 agent_control.session_id()
             } else {
                 SessionId::from(thread_id)

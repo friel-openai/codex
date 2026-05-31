@@ -64,7 +64,6 @@ async fn handle_spawn_agent(
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty());
-    reject_removed_watchdog_role(role_name)?;
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = render_input_preview(&input_items);
     let session_source = turn.session_source.clone();
