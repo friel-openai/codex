@@ -99,6 +99,7 @@ fn full_history_rollout_reference_items(
                 segment_id: source_meta.and_then(|meta| meta.meta.segment_id),
                 max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                 nth_user_message: Some(usize::MAX),
+                compacted_replacement_history_filter_texts: None,
             },
         )))
         .collect()

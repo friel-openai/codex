@@ -1747,11 +1747,12 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, history_before_seed.raw_items());
+    let initial_context = session.build_initial_context(&turn_context).await;
 
     session
         .record_context_updates_and_set_reference_context_item(&turn_context)
         .await;
-    expected.extend(session.build_initial_context(&turn_context).await);
+    expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
     assert_eq!(expected, history_after_seed.raw_items());
 
@@ -3605,9 +3606,9 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
         .expect("rollout path after compaction");
     assert_eq!(new_rollout_path, old_rollout_path);
     let config = sess.get_config().await;
-    let archived_old_rollout_path = config
+    let rotated_old_rollout_path = config
         .codex_home
-        .join(codex_rollout::ARCHIVED_SESSIONS_SUBDIR)
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
         .join(sess.thread_id.to_string())
         .join(old_segment_id.to_string())
         .join(
@@ -3616,7 +3617,7 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
                 .expect("old rollout path should have a file name"),
         );
     assert!(old_rollout_path.exists());
-    assert!(archived_old_rollout_path.exists());
+    assert!(rotated_old_rollout_path.exists());
     let old_rollout_timestamp = old_rollout_path
         .file_name()
         .and_then(|file_name| file_name.to_str())
@@ -3632,7 +3633,7 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
         matches!(
             item,
             RolloutItem::RolloutReference(reference)
-                if reference.rollout_path.as_path() == archived_old_rollout_path.as_path()
+                if reference.rollout_path.as_path() == rotated_old_rollout_path.as_path()
                     && reference.thread_id == Some(sess.thread_id)
                     && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
         )
@@ -8106,11 +8107,11 @@ async fn turn_context_item_stores_split_file_system_sandbox_policy_when_differen
 async fn record_context_updates_and_set_reference_context_item_injects_full_context_when_baseline_missing()
  {
     let (session, turn_context) = make_session_and_context().await;
+    let initial_context = session.build_initial_context(&turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&turn_context)
         .await;
     let history = session.clone_history().await;
-    let initial_context = session.build_initial_context(&turn_context).await;
     assert_eq!(history.raw_items().to_vec(), initial_context);
 
     let current_context = session.reference_context_item().await;
@@ -8149,6 +8150,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
             /*reference_context_item*/ None,
         )
         .await;
+    let expected_initial_context = session.build_initial_context(&turn_context).await;
 
     session
         .record_context_updates_and_set_reference_context_item(&turn_context)
@@ -8156,7 +8158,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
 
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
-    expected_history.extend(session.build_initial_context(&turn_context).await);
+    expected_history.extend(expected_initial_context);
     assert_eq!(history.raw_items().to_vec(), expected_history);
 }
 
@@ -9494,12 +9496,9 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     // Verify the `<turn_aborted>` marker is still recorded in history for the model.
     assert!(
         history.raw_items().iter().any(|item| {
-            let ResponseItem::Message { role, content, .. } = item else {
+            let ResponseItem::Message { content, .. } = item else {
                 return false;
             };
-            if role != "user" {
-                return false;
-            }
             content.iter().any(|content_item| {
                 let ContentItem::InputText { text } = content_item else {
                     return false;
@@ -10152,6 +10151,14 @@ async fn root_agent_prompt_is_inline_developer_context_not_session_instructions(
             .features
             .enable(Feature::AgentPromptInjection)
             .expect("test config should enable prompt injection");
+        config
+            .features
+            .enable(Feature::Goals)
+            .expect("test config should enable goals");
+        config
+            .features
+            .enable(Feature::GoalSupervisor)
+            .expect("test config should enable goal supervisor");
     })
     .await
     .expect("session should build");

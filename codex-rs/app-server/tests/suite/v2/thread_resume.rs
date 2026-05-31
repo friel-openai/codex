@@ -16,10 +16,6 @@ use app_test_support::write_chatgpt_auth;
 use chrono::Utc;
 use codex_app_server_protocol::AskForApproval;
 use codex_app_server_protocol::ClientInfo;
-use codex_app_server_protocol::CollabAgentState;
-use codex_app_server_protocol::CollabAgentStatus;
-use codex_app_server_protocol::CollabAgentTool;
-use codex_app_server_protocol::CollabAgentToolCallStatus;
 use codex_app_server_protocol::CommandExecutionApprovalDecision;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::FileChangeApprovalDecision;
@@ -920,6 +916,7 @@ async fn thread_resume_materializes_rollout_references_for_scrollback() -> Resul
             segment_id: None,
             max_depth: 2,
             nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
         }),
         RolloutItem::EventMsg(EventMsg::ContextCompacted(ContextCompactedEvent {})),
         user_message_item("after compaction"),
@@ -3582,7 +3579,8 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -> Result<()> {
+async fn thread_resume_reconstructs_goal_supervisor_raw_item_without_hidden_tool_calls()
+-> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
@@ -3602,10 +3600,10 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
     let persisted_rollout = std::fs::read_to_string(&rollout_file_path)?;
     let sender_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002")
         .expect("valid sender thread id");
-    let watchdog_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003")
-        .expect("valid watchdog thread id");
+    let goal_supervisor_thread_id = ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003")
+        .expect("valid goal supervisor thread id");
     let communication = InterAgentCommunication::new(
-        AgentPath::try_from("/root/watchdog").expect("valid agent path"),
+        AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
         AgentPath::root(),
         Vec::new(),
         "goodbye".to_string(),
@@ -3616,12 +3614,12 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
         RolloutLine {
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
-                call_id: "spawn-watchdog".to_string(),
+                call_id: "spawn-goal-supervisor".to_string(),
                 completed_at_ms: 0,
                 sender_thread_id,
-                new_thread_id: Some(watchdog_thread_id),
+                new_thread_id: Some(goal_supervisor_thread_id),
                 new_agent_nickname: Some("Boyle".to_string()),
-                new_agent_role: Some("watchdog".to_string()),
+                new_agent_role: Some("goal_supervisor".to_string()),
                 prompt: "Every time you start, respond with goodbye.".to_string(),
                 model: "arcanine 1m".to_string(),
                 reasoning_effort: ReasoningEffort::Low,
@@ -3635,12 +3633,12 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
         RolloutLine {
             timestamp: meta_rfc3339.to_string(),
             item: RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
-                call_id: "watchdog-close".to_string(),
+                call_id: "goal-supervisor-close".to_string(),
                 completed_at_ms: 0,
                 sender_thread_id,
-                receiver_thread_id: watchdog_thread_id,
+                receiver_thread_id: goal_supervisor_thread_id,
                 receiver_agent_nickname: Some("Boyle".to_string()),
-                receiver_agent_role: Some("watchdog".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
                 status: AgentStatus::Completed(Some("goodbye".to_string())),
             })),
         },
@@ -3670,57 +3668,16 @@ async fn thread_resume_reconstructs_inter_agent_raw_item_and_closed_watchdog() -
     .await??;
     let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
 
-    let reconstructed_turn = thread.turns.last().expect("reconstructed watchdog turn");
+    let reconstructed_turn = thread
+        .turns
+        .last()
+        .expect("reconstructed goal supervisor turn");
     assert_eq!(
         reconstructed_turn.items[1..],
-        vec![
-            ThreadItem::CollabAgentToolCall {
-                id: "spawn-watchdog".to_string(),
-                tool: CollabAgentTool::SpawnAgent,
-                status: CollabAgentToolCallStatus::Completed,
-                sender_thread_id: sender_thread_id.to_string(),
-                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                prompt: Some("Every time you start, respond with goodbye.".to_string()),
-                model: Some("arcanine 1m".to_string()),
-                reasoning_effort: Some(ReasoningEffort::Low),
-                receiver_agent_nickname: None,
-                receiver_agent_role: None,
-                agents_states: [(
-                    watchdog_thread_id.to_string(),
-                    CollabAgentState {
-                        status: CollabAgentStatus::PendingInit,
-                        message: None,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-            ThreadItem::RawResponseItem {
-                id: "item-2".to_string(),
-                item: raw_response_item,
-            },
-            ThreadItem::CollabAgentToolCall {
-                id: "watchdog-close".to_string(),
-                tool: CollabAgentTool::CloseAgent,
-                status: CollabAgentToolCallStatus::Completed,
-                sender_thread_id: sender_thread_id.to_string(),
-                receiver_thread_ids: vec![watchdog_thread_id.to_string()],
-                prompt: None,
-                model: None,
-                reasoning_effort: None,
-                receiver_agent_nickname: None,
-                receiver_agent_role: None,
-                agents_states: [(
-                    watchdog_thread_id.to_string(),
-                    CollabAgentState {
-                        status: CollabAgentStatus::Completed,
-                        message: Some("goodbye".to_string()),
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            },
-        ]
+        vec![ThreadItem::RawResponseItem {
+            id: "item-2".to_string(),
+            item: raw_response_item,
+        }]
     );
 
     Ok(())

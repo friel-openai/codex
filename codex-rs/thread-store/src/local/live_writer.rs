@@ -298,6 +298,7 @@ pub(super) async fn rotate_thread_segment(
         segment_id: old_meta.meta.segment_id,
         max_depth: params.previous_segment_reference_depth,
         nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
     }));
     initial_items.extend(params.initial_items);
 

@@ -246,9 +246,12 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
     assert_eq!(requests.len(), 2, "expected two calls to the responses API");
 
     let follow_up_request = &requests[1];
-    let user_texts = follow_up_request.message_input_texts("user");
+    let model_visible_texts = ["developer", "user"]
+        .into_iter()
+        .flat_map(|role| follow_up_request.message_input_texts(role))
+        .collect::<Vec<_>>();
     assert!(
-        user_texts
+        model_visible_texts
             .iter()
             .any(|text| text.contains("<turn_aborted>")),
         "expected <turn_aborted> marker in follow-up request"

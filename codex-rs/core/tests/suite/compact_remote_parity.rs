@@ -993,6 +993,7 @@ fn normalize_tmp_prefix_before_marker(text: &mut String, marker: &str) {
             .or_else(|| prefix.rfind("/var/folders/"))
             .or_else(|| prefix.rfind("/private/tmp/.tmp"))
             .or_else(|| prefix.rfind("/tmp/.tmp"))
+            .or_else(|| prefix.rfind("/var/tmp/"))
             .or(windows_appdata_temp_start);
         if let Some(start_index) = start {
             text.replace_range(start_index..marker_index, "<CODEX_HOME>");
@@ -1015,6 +1016,15 @@ fn normalize_string_rewrites_linux_temp_skill_paths() {
         "file: <CODEX_HOME>/skills/.system/imagegen/SKILL.md and \
          <CODEX_HOME>/skills/custom/SKILL.md"
     );
+}
+
+#[test]
+fn normalize_string_rewrites_nested_linux_temp_skill_paths() {
+    let text = normalize_string(
+        "file: /var/tmp/frodex136-test-tmp.IulHFx/.tmp5YYdK3/skills/.system/imagegen/SKILL.md",
+    );
+
+    assert_eq!(text, "file: <CODEX_HOME>/skills/.system/imagegen/SKILL.md");
 }
 
 #[test]
