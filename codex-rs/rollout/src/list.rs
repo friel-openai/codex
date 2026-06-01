@@ -25,6 +25,7 @@ use crate::state_db;
 use codex_file_search as file_search;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMetaLine;
@@ -92,6 +93,7 @@ pub type ConversationsPage = ThreadsPage;
 #[derive(Default)]
 struct HeadTailSummary {
     saw_session_meta: bool,
+    saw_compacted_user_message: bool,
     thread_id: Option<ThreadId>,
     first_user_message: Option<String>,
     preview: Option<String>,
@@ -779,8 +781,10 @@ async fn build_thread_item(
     {
         return None;
     }
-    // Apply filters: must have session meta and a discoverable preview.
-    if summary.saw_session_meta && summary.preview.is_some() {
+    // Apply filters: must have session meta and either a discoverable preview or compacted user
+    // history.
+    if summary.saw_session_meta && (summary.preview.is_some() || summary.saw_compacted_user_message)
+    {
         let HeadTailSummary {
             thread_id,
             first_user_message,
@@ -1154,8 +1158,14 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::TurnContext(_) => {
                 // Not included in `head`; skip.
             }
-            RolloutItem::Compacted(_) => {
-                // Not included in `head`; skip.
+            RolloutItem::Compacted(compacted) => {
+                if compacted
+                    .replacement_history
+                    .as_deref()
+                    .is_some_and(|history| history.iter().any(ResponseItem::is_user_message))
+                {
+                    summary.saw_compacted_user_message = true;
+                }
             }
             RolloutItem::EventMsg(ev) => {
                 if let Some(preview) = event_msg_preview(&ev) {

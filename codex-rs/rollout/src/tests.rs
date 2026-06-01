@@ -1122,6 +1122,57 @@ async fn test_list_threads_scans_past_head_for_user_event() {
 }
 
 #[tokio::test]
+async fn test_list_threads_includes_compacted_replacement_history_with_user_message() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+
+    let uuid = Uuid::from_u128(102);
+    let thread_id = thread_id_from_uuid(uuid);
+    let ts = "2025-05-03T10-30-00";
+    let path = home
+        .join("sessions/2025/05/03")
+        .join(format!("rollout-{ts}-{uuid}.jsonl"));
+    write_session_meta(path.as_path(), thread_id, SegmentId::new(), ts);
+    let mut file = fs::OpenOptions::new().append(true).open(path).unwrap();
+    let compacted = serde_json::json!({
+        "timestamp": ts,
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "Hello from compacted history",
+                }],
+            }],
+        },
+    });
+    writeln!(file, "{compacted}").unwrap();
+
+    let provider_filter = provider_vec(&[TEST_PROVIDER]);
+    let page = get_threads(
+        home,
+        /*page_size*/ 10,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        Some(provider_filter.as_slice()),
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(page.items.len(), 1);
+    let item = &page.items[0];
+    assert_eq!(item.thread_id, Some(thread_id));
+    assert_eq!(item.preview, None);
+    assert_eq!(item.first_user_message, None);
+}
+
+#[tokio::test]
 async fn test_list_threads_uses_goal_objective_as_preview() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
