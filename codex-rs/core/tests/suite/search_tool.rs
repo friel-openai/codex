@@ -52,6 +52,7 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::HashMap;
+use std::future::Future;
 use std::time::Duration;
 
 const SEARCH_TOOL_DESCRIPTION_SNIPPETS: [&str; 2] = [
@@ -115,6 +116,28 @@ fn tool_search_output_has_namespace_child(
         "tools": tool_search_output_tools(request, call_id),
     });
     namespace_child_tool(&output, namespace, tool_name).is_some()
+}
+
+fn run_large_search_tool_test<F, Fut>(name: &'static str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            runtime.block_on(test())
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -755,8 +778,15 @@ async fn tool_search_returns_deferred_tools_without_follow_up_tool_injection() -
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
+#[test]
+fn tool_search_returns_deferred_v1_multi_agent_tools() -> Result<()> {
+    run_large_search_tool_test(
+        "tool_search_returns_deferred_v1_multi_agent_tools",
+        tool_search_returns_deferred_v1_multi_agent_tools_impl,
+    )
+}
+
+async fn tool_search_returns_deferred_v1_multi_agent_tools_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;

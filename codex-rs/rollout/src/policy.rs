@@ -2,6 +2,13 @@ use crate::protocol::EventMsg;
 use crate::protocol::RolloutItem;
 use codex_protocol::models::ResponseItem;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum EventPersistenceMode {
+    #[default]
+    Limited,
+    Extended,
+}
+
 /// Whether a rollout `item` should be persisted in rollout files.
 pub fn is_persisted_rollout_item(item: &RolloutItem) -> bool {
     match item {

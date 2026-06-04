@@ -312,6 +312,8 @@ mod tests {
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
 
+    use crate::ThreadEventPersistenceMode;
+
     use super::*;
     use crate::LiveThread;
     use crate::ThreadPersistenceMetadata;

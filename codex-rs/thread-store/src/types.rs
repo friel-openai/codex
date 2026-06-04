@@ -43,6 +43,16 @@ mod optional_option {
     }
 }
 
+/// Controls how many event variants should be persisted for future replay.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ThreadEventPersistenceMode {
+    /// Persist only the legacy minimal replay surface.
+    #[default]
+    Limited,
+    /// Persist the richer event surface used by app-server history reconstruction.
+    Extended,
+}
+
 /// Thread-scoped metadata used when opening live persistence.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThreadPersistenceMetadata {

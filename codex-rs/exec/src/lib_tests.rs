@@ -798,6 +798,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
             session_id: "67e55044-10b1-426f-9247-bb680e5fe0c8".to_string(),
             forked_from_id: Some("f6f10963-370f-4f42-8f3b-bb680e5fe0c8".to_string()),
+            parent_thread_id: None,
             preview: String::new(),
             ephemeral: false,
             model_provider: "openai".to_string(),

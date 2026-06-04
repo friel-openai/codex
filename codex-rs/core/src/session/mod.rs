@@ -1907,8 +1907,7 @@ impl Session {
 
         // The TUI indexes live subagent rows by ThreadId. Use the child ThreadId in this
         // hidden notification so final status updates remove the correct panel row.
-        let message =
-            format_subagent_notification_message(&self.thread_id.to_string(), &status);
+        let message = format_subagent_notification_message(&self.thread_id.to_string(), &status);
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
         let trace_message = self

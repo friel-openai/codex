@@ -1646,12 +1646,12 @@ impl ChatWidget {
 
     fn rename_confirmation_cell(name: &str, thread_id: Option<ThreadId>) -> PlainHistoryCell {
         let name = name.to_string();
-        let line = vec![
+        let mut line = vec![
             "• ".into(),
             "Session renamed to ".into(),
             name.to_string().cyan(),
         ];
-        if let Some(hint) = resume_hint(Some(name), thread_id) {
+        if let Some(hint) = resume_hint(Some(&name), thread_id) {
             line.extend([". To resume this session run ".into(), hint.cyan()]);
         }
         PlainHistoryCell::new(vec![line.into()])
