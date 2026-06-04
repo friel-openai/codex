@@ -5,11 +5,11 @@
 
 use super::resize_reflow::trailing_run_start;
 use super::*;
-#[cfg(target_os = "windows")]
-use codex_config::types::WindowsSandboxModeToml;
 use crate::terminal_multiplexer::FORK_PLACEMENT_REQUIRES_MULTIPLEXER_MESSAGE;
 use crate::terminal_multiplexer::ForkPaneSpawnResult;
 use crate::terminal_multiplexer::spawn_fork_in_new_pane;
+#[cfg(target_os = "windows")]
+use codex_config::types::WindowsSandboxModeToml;
 
 const SHUTDOWN_FIRST_EXIT_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 2);
 

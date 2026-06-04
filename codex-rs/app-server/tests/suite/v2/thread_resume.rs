@@ -844,7 +844,7 @@ async fn thread_resume_materializes_rollout_references_for_scrollback() -> Resul
     ];
     write_rollout_items(current_path.as_path(), current_rfc3339, &current_items)?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let resume_id = mcp
@@ -3573,7 +3573,7 @@ async fn thread_resume_reconstructs_goal_supervisor_raw_item_without_hidden_tool
         format!("{persisted_rollout}{appended_rollout}\n"),
     )?;
 
-    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let resume_id = mcp

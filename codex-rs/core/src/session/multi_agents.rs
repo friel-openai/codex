@@ -1,3 +1,4 @@
+use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
@@ -13,6 +14,9 @@ pub(super) fn usage_hint_text<'a>(
 
     let multi_agent_v2 = &turn_context.config.multi_agent_v2;
     if !multi_agent_v2.usage_hint_enabled {
+        return None;
+    }
+    if is_goal_supervisor_helper_source(session_source) {
         return None;
     }
 

@@ -2624,10 +2624,13 @@ async fn inherited_thread_state_shapes_first_responses_request() -> anyhow::Resu
     session
         .spawn_task(
             Arc::clone(&turn_context),
-            vec![TurnInput::UserInput(vec![UserInput::Text {
-                text: "use inherited state".to_string(),
-                text_elements: Vec::new(),
-            }])],
+            vec![TurnInput::UserInput {
+                content: vec![UserInput::Text {
+                    text: "use inherited state".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                client_id: None,
+            }],
             crate::tasks::RegularTask::new(),
         )
         .await;
@@ -3763,7 +3766,7 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
     let rotated_old_rollout_path = config
         .codex_home
         .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-        .join(sess.conversation_id.to_string())
+        .join(sess.thread_id.to_string())
         .join(old_segment_id.to_string())
         .join(
             old_rollout_path
@@ -3776,19 +3779,19 @@ async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
         .file_name()
         .and_then(|file_name| file_name.to_str())
         .and_then(|file_name| file_name.strip_prefix("rollout-"))
-        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.conversation_id)))
+        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.thread_id)))
         .expect("old rollout timestamp");
     let (new_items, new_thread_id, _) =
         RolloutRecorder::load_rollout_items(new_rollout_path.as_path())
             .await
             .expect("load new rollout segment");
-    assert_eq!(new_thread_id, Some(sess.conversation_id));
+    assert_eq!(new_thread_id, Some(sess.thread_id));
     assert!(new_items.iter().any(|item| {
         matches!(
             item,
             RolloutItem::RolloutReference(reference)
                 if reference.rollout_path.as_path() == rotated_old_rollout_path.as_path()
-                    && reference.thread_id == Some(sess.conversation_id)
+                    && reference.thread_id == Some(sess.thread_id)
                     && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
         )
     }));

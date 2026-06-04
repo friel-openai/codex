@@ -38,7 +38,7 @@ async fn handle_compact_parent_context(
     let result = session
         .services
         .agent_control
-        .compact_parent_for_goal_supervisor_helper(session.conversation_id)
+        .compact_parent_for_goal_supervisor_helper(session.thread_id)
         .await
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
@@ -50,7 +50,7 @@ async fn handle_compact_parent_context(
         let _ = session
             .services
             .agent_control
-            .finish_goal_supervisor_helper(session.conversation_id)
+            .finish_goal_supervisor_helper(session.thread_id)
             .await;
     }
     Ok(CompactParentContextResult::from(result))

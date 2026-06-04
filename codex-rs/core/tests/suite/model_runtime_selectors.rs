@@ -29,6 +29,7 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
+use std::future::Future;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -142,6 +143,28 @@ async fn response_body_for_remote_model(
     Ok(response_mock.single_request().body_json())
 }
 
+fn run_large_model_runtime_selector_test<F, Fut>(name: &'static str, test: F) -> Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<()>> + Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            runtime.block_on(test())
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn remote_tool_mode_selector_overrides_feature_flags() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -183,22 +206,29 @@ async fn remote_tool_mode_selector_overrides_feature_flags() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
+#[test]
+fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
+    run_large_model_runtime_selector_test(
+        "remote_multi_agent_selector_overrides_feature_flags",
+        remote_multi_agent_selector_overrides_feature_flags_impl,
+    )
+}
+
+async fn remote_multi_agent_selector_overrides_feature_flags_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let mut v2_model = remote_model("test-multi-agent-v2");
     v2_model.multi_agent_version = Some(MultiAgentVersion::V2);
     let v2_body = response_body_for_remote_model(v2_model, |config| {
         config.agent_max_threads = Some(3);
-        config
-            .features
-            .enable(Feature::Collab)
-            .expect("test config should allow feature update");
-        config
-            .features
-            .disable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
+        assert!(
+            config.features.enable(Feature::Collab).is_ok(),
+            "test config should allow feature update"
+        );
+        assert!(
+            config.features.disable(Feature::MultiAgentV2).is_ok(),
+            "test config should allow feature update"
+        );
     })
     .await?;
     assert!(tool_names(&v2_body).contains(&"send_message".to_string()));
@@ -206,10 +236,10 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
     let mut disabled_model = remote_model("test-multi-agent-disabled");
     disabled_model.multi_agent_version = Some(MultiAgentVersion::Disabled);
     let disabled_body = response_body_for_remote_model(disabled_model, |config| {
-        config
-            .features
-            .enable(Feature::MultiAgentV2)
-            .expect("test config should allow feature update");
+        assert!(
+            config.features.enable(Feature::MultiAgentV2).is_ok(),
+            "test config should allow feature update"
+        );
     })
     .await?;
     let disabled_tools = tool_names(&disabled_body);
@@ -221,8 +251,15 @@ async fn remote_multi_agent_selector_overrides_feature_flags() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> Result<()> {
+#[test]
+fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> Result<()> {
+    run_large_model_runtime_selector_test(
+        "remote_multi_agent_selector_uses_model_selected_before_first_turn",
+        remote_multi_agent_selector_uses_model_selected_before_first_turn_impl,
+    )
+}
+
+async fn remote_multi_agent_selector_uses_model_selected_before_first_turn_impl() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = wiremock::MockServer::start().await;
@@ -289,17 +326,14 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() -> 
     })
     .await;
 
+    let last_request = response_mock
+        .last_request()
+        .ok_or_else(|| anyhow::anyhow!("expected response request"))?;
     assert_eq!(
         (
             models_mock.requests().len(),
             test.codex.multi_agent_version(),
-            tool_names(
-                &response_mock
-                    .last_request()
-                    .expect("expected response request")
-                    .body_json(),
-            )
-            .contains(&"send_message".to_string()),
+            tool_names(&last_request.body_json()).contains(&"send_message".to_string()),
         ),
         (1, Some(MultiAgentVersion::V2), true)
     );

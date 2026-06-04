@@ -34,12 +34,12 @@ async fn handle_snooze(
     let parent_thread_id = session
         .services
         .agent_control
-        .goal_supervisor_parent_for_helper(session.conversation_id)
+        .goal_supervisor_parent_for_helper(session.thread_id)
         .await;
     let Some(delay_seconds) = session
         .services
         .agent_control
-        .snooze_goal_supervisor_helper(session.conversation_id, args.delay_seconds)
+        .snooze_goal_supervisor_helper(session.thread_id, args.delay_seconds)
         .await
     else {
         return Err(FunctionCallError::RespondToModel(

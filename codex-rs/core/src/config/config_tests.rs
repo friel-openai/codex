@@ -9903,7 +9903,7 @@ non_code_mode_only = true
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(4))
+        (Some(4), Some(4))
     );
     assert!(!config.multi_agent_v2.usage_hint_enabled);
     assert_eq!(
@@ -9953,7 +9953,7 @@ enabled = true
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(3))
+        (Some(8), Some(8))
     );
     assert_eq!(
         config.multi_agent_v2.root_agent_usage_hint_text.as_deref(),
@@ -10300,7 +10300,7 @@ max_concurrent_threads_per_session = 1
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(0))
+        (Some(0), Some(0))
     );
 
     Ok(())

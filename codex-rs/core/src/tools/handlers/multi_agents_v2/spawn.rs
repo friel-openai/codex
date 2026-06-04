@@ -2,7 +2,6 @@ use super::*;
 use crate::agent::control::SpawnAgentForkMode;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::control::render_input_preview;
-use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::apply_role_to_config;
@@ -67,12 +66,6 @@ async fn handle_spawn_agent(
 
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let max_depth = turn.config.agent_max_depth;
-    if exceeds_thread_spawn_depth_limit(child_depth, max_depth) {
-        return Err(FunctionCallError::RespondToModel(
-            "Agent depth limit reached. Solve the task yourself.".to_string(),
-        ));
-    }
     session
         .send_event(
             &turn,
@@ -153,7 +146,7 @@ async fn handle_spawn_agent(
             Some(spawn_source),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                fork_mode,
+                fork_mode: fork_mode.clone(),
                 parent_thread_id: Some(session.thread_id),
                 environments: Some(turn.environments.to_selections()),
                 initial_task_message: fork_mode.as_ref().map(|_| prompt.clone()),

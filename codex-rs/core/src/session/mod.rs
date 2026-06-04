@@ -1890,8 +1890,7 @@ impl Session {
 
         // The TUI indexes live subagent rows by ThreadId. Use the child ThreadId in this
         // hidden notification so final status updates remove the correct panel row.
-        let message =
-            format_subagent_notification_message(&self.conversation_id.to_string(), &status);
+        let message = format_subagent_notification_message(&self.thread_id.to_string(), &status);
         // `communication` owns the message. Keep a second copy only when the
         // recorder will actually need it after parent delivery succeeds.
         let trace_message = self
@@ -2835,11 +2834,7 @@ impl Session {
         let params = {
             let state = self.state.lock().await;
             let session_configuration = &state.session_configuration;
-            let event_persistence_mode = if session_configuration.persist_extended_history {
-                ThreadEventPersistenceMode::Extended
-            } else {
-                ThreadEventPersistenceMode::Limited
-            };
+            let event_persistence_mode = ThreadEventPersistenceMode::Limited;
             RotateThreadSegmentParams {
                 source: session_configuration.session_source.clone(),
                 base_instructions: BaseInstructions {

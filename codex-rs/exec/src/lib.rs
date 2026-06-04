@@ -1301,6 +1301,7 @@ fn session_configured_from_thread_fork_response(
     session_configured_from_thread_response(
         &response.thread.session_id,
         &response.thread.id,
+        response.thread.parent_thread_id.as_deref(),
         response.thread.thread_source.map(Into::into),
         response.thread.name.clone(),
         response.thread.path.clone(),

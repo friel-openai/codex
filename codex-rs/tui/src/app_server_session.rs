@@ -1419,7 +1419,6 @@ fn thread_start_params_from_config(
         session_start_source,
         thread_source: Some(ThreadSource::User),
         experimental_raw_events: true,
-        persist_extended_history: true,
         ..ThreadStartParams::default()
     }
 }

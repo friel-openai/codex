@@ -6,7 +6,6 @@
 
 use crate::StateDbHandle;
 use crate::context::ContextualUserFragment;
-use crate::context::GoalContext;
 use crate::context::InternalContextSource;
 use crate::context::InternalModelContextFragment;
 use crate::goal_supervisor::GoalSupervisorRuntimeState;

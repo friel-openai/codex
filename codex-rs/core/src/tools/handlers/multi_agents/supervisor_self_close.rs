@@ -36,7 +36,7 @@ async fn handle_close_self(
     let Some(parent_thread_id) = session
         .services
         .agent_control
-        .goal_supervisor_parent_for_helper(session.conversation_id)
+        .goal_supervisor_parent_for_helper(session.thread_id)
         .await
     else {
         return Err(FunctionCallError::RespondToModel(
@@ -64,7 +64,7 @@ async fn handle_close_self(
         let sender_agent_path = session
             .services
             .agent_control
-            .get_agent_config_snapshot(session.conversation_id)
+            .get_agent_config_snapshot(session.thread_id)
             .await
             .and_then(|snapshot| snapshot.session_source.get_agent_path())
             .unwrap_or_else(AgentPath::root);
@@ -74,7 +74,7 @@ async fn handle_close_self(
     };
     let goal = crate::goal_supervisor::complete_supervised_goal(
         &parent_thread.codex.session,
-        session.conversation_id,
+        session.thread_id,
     )
     .await
     .map_err(|err| FunctionCallError::RespondToModel(format!("close_self failed: {err}")))?;

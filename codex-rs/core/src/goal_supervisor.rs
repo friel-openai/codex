@@ -192,7 +192,7 @@ pub(crate) async fn snooze_supervisor_helper(
     if let Some(state_db) = session.state_db_for_thread_goals().await?
         && let Some(goal) = state_db
             .thread_goals()
-            .get_thread_goal(session.conversation_id)
+            .get_thread_goal(session.thread_id)
             .await?
     {
         if goal.goal_id != active_goal_id {
@@ -202,7 +202,7 @@ pub(crate) async fn snooze_supervisor_helper(
         state_db
             .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
-                session.conversation_id,
+                session.thread_id,
                 &active_goal_id,
                 Some(Utc::now().timestamp_millis() + (delay_seconds as i64 * 1000)),
             )
@@ -290,7 +290,7 @@ pub(crate) async fn complete_supervised_goal(
     let updated = state_db
         .thread_goals()
         .update_thread_goal(
-            session.conversation_id,
+            session.thread_id,
             codex_state::GoalUpdate {
                 objective: None,
                 status: Some(codex_state::ThreadGoalStatus::Complete),
@@ -304,16 +304,16 @@ pub(crate) async fn complete_supervised_goal(
         state_db
             .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
-                session.conversation_id,
+                session.thread_id,
                 &active_goal_id,
                 /*snoozed_until_ms*/ None,
             )
             .await?;
         session
             .send_event_raw(Event {
-                id: format!("goal-supervisor-complete-{}", session.conversation_id),
+                id: format!("goal-supervisor-complete-{}", session.thread_id),
                 msg: EventMsg::ThreadGoalUpdated(ThreadGoalUpdatedEvent {
-                    thread_id: session.conversation_id,
+                    thread_id: session.thread_id,
                     turn_id: None,
                     goal: goal.clone(),
                 }),
@@ -333,7 +333,7 @@ async fn spawn_supervisor_helper(
     let parent_source = session
         .services
         .agent_control
-        .get_agent_config_snapshot(session.conversation_id)
+        .get_agent_config_snapshot(session.thread_id)
         .await
         .map(|snapshot| snapshot.session_source)
         .unwrap_or(SessionSource::Cli);
@@ -344,7 +344,7 @@ async fn spawn_supervisor_helper(
         .join("goal_supervisor")
         .map_err(anyhow::Error::msg)?;
     let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: session.conversation_id,
+        parent_thread_id: session.thread_id,
         depth,
         agent_path: Some(supervisor_path),
         agent_nickname: None,
@@ -371,6 +371,7 @@ async fn spawn_supervisor_helper(
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: None,
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                parent_thread_id: Some(session.thread_id),
                 environments: None,
                 initial_task_message: None,
             },
@@ -383,7 +384,7 @@ async fn spawn_supervisor_helper(
 fn supervisor_helper_prompt(session: &Arc<Session>, goal: &ThreadGoal) -> String {
     format!(
         "# Goal Supervisor Assignment\n\nParent agent id: {}\n\nActive goal objective:\n\n{}\n\nEvaluate whether the parent should continue now, snooze, compact, or mark the goal complete.",
-        session.conversation_id, goal.objective
+        session.thread_id, goal.objective
     )
 }
 
@@ -461,7 +462,7 @@ async fn persisted_snooze_delay(
     };
     let Some(snoozed_until_ms) = state_db
         .thread_goals()
-        .get_thread_goal_supervisor_snoozed_until_ms(session.conversation_id, goal_id)
+        .get_thread_goal_supervisor_snoozed_until_ms(session.thread_id, goal_id)
         .await?
     else {
         return Ok(None);
@@ -471,7 +472,7 @@ async fn persisted_snooze_delay(
         state_db
             .thread_goals()
             .set_thread_goal_supervisor_snoozed_until_ms(
-                session.conversation_id,
+                session.thread_id,
                 goal_id,
                 /*snoozed_until_ms*/ None,
             )

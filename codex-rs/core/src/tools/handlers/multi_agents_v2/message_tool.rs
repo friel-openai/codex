@@ -100,7 +100,7 @@ async fn handle_message_submission(
     let goal_supervisor_parent_thread_id = session
         .services
         .agent_control
-        .goal_supervisor_parent_for_helper(session.conversation_id)
+        .goal_supervisor_parent_for_helper(session.thread_id)
         .await;
     let is_goal_supervisor_parent = goal_supervisor_parent_thread_id == Some(receiver_thread_id);
     let is_supervisor_parent = is_goal_supervisor_parent;
@@ -221,7 +221,7 @@ async fn handle_message_submission(
         let _ = session
             .services
             .agent_control
-            .finish_goal_supervisor_helper(session.conversation_id)
+            .finish_goal_supervisor_helper(session.thread_id)
             .await;
     }
 

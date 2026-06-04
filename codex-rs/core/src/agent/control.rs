@@ -690,6 +690,7 @@ impl AgentControl {
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
             && config.multi_agent_v2.usage_hint_enabled
+            && !is_goal_supervisor_helper_source(&session_source)
             && let Some(subagent_usage_hint_text) =
                 config.multi_agent_v2.subagent_usage_hint_text.clone()
             && let Some(subagent_usage_hint_message) =
@@ -744,13 +745,12 @@ impl AgentControl {
         }
 
         let inherited_thread_state = InheritedThreadState::builder()
-            .prompt_cache_key(parent_prompt_cache_key_for_source(state, Some(&session_source)).await)
-            .response_continuation(parent_response_continuation_for_source(
-                state,
-                Some(&session_source),
+            .prompt_cache_key(
+                parent_prompt_cache_key_for_source(state, Some(&session_source)).await,
             )
-            .await)
-            .mcp_tool_snapshot(parent_mcp_tool_snapshot_for_source(state, Some(&session_source)).await)
+            .mcp_tool_snapshot(
+                parent_mcp_tool_snapshot_for_source(state, Some(&session_source)).await,
+            )
             .build();
 
         state
@@ -1486,7 +1486,10 @@ impl AgentControl {
             }
             Err(_) => SessionSource::Cli,
         };
-        self.register_session_root(owner_thread_id, &owner_source);
+        self.register_session_root(
+            owner_thread_id,
+            thread_spawn_parent_thread_id(&owner_source),
+        );
         let agents = self
             .list_agents(&owner_source, /*path_prefix*/ None)
             .await

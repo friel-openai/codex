@@ -80,6 +80,48 @@ fn text_input(text: &str) -> Op {
     .into()
 }
 
+fn run_large_stack_async<F, Fut>(test: F)
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name("agent-control-test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()
+                .expect("test runtime should build")
+                .block_on(test());
+        })
+        .expect("test thread should spawn")
+        .join()
+        .expect("test thread should finish");
+}
+
+fn run_large_stack_result_async<F, Fut>(test: F) -> anyhow::Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = anyhow::Result<()>> + Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name("agent-control-test".to_string())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_stack_size(16 * 1024 * 1024)
+                .build()?
+                .block_on(test())
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
 fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
     ResponseItem::Message {
         id: None,
@@ -1117,151 +1159,159 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
         .expect("parent shutdown should submit");
 }
 
-#[tokio::test]
-async fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt() {
-    let harness = AgentControlHarness::new().await;
-    let mut parent_config = harness.config.clone();
-    let _ = parent_config.features.enable(Feature::AgentPromptInjection);
-    let _ = parent_config.features.enable(Feature::Goals);
-    let _ = parent_config.features.enable(Feature::GoalSupervisor);
-    let new_thread = harness
-        .manager
-        .start_thread(parent_config)
-        .await
-        .expect("start parent thread");
-    let parent_thread_id = new_thread.thread_id;
-    let parent_thread = new_thread.thread;
-    parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
-        .await;
-    parent_thread
-        .codex
-        .session
-        .ensure_rollout_materialized()
-        .await;
-    parent_thread
-        .codex
-        .session
-        .flush_rollout()
-        .await
-        .expect("parent rollout should flush");
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Ship the active user goal.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
+#[test]
+fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt() {
+    run_large_stack_async(|| async {
+        let harness = AgentControlHarness::new().await;
+        let mut parent_config = harness.config.clone();
+        let _ = parent_config.features.enable(Feature::AgentPromptInjection);
+        let _ = parent_config.features.enable(Feature::Goals);
+        let _ = parent_config.features.enable(Feature::GoalSupervisor);
+        let new_thread = harness
+            .manager
+            .start_thread(parent_config)
+            .await
+            .expect("start parent thread");
+        let parent_thread_id = new_thread.thread_id;
+        let parent_thread = new_thread.thread;
+        parent_thread
+            .inject_user_message_without_turn("parent seed context".to_string())
+            .await;
+        parent_thread
+            .codex
+            .session
+            .ensure_rollout_materialized()
+            .await;
+        parent_thread
+            .codex
+            .session
+            .flush_rollout()
+            .await
+            .expect("parent rollout should flush");
+        let before_thread_ids = harness.manager.list_thread_ids().await;
+        let goal = ThreadGoal {
+            thread_id: parent_thread_id,
+            objective: "Ship the active user goal.".to_string(),
+            status: ThreadGoalStatus::Active,
+            token_budget: None,
+            tokens_used: 0,
+            time_used_seconds: 0,
+            created_at: 1,
+            updated_at: 1,
+        };
 
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.codex.session,
-        "goal-supervisor-test",
-        &goal,
-    )
-    .await
-    .expect("goal supervisor helper should spawn");
-
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    let helper_thread = harness
-        .manager
-        .get_thread(helper_thread_id)
+        crate::goal_supervisor::maybe_start_supervisor_checkin(
+            &parent_thread.codex.session,
+            "goal-supervisor-test",
+            &goal,
+        )
         .await
-        .expect("supervisor helper thread should be registered");
-    assert_eq!(
-        helper_thread.codex.session.prompt_cache_key(),
-        parent_thread.codex.session.prompt_cache_key(),
-        "goal supervisor helpers are internal full-history forks and must keep the parent prompt cache key"
-    );
+        .expect("goal supervisor helper should spawn");
 
-    let helper_history = helper_thread.codex.session.clone_history().await;
-    assert!(
-        helper_history.raw_items().iter().any(|item| matches!(
-            item,
-            ResponseItem::Message { role, content, .. }
-                if role == "user"
-                    && content.iter().any(|content_item| matches!(
-                        content_item,
-                        ContentItem::InputText { text } if text == "parent seed context"
-                    ))
-        )),
-        "goal supervisor helpers must inherit the parent conversation prefix before their supervisor assignment"
-    );
-    let supervisor_prompt =
-        crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
-    let supervisor_prompt_count = helper_history
-        .raw_items()
-        .iter()
-        .filter(|item| {
-            matches!(
+        let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+        let helper_thread = harness
+            .manager
+            .get_thread(helper_thread_id)
+            .await
+            .expect("supervisor helper thread should be registered");
+        assert_eq!(
+            helper_thread.codex.session.prompt_cache_key(),
+            parent_thread.codex.session.prompt_cache_key(),
+            "goal supervisor helpers are internal full-history forks and must keep the parent prompt cache key"
+        );
+
+        let helper_history = helper_thread.codex.session.clone_history().await;
+        assert!(
+            helper_history.raw_items().iter().any(|item| matches!(
                 item,
                 ResponseItem::Message { role, content, .. }
-                    if role == "developer"
+                    if role == "user"
                         && content.iter().any(|content_item| matches!(
                             content_item,
-                            ContentItem::InputText { text } if text == &supervisor_prompt
+                            ContentItem::InputText { text } if text == "parent seed context"
                         ))
-            )
-        })
-        .count();
-    assert_eq!(
-        supervisor_prompt_count, 1,
-        "the supervisor prompt should be injected once as the helper role prompt; duplicating it in the user assignment changes the post-fork context"
-    );
-    assert_eq!(
-        history_text_match_count(helper_history.raw_items(), "You are also a **watchdog**"),
-        0,
-        "goal supervisor helper history must not include the legacy watchdog role prompt"
-    );
-    assert!(
-        !helper_history.raw_items().iter().any(|item| matches!(
+            )),
+            "goal supervisor helpers must inherit the parent conversation prefix before their supervisor assignment"
+        );
+        let supervisor_prompt =
+            crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
+        let supervisor_prompt_count = helper_history
+            .raw_items()
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ResponseItem::Message { role, content, .. }
+                        if role == "developer"
+                            && content.iter().any(|content_item| matches!(
+                                content_item,
+                                ContentItem::InputText { text } if text == &supervisor_prompt
+                            ))
+                )
+            })
+            .count();
+        assert_eq!(
+            supervisor_prompt_count, 1,
+            "the supervisor prompt should be injected once as the helper role prompt; duplicating it in the user assignment changes the post-fork context"
+        );
+        assert_eq!(
+            history_text_match_count(helper_history.raw_items(), "You are also a **watchdog**"),
+            0,
+            "goal supervisor helper history must not include the legacy watchdog role prompt"
+        );
+        assert!(
+            !helper_history.raw_items().iter().any(|item| matches!(
+                item,
+                ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
+                    if call_id == "synthetic_watchdog_tool_search"
+            )),
+            "goal supervisor helpers use eager supervisor tools and must not inherit the removed watchdog synthetic tool search context"
+        );
+        assert!(helper_history.raw_items().iter().any(|item| matches!(
             item,
-            ResponseItem::ToolSearchCall { call_id: Some(call_id), .. }
-                if call_id == "synthetic_watchdog_tool_search"
-        )),
-        "goal supervisor helpers use eager supervisor tools and must not inherit the removed watchdog synthetic tool search context"
-    );
-    assert!(helper_history.raw_items().iter().any(|item| matches!(
-        item,
-        ResponseItem::FunctionCall { name, call_id, .. }
-            if name == "list_agents" && call_id == "synthetic_supervisor_list_agents"
-    )));
+            ResponseItem::FunctionCall { name, call_id, .. }
+                if name == "list_agents" && call_id == "synthetic_supervisor_list_agents"
+        )));
 
-    let captured_input = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .find_map(|(thread_id, op)| {
-            if thread_id != helper_thread_id {
-                return None;
-            }
-            match op {
-                Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
-                    UserInput::Text { text, .. } => Some(text),
-                    UserInput::Image { .. }
-                    | UserInput::LocalImage { .. }
-                    | UserInput::Skill { .. }
-                    | UserInput::Mention { .. } => None,
+        let captured_input = harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .find_map(|(thread_id, op)| {
+                if thread_id != helper_thread_id {
+                    return None;
+                }
+                match op {
+                    Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                        UserInput::Text { text, .. } => Some(text),
+                        UserInput::Image { .. }
+                        | UserInput::LocalImage { .. }
+                        | UserInput::Skill { .. }
+                        | UserInput::Mention { .. } => None,
+                        _ => None,
+                    }),
                     _ => None,
-                }),
-                _ => None,
-            }
-        })
-        .expect("supervisor helper assignment should be submitted as user input");
-    assert!(captured_input.contains("# Goal Supervisor Assignment"));
-    assert!(captured_input.contains("Ship the active user goal."));
-    assert!(
-        !captured_input.contains("You are also a **goal supervisor**"),
-        "the supervisor role prompt must not be copied into the helper assignment"
-    );
+                }
+            })
+            .expect("supervisor helper assignment should be submitted as user input");
+        assert!(captured_input.contains("# Goal Supervisor Assignment"));
+        assert!(captured_input.contains("Ship the active user goal."));
+        assert!(
+            !captured_input.contains("You are also a **goal supervisor**"),
+            "the supervisor role prompt must not be copied into the helper assignment"
+        );
+    });
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[test]
 #[serial(fork_env)]
-async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot()
+fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
+    run_large_stack_result_async(
+        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_impl,
+    )
+}
+
+async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_impl()
 -> anyhow::Result<()> {
     let server = start_mock_server().await;
     let request_log = mount_sse_sequence(
@@ -1546,8 +1596,15 @@ while True:
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id()
+#[test]
+fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id()
+-> anyhow::Result<()> {
+    run_large_stack_result_async(
+        goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id_impl,
+    )
+}
+
+async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id_impl()
 -> anyhow::Result<()> {
     let server = start_websocket_server(vec![
         vec![
@@ -2585,114 +2642,116 @@ async fn spawn_child_completion_notifies_parent_history() {
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
 }
 
-#[tokio::test]
-async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
-    let harness = AgentControlHarness::new().await;
-    let mut config = harness.config.clone();
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let root = harness
-        .manager
-        .start_thread(config.clone())
-        .await
-        .expect("root thread should start");
-    let root_thread_id = root.thread_id;
-    let root_thread = root.thread;
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let worker_thread_id = harness
-        .control
-        .spawn_agent(
-            config.clone(),
-            text_input("hello worker"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: root_thread_id,
-                depth: 1,
-                agent_path: Some(worker_path.clone()),
-                agent_nickname: None,
-                agent_role: Some("explorer".to_string()),
-            })),
-        )
-        .await
-        .expect("worker spawn should succeed");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    let tester_thread_id = harness
-        .control
-        .spawn_agent(
-            config,
-            text_input("hello tester"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id: worker_thread_id,
-                depth: 2,
-                agent_path: Some(tester_path.clone()),
-                agent_nickname: None,
-                agent_role: Some("explorer".to_string()),
-            })),
-        )
-        .await
-        .expect("tester spawn should succeed");
-    harness
-        .control
-        .shutdown_live_agent(worker_thread_id)
-        .await
-        .expect("worker shutdown should succeed");
-
-    let tester_thread = harness
-        .manager
-        .get_thread(tester_thread_id)
-        .await
-        .expect("tester thread should exist");
-    let tester_turn = tester_thread.codex.session.new_default_turn().await;
-    tester_thread
-        .codex
-        .session
-        .send_event(
-            tester_turn.as_ref(),
-            EventMsg::TurnComplete(TurnCompleteEvent {
-                turn_id: tester_turn.sub_id.clone(),
-                last_agent_message: Some("done".to_string()),
-                completed_at: None,
-                duration_ms: None,
-                time_to_first_token_ms: None,
-            }),
-        )
-        .await;
-
-    sleep(Duration::from_millis(100)).await;
-
-    assert!(
-        !harness
+#[test]
+fn multi_agent_v2_completion_ignores_dead_direct_parent() {
+    run_large_stack_async(|| async {
+        let harness = AgentControlHarness::new().await;
+        let mut config = harness.config.clone();
+        let _ = config.features.enable(Feature::MultiAgentV2);
+        let root = harness
             .manager
-            .captured_ops()
-            .into_iter()
-            .any(|(thread_id, op)| {
-                thread_id == worker_thread_id
-                    && matches!(
-                        op,
-                        Op::InterAgentCommunication { communication }
-                            if communication.author == tester_path
-                                && communication.recipient == worker_path
-                                && communication.content == "done"
-                    )
-            })
-    );
+            .start_thread(config.clone())
+            .await
+            .expect("root thread should start");
+        let root_thread_id = root.thread_id;
+        let root_thread = root.thread;
+        let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+        let worker_thread_id = harness
+            .control
+            .spawn_agent(
+                config.clone(),
+                text_input("hello worker"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: root_thread_id,
+                    depth: 1,
+                    agent_path: Some(worker_path.clone()),
+                    agent_nickname: None,
+                    agent_role: Some("explorer".to_string()),
+                })),
+            )
+            .await
+            .expect("worker spawn should succeed");
+        let tester_path = worker_path.join("tester").expect("tester path");
+        let tester_thread_id = harness
+            .control
+            .spawn_agent(
+                config,
+                text_input("hello tester"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id: worker_thread_id,
+                    depth: 2,
+                    agent_path: Some(tester_path.clone()),
+                    agent_nickname: None,
+                    agent_role: Some("explorer".to_string()),
+                })),
+            )
+            .await
+            .expect("tester spawn should succeed");
+        harness
+            .control
+            .shutdown_live_agent(worker_thread_id)
+            .await
+            .expect("worker shutdown should succeed");
 
-    let root_history_items = root_thread
-        .codex
-        .session
-        .clone_history()
-        .await
-        .raw_items()
-        .to_vec();
-    assert!(!history_contains_assistant_inter_agent_communication(
-        &root_history_items,
-        &InterAgentCommunication::new(
-            tester_path,
-            AgentPath::root(),
-            Vec::new(),
-            "done".to_string(),
-            /*trigger_turn*/ true,
-        )
-    ));
-    assert!(!has_subagent_notification(&root_history_items));
+        let tester_thread = harness
+            .manager
+            .get_thread(tester_thread_id)
+            .await
+            .expect("tester thread should exist");
+        let tester_turn = tester_thread.codex.session.new_default_turn().await;
+        tester_thread
+            .codex
+            .session
+            .send_event(
+                tester_turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: tester_turn.sub_id.clone(),
+                    last_agent_message: Some("done".to_string()),
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                }),
+            )
+            .await;
+
+        sleep(Duration::from_millis(100)).await;
+
+        assert!(
+            !harness
+                .manager
+                .captured_ops()
+                .into_iter()
+                .any(|(thread_id, op)| {
+                    thread_id == worker_thread_id
+                        && matches!(
+                            op,
+                            Op::InterAgentCommunication { communication }
+                                if communication.author == tester_path
+                                    && communication.recipient == worker_path
+                                    && communication.content == "done"
+                        )
+                })
+        );
+
+        let root_history_items = root_thread
+            .codex
+            .session
+            .clone_history()
+            .await
+            .raw_items()
+            .to_vec();
+        assert!(!history_contains_assistant_inter_agent_communication(
+            &root_history_items,
+            &InterAgentCommunication::new(
+                tester_path,
+                AgentPath::root(),
+                Vec::new(),
+                "done".to_string(),
+                /*trigger_turn*/ true,
+            )
+        ));
+        assert!(!has_subagent_notification(&root_history_items));
+    });
 }
 
 #[tokio::test]
