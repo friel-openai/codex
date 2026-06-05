@@ -1089,6 +1089,69 @@ async fn replayed_in_progress_turn_marks_task_running() {
 }
 
 #[tokio::test]
+async fn fork_initial_replay_interrupted_boundary_uses_info_notice_snapshot() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.forked_from = Some(ThreadId::new());
+
+    chat.replay_thread_turns(
+        vec![app_server_turn(
+            "turn-1",
+            AppServerTurnStatus::Interrupted,
+            /*duration_ms*/ None,
+            /*error*/ None,
+        )],
+        ReplayKind::ResumeInitialMessages,
+    );
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(
+        cells.len(),
+        1,
+        "expected only the fork interrupt notice to be inserted"
+    );
+    let rendered = lines_to_single_string(&cells[0]);
+    assert_chatwidget_snapshot!("fork_initial_replay_interrupted_boundary_notice", rendered);
+}
+
+#[tokio::test]
+async fn fork_initial_replay_does_not_reword_non_final_interrupted_turn() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    chat.forked_from = Some(ThreadId::new());
+
+    chat.replay_thread_turns(
+        vec![
+            app_server_turn(
+                "turn-1",
+                AppServerTurnStatus::Interrupted,
+                /*duration_ms*/ None,
+                /*error*/ None,
+            ),
+            app_server_turn(
+                "turn-2",
+                AppServerTurnStatus::Completed,
+                /*duration_ms*/ None,
+                /*error*/ None,
+            ),
+        ],
+        ReplayKind::ResumeInitialMessages,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Conversation interrupted - tell the model what to do differently."),
+        "expected historical interrupt to keep the default message, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Forked from an in-progress turn."),
+        "expected only the synthetic final fork boundary to use the fork notice"
+    );
+}
+
+#[tokio::test]
 async fn replayed_stream_error_does_not_set_retry_status_or_status_indicator() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     chat.set_status_header("Idle".to_string());

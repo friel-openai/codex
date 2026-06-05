@@ -187,7 +187,6 @@ impl SlashCommand {
             SlashCommand::New
             | SlashCommand::Archive
             | SlashCommand::Resume
-            | SlashCommand::Fork
             | SlashCommand::Init
             | SlashCommand::Compact
             | SlashCommand::Model
@@ -207,6 +206,7 @@ impl SlashCommand {
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
             | SlashCommand::Copy
+            | SlashCommand::Fork
             | SlashCommand::Raw
             | SlashCommand::Rename
             | SlashCommand::Mention
@@ -291,6 +291,7 @@ mod tests {
         assert!(SlashCommand::Raw.available_in_side_conversation());
         assert!(SlashCommand::Raw.supports_inline_args());
         assert!(SlashCommand::App.available_during_task());
+        assert!(SlashCommand::Fork.available_during_task());
     }
 
     #[test]

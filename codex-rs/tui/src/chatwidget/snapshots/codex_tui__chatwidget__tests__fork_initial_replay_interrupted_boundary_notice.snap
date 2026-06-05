@@ -1,0 +1,6 @@
+---
+source: tui/src/chatwidget/tests/history_replay.rs
+assertion_line: 1113
+expression: rendered
+---
+• Forked from an in-progress turn. The parent session is still running.

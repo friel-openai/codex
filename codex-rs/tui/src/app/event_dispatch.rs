@@ -146,6 +146,18 @@ impl App {
                     self.chat_widget
                         .add_plain_history_lines(vec!["/fork".magenta().into()]);
                 }
+                let fork_during_active_turn = self.chat_widget.is_user_turn_pending_or_running();
+                if terminal_info.multiplexer.is_none()
+                    && placement.is_none()
+                    && fork_during_active_turn
+                {
+                    self.chat_widget.add_error_message(
+                        "'/fork' is disabled while a task is in progress outside a terminal multiplexer."
+                            .to_string(),
+                    );
+                    tui.frame_requester().schedule_frame();
+                    return Ok(AppRunControl::Continue);
+                }
                 if let Some(thread_id) = self.chat_widget.thread_id() {
                     self.refresh_in_memory_config_from_disk_best_effort("forking the thread")
                         .await;
@@ -172,6 +184,10 @@ impl App {
                                 self.chat_widget.add_error_message(format!(
                                     "Failed to open a new pane for /fork: {err}"
                                 ));
+                                if fork_during_active_turn {
+                                    tui.frame_requester().schedule_frame();
+                                    return Ok(AppRunControl::Continue);
+                                }
                             }
                         }
                     } else if placement.is_some() {

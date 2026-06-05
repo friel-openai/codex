@@ -137,7 +137,7 @@ impl ChatWidget {
         submitted_follow_up
     }
 
-    pub(super) fn is_user_turn_pending_or_running(&self) -> bool {
+    pub(crate) fn is_user_turn_pending_or_running(&self) -> bool {
         self.input_queue.user_turn_pending_start || self.bottom_pane.is_task_running()
     }
 

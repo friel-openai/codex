@@ -852,6 +852,7 @@ pub(crate) struct ActiveCellTranscriptKey {
 pub(crate) enum InterruptedTurnNoticeMode {
     #[default]
     Default,
+    ForkedFromInProgress,
     Suppress,
 }
 

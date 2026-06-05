@@ -150,6 +150,14 @@ impl ChatWidget {
                     "Model interrupted to submit steer instructions.".to_owned(),
                     /*hint*/ None,
                 ));
+            } else if self.interrupted_turn_notice_mode
+                == InterruptedTurnNoticeMode::ForkedFromInProgress
+            {
+                self.add_to_history(history_cell::new_info_event(
+                    "Forked from an in-progress turn. The parent session is still running."
+                        .to_string(),
+                    /*hint*/ None,
+                ));
             } else {
                 self.add_to_history(history_cell::new_error_event(
                     self.interrupted_turn_message(reason),

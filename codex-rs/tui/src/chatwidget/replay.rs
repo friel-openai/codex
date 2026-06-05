@@ -12,6 +12,17 @@ impl ChatWidget {
     /// avoid triggering side effects. Event ids are passed as `None` to
     /// distinguish replayed events from live ones.
     pub(crate) fn replay_thread_turns(&mut self, turns: Vec<Turn>, replay_kind: ReplayKind) {
+        let fork_interrupted_turn_id = if self.forked_from.is_some() {
+            turns.last().and_then(|turn| {
+                (matches!(turn.status, TurnStatus::Interrupted)
+                    && turn.completed_at.is_none()
+                    && turn.duration_ms.is_none())
+                .then(|| turn.id.clone())
+            })
+        } else {
+            None
+        };
+
         for turn in turns {
             let Turn {
                 id: turn_id,
@@ -34,6 +45,13 @@ impl ChatWidget {
                 status,
                 TurnStatus::Completed | TurnStatus::Interrupted | TurnStatus::Failed
             ) {
+                let interrupted_turn_notice_mode =
+                    (fork_interrupted_turn_id.as_deref() == Some(turn_id.as_str())).then(|| {
+                        std::mem::replace(
+                            &mut self.interrupted_turn_notice_mode,
+                            InterruptedTurnNoticeMode::ForkedFromInProgress,
+                        )
+                    });
                 self.handle_turn_completed_notification(
                     TurnCompletedNotification {
                         thread_id: self.thread_id.map(|id| id.to_string()).unwrap_or_default(),
@@ -50,6 +68,9 @@ impl ChatWidget {
                     },
                     Some(replay_kind),
                 );
+                if let Some(interrupted_turn_notice_mode) = interrupted_turn_notice_mode {
+                    self.interrupted_turn_notice_mode = interrupted_turn_notice_mode;
+                }
             }
         }
     }
