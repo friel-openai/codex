@@ -1486,10 +1486,11 @@ fn supervisor_snooze_agent_message_item(message: &str) -> Option<ThreadItem> {
 }
 
 fn visible_inter_agent_message(communication: &InterAgentCommunication) -> String {
-    let content = communication
-        .encrypted_content
-        .as_deref()
-        .unwrap_or(&communication.content);
+    let content = if communication.content.is_empty() && communication.encrypted_content.is_some() {
+        "[encrypted message]"
+    } else {
+        &communication.content
+    };
     format!("Agent message: {content} from {}", communication.author)
 }
 
@@ -3962,6 +3963,51 @@ mod tests {
                 assert_eq!(text, "Agent message: ping 21 (21) from /root/watchdog");
                 assert_eq!(phase, Some(MessagePhase::Commentary));
                 assert_eq!(memory_citation, None);
+            }
+            other => bail!("unexpected message: {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "no extra messages expected");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_encrypted_inter_agent_raw_response_does_not_render_ciphertext() -> Result<()> {
+        let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let outgoing = Arc::new(OutgoingMessageSender::new(
+            tx,
+            codex_analytics::AnalyticsEventsClient::disabled(),
+        ));
+        let conversation_id = ThreadId::new();
+        let outgoing = ThreadScopedOutgoingMessageSender::new(
+            outgoing,
+            vec![ConnectionId(1)],
+            conversation_id,
+        );
+        let communication = InterAgentCommunication::new_encrypted(
+            AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
+            AgentPath::root(),
+            Vec::new(),
+            "gAAAAABqKHxROS-9NG4XHnjf7m9iGOunr9TPY4sShZI5WQsBqZ7eLq94".to_string(),
+            /*trigger_turn*/ true,
+        );
+        let item: codex_protocol::models::ResponseItem =
+            communication.to_response_input_item().into();
+
+        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item.clone(), &outgoing)
+            .await;
+
+        let msg = recv_broadcast_message(&mut rx).await?;
+        match msg {
+            OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(
+                notification,
+            )) => {
+                let ThreadItem::AgentMessage { text, .. } = notification.item else {
+                    bail!("unexpected item");
+                };
+                assert_eq!(
+                    text,
+                    "Agent message: [encrypted message] from /root/goal_supervisor"
+                );
             }
             other => bail!("unexpected message: {other:?}"),
         }

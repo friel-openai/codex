@@ -49,7 +49,7 @@ pub(super) fn communication_from_tool_message(
     recipient: AgentPath,
     message: String,
 ) -> InterAgentCommunication {
-    InterAgentCommunication::new_encrypted(
+    InterAgentCommunication::new(
         author,
         recipient,
         Vec::new(),

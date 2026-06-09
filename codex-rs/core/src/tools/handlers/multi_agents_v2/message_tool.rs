@@ -157,14 +157,12 @@ async fn handle_message_submission(
         .ok_or_else(|| {
             FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
         })?;
-    let communication = InterAgentCommunication::new(
+    let communication = communication_from_tool_message(
         turn.session_source
             .get_agent_path()
             .unwrap_or_else(AgentPath::root),
         receiver_agent_path,
-        Vec::new(),
         prompt.clone(),
-        /*trigger_turn*/ true,
     );
     let delivered_communication = mode.apply(communication);
     let result = session

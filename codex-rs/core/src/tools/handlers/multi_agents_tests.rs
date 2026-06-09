@@ -1158,7 +1158,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             turn.clone(),
             "spawn_agent",
             function_payload(json!({
-                "message": "encrypted-spawn-message",
+                "message": "spawn message",
                 "task_name": "test_process"
             })),
         ))
@@ -1194,8 +1194,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-spawn-message")
+                        && communication.content == "spawn message"
+                        && communication.encrypted_content.is_none()
                         && communication.trigger_turn
             )
     }));
@@ -1207,7 +1207,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             "send_message",
             function_payload(json!({
                 "target": "test_process",
-                "message": "encrypted-send-message"
+                "message": "send message"
             })),
         ))
         .await
@@ -1221,8 +1221,8 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
                     if communication.author == AgentPath::root()
                         && communication.recipient.as_str() == "/root/test_process"
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-send-message")
+                        && communication.content == "send message"
+                        && communication.encrypted_content.is_none()
                         && !communication.trigger_turn
             )
     }));
@@ -1404,7 +1404,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
             "send_message",
             function_payload(json!({
                 "target": "/root",
-                "message": "encrypted-done"
+                "message": "done"
             })),
         ))
         .await
@@ -1418,8 +1418,8 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                     if communication.author == child_path
                         && communication.recipient == AgentPath::root()
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-done")
+                        && communication.content == "done"
+                        && communication.encrypted_content.is_none()
                         && !communication.trigger_turn
             )
     }));
@@ -1950,8 +1950,8 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
             if communication.author == AgentPath::root()
                 && communication.recipient.as_str() == "/root/worker"
                 && communication.other_recipients.is_empty()
-                && communication.content.is_empty()
-                && communication.encrypted_content.as_deref() == Some("continue")
+                && communication.content == "continue"
+                && communication.encrypted_content.is_none()
                 && !communication.trigger_turn
     )));
 }
