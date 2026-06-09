@@ -91,11 +91,13 @@ use codex_core::review_prompts;
 use codex_protocol::ThreadId;
 use codex_protocol::items::parse_hook_prompt_message;
 use codex_protocol::models::AdditionalPermissionProfile as CoreAdditionalPermissionProfile;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::CodexErrorInfo as CoreCodexErrorInfo;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::ReviewDecision;
@@ -222,6 +224,17 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::Warning(warning_event) => {
+            if let Some(item) = supervisor_snooze_agent_message_item(&warning_event.message) {
+                let notification = ItemCompletedNotification {
+                    thread_id: conversation_id.to_string(),
+                    turn_id: format!("warning-{}", ThreadId::new()),
+                    item,
+                    completed_at_ms: now_unix_timestamp_ms(),
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::ItemCompleted(notification))
+                    .await;
+            }
             let notification = WarningNotification {
                 thread_id: Some(conversation_id.to_string()),
                 message: warning_event.message,
@@ -1422,6 +1435,19 @@ async fn maybe_emit_raw_response_item_completed(
     item: codex_protocol::models::ResponseItem,
     outgoing: &ThreadScopedOutgoingMessageSender,
 ) {
+    if let Some(thread_item) = inter_agent_message_item(&item) {
+        let notification = ItemCompletedNotification {
+            thread_id: conversation_id.to_string(),
+            turn_id: turn_id.to_string(),
+            item: thread_item,
+            completed_at_ms: now_unix_timestamp_ms(),
+        };
+        outgoing
+            .send_server_notification(ServerNotification::ItemCompleted(notification))
+            .await;
+        return;
+    }
+
     let notification = RawResponseItemCompletedNotification {
         thread_id: conversation_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -1430,6 +1456,41 @@ async fn maybe_emit_raw_response_item_completed(
     outgoing
         .send_server_notification(ServerNotification::RawResponseItemCompleted(notification))
         .await;
+}
+
+fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Option<ThreadItem> {
+    let codex_protocol::models::ResponseItem::Message { content, id, .. } = item else {
+        return None;
+    };
+    let communication = InterAgentCommunication::from_message_content(content)?;
+    Some(ThreadItem::AgentMessage {
+        id: id
+            .clone()
+            .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
+        text: visible_inter_agent_message(&communication),
+        phase: Some(MessagePhase::Commentary),
+        memory_citation: None,
+    })
+}
+
+fn supervisor_snooze_agent_message_item(message: &str) -> Option<ThreadItem> {
+    if !(message.starts_with("Supervisor snoozed for ") && message.ends_with('.')) {
+        return None;
+    }
+    Some(ThreadItem::AgentMessage {
+        id: format!("item-{}", ThreadId::new()),
+        text: message.to_string(),
+        phase: Some(MessagePhase::Commentary),
+        memory_citation: None,
+    })
+}
+
+fn visible_inter_agent_message(communication: &InterAgentCommunication) -> String {
+    let content = communication
+        .encrypted_content
+        .as_deref()
+        .unwrap_or(&communication.content);
+    format!("Agent message: {content} from {}", communication.author)
 }
 
 pub(crate) async fn maybe_emit_hook_prompt_item_completed(
@@ -3856,7 +3917,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_inter_agent_raw_response_emits_raw_response_item_completed() -> Result<()> {
+    async fn test_inter_agent_raw_response_emits_agent_message_item_completed() -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,
@@ -3883,16 +3944,49 @@ mod tests {
 
         let msg = recv_broadcast_message(&mut rx).await?;
         match msg {
-            OutgoingMessage::AppServerNotification(
-                ServerNotification::RawResponseItemCompleted(notification),
-            ) => {
+            OutgoingMessage::AppServerNotification(ServerNotification::ItemCompleted(
+                notification,
+            )) => {
                 assert_eq!(notification.thread_id, conversation_id.to_string());
                 assert_eq!(notification.turn_id, "turn-1");
-                assert_eq!(notification.item, item);
+                let ThreadItem::AgentMessage {
+                    id,
+                    text,
+                    phase,
+                    memory_citation,
+                } = notification.item
+                else {
+                    bail!("unexpected item");
+                };
+                assert!(!id.is_empty());
+                assert_eq!(text, "Agent message: ping 21 (21) from /root/watchdog");
+                assert_eq!(phase, Some(MessagePhase::Commentary));
+                assert_eq!(memory_citation, None);
             }
             other => bail!("unexpected message: {other:?}"),
         }
         assert!(rx.try_recv().is_err(), "no extra messages expected");
         Ok(())
+    }
+
+    #[test]
+    fn supervisor_snooze_warning_maps_to_agent_message_item() {
+        let Some(item) = supervisor_snooze_agent_message_item("Supervisor snoozed for 2m.") else {
+            panic!("expected supervisor snooze item");
+        };
+        let ThreadItem::AgentMessage {
+            text,
+            phase,
+            memory_citation,
+            ..
+        } = item
+        else {
+            panic!("expected agent message item");
+        };
+
+        assert_eq!(text, "Supervisor snoozed for 2m.");
+        assert_eq!(phase, Some(MessagePhase::Commentary));
+        assert_eq!(memory_citation, None);
+        assert!(supervisor_snooze_agent_message_item("Plain warning.").is_none());
     }
 }

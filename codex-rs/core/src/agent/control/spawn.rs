@@ -450,11 +450,6 @@ impl AgentControl {
             shell_snapshot: inherited_shell_snapshot,
             exec_policy: inherited_exec_policy,
         } = inheritance;
-        if options.fork_parent_spawn_call_id.is_none() {
-            return Err(CodexErr::Fatal(
-                "spawn_agent fork requires a parent spawn call id".to_string(),
-            ));
-        }
         let Some(fork_mode) = options.fork_mode.as_ref() else {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a fork mode".to_string(),
@@ -470,6 +465,12 @@ impl AgentControl {
         };
 
         let parent_thread_id = *parent_thread_id;
+        let is_goal_supervisor_helper = is_goal_supervisor_helper_source(&session_source);
+        if options.fork_parent_spawn_call_id.is_none() && !is_goal_supervisor_helper {
+            return Err(CodexErr::Fatal(
+                "spawn_agent fork requires a parent spawn call id".to_string(),
+            ));
+        }
         let parent_thread = state.get_thread(parent_thread_id).await.ok();
         if let Some(parent_thread) = parent_thread.as_ref() {
             // `record_conversation_items` only queues persistence writes asynchronously.
@@ -487,21 +488,20 @@ impl AgentControl {
             .await?;
         let parent_rollout_path = parent_stored_thread.rollout_path.clone();
         let parent_history = parent_stored_thread.history.ok_or_else(|| {
-                CodexErr::Fatal(format!(
-                    "parent thread history unavailable for fork: {parent_thread_id}"
-                ))
-            })?;
+            CodexErr::Fatal(format!(
+                "parent thread history unavailable for fork: {parent_thread_id}"
+            ))
+        })?;
 
-        let mut forked_rollout_items =
-            if matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
-                if let Some(rollout_path) = parent_rollout_path {
-                    full_history_rollout_reference_items(rollout_path, &parent_history.items)
-                } else {
-                    parent_history.items
-                }
+        let mut forked_rollout_items = if matches!(fork_mode, SpawnAgentForkMode::FullHistory) {
+            if let Some(rollout_path) = parent_rollout_path {
+                full_history_rollout_reference_items(rollout_path, &parent_history.items)
             } else {
                 parent_history.items
-            };
+            }
+        } else {
+            parent_history.items
+        };
         if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
             forked_rollout_items =
                 truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
@@ -564,6 +564,7 @@ impl AgentControl {
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
             && config.multi_agent_v2.usage_hint_enabled
+            && !is_goal_supervisor_helper
             && let Some(subagent_usage_hint_text) =
                 config.multi_agent_v2.subagent_usage_hint_text.clone()
             && let Some(subagent_usage_hint_message) =
@@ -581,8 +582,10 @@ impl AgentControl {
             }
             if let Some(parent_thread) = parent_thread.as_ref()
                 && let Some(state_db) = parent_thread.codex.session.services.state_db.as_ref()
-                && let Ok(Some(parent_goal)) =
-                    state_db.thread_goals().get_thread_goal(parent_thread_id).await
+                && let Ok(Some(parent_goal)) = state_db
+                    .thread_goals()
+                    .get_thread_goal(parent_thread_id)
+                    .await
             {
                 forked_rollout_items.push(
                     crate::goal_supervisor::supervisor_continuity_context_item(
@@ -612,13 +615,15 @@ impl AgentControl {
         }
 
         let inherited_thread_state = InheritedThreadState::builder()
-            .prompt_cache_key(parent_prompt_cache_key_for_source(state, Some(&session_source)).await)
-            .response_continuation(parent_response_continuation_for_source(
-                state,
-                Some(&session_source),
+            .prompt_cache_key(
+                parent_prompt_cache_key_for_source(state, Some(&session_source)).await,
             )
-            .await)
-            .mcp_tool_snapshot(parent_mcp_tool_snapshot_for_source(state, Some(&session_source)).await)
+            .response_continuation(
+                parent_response_continuation_for_source(state, Some(&session_source)).await,
+            )
+            .mcp_tool_snapshot(
+                parent_mcp_tool_snapshot_for_source(state, Some(&session_source)).await,
+            )
             .build();
 
         state
@@ -842,7 +847,13 @@ impl AgentControl {
         owner_thread_id: ThreadId,
     ) -> Vec<RolloutItem> {
         let owner_source = match state.get_thread(owner_thread_id).await {
-            Ok(owner_thread) => owner_thread.codex.thread_config_snapshot().await.session_source,
+            Ok(owner_thread) => {
+                owner_thread
+                    .codex
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
             Err(_) => SessionSource::Cli,
         };
         self.register_session_root(owner_thread_id, owner_source.parent_thread_id());

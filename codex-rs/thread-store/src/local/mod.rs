@@ -312,8 +312,6 @@ mod tests {
     use codex_protocol::protocol::UserMessageEvent;
     use tempfile::TempDir;
 
-    use crate::ThreadEventPersistenceMode;
-
     use super::*;
     use crate::LiveThread;
     use crate::ThreadPersistenceMetadata;
@@ -475,7 +473,6 @@ mod tests {
                     base_instructions: BaseInstructions::default(),
                     dynamic_tools: Vec::new(),
                     metadata: thread_metadata(),
-                    event_persistence_mode: ThreadEventPersistenceMode::Limited,
                     initial_items: Vec::new(),
                     previous_segment_reference_depth: 1,
                 },

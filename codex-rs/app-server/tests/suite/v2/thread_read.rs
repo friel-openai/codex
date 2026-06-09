@@ -559,6 +559,7 @@ fn thread_read_unloaded_include_turns_materializes_rollout_reference() -> Result
         store
             .create_thread(CreateThreadParams {
                 thread_id,
+                extra_config: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 source: ProtocolSessionSource::Cli,

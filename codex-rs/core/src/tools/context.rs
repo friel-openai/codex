@@ -210,7 +210,6 @@ impl FunctionToolOutput {
     pub fn into_text(self) -> String {
         function_call_output_content_items_to_text(&self.body).unwrap_or_default()
     }
-
 }
 
 impl ToolOutput for FunctionToolOutput {

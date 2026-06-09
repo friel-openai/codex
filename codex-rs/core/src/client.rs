@@ -455,7 +455,7 @@ impl ModelClient {
     fn prompt_cache_key_string(&self) -> String {
         self.prompt_cache_key_override
             .clone()
-            .unwrap_or_else(|| self.state.thread_id.to_string())
+            .unwrap_or_else(|| self.prompt_cache_key().to_string())
     }
 
     /// Creates a fresh turn-scoped streaming session.

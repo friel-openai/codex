@@ -1810,7 +1810,6 @@ while True:
         "followup_task",
         "wait_agent",
         "list_agents",
-        "close_agent",
         "supervisor.close_self",
         "supervisor.snooze",
         "supervisor.compact_parent_context",

@@ -16,8 +16,8 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoal;
-use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::protocol::ThreadGoalStatus;
+use codex_protocol::protocol::ThreadGoalUpdatedEvent;
 use codex_protocol::user_input::UserInput;
 use serde::Serialize;
 use std::sync::Arc;
@@ -86,7 +86,11 @@ pub(crate) async fn maybe_start_supervisor_checkin(
     goal_id: &str,
     goal: &ThreadGoal,
 ) -> anyhow::Result<()> {
-    let active_helper_id = *session.goal_supervisor_runtime.active_helper_id.lock().await;
+    let active_helper_id = *session
+        .goal_supervisor_runtime
+        .active_helper_id
+        .lock()
+        .await;
     if let Some(helper_id) = active_helper_id {
         let active_goal_id = session
             .goal_supervisor_runtime
@@ -131,7 +135,11 @@ pub(crate) async fn finish_supervisor_helper(
     helper_thread_id: ThreadId,
 ) -> anyhow::Result<bool> {
     let cleared_active_helper = {
-        let mut active_helper_id = session.goal_supervisor_runtime.active_helper_id.lock().await;
+        let mut active_helper_id = session
+            .goal_supervisor_runtime
+            .active_helper_id
+            .lock()
+            .await;
         if *active_helper_id != Some(helper_thread_id) {
             false
         } else {
@@ -290,7 +298,7 @@ pub(crate) async fn complete_supervised_goal(
             .set_thread_goal_supervisor_snoozed_until_ms(
                 session.thread_id,
                 &active_goal_id,
-                None,
+                /*snoozed_until_ms*/ None,
             )
             .await?;
         session
@@ -452,7 +460,11 @@ async fn persisted_snooze_delay(
     if snoozed_until_ms <= now_ms {
         state_db
             .thread_goals()
-            .set_thread_goal_supervisor_snoozed_until_ms(session.thread_id, goal_id, None)
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                session.thread_id,
+                goal_id,
+                /*snoozed_until_ms*/ None,
+            )
             .await?;
         return Ok(None);
     }

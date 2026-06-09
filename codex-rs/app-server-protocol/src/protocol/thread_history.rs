@@ -248,11 +248,13 @@ impl ThreadHistoryBuilder {
         };
 
         if role != "user" {
-            if InterAgentCommunication::is_message_content(content) {
+            if let Some(communication) = InterAgentCommunication::from_message_content(content) {
                 let id = id.clone().unwrap_or_else(|| self.next_item_id());
-                self.ensure_turn().items.push(ThreadItem::RawResponseItem {
+                self.ensure_turn().items.push(ThreadItem::AgentMessage {
                     id,
-                    item: item.clone(),
+                    text: visible_inter_agent_message(&communication),
+                    phase: Some(MessagePhase::Commentary),
+                    memory_citation: None,
                 });
             }
             return;
@@ -1232,6 +1234,14 @@ impl From<&PendingTurn> for Turn {
             duration_ms: value.duration_ms,
         }
     }
+}
+
+fn visible_inter_agent_message(communication: &InterAgentCommunication) -> String {
+    let content = communication
+        .encrypted_content
+        .as_deref()
+        .unwrap_or(&communication.content);
+    format!("Agent message: {content} from {}", communication.author)
 }
 
 #[cfg(test)]
@@ -3107,7 +3117,8 @@ mod tests {
     }
 
     #[test]
-    fn reconstructs_inter_agent_raw_response_item_between_watchdog_spawn_and_close() {
+    fn reconstructs_inter_agent_raw_response_item_as_agent_message_between_watchdog_spawn_and_close()
+     {
         let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
         let watchdog_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
@@ -3176,9 +3187,11 @@ mod tests {
                     .into_iter()
                     .collect(),
                 },
-                ThreadItem::RawResponseItem {
+                ThreadItem::AgentMessage {
                     id: "item-1".into(),
-                    item: response_item,
+                    text: "Agent message: goodbye from /root/watchdog".into(),
+                    phase: Some(MessagePhase::Commentary),
+                    memory_citation: None,
                 },
                 ThreadItem::CollabAgentToolCall {
                     id: "watchdog-close".into(),

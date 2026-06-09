@@ -1162,6 +1162,7 @@ fn config_request_overrides_from_config(
         "model_reasoning_effort",
         config
             .model_reasoning_effort
+            .as_ref()
             .map(|effort| effort.to_string()),
     );
     insert(
@@ -1301,7 +1302,7 @@ fn session_configured_from_thread_fork_response(
         config.permissions.effective_permission_profile(),
         response.active_permission_profile.clone().map(Into::into),
         response.cwd.clone(),
-        response.reasoning_effort,
+        response.reasoning_effort.clone(),
     )
 }
 
