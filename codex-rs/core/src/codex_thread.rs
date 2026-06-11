@@ -324,6 +324,21 @@ impl CodexThread {
         Ok(true)
     }
 
+    pub async fn maybe_start_goal_supervisor_checkin_after_goal_resume(
+        &self,
+        goal_id: &str,
+        goal: &ThreadGoal,
+    ) -> anyhow::Result<bool> {
+        if !self.enabled(Feature::GoalSupervisor) {
+            return Ok(false);
+        }
+        crate::goal_supervisor::clear_supervisor_snooze_for_goal(&self.codex.session, goal_id)
+            .await?;
+        crate::goal_supervisor::maybe_start_supervisor_checkin(&self.codex.session, goal_id, goal)
+            .await?;
+        Ok(true)
+    }
+
     pub async fn set_app_server_client_info(
         &self,
         app_server_client_name: Option<String>,

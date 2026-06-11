@@ -130,6 +130,24 @@ pub(crate) async fn maybe_start_supervisor_checkin(
     Ok(())
 }
 
+pub(crate) async fn clear_supervisor_snooze_for_goal(
+    session: &Arc<Session>,
+    goal_id: &str,
+) -> anyhow::Result<()> {
+    *session.goal_supervisor_runtime.snoozed_until.lock().await = None;
+    if let Some(state_db) = session.services.state_db.as_ref() {
+        state_db
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                session.thread_id,
+                goal_id,
+                /*snoozed_until_ms*/ None,
+            )
+            .await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn finish_supervisor_helper(
     session: &Arc<Session>,
     helper_thread_id: ThreadId,

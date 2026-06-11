@@ -1543,6 +1543,86 @@ fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> an
     )
 }
 
+#[test]
+fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper() -> anyhow::Result<()> {
+    run_large_stack_result_async(|| async {
+        let (home, mut config) = test_config().await;
+        let _ = config.features.enable(Feature::Goals);
+        let _ = config.features.enable(Feature::GoalSupervisor);
+        let _ = config.features.enable(Feature::Sqlite);
+        let harness = AgentControlHarness::new_with_config(home, config).await;
+        let state_db = harness
+            .state_db
+            .as_ref()
+            .expect("sqlite state db should be available");
+        let (parent_thread_id, parent_thread) = harness.start_thread().await;
+        parent_thread
+            .codex
+            .session
+            .ensure_rollout_materialized()
+            .await;
+        parent_thread.codex.session.flush_rollout().await?;
+        let (goal_id, goal) = create_active_thread_goal_for_test(
+            state_db,
+            parent_thread_id,
+            &parent_thread.codex.session,
+            "Resume the paused goal now.",
+        )
+        .await?;
+        state_db
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                parent_thread_id,
+                goal_id.as_str(),
+                Some(chrono::Utc::now().timestamp_millis() + 60_000),
+            )
+            .await?;
+
+        crate::goal_supervisor::maybe_start_supervisor_checkin(
+            &parent_thread.codex.session,
+            goal_id.as_str(),
+            &goal,
+        )
+        .await?;
+        let before_resume_thread_ids = harness.manager.list_thread_ids().await;
+        assert_eq!(
+            vec![parent_thread_id],
+            before_resume_thread_ids,
+            "plain idle continuation should honor the supervisor snooze"
+        );
+
+        parent_thread
+            .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
+            .await?;
+
+        let child_thread_id =
+            spawned_thread_id_after(&harness.manager, &before_resume_thread_ids).await;
+        let child_thread = harness
+            .manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("supervisor helper thread should be registered");
+        let child_config = child_thread.config_snapshot().await;
+        assert_matches!(
+            child_config.session_source,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                agent_role: Some(agent_role),
+                ..
+            }) if agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
+        );
+        assert_eq!(
+            None,
+            state_db
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+                .await?,
+            "manual goal resume should clear the persisted supervisor snooze"
+        );
+        let _ = parent_thread.submit(Op::Shutdown {}).await;
+        Ok(())
+    })
+}
+
 async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_impl()
 -> anyhow::Result<()> {
     let server = start_mock_server().await;
