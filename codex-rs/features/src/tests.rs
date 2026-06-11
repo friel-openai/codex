@@ -33,7 +33,10 @@ fn default_enabled_features_are_stable() {
         if spec.default_enabled {
             assert!(
                 matches!(spec.stage, Stage::Stable | Stage::Removed)
-                    || spec.id == Feature::TerminalResizeReflow,
+                    || matches!(
+                        spec.id,
+                        Feature::TerminalResizeReflow | Feature::GoalSupervisor
+                    ),
                 "feature `{}` is enabled by default but is not stable/removed ({:?})",
                 spec.key,
                 spec.stage
@@ -364,21 +367,33 @@ fn multi_agent_is_stable_and_enabled_by_default() {
 }
 
 #[test]
-fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+fn multi_agent_v2_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::MultiAgentV2.stage(), Stage::Stable);
+    assert_eq!(Feature::MultiAgentV2.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
+}
+
+#[test]
+fn agent_prompt_injection_is_stable_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("agent_prompt_injection"),
         Some(Feature::AgentPromptInjection)
     );
-    assert_eq!(
-        Feature::AgentPromptInjection.stage(),
-        Stage::UnderDevelopment
-    );
-    assert_eq!(Feature::AgentPromptInjection.default_enabled(), false);
-    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
+    assert_eq!(Feature::AgentPromptInjection.stage(), Stage::Stable);
+    assert_eq!(Feature::AgentPromptInjection.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::AgentPromptInjection));
 }
 
 #[test]
-fn goal_supervisor_is_experimental_and_disabled_by_default() {
+fn goals_is_stable_and_enabled_by_default() {
+    assert_eq!(feature_for_key("goals"), Some(Feature::Goals));
+    assert_eq!(Feature::Goals.stage(), Stage::Stable);
+    assert_eq!(Feature::Goals.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::Goals));
+}
+
+#[test]
+fn goal_supervisor_is_experimental_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("goal_supervisor"),
         Some(Feature::GoalSupervisor)
@@ -387,8 +402,8 @@ fn goal_supervisor_is_experimental_and_disabled_by_default() {
         Feature::GoalSupervisor.stage(),
         Stage::Experimental { .. }
     ));
-    assert_eq!(Feature::GoalSupervisor.default_enabled(), false);
-    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::GoalSupervisor));
 }
 
 #[test]
@@ -624,7 +639,7 @@ usage_hint_enabled = false
         FeatureOverrides::default(),
     );
 
-    assert_eq!(features.enabled(Feature::MultiAgentV2), false);
+    assert_eq!(features.enabled(Feature::MultiAgentV2), true);
     assert_eq!(features_toml.entries(), BTreeMap::new());
     assert_eq!(
         features_toml.multi_agent_v2,

@@ -455,6 +455,7 @@ fn truncates_rollout_from_start_applies_thread_rollback_markers() {
 async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
     let (session, turn_context) = make_session_and_context().await;
     let mut items = session.build_initial_context(&turn_context).await;
+    let session_prefix_len = items.len();
     items.push(user_msg("feature request"));
     items.push(assistant_msg("ack"));
     items.push(user_msg("second question"));
@@ -470,12 +471,11 @@ async fn ignores_session_prefix_messages_when_truncating_rollout_from_start() {
         &rollout_items,
         /*n_from_start*/ 1,
     );
-    let expected: Vec<RolloutItem> = vec![
-        RolloutItem::ResponseItem(items[0].clone()),
-        RolloutItem::ResponseItem(items[1].clone()),
-        RolloutItem::ResponseItem(items[2].clone()),
-        RolloutItem::ResponseItem(items[3].clone()),
-    ];
+    let expected: Vec<RolloutItem> = items[..session_prefix_len + 2]
+        .iter()
+        .cloned()
+        .map(RolloutItem::ResponseItem)
+        .collect();
 
     assert_eq!(
         serde_json::to_value(&truncated).unwrap(),
