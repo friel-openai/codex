@@ -60,6 +60,7 @@ pub(super) async fn make_test_app() -> App {
         agent_navigation: AgentNavigationState::default(),
         side_threads: HashMap::new(),
         abandoned_side_threads: HashSet::new(),
+        standalone_side_active: false,
         active_thread_id: None,
         active_thread_rx: None,
         primary_thread_id: None,
