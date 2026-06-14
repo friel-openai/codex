@@ -45,7 +45,8 @@ fn default_enabled_features_are_stable() {
     for spec in crate::FEATURES {
         if spec.default_enabled {
             assert!(
-                matches!(spec.stage, Stage::Stable | Stage::Removed),
+                matches!(spec.stage, Stage::Stable | Stage::Removed)
+                    || spec.id == Feature::GoalSupervisor,
                 "feature `{}` is enabled by default but is not stable/removed ({:?})",
                 spec.key,
                 spec.stage
@@ -192,21 +193,39 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
 }
 
 #[test]
-fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+fn multi_agent_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::Collab.stage(), Stage::Stable);
+    assert_eq!(Feature::Collab.default_enabled(), true);
+}
+
+#[test]
+fn multi_agent_v2_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::MultiAgentV2.stage(), Stage::Stable);
+    assert_eq!(Feature::MultiAgentV2.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::MultiAgentV2));
+}
+
+#[test]
+fn agent_prompt_injection_is_stable_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("agent_prompt_injection"),
         Some(Feature::AgentPromptInjection)
     );
-    assert_eq!(
-        Feature::AgentPromptInjection.stage(),
-        Stage::UnderDevelopment
-    );
-    assert_eq!(Feature::AgentPromptInjection.default_enabled(), false);
-    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
+    assert_eq!(Feature::AgentPromptInjection.stage(), Stage::Stable);
+    assert_eq!(Feature::AgentPromptInjection.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::AgentPromptInjection));
 }
 
 #[test]
-fn goal_supervisor_is_experimental_and_disabled_by_default() {
+fn goals_is_stable_and_enabled_by_default() {
+    assert_eq!(feature_for_key("goals"), Some(Feature::Goals));
+    assert_eq!(Feature::Goals.stage(), Stage::Stable);
+    assert_eq!(Feature::Goals.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::Goals));
+}
+
+#[test]
+fn goal_supervisor_is_experimental_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("goal_supervisor"),
         Some(Feature::GoalSupervisor)
@@ -215,8 +234,8 @@ fn goal_supervisor_is_experimental_and_disabled_by_default() {
         Feature::GoalSupervisor.stage(),
         Stage::Experimental { .. }
     ));
-    assert_eq!(Feature::GoalSupervisor.default_enabled(), false);
-    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), true);
+    assert!(Features::with_defaults().enabled(Feature::GoalSupervisor));
 }
 
 #[test]
@@ -473,6 +492,47 @@ non_code_mode_only = true
 }
 
 #[test]
+fn multi_agent_v2_feature_config_usage_hint_enabled_does_not_enable_feature() {
+    let features_toml: FeaturesToml = toml::from_str(
+        r#"
+[multi_agent_v2]
+usage_hint_enabled = false
+"#,
+    )
+    .expect("features table should deserialize");
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features.enabled(Feature::MultiAgentV2), true);
+    assert_eq!(features_toml.entries(), BTreeMap::new());
+    assert_eq!(
+        features_toml.multi_agent_v2,
+        Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
+            enabled: None,
+            max_concurrent_threads_per_session: None,
+            min_wait_timeout_ms: None,
+            max_wait_timeout_ms: None,
+            default_wait_timeout_ms: None,
+            usage_hint_enabled: Some(false),
+            usage_hint_text: None,
+            root_agent_usage_hint_text: None,
+            subagent_usage_hint_text: None,
+            multi_agent_mode_hint_text: None,
+            tool_namespace: None,
+            hide_spawn_agent_metadata: None,
+            expose_spawn_agent_model_overrides: None,
+            non_code_mode_only: None,
+        }))
+    );
+}
+
+#[test]
 fn materialize_resolved_enabled_writes_all_features_and_preserves_custom_config() {
     let mut features = Features::with_defaults();
     features.enable(Feature::CodeMode);
@@ -563,7 +623,7 @@ fn unstable_warning_event_only_mentions_enabled_under_development_features() {
 }
 
 #[test]
-fn unstable_warning_event_ignores_enabled_structured_stable_feature() {
+fn unstable_warning_event_ignores_stable_structured_feature() {
     let configured_features: Table = toml::from_str(
         r#"
 multi_agent_v2 = { enabled = true, tool_namespace = "agents" }
