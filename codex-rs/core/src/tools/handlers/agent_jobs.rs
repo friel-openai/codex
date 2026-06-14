@@ -1,6 +1,7 @@
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::status::is_final;
 use crate::config::Config;
+use crate::config::DEFAULT_AGENT_MAX_THREADS;
 use crate::function_tool::FunctionCallError;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -36,8 +37,6 @@ mod spawn_agents_on_csv;
 pub use report_agent_job_result::ReportAgentJobResultHandler;
 pub use spawn_agents_on_csv::SpawnAgentsOnCsvHandler;
 
-const DEFAULT_AGENT_JOB_CONCURRENCY: usize = 16;
-const MAX_AGENT_JOB_CONCURRENCY: usize = 64;
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const DEFAULT_AGENT_JOB_ITEM_TIMEOUT: Duration = Duration::from_secs(60 * 30);
 
@@ -141,8 +140,9 @@ async fn build_runner_options(
 }
 
 fn normalize_concurrency(requested: Option<usize>, max_threads: Option<usize>) -> usize {
-    let requested = requested.unwrap_or(DEFAULT_AGENT_JOB_CONCURRENCY).max(1);
-    let requested = requested.min(MAX_AGENT_JOB_CONCURRENCY);
+    let requested = requested
+        .unwrap_or_else(|| max_threads.unwrap_or(DEFAULT_AGENT_MAX_THREADS))
+        .max(1);
     if let Some(max_threads) = max_threads {
         requested.min(max_threads.max(1))
     } else {

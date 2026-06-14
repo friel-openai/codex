@@ -204,6 +204,7 @@ async fn prompt_tools_are_consistent_across_requests() -> anyhow::Result<()> {
         "workspace",
         "apply_patch",
         "view_image",
+        "supervisor",
         "tool_search",
         "web_search",
     ]);
