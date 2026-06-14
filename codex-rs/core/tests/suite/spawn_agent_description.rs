@@ -228,22 +228,25 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         "hidden picker model should be omitted from spawn_agent description: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work."
         ),
-        "expected explicit authorization rule in spawn_agent description: {description:?}"
+        "spawn_agent description should not require explicit authorization: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn."
-        ) && description.contains("### When to delegate vs. do the subtask yourself"),
-        "expected delegation decision guidance in spawn_agent description: {description:?}"
+        ) && description.contains("### When to delegate vs. do the subtask yourself")
+            && description.contains(
+                "Use a subagent when a subtask is easy enough for it to handle and can run in parallel with your local work."
+            ),
+        "expected delegation guidance without an explicit-authorization restriction: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
         ),
-        "expected agent-role clarification in spawn_agent description: {description:?}"
+        "spawn_agent description should not retain an authorization restriction: {description:?}"
     );
     assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),
@@ -342,6 +345,12 @@ wait_agent_enabled = {wait_agent_enabled}
         .with_pre_build_hook(move |home| {
             std::fs::write(home.join("config.toml"), &config_toml)
                 .expect("write multi-agent configuration");
+        })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
         })
         .build_with_auto_env(&server)
         .await?;
