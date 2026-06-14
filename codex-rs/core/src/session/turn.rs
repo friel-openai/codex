@@ -60,6 +60,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -101,9 +102,9 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelMessages;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
@@ -550,7 +551,32 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    refresh_turn_context,
                 } = sampling_request_output;
+                if refresh_turn_context {
+                    let refreshed_turn_context = sess
+                        .refresh_active_turn_context(turn_context.as_ref())
+                        .await;
+                    let refreshed_step_context = sess
+                        .capture_step_context(
+                            Arc::clone(&refreshed_turn_context),
+                            &cancellation_token,
+                        )
+                        .await?;
+                    let display_roots =
+                        turn_diff_display_roots(refreshed_step_context.as_ref()).await;
+                    turn_diff_tracker
+                        .lock()
+                        .await
+                        .set_environment_display_roots(display_roots);
+                    world_state = sess
+                        .record_context_updates_and_set_reference_context_item(
+                            refreshed_step_context.as_ref(),
+                        )
+                        .await?;
+                    turn_context = refreshed_turn_context;
+                    next_step_context = Some(refreshed_step_context);
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -2096,6 +2122,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    refresh_turn_context: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2981,6 +3008,8 @@ async fn try_run_sampling_request(
         .or_cancel(&cancellation_token)
         .await??;
     let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
+    let mut tool_call_count = 0usize;
+    let mut workspace_cwd_call_seen = false;
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -3158,6 +3187,10 @@ async fn try_run_sampling_request(
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
+                if let Some(tool_name) = output_result.tool_name {
+                    tool_call_count += 1;
+                    workspace_cwd_call_seen |= is_set_workspace_cwd_tool(&tool_name);
+                }
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
@@ -3167,6 +3200,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        refresh_turn_context: false,
                     });
                 }
             }
@@ -3350,6 +3384,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    refresh_turn_context: false,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -3634,6 +3669,9 @@ async fn try_run_sampling_request(
     } else {
         Some(turn_context.turn_timing_state.begin_tool_blocking())
     };
+    if workspace_cwd_call_seen && tool_call_count != 1 {
+        step_context.reject_context_transition_mixed_with_sibling_tool();
+    }
     if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await {
         reroute_safe.store(false, Ordering::Relaxed);
         return Err(err);
@@ -3663,7 +3701,10 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    outcome.map(|mut outcome| {
+        outcome.refresh_turn_context = step_context.turn_context_refresh_requested();
+        outcome
+    })
 }
 
 pub(crate) fn get_last_assistant_message_from_turn<'a>(
