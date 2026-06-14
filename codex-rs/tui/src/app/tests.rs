@@ -1988,6 +1988,10 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
 
     runtime.block_on(async {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        std::fs::write(
+            app.config.codex_home.join("config.toml"),
+            "[features.multi_agent_v2]\nenabled = false\n",
+        )?;
         let mut app_server =
             crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
         let root = app_server
@@ -8204,5 +8208,24 @@ async fn side_backtrack_rejection_reports_unavailable_message_snapshot() {
     );
 }
 async fn start_config_write_test_app_server(app: &App) -> Result<AppServerSession> {
-    Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await
+    let state_db =
+        crate::init_state_db_for_app_server_target(&app.config, &crate::AppServerTarget::Embedded)
+            .await?;
+    let client = crate::start_embedded_app_server(
+        codex_arg0::Arg0DispatchPaths::default(),
+        app.config.clone(),
+        Vec::new(),
+        codex_config::LoaderOverrides::without_managed_config_for_tests(),
+        /*strict_config*/ false,
+        codex_config::CloudConfigBundleLoader::default(),
+        codex_feedback::CodexFeedback::new(),
+        /*log_db*/ None,
+        state_db,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    )
+    .await?;
+    Ok(AppServerSession::new(
+        codex_app_server_client::AppServerClient::InProcess(client),
+        crate::app_server_session::ThreadParamsMode::Embedded,
+    ))
 }

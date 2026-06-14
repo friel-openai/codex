@@ -7649,6 +7649,36 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
 }
 
 #[tokio::test]
+async fn thread_start_accepts_agents_max_threads_with_multi_agent_v2() {
+    let (_home, config) = test_config_with_cli_overrides(vec![(
+        "agents.max_threads".to_string(),
+        TomlValue::Integer(1),
+    )])
+    .await;
+    assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert_eq!(
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(1), 2, Some(1))
+    );
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+
+    let root = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("agents.max_threads should not block multi-agent v2 thread startup");
+    let _ = root.thread.submit(Op::Shutdown {}).await;
+}
+
+#[tokio::test]
 async fn spawn_agent_respects_legacy_max_threads_alias() {
     let max_threads = 1usize;
     let (_home, mut config) = test_config_with_cli_overrides(vec![(
@@ -7803,8 +7833,25 @@ async fn spawn_agent_limit_shared_across_clones() {
         .expect("shutdown agent");
 }
 
-#[tokio::test]
-async fn resume_agent_respects_max_threads_limit() {
+#[test]
+fn resume_agent_respects_max_threads_limit() {
+    let test_thread = std::thread::Builder::new()
+        .name("resume_agent_respects_max_threads_limit".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime")
+                .block_on(resume_agent_respects_max_threads_limit_inner())
+        })
+        .expect("spawn test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn resume_agent_respects_max_threads_limit_inner() {
     let max_threads = 1usize;
     let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_concurrent_threads_per_session".to_string(),

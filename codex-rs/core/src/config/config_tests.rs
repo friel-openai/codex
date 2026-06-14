@@ -11381,15 +11381,13 @@ enabled = true
         .await?;
 
     assert_eq!(
-        config.multi_agent_v2,
-        resolve_multi_agent_v2_config(&ConfigToml::default())
-    );
-    assert_eq!(
         (
             config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V1),
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(3))
+        (None, 257, Some(256), Some(256))
     );
 
     Ok(())
@@ -11601,6 +11599,69 @@ max_concurrent_threads_per_session = 3
             config.effective_agent_max_threads(MultiAgentVersion::V2),
         ),
         (4, Some(3))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_accepts_legacy_agents_max_threads_alias() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[features.multi_agent_v2]
+enabled = true
+
+[agents]
+max_threads = 3
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(3), 4, Some(3))
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn multi_agent_v2_disabled_keeps_legacy_agents_max_threads_for_v1() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    std::fs::write(
+        codex_home.path().join(CONFIG_TOML_FILE),
+        r#"[features.multi_agent_v2]
+enabled = false
+
+[agents]
+max_threads = 3
+"#,
+    )?;
+
+    let config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .build()
+        .await?;
+
+    assert_eq!(
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V1),
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(3), 4, Some(3), Some(3))
     );
 
     Ok(())

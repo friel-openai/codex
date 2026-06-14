@@ -777,6 +777,10 @@ impl TestCodexBuilder {
         // Keep generic tests stable when the bundled catalog default changes. Tests that need a
         // specific model can still override this with a config mutator.
         config.model = Some("gpt-5.5".to_string());
+        // Keep the shared upstream integration suite on upstream feature defaults. Frodex's
+        // default enablement is covered by dedicated feature and configuration tests.
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        let _ = config.features.disable(Feature::AgentPromptInjection);
         config.cwd = cwd_override;
         config.model_provider = model_provider;
         if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex") {

@@ -234,22 +234,25 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
         "hidden picker model should be omitted from spawn_agent description: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work."
         ),
-        "expected explicit authorization rule in spawn_agent description: {description:?}"
+        "spawn_agent description should not require explicit authorization: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Requests for depth, thoroughness, research, investigation, or detailed codebase analysis do not count as permission to spawn."
-        ) && description.contains("### When to delegate vs. do the subtask yourself"),
-        "expected delegation decision guidance in spawn_agent description: {description:?}"
+        ) && description.contains("### When to delegate vs. do the subtask yourself")
+            && description.contains(
+                "Use a subagent when a subtask is easy enough for it to handle and can run in parallel with your local work."
+            ),
+        "expected delegation guidance without an explicit-authorization restriction: {description:?}"
     );
     assert!(
-        description.contains(
+        !description.contains(
             "Agent-role guidance below only helps choose which agent to use after spawning is already authorized; it never authorizes spawning by itself."
         ),
-        "expected agent-role clarification in spawn_agent description: {description:?}"
+        "spawn_agent description should not retain an authorization restriction: {description:?}"
     );
     assert!(
         !description.contains("A mini model can solve many tasks faster than the main model."),
@@ -399,6 +402,10 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
                 .expect("write multi-agent configuration");
         })
         .with_config(move |config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
             config.multi_agent_v2.root_agent_usage_hint_text =
                 Some(legacy_root_agent_usage_hint_text.to_string());
         })
@@ -479,6 +486,10 @@ async fn multi_agent_v2_cold_resume_refreshes_legacy_usage_hints_once(
     )
     .await;
     let mut resumed_builder = test_codex().with_config(move |config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
         if let Some(root_agent_usage_hint_text) = resumed_root_agent_usage_hint_text {
             config.multi_agent_v2.root_agent_usage_hint_text = Some(root_agent_usage_hint_text);
         }
@@ -578,6 +589,12 @@ async fn multi_agent_v2_resume_refreshes_changed_wait_guidance(
             std::fs::write(home.join("config.toml"), &initial_config_toml)
                 .expect("write initial multi-agent configuration");
         })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+        })
         .build_with_auto_env(&server)
         .await?;
 
@@ -624,7 +641,13 @@ async fn multi_agent_v2_resume_refreshes_changed_wait_guidance(
         ],
     )
     .await;
-    let resumed = test_codex().resume(&server, home, rollout_path).await?;
+    let mut resumed_builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    });
+    let resumed = resumed_builder.resume(&server, home, rollout_path).await?;
     let current_usage_hint = resumed
         .config
         .multi_agent_v2
