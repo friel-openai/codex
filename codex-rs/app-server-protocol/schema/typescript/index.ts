@@ -40,6 +40,7 @@ export type { InitializeCapabilities } from "./InitializeCapabilities";
 export type { InitializeParams } from "./InitializeParams";
 export type { InitializeResponse } from "./InitializeResponse";
 export type { InputModality } from "./InputModality";
+export type { InterAgentCommunication } from "./InterAgentCommunication";
 export type { InternalSessionSource } from "./InternalSessionSource";
 export type { LocalShellAction } from "./LocalShellAction";
 export type { LocalShellExecAction } from "./LocalShellExecAction";

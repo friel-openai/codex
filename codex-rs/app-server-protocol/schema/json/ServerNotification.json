@@ -2054,6 +2054,42 @@
       ],
       "type": "string"
     },
+    "InterAgentCommunication": {
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "content": {
+          "type": "string"
+        },
+        "encrypted_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "other_recipients": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AgentPath"
+          },
+          "type": "array"
+        },
+        "recipient": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "trigger_turn": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "author",
+        "content",
+        "recipient",
+        "trigger_turn"
+      ],
+      "type": "object"
+    },
     "ItemCompletedNotification": {
       "properties": {
         "completedAtMs": {
@@ -3739,6 +3775,30 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "communication": {
+              "$ref": "#/definitions/InterAgentCommunication"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "interAgentCommunication"
+              ],
+              "title": "InterAgentCommunicationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "communication",
+            "id",
+            "type"
+          ],
+          "title": "InterAgentCommunicationThreadItem",
           "type": "object"
         },
         {

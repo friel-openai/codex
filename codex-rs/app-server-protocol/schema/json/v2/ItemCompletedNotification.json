@@ -5,6 +5,9 @@
       "description": "A path that is guaranteed to be absolute and normalized (though it is not guaranteed to be canonicalized or exist on the filesystem).\n\nIMPORTANT: When deserializing an `AbsolutePathBuf`, a base path must be set using [AbsolutePathBufGuard::new]. If no base path is set, the deserialization will fail unless the path being deserialized is already absolute.",
       "type": "string"
     },
+    "AgentPath": {
+      "type": "string"
+    },
     "ByteRange": {
       "properties": {
         "end": {
@@ -293,6 +296,42 @@
         "original"
       ],
       "type": "string"
+    },
+    "InterAgentCommunication": {
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "content": {
+          "type": "string"
+        },
+        "encrypted_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "other_recipients": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AgentPath"
+          },
+          "type": "array"
+        },
+        "recipient": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "trigger_turn": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "author",
+        "content",
+        "recipient",
+        "trigger_turn"
+      ],
+      "type": "object"
     },
     "McpToolCallError": {
       "properties": {
@@ -603,6 +642,30 @@
             "type"
           ],
           "title": "AgentMessageThreadItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "communication": {
+              "$ref": "#/definitions/InterAgentCommunication"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "interAgentCommunication"
+              ],
+              "title": "InterAgentCommunicationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "communication",
+            "id",
+            "type"
+          ],
+          "title": "InterAgentCommunicationThreadItem",
           "type": "object"
         },
         {

@@ -386,7 +386,9 @@ impl TurnToolCounts {
             | ThreadItem::ImageView { .. }
             | ThreadItem::EnteredReviewMode { .. }
             | ThreadItem::ExitedReviewMode { .. }
-            | ThreadItem::ContextCompaction { .. } => return,
+            | ThreadItem::ContextCompaction { .. }
+            | ThreadItem::RawResponseItem { .. }
+            | ThreadItem::InterAgentCommunication { .. } => return,
         }
         self.total += 1;
     }
@@ -1620,6 +1622,8 @@ fn tracked_tool_item_id(item: &ThreadItem) -> Option<&str> {
         | ThreadItem::Reasoning { .. }
         | ThreadItem::SubAgentActivity { .. }
         | ThreadItem::ImageView { .. }
+        | ThreadItem::InterAgentCommunication { .. }
+        | ThreadItem::RawResponseItem { .. }
         | ThreadItem::EnteredReviewMode { .. }
         | ThreadItem::ExitedReviewMode { .. }
         | ThreadItem::ContextCompaction { .. } => None,
