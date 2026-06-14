@@ -347,6 +347,8 @@ WHERE thread_id = ? AND turn_id = ?
                 ..
             }
             | ThreadItem::HookPrompt { .. }
+            | ThreadItem::InterAgentCommunication { .. }
+            | ThreadItem::RawResponseItem { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
             | ThreadItem::CommandExecution { .. }
