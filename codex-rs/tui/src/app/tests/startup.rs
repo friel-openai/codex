@@ -59,6 +59,12 @@ fn startup_waiting_gate_is_only_for_fresh_or_exit_session_selection() {
         )),
         false
     );
+    assert!(!App::should_wait_for_initial_session(
+        &SessionSelection::Side(crate::resume_picker::SessionTarget {
+            path: Some(PathBuf::from("/tmp/side")),
+            thread_id: ThreadId::new(),
+        })
+    ));
 }
 
 #[test]
@@ -72,6 +78,10 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
         path: Some(PathBuf::from("/tmp/fork")),
         thread_id: ThreadId::new(),
         history_mode: None,
+    });
+    let side = SessionSelection::Side(crate::resume_picker::SessionTarget {
+        path: Some(PathBuf::from("/tmp/side")),
+        thread_id: ThreadId::new(),
     });
     let no_images: Vec<PathBuf> = Vec::new();
     let initial_images = vec![PathBuf::from("/tmp/image.png")];
@@ -96,6 +106,9 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
     ));
     assert!(!App::should_prompt_for_paused_goal_after_startup_resume(
         &fork, &None, &no_images
+    ));
+    assert!(!App::should_prompt_for_paused_goal_after_startup_resume(
+        &side, &None, &no_images
     ));
 }
 
@@ -135,7 +148,7 @@ fn startup_waiting_gate_holds_active_thread_events_until_primary_thread_configur
 }
 
 #[test]
-fn startup_waiting_gate_not_applied_for_resume_or_fork_session_selection() {
+fn startup_waiting_gate_not_applied_for_resume_fork_or_side_session_selection() {
     let wait_for_resume = App::should_wait_for_initial_session(&SessionSelection::Resume(
         crate::resume_picker::SessionTarget {
             path: Some(PathBuf::from("/tmp/restore")),
@@ -164,6 +177,16 @@ fn startup_waiting_gate_not_applied_for_resume_or_fork_session_selection() {
         ),
         true
     );
+    let wait_for_side = App::should_wait_for_initial_session(&SessionSelection::Side(
+        crate::resume_picker::SessionTarget {
+            path: Some(PathBuf::from("/tmp/side")),
+            thread_id: ThreadId::new(),
+        },
+    ));
+    assert!(App::should_handle_active_thread_events(
+        wait_for_side,
+        /*has_active_thread_receiver*/ true
+    ));
 }
 
 #[tokio::test]
