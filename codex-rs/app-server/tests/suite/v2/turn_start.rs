@@ -1974,16 +1974,16 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let developer_texts = response_mock
         .single_request()
         .message_input_texts("developer");
-    assert!(developer_texts.iter().any(|text| {
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains("Proactive multi-agent delegation is active."))
+    );
+    assert!(!developer_texts.iter().any(|text| {
         text.contains(
             "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
         )
     }));
-    assert!(
-        !developer_texts
-            .iter()
-            .any(|text| text.contains("Proactive multi-agent delegation is active."))
-    );
 
     Ok(())
 }
@@ -2059,17 +2059,17 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let developer_texts = response_mock
         .single_request()
         .message_input_texts("developer");
-    assert!(developer_texts.iter().any(|text| {
-        text.contains(MULTI_AGENT_MODE_OPEN_TAG)
-            && text.contains(
-                "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
-            )
-    }));
     assert!(
-        !developer_texts
+        developer_texts
             .iter()
-            .any(|text| text.contains("Proactive multi-agent delegation is active."))
+            .any(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG)
+                && text.contains("Proactive multi-agent delegation is active."))
     );
+    assert!(!developer_texts.iter().any(|text| {
+        text.contains(
+            "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
+        )
+    }));
 
     Ok(())
 }
@@ -3547,7 +3547,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::Collab, true), (Feature::MultiAgentV2, false)]),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -3935,7 +3935,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::Collab, true), (Feature::MultiAgentV2, false)]),
     )?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),
