@@ -192,13 +192,17 @@ impl AgentControl {
         if initial_history.get_multi_agent_version() != Some(MultiAgentVersion::V2) {
             return Err(CodexErr::ThreadNotFound(thread_id));
         }
-        let residency_slot = self
-            .reserve_v2_residency_slot(&state, &config, Some(thread_id))
-            .await?;
-
         let (session_source, _) = initial_history
             .get_resumed_session_sources()
             .unwrap_or((stored_source, None));
+        let residency_slot = if is_v2_resident_session_source(&session_source) {
+            Some(
+                self.reserve_v2_residency_slot(&state, &config, Some(thread_id))
+                    .await?,
+            )
+        } else {
+            None
+        };
         let parent_thread_id = initial_history
             .get_resumed_parent_thread_id()
             .or(stored_parent_thread_id);
@@ -223,7 +227,9 @@ impl AgentControl {
             .await
         {
             Ok(reloaded_thread) => {
-                residency_slot.commit(reloaded_thread.thread_id);
+                if let Some(residency_slot) = residency_slot {
+                    residency_slot.commit(reloaded_thread.thread_id);
+                }
                 state.notify_thread_created(reloaded_thread.thread_id);
                 Ok(())
             }
@@ -255,7 +261,12 @@ impl AgentControl {
                 &config,
             )
             .await;
-        if let Some(session_source) = session_source.as_ref() {
+        let is_internal_supervisor_helper = session_source
+            .as_ref()
+            .is_some_and(is_internal_supervisor_helper_source);
+        if let Some(session_source) = session_source.as_ref()
+            && !is_internal_supervisor_helper
+        {
             self.ensure_execution_capacity(multi_agent_version, session_source)?;
         }
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
@@ -276,7 +287,11 @@ impl AgentControl {
         } else {
             agent_max_threads
         };
-        let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        let mut reservation = if is_internal_supervisor_helper {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(reservation_max_threads)?
+        };
         let inheritance = SpawnAgentThreadInheritance {
             shell_snapshot: self
                 .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
@@ -403,7 +418,15 @@ impl AgentControl {
 
         self.send_input_after_capacity_check(new_thread.thread_id, &state, initial_operation)
             .await?;
-        if multi_agent_version != MultiAgentVersion::V2 {
+        let is_goal_supervisor_helper = options.fork_mode.is_some()
+            && notification_source
+                .as_ref()
+                .is_some_and(is_goal_supervisor_helper_source);
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if multi_agent_version != MultiAgentVersion::V2
+            || pathless_multi_agent_child
+            || is_goal_supervisor_helper
+        {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -437,7 +460,8 @@ impl AgentControl {
             shell_snapshot: inherited_shell_snapshot,
             exec_policy: inherited_exec_policy,
         } = inheritance;
-        if options.fork_parent_spawn_call_id.is_none() {
+        let is_goal_supervisor_helper = is_goal_supervisor_helper_source(&session_source);
+        if options.fork_parent_spawn_call_id.is_none() && !is_goal_supervisor_helper {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
@@ -563,6 +587,7 @@ impl AgentControl {
         if preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
             && config.multi_agent_v2.usage_hint_enabled
+            && !is_goal_supervisor_helper
             && let Some(subagent_usage_hint_text) =
                 config.multi_agent_v2.subagent_usage_hint_text.clone()
             && let Some(subagent_usage_hint_message) =
@@ -571,6 +596,45 @@ impl AgentControl {
                 ])
         {
             forked_rollout_items.push(RolloutItem::ResponseItem(subagent_usage_hint_message));
+        }
+        if is_goal_supervisor_helper {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(role_prompt_item(role_prompt));
+            }
+            if let Some(parent_thread) = parent_thread.as_ref()
+                && let Some(state_db) = parent_thread.codex.session.services.state_db.as_ref()
+                && let Ok(Some(parent_goal)) = state_db
+                    .thread_goals()
+                    .get_thread_goal(parent_thread_id)
+                    .await
+            {
+                forked_rollout_items.push(
+                    crate::goal_supervisor::supervisor_continuity_context_item(
+                        &parent_thread.codex.session,
+                        &crate::goal_supervisor::protocol_goal_from_state(parent_goal),
+                        &forked_rollout_items,
+                    )
+                    .await,
+                );
+            }
+            forked_rollout_items.extend(
+                self.supervisor_boot_context_items(state, parent_thread_id)
+                    .await,
+            );
+        } else {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(role_prompt_item(role_prompt));
+            }
+            if let Some(initial_task_message) = options.initial_task_message.clone() {
+                forked_rollout_items.push(subagent_assignment_item(
+                    &session_source,
+                    initial_task_message,
+                ));
+            }
         }
 
         let inherited_thread_state = InheritedThreadState::builder()
@@ -716,7 +780,11 @@ impl AgentControl {
             )
             .await;
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
-        let mut reservation = self.state.reserve_spawn_slot(agent_max_threads)?;
+        let mut reservation = if is_internal_supervisor_helper_source(&session_source) {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(agent_max_threads)?
+        };
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -772,7 +840,8 @@ impl AgentControl {
         // Resumed threads are re-registered in-memory and need the same listener
         // attachment path as freshly spawned threads.
         state.notify_thread_created(resumed_thread.thread_id);
-        if multi_agent_version != MultiAgentVersion::V2 {
+        let pathless_multi_agent_child = agent_metadata.agent_path.is_none();
+        if multi_agent_version != MultiAgentVersion::V2 || pathless_multi_agent_child {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()
@@ -793,5 +862,29 @@ impl AgentControl {
         .await;
 
         Ok((resumed_thread.thread_id, multi_agent_version))
+    }
+
+    async fn supervisor_boot_context_items(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RolloutItem> {
+        let owner_source = match state.get_thread(owner_thread_id).await {
+            Ok(owner_thread) => {
+                owner_thread
+                    .codex
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
+            Err(_) => SessionSource::Cli,
+        };
+        self.register_session_root(owner_thread_id, owner_source.parent_thread_id());
+        let agents = self
+            .list_agents(&owner_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+
+        synthetic_supervisor_list_agents_items(owner_thread_id, agents)
     }
 }
