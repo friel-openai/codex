@@ -225,6 +225,7 @@ mod loaded_threads;
 mod pending_interactive_replay;
 mod permission_shortcuts;
 mod pets;
+mod placed_side;
 mod platform_actions;
 mod plugin_mentions;
 mod replay_filter;
@@ -233,6 +234,7 @@ mod safety_buffering;
 mod session_lifecycle;
 mod side;
 mod startup;
+mod standalone_side;
 mod startup_prompts;
 mod thread_event_buffer;
 mod thread_events;
@@ -600,6 +602,7 @@ pub(crate) struct App {
     agents_overview: agents_overview::AgentsOverviewState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
+    standalone_side_active: bool,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     primary_thread_id: Option<ThreadId>,

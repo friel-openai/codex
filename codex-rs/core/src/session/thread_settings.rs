@@ -107,7 +107,7 @@ pub(super) async fn emit_applied(session: &Session, submission_id: String) {
 
 /// Builds the thread-owned settings event used by live updates and
 /// synthesized fork history.
-pub(super) async fn applied_event(session: &Session) -> EventMsg {
+pub(crate) async fn applied_event(session: &Session) -> EventMsg {
     EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
         thread_settings: session.thread_settings_snapshot().await,
     })
