@@ -26,6 +26,7 @@ impl AgentCommunicationKind {
 pub(crate) struct AgentCommunicationContext {
     kind: AgentCommunicationKind,
     sender_thread_id: ThreadId,
+    last_task_message_override: Option<String>,
 }
 
 impl AgentCommunicationContext {
@@ -33,7 +34,17 @@ impl AgentCommunicationContext {
         Self {
             kind,
             sender_thread_id,
+            last_task_message_override: None,
         }
+    }
+
+    pub(crate) fn with_last_task_message_override(mut self, message: String) -> Self {
+        self.last_task_message_override = Some(message);
+        self
+    }
+
+    pub(crate) fn last_task_message_override(&self) -> Option<&str> {
+        self.last_task_message_override.as_deref()
     }
 }
 
