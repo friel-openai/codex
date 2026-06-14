@@ -8,11 +8,13 @@ use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
 use crate::environment_selection::TurnEnvironmentSnapshot;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
+use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
@@ -49,6 +51,8 @@ use self::execution::AgentExecutionLimiter;
 use self::residency::V2Residency;
 
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
+    "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 
 mod execution;
 mod legacy;
@@ -745,6 +749,80 @@ fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => Some(*depth),
         _ => None,
     }
+}
+
+async fn parent_prompt_cache_key_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<ThreadId> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .map(|parent_thread| parent_thread.codex.session.prompt_cache_key())
+}
+
+async fn parent_mcp_tool_snapshot_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<McpToolSnapshot> {
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
+    let list_all_tools = parent_thread
+        .codex
+        .session
+        .services
+        .mcp_connection_manager
+        .load_full()
+        .list_all_tools_future();
+    let tools = list_all_tools.await;
+    Some(McpToolSnapshot { tools })
+}
+
+fn fork_previous_response_id_enabled() -> bool {
+    std::env::var(CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV)
+        .is_ok_and(|value| fork_previous_response_id_value_enabled(&value))
+}
+
+fn fork_previous_response_id_value_enabled(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+async fn parent_response_continuation_for_source(
+    state: &Arc<ThreadManagerState>,
+    session_source: Option<&SessionSource>,
+) -> Option<crate::client::ResponseContinuation> {
+    if !fork_previous_response_id_enabled() {
+        return None;
+    }
+    let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id, ..
+    })) = session_source
+    else {
+        return None;
+    };
+
+    state
+        .get_thread(*parent_thread_id)
+        .await
+        .ok()
+        .and_then(|parent_thread| parent_thread.codex.session.response_continuation_for_fork())
 }
 #[cfg(test)]
 #[path = "control_tests.rs"]
