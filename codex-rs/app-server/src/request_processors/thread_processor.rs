@@ -2362,8 +2362,12 @@ impl ThreadRequestProcessor {
         {
             stored_thread = stored_thread_with_history;
         }
+        let session_id = self
+            .persisted_thread_root_session_id(thread_id, stored_thread.parent_thread_id)
+            .await?;
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
+        thread.session_id = session_id;
         if include_turns {
             if paginated {
                 thread.turns = self
@@ -2375,6 +2379,40 @@ impl ThreadRequestProcessor {
             }
         }
         Ok(Some(thread))
+    }
+
+    async fn persisted_thread_root_session_id(
+        &self,
+        thread_id: ThreadId,
+        mut parent_thread_id: Option<ThreadId>,
+    ) -> Result<String, ThreadReadViewError> {
+        let mut visited = HashSet::from([thread_id]);
+        while let Some(ancestor_thread_id) = parent_thread_id {
+            if !visited.insert(ancestor_thread_id) {
+                return Err(ThreadReadViewError::InvalidRequest(format!(
+                    "thread parent cycle for thread id {thread_id}"
+                )));
+            }
+            if let Ok(loaded_ancestor) = self.thread_manager.get_thread(ancestor_thread_id).await {
+                return Ok(loaded_ancestor.session_configured().session_id.to_string());
+            }
+            let Some(stored_ancestor) = self
+                .read_stored_thread_for_read(ancestor_thread_id, /*include_history*/ false)
+                .await?
+            else {
+                // A read-only view should remain available even when an adopted
+                // thread's ancestor is not present in this store.
+                return Ok(thread_id.to_string());
+            };
+            parent_thread_id = stored_ancestor
+                .source
+                .parent_thread_id()
+                .or(stored_ancestor.parent_thread_id);
+            if parent_thread_id.is_none() {
+                return Ok(stored_ancestor.thread_id.to_string());
+            }
+        }
+        Ok(thread_id.to_string())
     }
 
     async fn read_stored_thread_for_read(
@@ -2433,6 +2471,15 @@ impl ThreadRequestProcessor {
                 thread.path = fallback_thread.path.clone();
             }
             thread.session_id.clone_from(&fallback_thread.session_id);
+            if thread.parent_thread_id != fallback_thread.parent_thread_id {
+                thread
+                    .parent_thread_id
+                    .clone_from(&fallback_thread.parent_thread_id);
+                thread.source.clone_from(&fallback_thread.source);
+                thread
+                    .thread_source
+                    .clone_from(&fallback_thread.thread_source);
+            }
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
@@ -4042,6 +4089,13 @@ impl ThreadRequestProcessor {
             )),
         };
         let mut thread = thread?;
+        let parent_thread_id = config_snapshot
+            .parent_thread_id
+            .map(|parent_thread_id| parent_thread_id.to_string());
+        if thread.parent_thread_id != parent_thread_id {
+            thread.parent_thread_id = parent_thread_id;
+            thread.source = config_snapshot.session_source.clone().into();
+        }
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
@@ -5465,6 +5519,8 @@ fn build_thread_from_loaded_snapshot(
         loaded_thread.rollout_path(),
     )
 }
+
+mod goal_scheduler;
 
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]

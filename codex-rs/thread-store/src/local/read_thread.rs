@@ -58,6 +58,7 @@ pub(super) async fn read_thread(
             && (params.include_archived || rollout_thread.archived_at.is_none())
             && !rollout_thread.preview.is_empty()
         {
+            apply_sqlite_ownership(&mut rollout_thread, &thread);
             rollout_thread.recency_at = thread.recency_at;
             rollout_thread.is_pinned = thread.is_pinned;
             if thread.name.is_some() {
@@ -120,6 +121,7 @@ pub(super) async fn read_thread_by_rollout_path(
         });
     }
     if let Some(metadata) = read_sqlite_metadata(store, thread.thread_id).await {
+        apply_sqlite_ownership_from_metadata(&mut thread, &metadata);
         if thread.history_mode == ThreadHistoryMode::Paginated {
             thread.name = sqlite_thread_name(&metadata);
         }
@@ -382,7 +384,9 @@ async fn stored_thread_from_sqlite_metadata(
     };
     let rollout_path = codex_rollout::plain_rollout_path(metadata.rollout_path.as_path());
     let forked_from_id = session_meta.as_ref().and_then(|meta| meta.forked_from_id);
-    let parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
+    let rollout_parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
+    let source = parse_session_source(&metadata.source);
+    let parent_thread_id = authoritative_parent_thread_id(&source, rollout_parent_thread_id);
     let history_mode = session_meta
         .as_ref()
         .map(|meta| meta.history_mode)
@@ -417,7 +421,7 @@ async fn stored_thread_from_sqlite_metadata(
         is_pinned: metadata.is_pinned,
         cwd: metadata.cwd,
         cli_version: metadata.cli_version,
-        source: parse_session_source(&metadata.source),
+        source,
         history_mode,
         thread_source: metadata.thread_source,
         agent_nickname: metadata.agent_nickname,
@@ -532,6 +536,41 @@ fn parse_session_source(source: &str) -> SessionSource {
     serde_json::from_str(source)
         .or_else(|_| serde_json::from_value(serde_json::Value::String(source.to_string())))
         .unwrap_or(SessionSource::Unknown)
+}
+
+fn apply_sqlite_ownership(target: &mut StoredThread, sqlite_thread: &StoredThread) {
+    target.parent_thread_id = sqlite_thread.parent_thread_id;
+    target.source = sqlite_thread.source.clone();
+    target
+        .thread_source
+        .clone_from(&sqlite_thread.thread_source);
+    target.agent_path.clone_from(&sqlite_thread.agent_path);
+    target
+        .agent_nickname
+        .clone_from(&sqlite_thread.agent_nickname);
+    target.agent_role.clone_from(&sqlite_thread.agent_role);
+}
+
+fn apply_sqlite_ownership_from_metadata(target: &mut StoredThread, metadata: &ThreadMetadata) {
+    let source = parse_session_source(&metadata.source);
+    target.parent_thread_id = authoritative_parent_thread_id(&source, target.parent_thread_id);
+    target.source = source;
+    target.thread_source.clone_from(&metadata.thread_source);
+    target.agent_path.clone_from(&metadata.agent_path);
+    target.agent_nickname.clone_from(&metadata.agent_nickname);
+    target.agent_role.clone_from(&metadata.agent_role);
+}
+
+fn authoritative_parent_thread_id(
+    source: &SessionSource,
+    rollout_parent_thread_id: Option<codex_protocol::ThreadId>,
+) -> Option<codex_protocol::ThreadId> {
+    source.parent_thread_id().or_else(|| {
+        source
+            .is_non_root_agent()
+            .then_some(rollout_parent_thread_id)
+            .flatten()
+    })
 }
 
 fn parse_or_default<T>(value: &str, default: T) -> T

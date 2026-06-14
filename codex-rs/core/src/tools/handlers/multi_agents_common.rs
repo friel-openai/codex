@@ -184,8 +184,11 @@ pub(crate) fn build_agent_spawn_config(
 
 pub(crate) fn build_agent_resume_config(turn: &TurnContext) -> Result<Config, FunctionCallError> {
     let mut config = build_agent_shared_config(turn)?;
-    // For resume, keep base instructions sourced from rollout/session metadata.
+    // Prompt identity belongs to the resumed rollout, not to the caller that
+    // happened to wake it.
     config.base_instructions = None;
+    config.developer_instructions = None;
+    config.personality = None;
     Ok(config)
 }
 

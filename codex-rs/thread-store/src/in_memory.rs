@@ -60,6 +60,7 @@ mod tests {
     use crate::ThreadSortKey;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SubAgentSource;
 
     #[tokio::test]
     async fn default_turn_pagination_methods_return_unsupported() {
@@ -246,6 +247,46 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![grandchild_thread_id]
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_source_updates_replace_created_parent_ownership() {
+        let store = InMemoryThreadStore::default();
+        let parent_thread_id = ThreadId::new();
+        let thread_id = ThreadId::new();
+        let mut params = create_thread_params(thread_id, ThreadHistoryMode::Legacy);
+        params.parent_thread_id = Some(parent_thread_id);
+        params.source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        });
+        store.create_thread(params).await.expect("create child");
+
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    source: Some(SessionSource::Exec),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("promote child");
+
+        let promoted = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read promoted thread");
+        assert_eq!(promoted.source, SessionSource::Exec);
+        assert_eq!(promoted.parent_thread_id, None);
     }
 
     #[tokio::test]
@@ -834,6 +875,19 @@ fn stored_thread_from_state(
             (*mapped_thread_id == thread_id).then(|| path.clone())
         });
 
+    let (source, parent_thread_id) = match metadata.and_then(|metadata| metadata.source.clone()) {
+        Some(source) => {
+            let parent_thread_id = source.parent_thread_id().or_else(|| {
+                source
+                    .is_non_root_agent()
+                    .then_some(created.parent_thread_id)
+                    .flatten()
+            });
+            (source, parent_thread_id)
+        }
+        None => (created.source.clone(), created.parent_thread_id),
+    };
+
     Ok(StoredThread {
         thread_id,
         extra_config: created.extra_config.clone(),
@@ -841,7 +895,7 @@ fn stored_thread_from_state(
             .and_then(|metadata| metadata.rollout_path.clone())
             .or(rollout_path),
         forked_from_id: created.forked_from_id,
-        parent_thread_id: created.parent_thread_id,
+        parent_thread_id,
         preview: metadata
             .and_then(|metadata| metadata.preview.clone())
             .unwrap_or_default(),
@@ -872,9 +926,7 @@ fn stored_thread_from_state(
         cli_version: metadata
             .and_then(|metadata| metadata.cli_version.clone())
             .unwrap_or_else(|| "test".to_string()),
-        source: metadata
-            .and_then(|metadata| metadata.source.clone())
-            .unwrap_or_else(|| created.source.clone()),
+        source,
         history_mode: created.history_mode,
         thread_source: metadata
             .and_then(|metadata| metadata.thread_source.clone())
