@@ -274,7 +274,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                 let control = Box::pin(app.handle_event(
                     &mut tui,
                     &mut app_server,
-                    AppEvent::ForkCurrentSession,
+                    AppEvent::ForkCurrentSession { placement: None },
                 ))
                 .await?;
 
