@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -30,6 +31,7 @@ use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
 use codex_login::AuthManager;
 use codex_mcp::McpRuntime;
+use codex_mcp::ToolInfo as McpToolInfo;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -40,9 +42,16 @@ use codex_thread_store::ThreadStore;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
+#[derive(Clone, Default)]
+pub(crate) struct McpToolSnapshot {
+    pub(crate) tools: HashMap<String, McpToolInfo>,
+}
+
 pub(crate) struct SessionServices {
     /// The single owner of live MCP connections for this thread.
     pub(crate) mcp_runtime: Arc<McpRuntime>,
+    /// Frozen parent tool definitions used by a fork's first model step.
+    pub(crate) mcp_tool_snapshot: Mutex<Option<McpToolSnapshot>>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,
     #[cfg_attr(not(unix), allow(dead_code))]
