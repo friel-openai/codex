@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -9,6 +10,7 @@ use codex_api::SharedAuthProvider;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
 use codex_model_provider_info::ModelProviderInfo;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::OpenAiModelsManager;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_models_manager::manager::StaticModelsManager;
@@ -176,6 +178,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager;
 }
 
@@ -284,21 +287,24 @@ impl ModelProvider for ConfiguredModelProvider {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
         match config_model_catalog {
-            Some(model_catalog) => Arc::new(StaticModelsManager::new(
+            Some(model_catalog) => Arc::new(StaticModelsManager::new_with_custom_models(
                 self.auth_manager.clone(),
                 model_catalog,
+                custom_models,
             )),
             None => {
                 let endpoint = Arc::new(OpenAiModelsEndpoint::new(
                     self.info.clone(),
                     self.auth_manager.clone(),
                 ));
-                Arc::new(OpenAiModelsManager::new(
+                Arc::new(OpenAiModelsManager::new_with_custom_models(
                     codex_home,
                     endpoint,
                     self.auth_manager.clone(),
+                    custom_models,
                 ))
             }
         }
@@ -589,8 +595,11 @@ mod tests {
             ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
             /*auth_manager*/ None,
         );
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let manager = provider.models_manager(
+            test_codex_home(),
+            /*config_model_catalog*/ None,
+            Default::default(),
+        );
 
         let catalog = manager.raw_model_catalog(RefreshStrategy::Online).await;
         let model_ids = catalog
@@ -631,6 +640,7 @@ mod tests {
             Some(ModelsResponse {
                 models: vec![configured_model],
             }),
+            Default::default(),
         );
 
         let catalog = manager.raw_model_catalog(RefreshStrategy::Online).await;
@@ -673,8 +683,11 @@ mod tests {
             )),
         );
 
-        let manager =
-            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
+        let manager = provider.models_manager(
+            test_codex_home(),
+            /*config_model_catalog*/ None,
+            Default::default(),
+        );
         let catalog = manager.raw_model_catalog(RefreshStrategy::Online).await;
 
         assert!(
