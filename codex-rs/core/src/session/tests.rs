@@ -2279,11 +2279,11 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, history_before_seed.raw_items());
 
+    let initial_context = build_initial_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await;
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
     assert_eq!(
@@ -5666,6 +5666,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
@@ -7835,6 +7836,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
@@ -9131,14 +9133,13 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
             /*reference_context_item*/ None,
         )
         .await;
-
+    let initial_context = build_initial_context(&session, &turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await;
 
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected_history.extend(initial_context);
     assert_eq!(
         strip_response_item_ids(history.raw_items()),
@@ -10117,6 +10118,138 @@ async fn task_finish_continues_late_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_steer_continues_before_thread_idle_lifecycle() {
+    struct OrderingTask {
+        final_pending_input_check_reached: Arc<tokio::sync::Notify>,
+        allow_initial_run_to_finish: Arc<tokio::sync::Notify>,
+        continuation_started: Arc<tokio::sync::Notify>,
+        allow_continuation_to_finish: Arc<tokio::sync::Notify>,
+    }
+
+    impl SessionTask for OrderingTask {
+        fn kind(&self) -> TaskKind {
+            TaskKind::Regular
+        }
+
+        fn span_name(&self) -> &'static str {
+            "session_task.pending_input_idle_ordering"
+        }
+
+        async fn run(
+            self: Arc<Self>,
+            session: Arc<SessionTaskContext>,
+            _ctx: Arc<TurnContext>,
+            _input: Vec<TurnInput>,
+            _cancellation_token: CancellationToken,
+        ) -> SessionTaskResult {
+            let session = session.clone_session();
+            assert!(
+                !session
+                    .input_queue
+                    .has_pending_input(&session.active_turn)
+                    .await
+            );
+            self.final_pending_input_check_reached.notify_one();
+            self.allow_initial_run_to_finish.notified().await;
+            Ok(None)
+        }
+
+        fn supports_pending_input_continuation(&self) -> bool {
+            true
+        }
+
+        async fn run_pending_input_continuation(
+            self: Arc<Self>,
+            session: Arc<SessionTaskContext>,
+            _ctx: Arc<TurnContext>,
+            _cancellation_token: CancellationToken,
+        ) -> SessionTaskResult {
+            let session = session.clone_session();
+            let pending_input = session
+                .input_queue
+                .get_pending_input(&session.active_turn)
+                .await;
+            assert_eq!(1, pending_input.len());
+            self.continuation_started.notify_one();
+            self.allow_continuation_to_finish.notified().await;
+            Ok(None)
+        }
+    }
+
+    struct ThreadIdleRecorder {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        idle_tx: async_channel::Sender<()>,
+    }
+
+    impl codex_extension_api::ThreadLifecycleContributor<crate::config::Config> for ThreadIdleRecorder {
+        fn on_thread_idle<'a>(
+            &'a self,
+            _input: codex_extension_api::ThreadIdleInput<'a>,
+        ) -> codex_extension_api::ExtensionFuture<'a, ()> {
+            Box::pin(async move {
+                self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                self.idle_tx.send(()).await.expect("idle receiver open");
+            })
+        }
+    }
+
+    let (mut session, turn_context) = make_session_and_context().await;
+    let idle_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (idle_tx, idle_rx) = async_channel::bounded(1);
+    let mut builder = codex_extension_api::ExtensionRegistryBuilder::<crate::config::Config>::new();
+    builder.thread_lifecycle_contributor(Arc::new(ThreadIdleRecorder {
+        calls: Arc::clone(&idle_calls),
+        idle_tx,
+    }));
+    session.services.extensions = Arc::new(builder.build());
+
+    let final_pending_input_check_reached = Arc::new(tokio::sync::Notify::new());
+    let allow_initial_run_to_finish = Arc::new(tokio::sync::Notify::new());
+    let continuation_started = Arc::new(tokio::sync::Notify::new());
+    let allow_continuation_to_finish = Arc::new(tokio::sync::Notify::new());
+    let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context);
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            OrderingTask {
+                final_pending_input_check_reached: Arc::clone(&final_pending_input_check_reached),
+                allow_initial_run_to_finish: Arc::clone(&allow_initial_run_to_finish),
+                continuation_started: Arc::clone(&continuation_started),
+                allow_continuation_to_finish: Arc::clone(&allow_continuation_to_finish),
+            },
+        )
+        .await;
+    final_pending_input_check_reached.notified().await;
+    session
+        .steer_input(
+            vec![UserInput::Text {
+                text: "late steer before supervisor".to_string(),
+                text_elements: Vec::new(),
+            }],
+            /*additional_context*/ Default::default(),
+            Some(&turn_context.sub_id),
+            /*client_user_message_id*/ None,
+            /*responsesapi_client_metadata*/ None,
+        )
+        .await
+        .expect("late steer should be accepted");
+    allow_initial_run_to_finish.notify_one();
+
+    continuation_started.notified().await;
+    assert_eq!(0, idle_calls.load(std::sync::atomic::Ordering::SeqCst));
+    allow_continuation_to_finish.notify_one();
+    timeout(StdDuration::from_secs(2), idle_rx.recv())
+        .await
+        .expect("thread idle lifecycle")
+        .expect("idle receiver open");
+
+    assert_eq!(1, idle_calls.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn task_finish_emits_thread_idle_lifecycle_after_active_turn_clears() {
     struct ThreadIdleRecorder {
         calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -10165,7 +10298,7 @@ async fn task_finish_emits_thread_idle_lifecycle_after_active_turn_clears() {
 }
 
 #[tokio::test]
-async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
+async fn thread_idle_lifecycle_waits_for_queue_only_sleep_wake() {
     struct ThreadIdleRecorder {
         calls: Arc<std::sync::atomic::AtomicUsize>,
     }
@@ -10189,19 +10322,82 @@ async fn thread_idle_lifecycle_waits_for_trigger_turn_mailbox_work() {
     }));
     session.services.extensions = Arc::new(builder.build());
     session
+        .services
+        .thread_extension_data
+        .insert(codex_extension_items::sleep::SleepItem {
+            id: "durable-sleep".to_string(),
+            duration_ms: 60_000,
+        });
+    session
         .input_queue
         .enqueue_mailbox_communication(InterAgentCommunication::new(
             AgentPath::root(),
             AgentPath::root(),
             Vec::new(),
-            "pending trigger".to_string(),
-            /*trigger_turn*/ true,
+            "queue-only update".to_string(),
+            /*trigger_turn*/ false,
         ))
         .await;
 
     session.emit_thread_idle_lifecycle_if_idle().await;
 
     assert_eq!(0, calls.load(std::sync::atomic::Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn pending_turn_start_work_does_not_wake_capacity_limited_v2_subagent() {
+    let (session, _turn_context) = make_session_and_context().await;
+    session
+        .services
+        .thread_extension_data
+        .insert(codex_extension_items::sleep::SleepItem {
+            id: "durable-sleep".to_string(),
+            duration_ms: 60_000,
+        });
+    session
+        .input_queue
+        .enqueue_mailbox_communication(InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root(),
+            Vec::new(),
+            "queue-only update".to_string(),
+            /*trigger_turn*/ false,
+        ))
+        .await;
+
+    assert!(
+        session.has_pending_turn_start_work().await,
+        "queue-only mail should wake a sleeping root"
+    );
+
+    {
+        let mut state = session.state.lock().await;
+        state.session_configuration.session_source =
+            codex_protocol::protocol::SessionSource::SubAgent(
+                codex_protocol::protocol::SubAgentSource::Other("worker".to_string()),
+            );
+    }
+    session.set_multi_agent_version_if_unset(MultiAgentVersion::V2);
+
+    assert!(
+        !session.has_pending_turn_start_work().await,
+        "queue-only mail must not bypass V2 subagent execution capacity"
+    );
+
+    session
+        .input_queue
+        .enqueue_mailbox_communication(InterAgentCommunication::new(
+            AgentPath::root(),
+            AgentPath::root(),
+            Vec::new(),
+            "trigger update".to_string(),
+            /*trigger_turn*/ true,
+        ))
+        .await;
+    assert!(
+        session.has_pending_turn_start_work().await,
+        "trigger-turn mail remains eligible for capacity-aware startup"
+    );
 }
 
 #[tokio::test]
@@ -11418,8 +11614,6 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 
     assert!(prompt.contains("# You are a Subagent"));
     assert!(prompt.contains("## Subagent Responsibilities"));
-    assert!(!prompt.contains("You are also a **watchdog**"));
-    assert!(!prompt.contains("watchdog.snooze"));
 }
 
 #[tokio::test]
@@ -11434,6 +11628,12 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     )
     .await
     .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.supervisor.md"),
+        "custom supervisor",
+    )
+    .await
+    .expect("write supervisor override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -11442,6 +11642,10 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     assert_eq!(
         load_subagent_prompt(codex_home.path()).await,
         "custom subagent"
+    );
+    assert_eq!(
+        load_supervisor_agent_prompt(codex_home.path()).await,
+        "custom supervisor"
     );
 }
 
