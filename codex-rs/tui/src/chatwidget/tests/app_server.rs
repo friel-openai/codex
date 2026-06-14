@@ -3,6 +3,9 @@ use codex_app_server_protocol::RawResponseItemCompletedNotification;
 use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_protocol::AgentPath;
+use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::RolloutItem;
 use pretty_assertions::assert_eq;
@@ -459,6 +462,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -478,6 +483,8 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -546,19 +553,18 @@ async fn sub_agent_activity_renders_only_on_completion() {
 #[tokio::test]
 async fn live_app_server_inter_agent_message_renders_agent_message_cell() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
-    let communication = InterAgentCommunication::new(
-        AgentPath::try_from("/root/worker").expect("valid agent path"),
-        AgentPath::root(),
-        Vec::new(),
-        "ready for review".to_string(),
-        /*trigger_turn*/ true,
-    );
 
     chat.handle_server_notification(
-        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
             thread_id: "thread-1".to_string(),
             turn_id: "turn-1".to_string(),
-            item: communication.to_response_input_item().into(),
+            item: AppServerThreadItem::AgentMessage {
+                id: "supervisor-message".to_string(),
+                text: "Agent message: ready for review from /root/goal_supervisor".to_string(),
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            },
         }),
         /*replay_kind*/ None,
     );
@@ -1110,6 +1116,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1133,6 +1141,8 @@ async fn live_app_server_collab_wait_items_render_history() {
                     receiver_thread_id.to_string(),
                     other_receiver_thread_id.to_string(),
                 ],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1184,6 +1194,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::InProgress,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -1204,6 +1216,8 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
                 status: AppServerCollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender_thread_id.to_string(),
                 receiver_thread_ids: vec![spawned_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("Explore the repo".to_string()),
                 model: Some("gpt-5".to_string()),
                 reasoning_effort: Some(ReasoningEffortConfig::High),
@@ -1227,6 +1241,525 @@ async fn live_app_server_collab_spawn_completed_renders_requested_model_and_effo
     assert_chatwidget_snapshot!(
         "app_server_collab_spawn_completed_renders_requested_model_and_effort",
         combined
+    );
+}
+
+#[tokio::test]
+async fn subagent_panel_hides_goal_supervisor_spawn() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let supervisor_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        supervisor_thread_id,
+        Some("goal-supervisor".to_string()),
+        Some("goal_supervisor".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-goal-supervisor".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                prompt: Some(
+                    "Supervise the active goal and continue the parent only when useful."
+                        .to_string(),
+                ),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::High),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!("subagent_panel_hides_goal_supervisor_spawn", screen);
+}
+
+#[tokio::test]
+async fn live_supervisor_spawn_metadata_does_not_render_panel_without_thread_started() {
+    // Goal supervisor helpers are internal check-ins. Even if the app-server sends their metadata
+    // before ThreadStarted, the live subagent panel must not expose them as user-selectable work.
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001022").expect("valid thread id");
+    let supervisor_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001023").expect("valid thread id");
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-supervisor-with-metadata".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: Some("Goal supervisor".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
+                prompt: Some(
+                    "Inspect the goal and decide whether to continue the parent.".to_string(),
+                ),
+                model: Some("gpt-5.4-ultrafast".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "live_supervisor_spawn_metadata_renders_history_without_thread_started",
+        inserted
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "live_supervisor_spawn_metadata_does_not_render_panel_without_thread_started",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn subagent_panel_hides_goal_supervisor_after_late_metadata() {
+    // Regression guard for the live TUI race observed in May 2026: the spawn completion can reach
+    // the chat widget before ThreadStarted supplies role metadata. Once goal_supervisor metadata
+    // arrives, the internal helper must disappear from the subagent panel.
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001012").expect("valid thread id");
+    let supervisor_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001013").expect("valid thread id");
+
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-supervisor-before-metadata".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                prompt: Some(
+                    "Inspect the goal and decide whether to continue the parent.".to_string(),
+                ),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    chat.set_collab_agent_metadata(
+        supervisor_thread_id,
+        Some("Goal supervisor".to_string()),
+        Some("goal_supervisor".to_string()),
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "subagent_panel_hides_goal_supervisor_after_late_metadata",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn subagent_notification_completion_hides_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let worker_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        worker_thread_id,
+        Some("Calculator".to_string()),
+        Some("worker".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-worker".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![worker_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                prompt: Some("Compute the answer.".to_string()),
+                model: Some("gpt-5.4".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    worker_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Running,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": worker_thread_id.to_string(),
+            "status": AgentStatus::Completed(Some("4037913".to_string())),
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/calculator").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert!(!screen.contains("Subagents"));
+    assert!(!screen.contains("Calculator"));
+    assert!(!screen.contains("<subagent_notification>"));
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(inserted.contains("Agent message: 4037913"));
+    assert!(!inserted.contains("<subagent_notification>"));
+    assert_chatwidget_snapshot!(
+        "subagent_notification_completion_hides_subagent_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn supervisor_goodbye_message_does_not_show_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let supervisor_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        supervisor_thread_id,
+        Some("Goal supervisor".to_string()),
+        Some("goal_supervisor".to_string()),
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "spawn-goal-supervisor".to_string(),
+                tool: AppServerCollabAgentTool::SpawnAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                prompt: Some(
+                    "Inspect the goal and decide whether to continue the parent.".to_string(),
+                ),
+                model: Some("arcanine 1m".to_string()),
+                reasoning_effort: Some(ReasoningEffortConfig::Low),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
+    );
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+    chat.handle_server_notification(
+        ServerNotification::ItemCompleted(ItemCompletedNotification {
+            completed_at_ms: 0,
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: AppServerThreadItem::CollabAgentToolCall {
+                id: "supervisor-close".to_string(),
+                tool: AppServerCollabAgentTool::CloseAgent,
+                status: AppServerCollabAgentToolCallStatus::Completed,
+                sender_thread_id: sender_thread_id.to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
+                prompt: None,
+                model: None,
+                reasoning_effort: None,
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    AppServerCollabAgentState {
+                        status: AppServerCollabAgentStatus::Completed,
+                        message: Some("goodbye".to_string()),
+                    },
+                )]),
+            },
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let inserted = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("supervisor_goodbye_message_inserts_close_history", inserted);
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "supervisor_goodbye_message_does_not_show_subagent_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn resume_replay_does_not_resurrect_closed_supervisor_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001002").expect("valid thread id");
+    let supervisor_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001003").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        supervisor_thread_id,
+        Some("Goal supervisor".to_string()),
+        Some("goal_supervisor".to_string()),
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/goal_supervisor").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "goodbye".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let turns = build_turns_from_rollout_items(&[
+        RolloutItem::EventMsg(EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-goal-supervisor".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(supervisor_thread_id),
+            new_agent_nickname: Some("Goal supervisor".to_string()),
+            new_agent_role: Some("goal_supervisor".to_string()),
+            prompt: "Inspect the goal and decide whether to continue the parent.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Low,
+            status: AgentStatus::PendingInit,
+            completed_at_ms: 0,
+        })),
+        RolloutItem::InterAgentCommunication(communication),
+        RolloutItem::EventMsg(EventMsg::CollabCloseEnd(CollabCloseEndEvent {
+            call_id: "supervisor-close".to_string(),
+            sender_thread_id,
+            receiver_thread_id: supervisor_thread_id,
+            receiver_agent_nickname: Some("Goal supervisor".to_string()),
+            receiver_agent_role: Some("goal_supervisor".to_string()),
+            status: AgentStatus::Completed(Some("goodbye".to_string())),
+            completed_at_ms: 0,
+        })),
+    ]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let replayed_history = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "resume_replay_closed_supervisor_history_cells",
+        replayed_history
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "resume_replay_does_not_resurrect_closed_supervisor_panel_row",
+        screen
+    );
+}
+
+#[tokio::test]
+async fn resume_replay_does_not_resurrect_open_subagent_panel_row() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let sender_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001012").expect("valid thread id");
+    let subagent_thread_id =
+        ThreadId::from_string("019cff70-2599-75e2-af72-b90000001013").expect("valid thread id");
+
+    chat.set_collab_agent_metadata(
+        subagent_thread_id,
+        Some("Avicenna".to_string()),
+        Some("fast-worker".to_string()),
+    );
+    let turns = build_turns_from_rollout_items(&[RolloutItem::EventMsg(
+        EventMsg::CollabAgentSpawnEnd(CollabAgentSpawnEndEvent {
+            call_id: "spawn-subagent".to_string(),
+            sender_thread_id,
+            new_thread_id: Some(subagent_thread_id),
+            new_agent_nickname: Some("Avicenna".to_string()),
+            new_agent_role: Some("fast-worker".to_string()),
+            prompt: "Compute the exact value.".to_string(),
+            model: "arcanine 1m".to_string(),
+            reasoning_effort: ReasoningEffortConfig::Medium,
+            status: AgentStatus::Running,
+            completed_at_ms: 0,
+        }),
+    )]);
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let replayed_history = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!(
+        "resume_replay_open_subagent_history_cells",
+        replayed_history
+    );
+
+    let width = 140;
+    let height = chat.desired_height(width);
+    let mut terminal =
+        crate::custom_terminal::Terminal::with_options(VT100Backend::new(width, height))
+            .expect("create terminal");
+    terminal.set_viewport_area(ratatui::prelude::Rect::new(0, 0, width, height));
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("render chat widget");
+    let screen = normalized_backend_snapshot(terminal.backend());
+
+    assert_chatwidget_snapshot!(
+        "resume_replay_does_not_resurrect_open_subagent_panel_row",
+        screen
     );
 }
 

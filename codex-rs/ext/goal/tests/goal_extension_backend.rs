@@ -1,5 +1,5 @@
-#![recursion_limit = "256"]
 #![allow(clippy::expect_used)]
+#![recursion_limit = "256"]
 
 use codex_utils_absolute_path::test_support::PathExt;
 use std::sync::Arc;
@@ -24,6 +24,7 @@ use codex_extension_api::ToolCallSource;
 use codex_extension_api::ToolExecutor;
 use codex_extension_api::ToolFinishInput;
 use codex_extension_api::ToolPayload;
+use codex_extension_api::ToolSpec;
 use codex_extension_api::TurnErrorInput;
 use codex_extension_api::TurnStartInput;
 use codex_extension_api::TurnStopInput;
@@ -63,7 +64,6 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
         "call-create-goal",
         json!({
             "objective": "ship goal extension backend",
-            "token_budget": 123,
         }),
     );
     let output = create_tool.handle(invocation.clone()).await?;
@@ -75,14 +75,11 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
                 "threadId": thread_id,
                 "objective": "ship goal extension backend",
                 "status": "active",
-                "tokenBudget": 123,
                 "tokensUsed": 0,
                 "timeUsedSeconds": 0,
                 "createdAt": result["goal"]["createdAt"],
                 "updatedAt": result["goal"]["updatedAt"],
             },
-            "remainingTokens": 123,
-            "completionBudgetReport": serde_json::Value::Null,
         })
     );
 
@@ -93,6 +90,178 @@ async fn installed_goal_tools_create_goal_and_fill_empty_preview() -> anyhow::Re
     assert_eq!(
         metadata.preview.as_deref(),
         Some("ship goal extension backend")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn installed_goal_tools_accept_full_sixteen_thousand_character_objective()
+-> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let tools = installed_tools(runtime.clone(), thread_id).await;
+    let tail = "FULL_OBJECTIVE_TAIL_9F3A";
+    let objective = format!("{}{}", "x".repeat(16_000 - tail.len()), tail);
+    let create_tool = tool_by_name(&tools, "create_goal");
+
+    let oversized = create_tool
+        .handle(tool_call(
+            "create_goal",
+            "call-create-oversized-goal",
+            json!({ "objective": "x".repeat(16_001) }),
+        ))
+        .await;
+    let Err(FunctionCallError::RespondToModel(message)) = oversized else {
+        anyhow::bail!("expected create_goal to reject an oversized objective");
+    };
+    assert_eq!("goal objective must be at most 16000 characters", message);
+    assert!(
+        runtime
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await?
+            .is_none()
+    );
+
+    let invocation = tool_call(
+        "create_goal",
+        "call-create-long-goal",
+        json!({ "objective": objective.clone() }),
+    );
+    let output = create_tool.handle(invocation.clone()).await?;
+    let result = output.code_mode_result(&invocation.payload);
+    assert_eq!(result["goal"]["objective"], objective);
+    assert!(
+        result["goal"]["objective"]
+            .as_str()
+            .is_some_and(|value| value.ends_with(tail))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn installed_goal_tools_hide_and_reject_token_budget() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let tools = installed_tools(runtime.clone(), thread_id).await;
+    let create_tool = tool_by_name(&tools, "create_goal");
+
+    let ToolSpec::Function(spec) = create_tool.spec() else {
+        anyhow::bail!("create_goal should be a function tool");
+    };
+    let properties = spec
+        .parameters
+        .properties
+        .expect("create_goal parameters should expose properties");
+    assert!(properties.contains_key("objective"));
+    assert!(!properties.contains_key("token_budget"));
+
+    for (call_id, token_budget) in [
+        ("call-create-goal-budget", json!(123)),
+        ("call-create-goal-null-budget", json!(null)),
+    ] {
+        let result = create_tool
+            .handle(tool_call(
+                "create_goal",
+                call_id,
+                json!({
+                    "objective": "ship goal extension backend",
+                    "token_budget": token_budget,
+                }),
+            ))
+            .await;
+        let Err(FunctionCallError::RespondToModel(message)) = result else {
+            anyhow::bail!("expected create_goal to reject a token budget");
+        };
+        assert_eq!("goal token budgets are disabled in Frodex", message);
+        assert!(
+            runtime
+                .thread_goals()
+                .get_thread_goal(thread_id)
+                .await?
+                .is_none()
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn installed_get_goal_reads_legacy_budget() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    runtime
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "finish legacy budgeted work",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ Some(123),
+        )
+        .await?;
+    let tools = installed_tools(runtime, thread_id).await;
+    let get_tool = tool_by_name(&tools, "get_goal");
+    let invocation = tool_call("get_goal", "call-get-goal", json!({}));
+
+    let output = get_tool.handle(invocation.clone()).await?;
+    let result = output.code_mode_result(&invocation.payload);
+    assert_eq!(
+        result,
+        json!({
+            "goal": {
+                "threadId": thread_id,
+                "objective": "finish legacy budgeted work",
+                "status": "active",
+                "tokenBudget": 123,
+                "tokensUsed": 0,
+                "timeUsedSeconds": 0,
+                "createdAt": result["goal"]["createdAt"],
+                "updatedAt": result["goal"]["updatedAt"],
+            },
+            "remainingTokens": 123,
+        })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn completed_unbudgeted_goal_omits_budget_output_fields() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let tools = installed_tools(runtime, thread_id).await;
+
+    tool_by_name(&tools, "create_goal")
+        .handle(tool_call(
+            "create_goal",
+            "call-create-goal",
+            json!({ "objective": "finish without a token budget" }),
+        ))
+        .await?;
+    let update_tool = tool_by_name(&tools, "update_goal");
+    let invocation = tool_call(
+        "update_goal",
+        "call-complete-goal",
+        json!({ "status": "complete" }),
+    );
+
+    let output = update_tool.handle(invocation.clone()).await?;
+    let result = output.code_mode_result(&invocation.payload);
+    assert_eq!(
+        result,
+        json!({
+            "goal": {
+                "threadId": thread_id,
+                "objective": "finish without a token budget",
+                "status": "complete",
+                "tokensUsed": 0,
+                "timeUsedSeconds": 0,
+                "createdAt": result["goal"]["createdAt"],
+                "updatedAt": result["goal"]["updatedAt"],
+            },
+        })
     );
     Ok(())
 }
@@ -126,6 +295,32 @@ async fn goal_tools_hidden_for_review_subagents() -> anyhow::Result<()> {
     .await;
 
     assert_eq!(Vec::<String>::new(), tool_names(&tools));
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_tools_hidden_for_spawned_subagents() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    let tools = installed_tools_with_start(
+        Arc::clone(&runtime),
+        thread_id,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        /*persistent_thread_state_available*/ true,
+    )
+    .await;
+
+    assert_eq!(Vec::<String>::new(), tool_names(&tools));
+    assert_eq!(
+        None,
+        runtime.thread_goals().get_thread_goal(thread_id).await?
+    );
     Ok(())
 }
 
@@ -367,18 +562,13 @@ async fn budget_limited_goal_keeps_accruing_until_turn_stop() -> anyhow::Result<
     let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
     harness.start_turn("turn-1", &TokenUsage::default()).await;
 
-    let tools = harness.tools();
-    let create_tool = tool_by_name(&tools, "create_goal");
-    create_tool
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({
-                "objective": "ship goal extension backend",
-                "token_budget": 25,
-            }),
-        ))
-        .await?;
+    seed_legacy_budgeted_active_goal(
+        runtime.as_ref(),
+        &harness,
+        thread_id,
+        /*token_budget*/ 25,
+    )
+    .await?;
     harness.sink.clear();
 
     harness
@@ -443,18 +633,13 @@ async fn budget_limited_goal_keeps_accounting_after_later_tool_finish() -> anyho
     let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
     harness.start_turn("turn-1", &TokenUsage::default()).await;
 
-    let tools = harness.tools();
-    let create_tool = tool_by_name(&tools, "create_goal");
-    create_tool
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({
-                "objective": "ship goal extension backend",
-                "token_budget": 25,
-            }),
-        ))
-        .await?;
+    seed_legacy_budgeted_active_goal(
+        runtime.as_ref(),
+        &harness,
+        thread_id,
+        /*token_budget*/ 25,
+    )
+    .await?;
 
     harness
         .record_token_usage(
@@ -613,18 +798,13 @@ async fn usage_limit_budget_limited_goal_accounts_remaining_progress() -> anyhow
     let harness = GoalExtensionHarness::new(runtime.clone(), thread_id).await?;
     harness.start_turn("turn-1", &TokenUsage::default()).await;
 
-    let tools = harness.tools();
-    let create_tool = tool_by_name(&tools, "create_goal");
-    create_tool
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({
-                "objective": "ship goal extension backend",
-                "token_budget": 25,
-            }),
-        ))
-        .await?;
+    seed_legacy_budgeted_active_goal(
+        runtime.as_ref(),
+        &harness,
+        thread_id,
+        /*token_budget*/ 25,
+    )
+    .await?;
 
     harness
         .record_token_usage(
@@ -807,8 +987,6 @@ async fn update_goal_can_block_and_accounts_final_progress() -> anyhow::Result<(
                 "createdAt": result["goal"]["createdAt"],
                 "updatedAt": result["goal"]["updatedAt"],
             },
-            "remainingTokens": serde_json::Value::Null,
-            "completionBudgetReport": serde_json::Value::Null,
         })
     );
 
@@ -1055,7 +1233,7 @@ async fn thread_resume_rehydrates_active_goal_idle_accounting() -> anyhow::Resul
 }
 
 #[tokio::test]
-async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
+async fn goal_service_sets_gets_and_clears_thread_goal_without_budget() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
@@ -1068,7 +1246,7 @@ async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
                 thread_id,
                 objective: GoalObjectiveUpdate::Set(" ship goal API ownership "),
                 status: None,
-                token_budget: GoalTokenBudgetUpdate::Set(Some(123)),
+                token_budget: GoalTokenBudgetUpdate::Keep,
             },
         )
         .await?;
@@ -1084,7 +1262,7 @@ async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
     assert_eq!(set.goal, get);
     assert_eq!("ship goal API ownership", get.objective);
     assert_eq!(ThreadGoalStatus::Active, get.status);
-    assert_eq!(Some(123), get.token_budget);
+    assert_eq!(None, get.token_budget);
     assert_eq!(Some("ship goal API ownership"), metadata.preview.as_deref());
 
     assert!(api.clear_thread_goal(runtime.as_ref(), thread_id).await?);
@@ -1093,6 +1271,102 @@ async fn goal_service_sets_gets_and_clears_thread_goal() -> anyhow::Result<()> {
         api.get_thread_goal(runtime.as_ref(), thread_id).await?
     );
     assert!(!api.clear_thread_goal(runtime.as_ref(), thread_id).await?);
+    Ok(())
+}
+
+#[tokio::test]
+async fn goal_service_rejects_new_budgets_and_clears_legacy_budget() -> anyhow::Result<()> {
+    let runtime = test_runtime().await?;
+    let thread_id = test_thread_id()?;
+    seed_thread_metadata(runtime.as_ref(), thread_id).await?;
+    let api = GoalService::new();
+
+    let error = api
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("ship goal API ownership"),
+                status: None,
+                token_budget: GoalTokenBudgetUpdate::Set(Some(123)),
+            },
+        )
+        .await
+        .expect_err("new token budgets should be rejected");
+    assert_eq!(
+        "thread goal token budgets are disabled in Frodex",
+        error.to_string()
+    );
+    assert!(
+        api.get_thread_goal(runtime.as_ref(), thread_id)
+            .await?
+            .is_none()
+    );
+
+    let error = api
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("ship goal API ownership"),
+                status: Some(ThreadGoalStatus::BudgetLimited),
+                token_budget: GoalTokenBudgetUpdate::Keep,
+            },
+        )
+        .await
+        .expect_err("budget-limited status should be rejected");
+    assert_eq!(
+        "thread goal budget-limited status is disabled in Frodex",
+        error.to_string()
+    );
+    assert!(
+        api.get_thread_goal(runtime.as_ref(), thread_id)
+            .await?
+            .is_none()
+    );
+
+    let legacy = runtime
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "ship legacy budget cleanup",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ Some(123),
+        )
+        .await?;
+    let preserved = api
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Set("ship legacy budget cleanup safely"),
+                status: None,
+                token_budget: GoalTokenBudgetUpdate::Keep,
+            },
+        )
+        .await?;
+    assert_eq!(Some(123), preserved.goal.token_budget);
+
+    let cleared = api
+        .set_thread_goal(
+            runtime.as_ref(),
+            GoalSetRequest {
+                thread_id,
+                objective: GoalObjectiveUpdate::Keep,
+                status: Some(ThreadGoalStatus::Active),
+                token_budget: GoalTokenBudgetUpdate::Set(None),
+            },
+        )
+        .await?;
+    let persisted = runtime
+        .thread_goals()
+        .get_thread_goal(thread_id)
+        .await?
+        .expect("legacy goal should remain persisted");
+    assert_eq!(legacy.goal_id, persisted.goal_id);
+    assert_eq!("ship legacy budget cleanup safely", cleared.goal.objective);
+    assert_eq!(ThreadGoalStatus::Active, cleared.goal.status);
+    assert_eq!(None, cleared.goal.token_budget);
     Ok(())
 }
 
@@ -1475,4 +1749,27 @@ fn protocol_status(status: codex_state::ThreadGoalStatus) -> ThreadGoalStatus {
         codex_state::ThreadGoalStatus::BudgetLimited => ThreadGoalStatus::BudgetLimited,
         codex_state::ThreadGoalStatus::Complete => ThreadGoalStatus::Complete,
     }
+}
+
+async fn seed_legacy_budgeted_active_goal(
+    runtime: &codex_state::StateRuntime,
+    harness: &GoalExtensionHarness,
+    thread_id: ThreadId,
+    token_budget: i64,
+) -> anyhow::Result<()> {
+    let goal = runtime
+        .thread_goals()
+        .insert_thread_goal(
+            thread_id,
+            "ship goal extension backend",
+            codex_state::ThreadGoalStatus::Active,
+            Some(token_budget),
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("legacy budgeted goal should be created"))?;
+    harness
+        .runtime_handle()
+        .apply_external_goal_set(goal, /*previous_goal*/ None)
+        .await
+        .map_err(anyhow::Error::msg)
 }
