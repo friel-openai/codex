@@ -1,0 +1,12 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+expression: replayed_history
+---
+• Spawned Goal supervisor [goal_supervisor] (arcanine 1m low)
+  └ Inspect the goal and decide whether to continue the parent.
+
+
+• Agent message: goodbye from /root/goal_supervisor
+
+
+• Closed Goal supervisor [goal_supervisor]
