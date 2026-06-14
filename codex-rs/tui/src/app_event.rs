@@ -227,7 +227,9 @@ pub(crate) enum AppEvent {
     DeleteCurrentThread,
 
     /// Fork the current session into a new thread.
-    ForkCurrentSession,
+    ForkCurrentSession {
+        placement: Option<ForkPanePlacement>,
+    },
 
     /// Request to exit the application.
     ///
@@ -1074,6 +1076,14 @@ pub(crate) struct PermissionProfileSelection {
     pub display_label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPanePlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    Float,
+}
 /// The exit strategy requested by the UI layer.
 ///
 /// Most user-initiated exits should use `ShutdownFirst` so core cleanup runs and the UI exits only
