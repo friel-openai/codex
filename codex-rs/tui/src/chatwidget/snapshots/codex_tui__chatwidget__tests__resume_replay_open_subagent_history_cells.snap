@@ -1,0 +1,7 @@
+---
+source: tui/src/chatwidget/tests/app_server.rs
+assertion_line: 1360
+expression: replayed_history
+---
+• Spawned Avicenna [fast-worker] (arcanine 1m medium)
+  └ Compute the exact value.

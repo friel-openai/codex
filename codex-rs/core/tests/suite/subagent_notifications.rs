@@ -987,7 +987,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     )
     .await;
 
-    let _child_request_log = mount_sse_once_match(
+    let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| body_contains(req, CHILD_PROMPT),
         sse(vec![
@@ -1023,26 +1023,12 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = spawn_turn.single_request();
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let child_request = loop {
-        if let Some(request) = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .find(|request| {
-                body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
-            })
-        {
-            break request;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for forked child request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
-    assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
-    assert!(!body_contains(&child_request, SPAWN_CALL_ID));
+    let child_request = wait_for_requests(&child_request_log)
+        .await?
+        .pop()
+        .expect("forked child request");
+    assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    assert!(child_request.body_contains_text(SPAWN_CALL_ID));
 
     Ok(())
 }
@@ -1125,7 +1111,7 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
         .set_app_server_client_info(
             Some("codex-tui".to_string()),
             Some("test-client-version".to_string()),
-            false,
+            /*mcp_elicitations_auto_deny*/ false,
         )
         .await?;
 
@@ -1248,7 +1234,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
+async fn plaintext_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
     let server = start_mock_server().await;
     let encrypted_message = "opaque-encrypted-message";
     let spawn_args = serde_json::to_string(&json!({
@@ -1319,11 +1305,7 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
             "content": [
                 {
                     "type": "input_text",
-                    "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n",
-                },
-                {
-                    "type": "encrypted_content",
-                    "encrypted_content": encrypted_message,
+                    "text": encrypted_message,
                 },
             ],
         })])

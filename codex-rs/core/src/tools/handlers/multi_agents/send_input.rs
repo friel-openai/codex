@@ -1,9 +1,11 @@
 use super::*;
+use crate::agent::control::AgentInputDelivery;
 use crate::agent::control::render_input_preview;
 use crate::tools::handlers::multi_agents_spec::create_send_input_tool_v1;
 use crate::turn_timing::now_unix_timestamp_ms;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
 use codex_tools::ToolSpec;
 
@@ -53,17 +55,12 @@ impl Handler {
             .services
             .agent_control
             .get_agent_metadata(receiver_thread_id);
-        if receiver_agent.is_some() {
-            let resume_config = build_agent_resume_config(turn.as_ref())?;
-            session
-                .services
-                .agent_control
-                .ensure_v2_agent_loaded(resume_config, receiver_thread_id)
-                .await
-                .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
-        }
+        let resume_config = receiver_agent
+            .as_ref()
+            .map(|_| build_agent_resume_config(turn.as_ref()))
+            .transpose()?;
         let receiver_agent = receiver_agent.unwrap_or_default();
-        if args.interrupt {
+        if args.interrupt && resume_config.is_none() {
             session
                 .services
                 .agent_control
@@ -86,7 +83,7 @@ impl Handler {
             .await;
         let agent_control = session.services.agent_control.clone();
         let sender_is_subagent = matches!(&turn.session_source, SessionSource::SubAgent(_));
-        let result = match (sender_is_subagent, message, items) {
+        let initial_operation = match (sender_is_subagent, message, items) {
             (true, Some(message), None) => {
                 let sender_path = turn
                     .session_source
@@ -101,22 +98,37 @@ impl Handler {
                     .agent_path
                     .clone()
                     .unwrap_or_else(|| fallback_agent_path(receiver_thread_id));
+                Op::InterAgentCommunication {
+                    communication: InterAgentCommunication::new(
+                        sender_path,
+                        receiver_path,
+                        Vec::new(),
+                        message,
+                        /*trigger_turn*/ true,
+                    ),
+                }
+            }
+            _ => input_items,
+        };
+        let result = match resume_config {
+            Some(resume_config) => {
+                let delivery = if args.interrupt {
+                    AgentInputDelivery::Interrupt
+                } else {
+                    AgentInputDelivery::Queue
+                };
                 agent_control
-                    .send_inter_agent_communication(
+                    .deliver_input_to_agent(
+                        resume_config,
                         receiver_thread_id,
-                        InterAgentCommunication::new(
-                            sender_path,
-                            receiver_path,
-                            Vec::new(),
-                            message,
-                            /*trigger_turn*/ true,
-                        ),
+                        initial_operation,
+                        delivery,
                     )
                     .await
             }
-            _ => {
+            None => {
                 agent_control
-                    .send_input(receiver_thread_id, input_items)
+                    .send_input(receiver_thread_id, initial_operation)
                     .await
             }
         }
