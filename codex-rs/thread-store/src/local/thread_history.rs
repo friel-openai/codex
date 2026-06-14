@@ -471,6 +471,8 @@ WHERE thread_id = ?
                 ..
             }
             | ThreadItem::HookPrompt { .. }
+            | ThreadItem::InterAgentCommunication { .. }
+            | ThreadItem::RawResponseItem { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
             | ThreadItem::CommandExecution { .. }
