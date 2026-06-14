@@ -337,6 +337,121 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
     })
 }
 
+pub fn create_supervisor_close_self_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "message".to_string(),
+        JsonSchema::string(Some(
+            "Optional final message sent to the parent agent before marking the goal complete."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_self".to_string(),
+        description: "Supervisor-only: mark the active goal complete, optionally send a final message to the parent agent, and end this supervisor check-in immediately."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "completed": {
+                    "type": "boolean",
+                    "description": "Whether the active goal was marked complete."
+                }
+            },
+            "required": ["completed"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_compact_parent_context_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Short reason why the parent thread should be compacted.".to_string(),
+            )),
+        ),
+        (
+            "evidence".to_string(),
+            JsonSchema::string(Some(
+                "Specific observation that the parent thread is idle or stuck.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Supervisor-only: request compaction for this supervisor helper's parent thread when it is idle and stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+pub fn create_supervisor_snooze_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "delay_seconds".to_string(),
+            JsonSchema::number(Some("Snooze delay in seconds.".to_string())),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Optional short reason for snoozing this check-in.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "snooze".to_string(),
+        description: "Supervisor-only: keep the active goal supervised, send no message for the current check-in, and wait before the next check-in."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ Some(vec!["delay_seconds".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "delay_seconds": {
+                    "type": "number",
+                    "description": "Effective snooze delay in seconds."
+                }
+            },
+            "required": ["delay_seconds"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Freeform(_)
+            | ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::WebSearch { .. } => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "supervisor".to_string(),
+        description: "Supervisor-only tools for active-goal lifecycle control.".to_string(),
+        tools,
+    })
+}
+
 pub fn create_interrupt_agent_tool_v2() -> ToolSpec {
     let properties = BTreeMap::from([(
         "target".to_string(),
