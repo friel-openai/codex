@@ -861,6 +861,42 @@ impl Session {
         .await
     }
 
+    /// Rebuilds request configuration after a tool changes the active thread's workspace.
+    ///
+    /// The refreshed context keeps state that belongs to the current user turn, including timing,
+    /// implicit skill invocation deduplication, and terminal error tracking. Filesystem-derived
+    /// configuration, environment selections, permissions, skills, extension attachments, and
+    /// request metadata come from the updated session configuration.
+    pub(crate) async fn refresh_active_turn_context(
+        &self,
+        current: &TurnContext,
+    ) -> Arc<TurnContext> {
+        let session_configuration = self.default_turn_configuration().await;
+        let refreshed = self
+            .new_turn_from_configuration(
+                current.sub_id.clone(),
+                session_configuration,
+                Some(current.final_output_json_schema.clone()),
+            )
+            .await;
+        let mut refreshed = Arc::try_unwrap(refreshed)
+            .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
+
+        crate::skills::preserve_implicit_skill_invocations(
+            current.extension_data.as_ref(),
+            refreshed.extension_data.as_ref(),
+        )
+        .await;
+        refreshed.trace_id = current.trace_id.clone();
+        refreshed.turn_timing_state = Arc::clone(&current.turn_timing_state);
+        refreshed.terminal_error = Arc::clone(&current.terminal_error);
+        refreshed.server_model_warning_emitted =
+            AtomicBool::new(current.server_model_warning_emitted.load(Ordering::Relaxed));
+        refreshed.model_verification_emitted =
+            AtomicBool::new(current.model_verification_emitted.load(Ordering::Relaxed));
+        Arc::new(refreshed)
+    }
+
     pub(crate) async fn new_startup_prewarm_turn_with_sub_id(
         &self,
         sub_id: String,
