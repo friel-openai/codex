@@ -1948,6 +1948,10 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
 
     runtime.block_on(async {
         let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
+        std::fs::write(
+            app.config.codex_home.join("config.toml"),
+            "[features.multi_agent_v2]\nenabled = false\n",
+        )?;
         let mut app_server =
             crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
         let root = app_server

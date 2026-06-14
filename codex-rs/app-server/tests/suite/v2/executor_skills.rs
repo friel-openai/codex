@@ -542,17 +542,7 @@ stream_max_retries = 0
             .as_str()
             .is_some_and(|contents| contents.contains(REFERENCE_MARKER))
     );
-    match scenario {
-        ExecutorSkillScenario::VisibleWithBudgetWarning => {
-            assert!(reference_output["next_cursor"].is_string());
-        }
-        ExecutorSkillScenario::ExplicitOnly
-        | ExecutorSkillScenario::RestrictedPermittedReference
-        | ExecutorSkillScenario::RestrictedDeniedReference
-        | ExecutorSkillScenario::RestrictedVisible => {
-            assert!(reference_output["next_cursor"].is_null());
-        }
-    }
+    assert!(reference_output["next_cursor"].is_string());
 
     Ok(())
 }

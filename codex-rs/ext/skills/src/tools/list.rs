@@ -33,6 +33,10 @@ const MAX_LIST_RESPONSE_BYTES: usize = 512 * 1024;
 const OVERSIZED_ENTRY_WARNING: &str =
     "Some skills were omitted because their metadata is too large.";
 
+#[cfg(test)]
+#[path = "list_tests.rs"]
+mod tests;
+
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ListArgs {
@@ -78,6 +82,8 @@ impl ToolExecutor<ToolCall> for ListTool {
     fn handle(&self, call: ToolCall) -> ToolExecutorFuture<'_> {
         Box::pin(async move {
             let args: ListArgs = parse_args(&call)?;
+            let response_byte_budget =
+                MAX_LIST_RESPONSE_BYTES.min((call.truncation_policy * 1.2).byte_budget());
             let catalog = self.context.catalog(&call.turn_id, args.authority).await;
             let mut omitted_oversized_entry = false;
             let skills = catalog
@@ -87,7 +93,9 @@ impl ToolExecutor<ToolCall> for ListTool {
                     entry.is_model_visible() && args.authority.matches(&entry.authority)
                 })
                 .filter_map(|entry| {
-                    let listed = listed_skill(entry).filter(single_entry_response_is_bounded);
+                    let listed = listed_skill(entry).filter(|skill| {
+                        single_entry_response_is_bounded(skill, response_byte_budget)
+                    });
                     omitted_oversized_entry |= listed.is_none();
                     listed
                 })
@@ -98,46 +106,56 @@ impl ToolExecutor<ToolCall> for ListTool {
                     "skills.list cursor is invalid".to_string(),
                 ));
             }
-            let mut warnings = if start == 0 {
+            let warnings = if start == 0 {
                 let mut warnings = catalog.warnings;
                 if omitted_oversized_entry {
-                    warnings.push(OVERSIZED_ENTRY_WARNING.to_string());
+                    warnings.insert(0, OVERSIZED_ENTRY_WARNING.to_string());
                 }
                 bounded_warnings(&warnings)
             } else {
                 Vec::new()
             };
-            let mut end = (start + MAX_SKILLS_PER_PAGE).min(skills.len());
-            loop {
-                let response = ListResponse {
-                    skills: skills[start..end].to_vec(),
-                    warnings: warnings.clone(),
-                    next_cursor: (end < skills.len()).then(|| pagination_cursor(&skills, end)),
-                };
-                if serialized_len(&response)? <= MAX_LIST_RESPONSE_BYTES {
-                    return skill_json_output(&response, args.authority);
-                }
-                if end.saturating_sub(start) > 1 {
-                    end -= 1;
-                } else if !warnings.is_empty() {
-                    warnings.clear();
-                } else {
-                    return Err(FunctionCallError::RespondToModel(
-                        "skill metadata is too large to list".to_string(),
-                    ));
-                }
-            }
+            let response = page_response(&skills, start, warnings, response_byte_budget)?;
+            skill_json_output(&response, args.authority)
         })
     }
 }
 
-fn single_entry_response_is_bounded(skill: &ListedSkill) -> bool {
+fn page_response(
+    skills: &[ListedSkill],
+    start: usize,
+    mut warnings: Vec<String>,
+    max_response_bytes: usize,
+) -> Result<ListResponse, FunctionCallError> {
+    let mut end = (start + MAX_SKILLS_PER_PAGE).min(skills.len());
+    loop {
+        let response = ListResponse {
+            skills: skills[start..end].to_vec(),
+            warnings: warnings.clone(),
+            next_cursor: (end < skills.len()).then(|| pagination_cursor(skills, end)),
+        };
+        if serialized_len(&response)? <= max_response_bytes {
+            return Ok(response);
+        }
+        if end.saturating_sub(start) > 1 {
+            end -= 1;
+        } else if !warnings.is_empty() {
+            warnings.pop();
+        } else {
+            return Err(FunctionCallError::RespondToModel(
+                "skill metadata is too large to list".to_string(),
+            ));
+        }
+    }
+}
+
+fn single_entry_response_is_bounded(skill: &ListedSkill, max_response_bytes: usize) -> bool {
     serialized_len(&ListResponse {
         skills: vec![skill.clone()],
         warnings: Vec::new(),
         next_cursor: Some(pagination_cursor(skill, usize::MAX)),
     })
-    .is_ok_and(|size| size <= MAX_LIST_RESPONSE_BYTES)
+    .is_ok_and(|size| size <= max_response_bytes)
 }
 
 fn listed_skill(entry: SkillCatalogEntry) -> Option<ListedSkill> {

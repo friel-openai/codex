@@ -1421,15 +1421,17 @@ async fn skills_list_only_returns_model_visible_bounded_metadata() -> TestResult
     let response = output
         .post_tool_use_response("call-1", &payload)
         .ok_or("skills.list should expose structured output")?;
-    let rendered_description = response["skills"][0]["description"]
-        .as_str()
-        .ok_or("skills.list response should include a description")?;
-
-    assert_eq!(response["skills"].as_array().map(Vec::len), Some(1));
+    assert_eq!(response["skills"].as_array().map(Vec::len), Some(0));
     assert_eq!(response["warnings"].as_array().map(Vec::len), Some(4));
+    assert_eq!(
+        response["warnings"][0],
+        "Some skills were omitted because their metadata is too large."
+    );
     assert_eq!(response["next_cursor"], serde_json::Value::Null);
-    assert_eq!(rendered_description, "x".repeat(1_021) + "...");
-    assert_ne!(rendered_description, description);
+    assert!(
+        serde_json::to_vec(&response)?.len()
+            <= (TruncationPolicy::Bytes(1_024) * 1.2).byte_budget()
+    );
 
     Ok(())
 }

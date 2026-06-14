@@ -1820,16 +1820,16 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let developer_texts = response_mock
         .single_request()
         .message_input_texts("developer");
-    assert!(developer_texts.iter().any(|text| {
+    assert!(
+        developer_texts
+            .iter()
+            .any(|text| text.contains("Proactive multi-agent delegation is active."))
+    );
+    assert!(!developer_texts.iter().any(|text| {
         text.contains(
             "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
         )
     }));
-    assert!(
-        !developer_texts
-            .iter()
-            .any(|text| text.contains("Proactive multi-agent delegation is active."))
-    );
 
     Ok(())
 }
@@ -1892,17 +1892,17 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let developer_texts = response_mock
         .single_request()
         .message_input_texts("developer");
-    assert!(developer_texts.iter().any(|text| {
-        text.contains(MULTI_AGENT_MODE_OPEN_TAG)
-            && text.contains(
-                "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
-            )
-    }));
     assert!(
-        !developer_texts
+        developer_texts
             .iter()
-            .any(|text| text.contains("Proactive multi-agent delegation is active."))
+            .any(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG)
+                && text.contains("Proactive multi-agent delegation is active."))
     );
+    assert!(!developer_texts.iter().any(|text| {
+        text.contains(
+            "Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents",
+        )
+    }));
 
     Ok(())
 }
@@ -3646,7 +3646,7 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
     })
     .await??;
     assert!(matches!(
-        &listed_child.source,
+        listed_child.source,
         codex_app_server_protocol::SessionSource::SubAgent(
             codex_protocol::protocol::SubAgentSource::ThreadSpawn {
                 agent_path: Some(_),
