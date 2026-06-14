@@ -2,7 +2,6 @@ use crate::config::MultiAgentV2Config;
 use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -46,18 +45,14 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
         return None;
     }
 
-    // A configured hint, including an empty string, defines a custom policy instead of an
-    // effort-derived built-in policy.
+    // A configured hint, including an empty string, replaces the Frodex proactive default.
     let multi_agent_mode = match &turn_context
         .config
         .multi_agent_v2
         .multi_agent_mode_hint_text
     {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.clone()),
-        None => match turn_context.effective_reasoning_effort() {
-            Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
-            _ => MultiAgentMode::ExplicitRequestOnly,
-        },
+        None => MultiAgentMode::Proactive,
     };
 
     match &turn_context.session_source {

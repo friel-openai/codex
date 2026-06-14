@@ -2322,7 +2322,10 @@ while True:
             .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}; failures={startup_failures:#?}"
     );
-    parent.thread.submit(text_input("parent seed").into()).await?;
+    parent
+        .thread
+        .submit(text_input("parent seed").into())
+        .await?;
     wait_for_turn_complete(parent.thread.as_ref()).await;
     parent
         .thread
@@ -2535,7 +2538,10 @@ async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key
     let parent = manager.start_thread(config).await?;
     let parent_thread_id = parent.thread_id;
     let parent_prompt_cache_key = parent.thread.codex.session.prompt_cache_key();
-    parent.thread.submit(text_input("parent seed").into()).await?;
+    parent
+        .thread
+        .submit(text_input("parent seed").into())
+        .await?;
     wait_for_turn_complete(parent.thread.as_ref()).await;
     parent
         .thread
@@ -3297,6 +3303,36 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
 }
 
 #[tokio::test]
+async fn thread_start_accepts_agents_max_threads_with_multi_agent_v2() {
+    let (_home, config) = test_config_with_cli_overrides(vec![(
+        "agents.max_threads".to_string(),
+        TomlValue::Integer(1),
+    )])
+    .await;
+    assert!(config.features.enabled(Feature::MultiAgentV2));
+    assert_eq!(
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(1), 2, Some(1))
+    );
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+
+    let root = manager
+        .start_thread(config)
+        .await
+        .expect("agents.max_threads should not block multi-agent v2 thread startup");
+    let _ = root.thread.submit(Op::Shutdown {}).await;
+}
+
+#[tokio::test]
 async fn spawn_agent_respects_max_threads_limit() {
     let max_threads = 1usize;
     let (_home, mut config) = test_config_with_cli_overrides(vec![(
@@ -3451,8 +3487,25 @@ async fn spawn_agent_limit_shared_across_clones() {
         .expect("shutdown agent");
 }
 
-#[tokio::test]
-async fn resume_agent_respects_max_threads_limit() {
+#[test]
+fn resume_agent_respects_max_threads_limit() {
+    let test_thread = std::thread::Builder::new()
+        .name("resume_agent_respects_max_threads_limit".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build test runtime")
+                .block_on(resume_agent_respects_max_threads_limit_inner())
+        })
+        .expect("spawn test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn resume_agent_respects_max_threads_limit_inner() {
     let max_threads = 1usize;
     let (_home, mut config) = test_config_with_cli_overrides(vec![(
         "agents.max_threads".to_string(),
@@ -3712,6 +3765,14 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         .get_thread(tester_thread_id)
         .await
         .expect("tester thread should exist");
+    let tester_turn = tester_thread.codex.session.new_default_turn().await;
+    assert_eq!(
+        tester_thread
+            .codex
+            .session
+            .resolve_multi_agent_version_for_model(&tester_turn.model_info, &tester_config),
+        MultiAgentVersion::V2,
+    );
     let worker_path = AgentPath::root().join("worker_a").expect("worker path");
     let tester_path = worker_path.join("tester").expect("tester path");
     harness.control.maybe_start_completion_watcher(
@@ -3726,7 +3787,6 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         tester_path.to_string(),
         Some(tester_path.clone()),
     );
-    let tester_turn = tester_thread.codex.session.new_default_turn().await;
     tester_thread
         .codex
         .session

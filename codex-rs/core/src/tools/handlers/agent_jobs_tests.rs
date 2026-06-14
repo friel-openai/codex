@@ -3,6 +3,23 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 #[test]
+fn agent_job_concurrency_defaults_to_the_agent_limit() {
+    assert_eq!(normalize_concurrency(/*requested*/ None, Some(256)), 256);
+    assert_eq!(normalize_concurrency(/*requested*/ None, Some(8)), 8);
+    assert_eq!(
+        normalize_concurrency(/*requested*/ None, /*max_threads*/ None),
+        256
+    );
+}
+
+#[test]
+fn agent_job_concurrency_respects_explicit_job_and_agent_limits() {
+    assert_eq!(normalize_concurrency(Some(4), Some(256)), 4);
+    assert_eq!(normalize_concurrency(Some(512), Some(256)), 256);
+    assert_eq!(normalize_concurrency(Some(512), Some(512)), 512);
+}
+
+#[test]
 fn parse_csv_supports_quotes_and_commas() {
     let input = "id,name\n1,\"alpha, beta\"\n2,gamma\n";
     let (headers, rows) = parse_csv(input).expect("csv parse");
