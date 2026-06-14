@@ -9,6 +9,7 @@ use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use codex_protocol::AgentPath;
+use codex_protocol::ThreadId;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]
@@ -48,7 +49,19 @@ async fn handle_spawn_agent(
     } = invocation;
     let arguments = function_arguments(payload)?;
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
-    let fork_mode = args.fork_mode()?;
+    if args.existing_thread_id.is_some() && !turn.config.multi_agent_v2.enable_thread_adoption {
+        return Err(FunctionCallError::RespondToModel(
+            "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
+                .to_string(),
+        ));
+    }
+    let is_adoption = args.existing_thread_id.is_some();
+    let fork_mode = if is_adoption {
+        args.validate_adoption_options()?;
+        None
+    } else {
+        args.fork_mode()?
+    };
     let role_name = args
         .agent_type
         .as_deref()
@@ -58,34 +71,39 @@ async fn handle_spawn_agent(
     let message = message_content(args.message)?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
-    let mut config =
-        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?;
-    if let Some(service_tier) = args.service_tier.as_ref() {
-        config.service_tier = Some(service_tier.clone());
-    }
+    let mut config = if is_adoption {
+        build_agent_resume_config(turn.as_ref())?
+    } else {
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?
+    };
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
-    if is_full_history_fork {
-        reject_full_fork_agent_type_override(role_name)?;
+    if !is_adoption {
+        if let Some(service_tier) = args.service_tier.as_ref() {
+            config.service_tier = Some(service_tier.clone());
+        }
+        if is_full_history_fork {
+            reject_full_fork_agent_type_override(role_name)?;
+        }
+        apply_requested_spawn_agent_model_overrides(
+            &session,
+            turn.as_ref(),
+            &mut config,
+            args.model.as_deref(),
+            args.reasoning_effort.clone(),
+        )
+        .await?;
+        if !is_full_history_fork {
+            apply_spawn_agent_role(&session, &mut config, role_name).await?;
+        }
+        apply_spawn_agent_service_tier(
+            &session,
+            &mut config,
+            turn.config.service_tier.as_deref(),
+            args.service_tier.as_deref(),
+        )
+        .await?;
+        apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     }
-    apply_requested_spawn_agent_model_overrides(
-        &session,
-        turn.as_ref(),
-        &mut config,
-        args.model.as_deref(),
-        args.reasoning_effort.clone(),
-    )
-    .await?;
-    if !is_full_history_fork {
-        apply_spawn_agent_role(&session, &mut config, role_name).await?;
-    }
-    apply_spawn_agent_service_tier(
-        &session,
-        &mut config,
-        turn.config.service_tier.as_deref(),
-        args.service_tier.as_deref(),
-    )
-    .await?;
-    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
 
     let spawn_source = thread_spawn_source(
         session.thread_id,
@@ -105,24 +123,41 @@ async fn handle_spawn_agent(
         .unwrap_or_else(AgentPath::root);
     let communication = communication_from_tool_message(author, new_agent_path.clone(), message);
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
-    let spawned_agent = Box::pin(
-        session
-            .services
-            .agent_control
-            .spawn_agent_with_communication(
-                config,
-                communication,
-                context,
-                Some(spawn_source),
-                SpawnAgentOptions {
-                    fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
-                    fork_mode,
-                    parent_thread_id: Some(session.thread_id),
-                    environments: Some(turn.environments.to_selections()),
-                },
-            ),
-    )
-    .await
+    let spawned_agent = if let Some(thread_id) = args.existing_thread_id {
+        Box::pin(
+            session
+                .services
+                .agent_control
+                .adopt_agent_with_communication(
+                    config,
+                    thread_id,
+                    communication,
+                    context,
+                    spawn_source,
+                ),
+        )
+        .await
+    } else {
+        Box::pin(
+            session
+                .services
+                .agent_control
+                .spawn_agent_with_communication(
+                    config,
+                    communication,
+                    context,
+                    Some(spawn_source),
+                    SpawnAgentOptions {
+                        fork_parent_spawn_call_id: fork_mode.as_ref().map(|_| call_id.clone()),
+                        fork_mode,
+                        parent_thread_id: Some(session.thread_id),
+                        environments: Some(turn.environments.to_selections()),
+                        initial_task_message: None,
+                    },
+                ),
+        )
+        .await
+    }
     .map_err(collab_spawn_error)?;
     let new_thread_id = spawned_agent.thread_id;
     let agent_snapshot = session
@@ -175,6 +210,7 @@ impl CoreToolRuntime for Handler {
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
+    existing_thread_id: Option<ThreadId>,
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
@@ -184,6 +220,22 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
+    fn validate_adoption_options(&self) -> Result<(), FunctionCallError> {
+        if self.fork_turns.is_some()
+            || self.fork_context.is_some()
+            || self.agent_type.is_some()
+            || self.model.is_some()
+            || self.reasoning_effort.is_some()
+            || self.service_tier.is_some()
+        {
+            return Err(FunctionCallError::RespondToModel(
+                "existing_thread_id cannot be combined with fork, agent type, model, reasoning effort, or service tier overrides".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+
     fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
