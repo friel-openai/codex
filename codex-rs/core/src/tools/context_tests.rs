@@ -6,6 +6,15 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 #[test]
+fn function_tool_output_can_end_turn_without_model_response() {
+    let output = FunctionToolOutput::from_text(String::new(), Some(true));
+    assert!(!output.terminal_no_response());
+
+    let output = output.into_terminal_no_response();
+    assert!(output.terminal_no_response());
+}
+
+#[test]
 fn custom_tool_calls_should_roundtrip_as_custom_outputs() {
     let payload = ToolPayload::Custom {
         input: "patch".to_string(),
