@@ -860,6 +860,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
             model_provider: "openai".to_string(),
             created_at: 0,
             updated_at: 0,
+            recency_at: Some(0),
             status: codex_app_server_protocol::ThreadStatus::Idle,
             path: Some(PathBuf::from("/tmp/fork-rollout.jsonl")),
             cwd: test_path_buf("/tmp").abs(),
