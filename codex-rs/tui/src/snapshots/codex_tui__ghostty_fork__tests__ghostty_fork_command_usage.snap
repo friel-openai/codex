@@ -1,0 +1,5 @@
+---
+source: tui/src/ghostty_fork_tests.rs
+expression: "ghostty_fork_usage(&terminal_info(TerminalName::Ghostty,\n/*multiplexer*/ None)).expect(\"Ghostty usage\")"
+---
+Usage: /fork [left|right|up|down] or /fork now [left|right|up|down]

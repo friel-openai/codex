@@ -703,6 +703,7 @@ pub(crate) struct ChatWidget {
     thread_name: Option<String>,
     thread_rename_block_message: Option<String>,
     active_side_conversation: bool,
+    standalone_side_conversation: bool,
     normal_placeholder_text: String,
     side_placeholder_text: String,
     forked_from: Option<ThreadId>,

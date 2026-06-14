@@ -90,6 +90,15 @@ impl TurnDiffTracker {
         tracker
     }
 
+    /// Replaces cwd-relative display roots without discarding changes already tracked this turn.
+    pub(crate) fn set_environment_display_roots(
+        &mut self,
+        display_roots: impl IntoIterator<Item = (String, PathBuf)>,
+    ) {
+        self.display_roots_by_environment = display_roots.into_iter().collect();
+        self.refresh_unified_diff();
+    }
+
     pub fn track_delta(&mut self, environment_id: &str, delta: &AppliedPatchDelta) {
         if !self.valid {
             return;
