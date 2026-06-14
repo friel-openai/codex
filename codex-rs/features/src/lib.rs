@@ -147,6 +147,8 @@ pub enum Feature {
     MultiAgentV2,
     /// Enable per-turn multi-agent mode selection.
     MultiAgentMode,
+    /// Enable root/subagent developer prompt injection.
+    AgentPromptInjection,
     /// Enable CSV-backed agent job tools.
     SpawnCsv,
     /// Enable apps.
@@ -1032,6 +1034,12 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::MultiAgentMode,
         key: "multi_agent_mode",
+        stage: Stage::UnderDevelopment,
+        default_enabled: false,
+    },
+    FeatureSpec {
+        id: Feature::AgentPromptInjection,
+        key: "agent_prompt_injection",
         stage: Stage::UnderDevelopment,
         default_enabled: false,
     },
