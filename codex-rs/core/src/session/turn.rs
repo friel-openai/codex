@@ -1231,10 +1231,18 @@ pub(crate) async fn built_tools(
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
     let turn_context = step_context.turn.as_ref();
-    let all_mcp_tools = step_context
-        .mcp_tools()
-        .or_cancel(cancellation_token)
-        .await?;
+    let inherited_mcp_tool_snapshot = sess.services.mcp_tool_snapshot.lock().await.clone();
+    let all_mcp_tools = if let Some(snapshot) = inherited_mcp_tool_snapshot {
+        let mut tools = snapshot.tools.into_values().collect::<Vec<_>>();
+        tools.sort_by_key(codex_mcp::ToolInfo::canonical_tool_name);
+        tools
+    } else {
+        step_context
+            .mcp_tools()
+            .or_cancel(cancellation_token)
+            .await?
+            .to_vec()
+    };
     let loaded_plugins = sess
         .services
         .plugins_manager
@@ -1245,7 +1253,7 @@ pub(crate) async fn built_tools(
 
     let apps_enabled = turn_context.apps_enabled();
     let accessible_connectors =
-        apps_enabled.then(|| connectors::accessible_connectors_from_mcp_tools(all_mcp_tools));
+        apps_enabled.then(|| connectors::accessible_connectors_from_mcp_tools(&all_mcp_tools));
     let accessible_connectors_with_enabled_state =
         accessible_connectors.as_ref().map(|connectors| {
             connectors::with_app_enabled_state(connectors.clone(), &turn_context.config)
@@ -1338,7 +1346,7 @@ pub(crate) async fn built_tools(
             .await
         };
     let mcp_tool_runtimes = build_mcp_tool_runtimes(
-        all_mcp_tools,
+        &all_mcp_tools,
         connectors.as_deref(),
         &turn_context.config,
         search_tool_enabled(turn_context),
