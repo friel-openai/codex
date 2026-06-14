@@ -695,6 +695,32 @@ async fn environment_tools_follow_the_step_context() {
 }
 
 #[tokio::test]
+async fn workspace_cwd_tool_requires_a_local_environment_and_preserves_subagent_schema() {
+    let enabled = probe(|turn| {
+        set_feature(turn, Feature::WorkspaceCwdTool, /*enabled*/ true);
+    })
+    .await;
+    assert_eq!(enabled.namespace_function_names("workspace"), ["set_cwd"]);
+    enabled.assert_registered_contains(&["workspaceset_cwd"]);
+
+    let disabled = probe(|turn| {
+        set_feature(turn, Feature::WorkspaceCwdTool, /*enabled*/ false);
+    })
+    .await;
+    assert!(disabled.namespace_function_names("workspace").is_empty());
+    disabled.assert_registered_lacks(&["workspaceset_cwd"]);
+
+    let subagent = probe(|turn| {
+        set_feature(turn, Feature::WorkspaceCwdTool, /*enabled*/ true);
+        turn.session_source =
+            SessionSource::SubAgent(SubAgentSource::Other("workspace-test".to_string()));
+    })
+    .await;
+    assert_eq!(subagent.namespace_function_names("workspace"), ["set_cwd"]);
+    subagent.assert_registered_contains(&["workspaceset_cwd"]);
+}
+
+#[tokio::test]
 async fn host_context_gates_agent_job_tools() {
     let normal_agent_job = probe(|turn| {
         set_feature(turn, Feature::SpawnCsv, /*enabled*/ true);
