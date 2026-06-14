@@ -4242,6 +4242,7 @@ dependencies = [
  "codex-cloud-config",
  "codex-config",
  "codex-connectors",
+ "codex-context-fragments",
  "codex-core-plugins",
  "codex-exec-server",
  "codex-features",
