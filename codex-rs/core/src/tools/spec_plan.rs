@@ -40,15 +40,20 @@ use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
+use crate::tools::handlers::multi_agents::SupervisorCompactParentContextHandler;
+use crate::tools::handlers::multi_agents::SupervisorSelfCloseHandler;
+use crate::tools::handlers::multi_agents::SupervisorSnoozeHandler;
 use crate::tools::handlers::multi_agents::WaitAgentHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::PromoteAgentHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -64,6 +69,7 @@ use crate::tools::router::ToolRouter;
 use codex_extension_api::ExtensionData;
 use codex_features::Feature;
 use codex_login::AuthManager;
+use codex_mcp::ToolInfo;
 use codex_protocol::account::PlanType;
 use codex_protocol::config_types::WebSearchMode;
 use codex_protocol::dynamic_tools::DynamicToolNamespaceTool;
@@ -96,6 +102,7 @@ use std::sync::Arc;
 use tracing::instrument;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const FRODEX_AGENT_OWNERSHIP_NAMESPACE: &str = "frodex";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -115,11 +122,12 @@ pub(crate) fn build_tool_router(
     session: &Session,
     turn_context: &TurnContext,
     environments: &TurnEnvironmentSnapshot,
-    mcp: &codex_mcp::McpBinding,
+    mcp: (&codex_mcp::McpBinding, &[ToolInfo]),
     connectors: Option<&[AppInfo]>,
     step_store: &ExtensionData,
     tool_suggest_candidates: Option<&crate::tools::router::ToolSuggestCandidates>,
 ) -> ToolRouter {
+    let (mcp, mcp_tools) = mcp;
     let default_agent_type_description =
         crate::agent::role::spawn_tool_spec::build(&std::collections::BTreeMap::new());
     let wait_for_environment_tool_config = session
@@ -143,7 +151,7 @@ pub(crate) fn build_tool_router(
         Vec::new()
     } else {
         for runtime in build_mcp_tool_runtimes(
-            mcp.tools(),
+            mcp_tools,
             connectors,
             &turn_context.config,
             search_tool_enabled(turn_context),
@@ -823,7 +831,7 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
     if features.enabled(Feature::WorkspaceCwdTool)
         && context.environments.single_local_environment().is_some()
     {
-        planned_tools.add(SetWorkspaceCwdHandler);
+        registry.add(SetWorkspaceCwdHandler);
     }
 
     if features.enabled(Feature::TokenBudget) {
@@ -945,6 +953,22 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 multi_agent_v2_handler(ListAgentsHandlerV2, tool_namespace),
                 exposure,
             ));
+            if turn_context.config.multi_agent_v2.enable_thread_adoption {
+                registry.register_trusted(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        AdoptAgentHandler::new(hide_spawn_agent_metadata),
+                        Some(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+                    ),
+                    exposure,
+                ));
+                registry.register_trusted(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        PromoteAgentHandler,
+                        Some(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+                    ),
+                    exposure,
+                ));
+            }
         } else {
             let agent_type_description =
                 agent_type_description(turn_context, context.default_agent_type_description);
@@ -971,6 +995,15 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             registry.add_with_exposure(CloseAgentHandler, exposure);
         }
+    }
+    if turn_context
+        .config
+        .features
+        .enabled(Feature::GoalSupervisor)
+    {
+        registry.add(SupervisorSelfCloseHandler);
+        registry.add(SupervisorSnoozeHandler);
+        registry.add(SupervisorCompactParentContextHandler);
     }
 }
 

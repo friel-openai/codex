@@ -40,9 +40,7 @@ impl Session {
     }
 
     pub(crate) async fn emit_thread_idle_lifecycle_if_idle(&self) {
-        if self.active_turn.lock().await.is_some()
-            || self.input_queue.has_trigger_turn_mailbox_items().await
-        {
+        if self.active_turn.lock().await.is_some() || self.has_pending_turn_start_work().await {
             return;
         }
 

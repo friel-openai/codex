@@ -114,6 +114,7 @@ pub(crate) async fn run_codex_thread_interactive(
         code_mode_session_provider: parent_session.services.code_mode_service.session_provider(),
         extensions: Arc::clone(&parent_session.services.extensions),
         conversation_history,
+        fork_startup_items: crate::session::ForkStartupItems::default(),
         requested_history_mode: None,
         session_source: SessionSource::SubAgent(subagent_source.clone()),
         forked_from_thread_id,
@@ -129,7 +130,7 @@ pub(crate) async fn run_codex_thread_interactive(
         parent_rollout_thread_trace: codex_rollout_trace::ThreadTraceContext::disabled(),
         inherited_thread_state: Default::default(),
         parent_trace: None,
-        environment_selections: parent_ctx.environments.to_selections(),
+        environment_selections: parent_ctx.environments.to_spawn_selections(),
         thread_extension_init: codex_extension_api::ExtensionDataInit::default(),
         supports_openai_form_elicitation: parent_session
             .services
