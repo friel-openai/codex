@@ -882,6 +882,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: Vec::new(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort.clone()),
@@ -917,6 +919,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agent_nickname: payload.new_agent_nickname.clone(),
+            receiver_agent_role: payload.new_agent_role.clone(),
             prompt: Some(payload.prompt.clone()),
             model: Some(payload.model.clone()),
             reasoning_effort: Some(payload.reasoning_effort.clone()),
@@ -934,6 +938,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -958,6 +964,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: Some(payload.prompt.clone()),
             model: None,
             reasoning_effort: None,
@@ -991,6 +999,8 @@ impl ThreadHistoryBuilder {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -1026,6 +1036,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids,
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -1043,6 +1055,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -1069,6 +1083,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -1086,6 +1102,8 @@ impl ThreadHistoryBuilder {
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![payload.receiver_thread_id.to_string()],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -1115,6 +1133,8 @@ impl ThreadHistoryBuilder {
             status,
             sender_thread_id: payload.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id],
+            receiver_agent_nickname: payload.receiver_agent_nickname.clone(),
+            receiver_agent_role: payload.receiver_agent_role.clone(),
             prompt: None,
             model: None,
             reasoning_effort: None,
@@ -3419,6 +3439,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -3437,6 +3459,9 @@ mod tests {
 
     #[test]
     fn reconstructs_collab_spawn_end_item_with_model_metadata() {
+        // Rollout replay must preserve the
+        // spawn nickname and role that the live app-server notification exposes, or resumed TUI
+        // history regresses to a bare thread id.
         let sender_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000001")
             .expect("valid sender thread id");
         let spawned_thread_id = ThreadId::try_from("00000000-0000-0000-0000-000000000002")
@@ -3479,6 +3504,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
                 receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000002".into()],
+                receiver_agent_nickname: Some("Scout".into()),
+                receiver_agent_role: Some("explorer".into()),
                 prompt: Some("inspect the repo".into()),
                 model: Some("gpt-5.4-mini".into()),
                 reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
@@ -3573,6 +3600,8 @@ mod tests {
                 status: CollabAgentToolCallStatus::Completed,
                 sender_thread_id: sender.to_string(),
                 receiver_thread_ids: vec![receiver.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("new task".into()),
                 model: None,
                 reasoning_effort: None,

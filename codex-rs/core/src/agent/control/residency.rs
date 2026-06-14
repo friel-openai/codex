@@ -2,6 +2,7 @@ use super::AgentControl;
 use crate::agent::AgentStatus;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
+use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -220,6 +221,7 @@ fn is_resident_candidate(thread: &CodexThread) -> bool {
 
 pub(super) fn is_v2_resident_session_source(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
+        && !is_goal_supervisor_helper_source(session_source)
 }
 
 async fn is_unloadable(thread: &CodexThread) -> bool {
