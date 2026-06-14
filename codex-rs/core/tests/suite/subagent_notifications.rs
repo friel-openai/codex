@@ -47,13 +47,11 @@ use serde_json::json;
 use std::fs;
 use std::future::Future;
 use std::path::Path;
-use std::sync::Mutex;
 use std::time::Duration;
 use test_case::test_case;
 use tokio::time::Instant;
 use tokio::time::sleep;
-use tracing::Level;
-use tracing_test::internal::MockWriter;
+use tracing_test::traced_test;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
@@ -87,6 +85,10 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
         .is_some_and(|body| body.contains(text))
 }
 
+fn request_header<'a>(req: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+    req.headers.get(name).and_then(|value| value.to_str().ok())
+}
+
 fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
     decoded_body(req)
         .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
@@ -95,27 +97,6 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
             items
                 .iter()
                 .any(|item| item.get("type").and_then(Value::as_str) == Some(ty))
-        })
-}
-
-fn request_has_user_input_text(req: &wiremock::Request, text: &str) -> bool {
-    decoded_body(req)
-        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("message")
-                    && item.get("role").and_then(Value::as_str) == Some("user")
-                    && item
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .is_some_and(|content| {
-                            content.iter().any(|span| {
-                                span.get("type").and_then(Value::as_str) == Some("input_text")
-                                    && span.get("text").and_then(Value::as_str) == Some(text)
-                            })
-                        })
-            })
         })
 }
 
@@ -485,24 +466,34 @@ async fn wait_for_requests(
     }
 }
 
-async fn wait_for_request_with_model(
+async fn wait_for_matching_request<F>(
     mock: &core_test_support::responses::ResponseMock,
-    model: &str,
-) -> Result<ResponsesRequest> {
+    mut predicate: F,
+) -> Result<ResponsesRequest>
+where
+    F: FnMut(&ResponsesRequest) -> bool,
+{
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(request) = mock
             .requests()
             .into_iter()
-            .find(|request| request.body_json()["model"] == model)
+            .find(|request| predicate(request))
         {
             return Ok(request);
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for request using model {model}");
+            anyhow::bail!("timed out waiting for matching request");
         }
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_request_with_model(
+    mock: &core_test_support::responses::ResponseMock,
+    model: &str,
+) -> Result<ResponsesRequest> {
+    wait_for_matching_request(mock, |request| request.body_json()["model"] == model).await
 }
 
 async fn setup_turn_one_with_spawned_child(
@@ -1044,7 +1035,8 @@ async fn spawned_child_receives_forked_parent_context(
     let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+            body_contains(req, CHILD_PROMPT)
+                && request_header(req, "x-openai-subagent") == Some("collab_spawn")
         },
         sse(vec![
             ev_response_created("resp-child-1"),
@@ -1085,8 +1077,15 @@ async fn spawned_child_receives_forked_parent_context(
     test.submit_turn(TURN_1_PROMPT).await?;
     let _ = spawn_turn.single_request();
 
-    let child_request = wait_for_request_with_model(&child_request_log, REQUESTED_MODEL).await?;
+    let child_request = wait_for_matching_request(&child_request_log, |request| {
+        request.header("x-openai-subagent").as_deref() == Some("collab_spawn")
+    })
+    .await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    assert!(child_request.body_contains_text(TURN_1_PROMPT));
+    assert!(child_request.body_contains_text(SPAWN_CALL_ID));
+    assert!(child_request.body_contains_text(CHILD_PROMPT));
+    assert!(child_request.body_contains_text("# Subagent Assignment"));
     let child_body = child_request.body_json();
     assert_eq!(
         (
@@ -1295,24 +1294,32 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
                 kind: ToolSuggestDiscoverableType::Plugin,
                 id: format!("{plugin_name}@{OPENAI_CURATED_MARKETPLACE_NAME}"),
             }];
+            config.agent_max_depth = 2;
         });
     let test = builder.build(&server).await?;
     test.codex
         .set_app_server_client_info(
             Some("codex-tui".to_string()),
             Some("test-client-version".to_string()),
-            false,
+            /*mcp_elicitations_auto_deny*/ false,
         )
         .await?;
 
     test.submit_turn(TURN_1_PROMPT).await?;
-    let root_tool_names = tool_names(&spawn_turn.single_request().body_json());
-    let child_requests = wait_for_requests(&child_turn).await?;
-    let child_tool_names = tool_names(&child_requests[0].body_json());
+    let root_request = spawn_turn.single_request();
+    let root_tools = root_request.body_json()["tools"].clone();
+    let root_tool_names = tool_names(&root_request.body_json());
+    let child_request = wait_for_matching_request(&child_turn, |request| {
+        request.header("x-openai-subagent").as_deref() == Some("collab_spawn")
+    })
+    .await?;
+    let child_tools = child_request.body_json()["tools"].clone();
+    let child_tool_names = tool_names(&child_request.body_json());
 
     // `request_plugin_install` is controlled by client-sensitive discoverable-tool
     // filtering. Forked children must inherit the parent client metadata so the
     // backend-visible tool list stays byte-compatible with the parent request.
+    assert_eq!(child_tools, root_tools);
     assert_eq!(child_tool_names, root_tool_names);
     assert!(
         !root_tool_names
@@ -1568,15 +1575,8 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
 }
 
 #[tokio::test]
+#[traced_test]
 async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
-    let output: &'static Mutex<Vec<u8>> = Box::leak(Box::new(Mutex::new(Vec::new())));
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_max_level(Level::INFO)
-        .with_writer(MockWriter::new(output))
-        .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
-
     let server = start_mock_server().await;
     let encrypted_message = "opaque-encrypted-message";
     let spawn_args = serde_json::to_string(&json!({
@@ -1635,22 +1635,10 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
 
     test.submit_turn(TURN_1_PROMPT).await?;
 
-    // The response mock records candidate requests before its request matcher runs, so wait for
-    // the child request instead of assuming the latest recorded request is already it.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    let child_request = loop {
-        if let Some(request) = child_request_log
-            .requests()
-            .into_iter()
-            .find(|request| !request.inputs_of_type("agent_message").is_empty())
-        {
-            break request;
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for child agent message request");
-        }
-        sleep(Duration::from_millis(10)).await;
-    };
+    let child_request = wait_for_matching_request(&child_request_log, |request| {
+        !request.inputs_of_type("agent_message").is_empty()
+    })
+    .await?;
     assert_eq!(
         strip_response_item_ids_from_json(strip_metadata_from_json(Value::Array(
             child_request.inputs_of_type("agent_message"),
@@ -1679,33 +1667,35 @@ async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
         .into_iter()
         .find(|thread_id| *thread_id != root_thread_id)
         .expect("child thread ID");
-    let logs = tokio::time::timeout(Duration::from_secs(5), async {
+    tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            let logs = String::from_utf8(output.lock().expect("buffer lock").clone())
-                .expect("logs should be UTF-8");
-            if logs.contains("kind=\"spawn\"") && logs.contains("state=\"receive\"") {
-                break logs;
+            if logs_contain("kind=\"spawn\"") && logs_contain("state=\"receive\"") {
+                break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await
     .expect("spawn communication logs should be emitted");
-    let send = logs
-        .lines()
-        .find(|line| line.contains("kind=\"spawn\"") && line.contains("state=\"send\""))
-        .expect("spawn send event");
-    assert!(send.contains(&format!("sender_thread_id={root_thread_id}")));
-    assert!(send.contains(&format!("receiver_thread_id={child_thread_id}")));
-    assert!(send.contains(&format!("content=\"{encrypted_message}\"")));
+    logs_assert(|lines: &[&str]| {
+        let send = lines
+            .iter()
+            .find(|line| line.contains("kind=\"spawn\"") && line.contains("state=\"send\""))
+            .expect("spawn send event");
+        assert!(send.contains(&format!("sender_thread_id={root_thread_id}")));
+        assert!(send.contains(&format!("receiver_thread_id={child_thread_id}")));
+        assert!(send.contains(&format!("content=\"{encrypted_message}\"")));
 
-    let communication_id = log_field(send, "communication_id").expect("communication ID");
-    logs.lines()
-        .find(|line| {
-            line.contains("state=\"receive\"")
-                && log_field(line, "communication_id") == Some(communication_id)
-        })
-        .expect("correlated receive event");
+        let communication_id = log_field(send, "communication_id").expect("communication ID");
+        lines
+            .iter()
+            .find(|line| {
+                line.contains("state=\"receive\"")
+                    && log_field(line, "communication_id") == Some(communication_id)
+            })
+            .expect("correlated receive event");
+        Ok(())
+    });
 
     Ok(())
 }
