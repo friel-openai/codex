@@ -265,6 +265,19 @@ impl ThreadMetadataBuilder {
 }
 
 impl ThreadMetadata {
+    /// Preserve SQLite-owned agent ownership when rollout metadata predates an ownership change.
+    pub fn prefer_existing_ownership(&mut self, existing: &Self) {
+        if self.source == existing.source {
+            return;
+        }
+
+        self.source = existing.source.clone();
+        self.thread_source = existing.thread_source.clone();
+        self.agent_nickname = existing.agent_nickname.clone();
+        self.agent_role = existing.agent_role.clone();
+        self.agent_path = existing.agent_path.clone();
+    }
+
     /// Preserve SQLite-owned Git fields when rollout-derived metadata is reconciled.
     pub fn prefer_existing_git_info(&mut self, existing: &Self) {
         if matches!(self.history_mode, ThreadHistoryMode::Paginated)

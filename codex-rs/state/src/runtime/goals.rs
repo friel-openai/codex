@@ -7,6 +7,27 @@ pub struct GoalStore {
     pool: Arc<SqlitePool>,
 }
 
+/// One active goal whose root thread may need a process-owned supervisor wakeup.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct ActiveGoalSupervisorSchedule {
+    pub thread_id: ThreadId,
+    pub goal_id: String,
+    pub goal_updated_at_ms: i64,
+    pub snoozed_until_ms: Option<i64>,
+}
+
+/// Bounded scan parameters for active goal supervisor schedules.
+pub struct ListActiveGoalSupervisorSchedulesParams {
+    pub after_thread_id: Option<ThreadId>,
+    pub limit: usize,
+}
+
+/// One page from an active goal supervisor schedule scan.
+pub struct ActiveGoalSupervisorSchedulesPage {
+    pub data: Vec<ActiveGoalSupervisorSchedule>,
+    pub next_cursor: Option<ThreadId>,
+}
+
 impl GoalStore {
     pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
@@ -14,6 +35,51 @@ impl GoalStore {
 
     pub(crate) async fn close(&self) {
         self.pool.close().await;
+    }
+
+    pub(crate) async fn ensure_thread_goal_supervisor_state_table(&self) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+CREATE TABLE IF NOT EXISTS thread_goal_supervisor_state (
+    thread_id TEXT PRIMARY KEY NOT NULL,
+    goal_id TEXT NOT NULL,
+    snoozed_until_ms INTEGER,
+    updated_at_ms INTEGER NOT NULL
+)
+            "#,
+        )
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub(crate) async fn upsert_frodex_goal_supervisor_state_rows(
+        &self,
+        supervisor_rows: Vec<(String, String, Option<i64>, i64)>,
+    ) -> anyhow::Result<()> {
+        for (thread_id, goal_id, snoozed_until_ms, updated_at_ms) in supervisor_rows {
+            sqlx::query(
+                r#"
+INSERT INTO thread_goal_supervisor_state (
+    thread_id,
+    goal_id,
+    snoozed_until_ms,
+    updated_at_ms
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    goal_id = excluded.goal_id,
+    snoozed_until_ms = excluded.snoozed_until_ms,
+    updated_at_ms = excluded.updated_at_ms
+                "#,
+            )
+            .bind(thread_id)
+            .bind(goal_id)
+            .bind(snoozed_until_ms)
+            .bind(updated_at_ms)
+            .execute(self.pool.as_ref())
+            .await?;
+        }
+        Ok(())
     }
 }
 
@@ -151,6 +217,86 @@ SELECT EXISTS(
             .await?;
 
         Ok(())
+    }
+
+    pub async fn get_active_goal_supervisor_schedule(
+        &self,
+        thread_id: ThreadId,
+    ) -> anyhow::Result<Option<ActiveGoalSupervisorSchedule>> {
+        let row = sqlx::query(
+            r#"
+SELECT
+    goals.thread_id,
+    goals.goal_id,
+    goals.updated_at_ms AS goal_updated_at_ms,
+    supervisor.snoozed_until_ms
+FROM thread_goals AS goals
+LEFT JOIN thread_goal_supervisor_state AS supervisor
+    ON supervisor.thread_id = goals.thread_id
+    AND supervisor.goal_id = goals.goal_id
+WHERE goals.thread_id = ?
+  AND goals.status = 'active'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM thread_goal_continuation_deferrals AS deferrals
+      WHERE deferrals.thread_id = goals.thread_id
+  )
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        row.map(|row| active_goal_supervisor_schedule_from_row(&row))
+            .transpose()
+    }
+
+    pub async fn list_active_goal_supervisor_schedules(
+        &self,
+        params: ListActiveGoalSupervisorSchedulesParams,
+    ) -> anyhow::Result<ActiveGoalSupervisorSchedulesPage> {
+        let limit = params.limit.clamp(1, 1_000);
+        let after_thread_id = params
+            .after_thread_id
+            .map(|thread_id| thread_id.to_string());
+        let mut rows = sqlx::query(
+            r#"
+SELECT
+    goals.thread_id,
+    goals.goal_id,
+    goals.updated_at_ms AS goal_updated_at_ms,
+    supervisor.snoozed_until_ms
+FROM thread_goals AS goals
+LEFT JOIN thread_goal_supervisor_state AS supervisor
+    ON supervisor.thread_id = goals.thread_id
+    AND supervisor.goal_id = goals.goal_id
+WHERE goals.status = 'active'
+  AND NOT EXISTS (
+      SELECT 1
+      FROM thread_goal_continuation_deferrals AS deferrals
+      WHERE deferrals.thread_id = goals.thread_id
+  )
+  AND (? IS NULL OR goals.thread_id > ?)
+ORDER BY goals.thread_id ASC
+LIMIT ?
+            "#,
+        )
+        .bind(after_thread_id.as_deref())
+        .bind(after_thread_id.as_deref())
+        .bind(i64::try_from(limit.saturating_add(1))?)
+        .fetch_all(self.pool.as_ref())
+        .await?;
+
+        let has_more = rows.len() > limit;
+        rows.truncate(limit);
+        let data = rows
+            .iter()
+            .map(active_goal_supervisor_schedule_from_row)
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let next_cursor = has_more
+            .then(|| data.last().map(|schedule| schedule.thread_id))
+            .flatten();
+        Ok(ActiveGoalSupervisorSchedulesPage { data, next_cursor })
     }
 
     pub async fn replace_thread_goal(
@@ -473,6 +619,15 @@ WHERE thread_id = ?
         &self,
         thread_id: ThreadId,
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
+        sqlx::query(
+            r#"
+DELETE FROM thread_goal_supervisor_state
+WHERE thread_id = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .execute(self.pool.as_ref())
+        .await?;
         let row = sqlx::query(
             r#"
 DELETE FROM thread_goals
@@ -494,6 +649,72 @@ RETURNING
         .await?;
 
         row.map(|row| thread_goal_from_row(&row)).transpose()
+    }
+
+    pub async fn get_thread_goal_supervisor_snoozed_until_ms(
+        &self,
+        thread_id: ThreadId,
+        goal_id: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        let row = sqlx::query(
+            r#"
+SELECT snoozed_until_ms
+FROM thread_goal_supervisor_state
+WHERE thread_id = ? AND goal_id = ?
+            "#,
+        )
+        .bind(thread_id.to_string())
+        .bind(goal_id)
+        .fetch_optional(self.pool.as_ref())
+        .await?;
+
+        Ok(row.map(|row| row.try_get("snoozed_until_ms")).transpose()?)
+    }
+
+    pub async fn set_thread_goal_supervisor_snoozed_until_ms(
+        &self,
+        thread_id: ThreadId,
+        goal_id: &str,
+        snoozed_until_ms: Option<i64>,
+    ) -> anyhow::Result<()> {
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        match snoozed_until_ms {
+            Some(snoozed_until_ms) => {
+                sqlx::query(
+                    r#"
+INSERT INTO thread_goal_supervisor_state (
+    thread_id,
+    goal_id,
+    snoozed_until_ms,
+    updated_at_ms
+) VALUES (?, ?, ?, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    goal_id = excluded.goal_id,
+    snoozed_until_ms = excluded.snoozed_until_ms,
+    updated_at_ms = excluded.updated_at_ms
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(goal_id)
+                .bind(snoozed_until_ms)
+                .bind(now_ms)
+                .execute(self.pool.as_ref())
+                .await?;
+            }
+            None => {
+                sqlx::query(
+                    r#"
+DELETE FROM thread_goal_supervisor_state
+WHERE thread_id = ? AND goal_id = ?
+                    "#,
+                )
+                .bind(thread_id.to_string())
+                .bind(goal_id)
+                .execute(self.pool.as_ref())
+                .await?;
+            }
+        }
+        Ok(())
     }
 
     pub async fn account_thread_goal_usage(
@@ -609,6 +830,17 @@ RETURNING
         let updated = thread_goal_from_row(&row)?;
         Ok(GoalAccountingOutcome::Updated(updated))
     }
+}
+
+fn active_goal_supervisor_schedule_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<ActiveGoalSupervisorSchedule> {
+    Ok(ActiveGoalSupervisorSchedule {
+        thread_id: ThreadId::from_string(row.try_get::<String, _>("thread_id")?.as_str())?,
+        goal_id: row.try_get("goal_id")?,
+        goal_updated_at_ms: row.try_get("goal_updated_at_ms")?,
+        snoozed_until_ms: row.try_get("snoozed_until_ms")?,
+    })
 }
 
 fn thread_goal_from_row(row: &sqlx::sqlite::SqliteRow) -> anyhow::Result<crate::ThreadGoal> {
@@ -1693,6 +1925,214 @@ mod tests {
             .expect("goal should exist");
         assert_eq!(100, goal.tokens_used);
         assert_eq!(10, goal.time_used_seconds);
+    }
+
+    #[tokio::test]
+    async fn supervisor_snooze_state_is_scoped_to_current_goal_id() {
+        let runtime = test_runtime().await;
+        let thread_id = test_thread_id();
+        upsert_test_thread(&runtime, thread_id).await;
+        let goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                thread_id,
+                "persist supervisor snooze",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("goal replacement should succeed");
+
+        runtime
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id, Some(123_456))
+            .await
+            .expect("supervisor snooze should persist");
+        assert_eq!(
+            Some(123_456),
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await
+                .expect("supervisor snooze should read")
+        );
+        assert_eq!(
+            None,
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, "stale-goal-id")
+                .await
+                .expect("stale supervisor snooze should be ignored")
+        );
+
+        runtime
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                thread_id,
+                &goal.goal_id,
+                /*snoozed_until_ms*/ None,
+            )
+            .await
+            .expect("supervisor snooze should clear");
+        assert_eq!(
+            None,
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await
+                .expect("supervisor snooze should be cleared")
+        );
+    }
+
+    #[tokio::test]
+    async fn active_goal_supervisor_schedules_are_bounded_and_ignore_stale_state() {
+        let runtime = test_runtime().await;
+        let first_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000123")
+            .expect("valid first thread id");
+        let paused_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000124")
+            .expect("valid paused thread id");
+        let last_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000125")
+            .expect("valid last thread id");
+        let deferred_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000126")
+            .expect("valid deferred thread id");
+        for thread_id in [
+            first_thread_id,
+            paused_thread_id,
+            last_thread_id,
+            deferred_thread_id,
+        ] {
+            upsert_test_thread(&runtime, thread_id).await;
+        }
+
+        let first_goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                first_thread_id,
+                "wake later",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("first goal should persist");
+        runtime
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                first_thread_id,
+                &first_goal.goal_id,
+                Some(123_456),
+            )
+            .await
+            .expect("first deadline should persist");
+
+        runtime
+            .thread_goals()
+            .replace_thread_goal(
+                paused_thread_id,
+                "do not wake",
+                crate::ThreadGoalStatus::Paused,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("paused goal should persist");
+
+        let stale_goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                last_thread_id,
+                "old goal",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("stale goal should persist");
+        runtime
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                last_thread_id,
+                &stale_goal.goal_id,
+                Some(999_999),
+            )
+            .await
+            .expect("stale deadline should persist");
+        let last_goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                last_thread_id,
+                "current goal",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("replacement goal should persist");
+        let deferred_goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                deferred_thread_id,
+                "wait for the next explicit turn",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ None,
+            )
+            .await
+            .expect("deferred goal should persist");
+        runtime
+            .thread_goals()
+            .replace_thread_goal_snapshot(&deferred_goal)
+            .await
+            .expect("goal continuation should be deferred");
+
+        let first_page = runtime
+            .thread_goals()
+            .list_active_goal_supervisor_schedules(ListActiveGoalSupervisorSchedulesParams {
+                after_thread_id: None,
+                limit: 1,
+            })
+            .await
+            .expect("first page should load");
+        assert_eq!(Some(first_thread_id), first_page.next_cursor);
+        assert_eq!(
+            vec![ActiveGoalSupervisorSchedule {
+                thread_id: first_thread_id,
+                goal_id: first_goal.goal_id,
+                goal_updated_at_ms: first_goal.updated_at.timestamp_millis(),
+                snoozed_until_ms: Some(123_456),
+            }],
+            first_page.data
+        );
+
+        let last_page = runtime
+            .thread_goals()
+            .list_active_goal_supervisor_schedules(ListActiveGoalSupervisorSchedulesParams {
+                after_thread_id: first_page.next_cursor,
+                limit: 1,
+            })
+            .await
+            .expect("last page should load");
+        assert_eq!(None, last_page.next_cursor);
+        assert_eq!(
+            vec![ActiveGoalSupervisorSchedule {
+                thread_id: last_thread_id,
+                goal_id: last_goal.goal_id,
+                goal_updated_at_ms: last_goal.updated_at.timestamp_millis(),
+                snoozed_until_ms: None,
+            }],
+            last_page.data
+        );
+        assert_eq!(
+            None,
+            runtime
+                .thread_goals()
+                .get_active_goal_supervisor_schedule(paused_thread_id)
+                .await
+                .expect("paused schedule lookup should succeed")
+        );
+        assert_eq!(
+            None,
+            runtime
+                .thread_goals()
+                .get_active_goal_supervisor_schedule(deferred_thread_id)
+                .await
+                .expect("deferred schedule lookup should succeed")
+        );
     }
 
     #[tokio::test]
