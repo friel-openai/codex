@@ -512,6 +512,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "goal_supervisor": {
+              "type": "boolean"
+            },
             "goals": {
               "type": "boolean"
             },
@@ -4710,6 +4713,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "goal_supervisor": {
           "type": "boolean"
         },
         "goals": {

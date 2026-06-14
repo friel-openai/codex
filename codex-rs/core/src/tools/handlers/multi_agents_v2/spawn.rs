@@ -57,6 +57,7 @@ async fn handle_spawn_agent(
         .filter(|role| !role.is_empty());
 
     let message = args.message.clone();
+    let initial_task_message = message.clone();
     let initial_operation = parse_collab_input(Some(args.message), /*items*/ None)?;
     let session_source = turn.session_source.clone();
     let child_depth = next_thread_spawn_depth(&session_source);
@@ -134,6 +135,7 @@ async fn handle_spawn_agent(
                 fork_mode,
                 parent_thread_id: Some(session.thread_id),
                 environments: Some(turn.environments.to_selections()),
+                initial_task_message: Some(initial_task_message),
             },
         ),
     )

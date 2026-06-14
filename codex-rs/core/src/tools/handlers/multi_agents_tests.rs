@@ -1157,7 +1157,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             turn.clone(),
             "spawn_agent",
             function_payload(json!({
-                "message": "encrypted-spawn-message",
+                "message": "spawn message",
                 "task_name": "test_process"
             })),
         ))
@@ -1211,7 +1211,7 @@ async fn multi_agent_v2_spawn_returns_path_and_send_message_accepts_relative_pat
             "send_message",
             function_payload(json!({
                 "target": "test_process",
-                "message": "encrypted-send-message"
+                "message": "send message"
             })),
         ))
         .await
@@ -1413,7 +1413,7 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
             "send_message",
             function_payload(json!({
                 "target": "/root",
-                "message": "encrypted-done"
+                "message": "done"
             })),
         ))
         .await
@@ -1427,8 +1427,8 @@ async fn multi_agent_v2_send_message_accepts_root_target_from_child() {
                     if communication.author == child_path
                         && communication.recipient == AgentPath::root()
                         && communication.other_recipients.is_empty()
-                        && communication.content.is_empty()
-                        && communication.encrypted_content.as_deref() == Some("encrypted-done")
+                        && communication.content == "done"
+                        && communication.encrypted_content.is_none()
                         && !communication.trigger_turn
             )
     }));
@@ -1518,7 +1518,7 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_list_agents_returns_completed_status_without_encrypted_spawn_preview() {
+async fn multi_agent_v2_list_agents_returns_completed_status_with_plain_text_spawn_preview() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     let root = manager
@@ -1604,7 +1604,10 @@ async fn multi_agent_v2_list_agents_returns_completed_status_without_encrypted_s
         .find(|agent| agent.agent_name == "/root/worker")
         .expect("worker agent should be listed");
     assert_eq!(worker.agent_status, json!({"completed": "done"}));
-    assert_eq!(worker.last_task_message, None);
+    assert_eq!(
+        worker.last_task_message.as_deref(),
+        Some("inspect this repo")
+    );
     assert_eq!(success, Some(true));
 }
 
@@ -1959,8 +1962,8 @@ async fn multi_agent_v2_send_message_rejects_interrupt_parameter() {
             if communication.author == AgentPath::root()
                 && communication.recipient.as_str() == "/root/worker"
                 && communication.other_recipients.is_empty()
-                && communication.content.is_empty()
-                && communication.encrypted_content.as_deref() == Some("continue")
+                && communication.content == "continue"
+                && communication.encrypted_content.is_none()
                 && !communication.trigger_turn
     )));
 }
@@ -4322,6 +4325,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         .features
         .enable(Feature::Sqlite)
         .expect("test config should allow sqlite");
+    let _ = config.features.disable(Feature::MultiAgentV2);
     let state_db = init_state_db(&config).await;
     let manager = ThreadManager::new(
         &config,

@@ -76,6 +76,13 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
     depth > max_depth
 }
 
+fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+    matches!(
+        agent_metadata.agent_role.as_deref(),
+        Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+    )
+}
+
 impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
@@ -93,7 +100,18 @@ impl AgentRegistry {
             active: true,
             reserved_agent_nickname: None,
             reserved_agent_path: None,
+            counted: true,
         })
+    }
+
+    pub(crate) fn reserve_uncounted_spawn_slot(self: &Arc<Self>) -> SpawnReservation {
+        SpawnReservation {
+            state: Arc::clone(self),
+            active: true,
+            reserved_agent_nickname: None,
+            reserved_agent_path: None,
+            counted: false,
+        }
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
@@ -111,6 +129,7 @@ impl AgentRegistry {
                 .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                        && !is_uncounted_agent_metadata(&metadata)
                 })
         };
         if removed_counted_agent {
@@ -310,6 +329,7 @@ pub(crate) struct SpawnReservation {
     active: bool,
     reserved_agent_nickname: Option<String>,
     reserved_agent_path: Option<AgentPath>,
+    counted: bool,
 }
 
 impl SpawnReservation {
@@ -348,7 +368,9 @@ impl Drop for SpawnReservation {
             if let Some(agent_path) = self.reserved_agent_path.take() {
                 self.state.release_reserved_agent_path(&agent_path);
             }
-            self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            if self.counted {
+                self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 }
