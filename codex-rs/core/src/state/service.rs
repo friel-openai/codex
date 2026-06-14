@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
@@ -34,6 +35,7 @@ use codex_mcp::McpConfig;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntime;
 use codex_mcp::McpRuntimeContext;
+use codex_mcp::ToolInfo as McpToolInfo;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -46,6 +48,11 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Default)]
+pub(crate) struct McpToolSnapshot {
+    pub(crate) tools: HashMap<String, McpToolInfo>,
+}
+
 pub(crate) struct SessionServices {
     /// The single owner of live MCP connections for this thread.
     pub(crate) mcp_runtime: Arc<McpRuntime>,
@@ -53,6 +60,7 @@ pub(crate) struct SessionServices {
     pub(crate) mcp_runtime_snapshot: ArcSwapOption<McpRuntimeSnapshot>,
     /// Serializes environment-driven runtime rebuilds.
     pub(crate) mcp_projection_lock: Mutex<()>,
+    pub(crate) mcp_tool_snapshot: Mutex<Option<McpToolSnapshot>>,
     pub(crate) mcp_startup_cancellation_token: Mutex<CancellationToken>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     pub(crate) elicitations: ElicitationService,

@@ -7,6 +7,7 @@
 //! `codex-core`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -573,6 +574,33 @@ impl McpConnectionManager {
         }
     }
 
+    pub fn required_startup_failures_future(
+        &self,
+        required_servers: Vec<String>,
+    ) -> impl Future<Output = Vec<McpStartupFailure>> + Send + 'static {
+        let clients = self.clients.clone();
+        async move {
+            let mut failures = Vec::new();
+            for server_name in required_servers {
+                let Some(async_managed_client) = clients.get(&server_name).cloned() else {
+                    failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: format!("required MCP server `{server_name}` was not initialized"),
+                    });
+                    continue;
+                };
+
+                match async_managed_client.client().await {
+                    Ok(_) => {}
+                    Err(error) => failures.push(McpStartupFailure {
+                        server: server_name.clone(),
+                        error: startup_outcome_error_message(error),
+                    }),
+                }
+            }
+            failures
+        }
+    }
     /// Returns all tools with model-visible names normalized.
     #[instrument(level = "trace", skip_all, fields(mcp_server_count = self.clients.len()))]
     pub async fn list_all_tools(&self) -> Vec<ToolInfo> {
@@ -632,6 +660,25 @@ impl McpConnectionManager {
         Some(self.with_server_metadata(tool))
     }
 
+    pub fn list_all_tools_future(
+        &self,
+    ) -> impl Future<Output = HashMap<String, ToolInfo>> + Send + 'static {
+        let clients = self.clients.values().cloned().collect::<Vec<_>>();
+        let prefix_mcp_tool_names = self.prefix_mcp_tool_names;
+        async move {
+            let mut tools = Vec::new();
+            for managed_client in clients {
+                let Some(server_tools) = managed_client.listed_tools().await else {
+                    continue;
+                };
+                tools.extend(server_tools);
+            }
+            normalize_tools_for_model_with_prefix(tools, prefix_mcp_tool_names)
+                .into_iter()
+                .map(|tool| (tool.canonical_tool_name().to_string(), tool))
+                .collect()
+        }
+    }
     /// Force-refresh codex apps tools by bypassing the in-process cache.
     ///
     /// On success, the refreshed tools replace shared cache contents when the
