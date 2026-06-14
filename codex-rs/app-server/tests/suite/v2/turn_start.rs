@@ -1929,7 +1929,7 @@ async fn thread_start_reports_multi_agent_mode() -> Result<()> {
         (
             BTreeMap::from([(Feature::MultiAgentV2, true)]),
             None,
-            MultiAgentMode::ExplicitRequestOnly,
+            MultiAgentMode::None,
         ),
     ];
 
@@ -3449,7 +3449,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::Collab, true), (Feature::MultiAgentV2, false)]),
     )?;
 
     let mut mcp = TestAppServer::new_with_auto_env(codex_home.path()).await?;
@@ -3831,7 +3831,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
         codex_home.path(),
         &server.uri(),
         "never",
-        &BTreeMap::from([(Feature::Collab, true)]),
+        &BTreeMap::from([(Feature::Collab, true), (Feature::MultiAgentV2, false)]),
     )?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),

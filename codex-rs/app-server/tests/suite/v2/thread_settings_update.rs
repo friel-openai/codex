@@ -173,14 +173,14 @@ async fn thread_settings_update_multi_agent_mode_applies_to_future_turns() -> Re
             .iter()
             .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
             .count(),
-        1
+        0
     );
     assert_eq!(
         second_developer_texts
             .iter()
             .filter(|text| text.contains(MULTI_AGENT_MODE_OPEN_TAG))
             .count(),
-        2
+        1
     );
     assert_eq!(
         second_developer_texts
@@ -195,7 +195,7 @@ async fn thread_settings_update_multi_agent_mode_applies_to_future_turns() -> Re
             .filter(|text| text
                 .contains("Do not spawn sub-agents unless the user explicitly asks for sub-agents"))
             .count(),
-        1
+        0
     );
     Ok(())
 }

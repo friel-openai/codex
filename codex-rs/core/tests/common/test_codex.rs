@@ -707,6 +707,10 @@ impl TestCodexBuilder {
         } else {
             load_default_config_for_test(home).await
         };
+        // Keep the shared upstream integration suite on upstream feature defaults. Frodex's
+        // default enablement is covered by dedicated feature and configuration tests.
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        let _ = config.features.disable(Feature::AgentPromptInjection);
         config.cwd = cwd_override;
         config.model_provider = model_provider;
         if let Ok(path) = codex_utils_cargo_bin::cargo_bin("codex") {

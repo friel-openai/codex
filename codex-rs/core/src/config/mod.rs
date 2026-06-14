@@ -203,8 +203,8 @@ impl Default for GhostSnapshotConfig {
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
-pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(256);
+pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 257;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
 pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
@@ -1406,27 +1406,16 @@ impl Config {
         }
     }
 
-    pub(crate) fn validate_multi_agent_v2_config(&self) -> std::io::Result<()> {
-        if self.features.enabled(Feature::MultiAgentV2) && self.agent_max_threads.is_some() {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_threads cannot be set when features.multi_agent_v2 is enabled",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
     pub(crate) fn effective_agent_max_threads(
         &self,
         multi_agent_version: MultiAgentVersion,
     ) -> Option<usize> {
         match multi_agent_version {
-            MultiAgentVersion::V2 => Some(
+            MultiAgentVersion::V2 => self.agent_max_threads.or(Some(
                 self.multi_agent_v2
                     .max_concurrent_threads_per_session
                     .saturating_sub(1),
-            ),
+            )),
             MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
                 self.agent_max_threads.or(DEFAULT_AGENT_MAX_THREADS)
             }
@@ -2488,10 +2477,14 @@ fn resolve_code_mode_config(config_toml: &ConfigToml) -> CodeModeConfig {
     }
 }
 
-fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config {
+fn resolve_multi_agent_v2_config(
+    config_toml: &ConfigToml,
+    agent_max_threads: Option<usize>,
+) -> MultiAgentV2Config {
     let base = multi_agent_v2_toml_config(config_toml.features.as_ref());
-    let max_concurrent_threads_per_session = base
-        .and_then(|config| config.max_concurrent_threads_per_session)
+    let max_concurrent_threads_per_session = agent_max_threads
+        .map(|max_threads| max_threads.saturating_add(1))
+        .or_else(|| base.and_then(|config| config.max_concurrent_threads_per_session))
         .unwrap_or(DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION);
     let default =
         MultiAgentV2Config::defaults_for_max_concurrency(max_concurrent_threads_per_session);
@@ -3380,7 +3373,14 @@ impl Config {
         let experimental_request_user_input_enabled =
             resolve_experimental_request_user_input_enabled(&cfg);
         let code_mode = resolve_code_mode_config(&cfg);
-        let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg);
+        let agent_max_threads = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
+        if agent_max_threads == Some(0) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "agents.max_threads must be at least 1",
+            ));
+        }
+        let multi_agent_v2 = resolve_multi_agent_v2_config(&cfg, agent_max_threads);
         let token_budget = resolve_token_budget_config(&cfg, &features)?;
         let rollout_budget = resolve_rollout_budget_config(&cfg, &features)?;
         let current_time_reminder = resolve_current_time_reminder_config(&cfg, &features)?;
@@ -3475,13 +3475,6 @@ impl Config {
             ));
         }
         validate_multi_agent_v2_tool_namespace(multi_agent_v2.tool_namespace.as_deref())?;
-        let agent_max_threads = cfg.agents.as_ref().and_then(|agents| agents.max_threads);
-        if agent_max_threads == Some(0) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "agents.max_threads must be at least 1",
-            ));
-        }
         let agent_max_depth = cfg
             .agents
             .as_ref()

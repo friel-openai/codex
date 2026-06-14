@@ -483,7 +483,10 @@ async fn thread_goal_get_rejects_unmaterialized_thread() -> Result<()> {
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+        config.replace(
+            "personality = true\n",
+            "personality = true\ngoals = true\ngoal_supervisor = false\n",
+        ),
     )?;
 
     let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
@@ -1265,7 +1268,10 @@ async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+        config.replace(
+            "personality = true\n",
+            "personality = true\ngoals = true\ngoal_supervisor = false\n",
+        ),
     )?;
 
     let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
@@ -1370,7 +1376,10 @@ async fn thread_goal_set_rejects_budget_writes_without_side_effects() -> Result<
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+        config.replace(
+            "personality = true\n",
+            "personality = true\ngoals = true\ngoal_supervisor = false\n",
+        ),
     )?;
 
     let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
@@ -1587,7 +1596,10 @@ async fn thread_goal_set_persists_resumable_stopped_statuses() -> Result<()> {
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+        config.replace(
+            "personality = true\n",
+            "personality = true\ngoals = true\ngoal_supervisor = false\n",
+        ),
     )?;
 
     let mut mcp = TestAppServer::new_without_managed_config(codex_home.path()).await?;
@@ -1674,7 +1686,10 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+        config.replace(
+            "personality = true\n",
+            "personality = true\ngoals = true\ngoal_supervisor = false\n",
+        ),
     )?;
     let thread_id = create_fake_rollout(
         codex_home.path(),

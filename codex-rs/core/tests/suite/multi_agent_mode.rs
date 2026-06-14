@@ -90,7 +90,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
     submit_turn(&test.codex, "turn one", /*mode*/ None).await?;
     assert_eq!(
         test.codex.config_snapshot().await.multi_agent_mode,
-        MultiAgentMode::ExplicitRequestOnly
+        MultiAgentMode::None
     );
     submit_turn(&test.codex, "turn two", Some(MultiAgentMode::Proactive)).await?;
     submit_turn(&test.codex, "turn three", /*mode*/ None).await?;
@@ -119,7 +119,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&first, NO_SPAWN_TEXT),
             count_containing(&first, PROACTIVE_TEXT),
         ),
-        (1, 1, 0)
+        (0, 0, 0)
     );
     assert_eq!(
         (
@@ -127,7 +127,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&second, NO_SPAWN_TEXT),
             count_containing(&second, PROACTIVE_TEXT),
         ),
-        (2, 1, 1)
+        (1, 0, 1)
     );
     assert_eq!(
         (
@@ -135,7 +135,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&third, NO_SPAWN_TEXT),
             count_containing(&third, PROACTIVE_TEXT),
         ),
-        (2, 1, 1)
+        (1, 0, 1)
     );
     assert_eq!(
         (
@@ -144,7 +144,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&fourth, PROACTIVE_TEXT),
             count_containing(&fourth, NO_MODE_TEXT),
         ),
-        (3, 1, 1, 1)
+        (2, 0, 1, 1)
     );
     assert_eq!(
         (
@@ -153,7 +153,7 @@ async fn multi_agent_mode_is_sticky_and_emits_only_on_change() -> Result<()> {
             count_containing(&fifth, PROACTIVE_TEXT),
             count_containing(&fifth, NO_MODE_TEXT),
         ),
-        (3, 1, 1, 1)
+        (2, 0, 1, 1)
     );
 
     Ok(())
