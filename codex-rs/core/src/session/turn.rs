@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use crate::SkillInjections;
+use crate::build_available_skills;
 use crate::build_skill_injections;
 use crate::client::ModelClientSession;
 use crate::client_common::Prompt;
@@ -15,7 +16,10 @@ use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
 use crate::compact_remote_v2::run_inline_remote_auto_compact_task as run_inline_remote_auto_compact_task_v2;
 use crate::connectors;
+use crate::context::AvailableSkillsInstructions;
 use crate::context::ContextualUserFragment;
+use crate::context_manager::updates::build_developer_update_item;
+use crate::default_skill_metadata_budget;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::feedback_tags;
 use crate::hook_runtime::inspect_pending_input;
@@ -43,6 +47,7 @@ use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::skills::SkillRenderSideEffects;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::TurnItemContributorPolicy;
 use crate::stream_events_utils::finalize_non_tool_response_item;
@@ -55,6 +60,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -149,7 +155,7 @@ const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_tok
 ///
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    mut turn_context: Arc<TurnContext>,
     turn_extension_data: Arc<codex_extension_api::ExtensionData>,
     input: Vec<TurnInput>,
     prewarmed_client_session: Option<ModelClientSession>,
@@ -359,7 +365,41 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    refresh_turn_context,
                 } = sampling_request_output;
+                if refresh_turn_context {
+                    let refreshed_turn_context = sess
+                        .refresh_active_turn_context(turn_context.as_ref())
+                        .await;
+                    let refreshed_step_context = sess
+                        .capture_step_context(
+                            Arc::clone(&refreshed_turn_context),
+                            &cancellation_token,
+                        )
+                        .await?;
+                    let display_roots =
+                        turn_diff_display_roots(refreshed_step_context.as_ref()).await;
+                    turn_diff_tracker
+                        .lock()
+                        .await
+                        .set_environment_display_roots(display_roots);
+                    if let Some(skills_update) =
+                        build_available_skills_context_update(refreshed_turn_context.as_ref())
+                    {
+                        sess.record_conversation_items(
+                            refreshed_turn_context.as_ref(),
+                            &[skills_update],
+                        )
+                        .await;
+                    }
+                    world_state = sess
+                        .record_context_updates_and_set_reference_context_item(
+                            refreshed_step_context.as_ref(),
+                        )
+                        .await;
+                    turn_context = refreshed_turn_context;
+                    next_step_context = Some(refreshed_step_context);
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -714,6 +754,25 @@ async fn required_mcp_servers_for_input(
     }
 
     (required_servers.into_iter().collect(), mentioned_plugins)
+}
+
+fn build_available_skills_context_update(turn_context: &TurnContext) -> Option<ResponseItem> {
+    if !turn_context.config.include_skill_instructions {
+        return None;
+    }
+    let instructions = build_available_skills(
+        turn_context.turn_skills.snapshot.outcome(),
+        default_skill_metadata_budget(turn_context.model_info.context_window),
+        SkillRenderSideEffects::None,
+    )
+    .map(|available_skills| {
+        AvailableSkillsInstructions::from_available_skills(
+            &available_skills,
+            turn_context.model_info.include_skills_usage_instructions,
+        )
+    })
+    .unwrap_or_else(|| AvailableSkillsInstructions::from_skill_lines(Vec::new()));
+    build_developer_update_item(vec![instructions.render()])
 }
 
 #[instrument(level = "trace", skip_all)]
@@ -1353,7 +1412,7 @@ async fn run_sampling_request(
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            Arc::clone(&step_context),
             Arc::clone(&turn_store),
             client_session,
             responses_metadata,
@@ -1564,6 +1623,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    refresh_turn_context: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2148,14 +2208,14 @@ fn assign_missing_streamed_response_item_id(
 #[instrument(level = "trace",
     skip_all,
     fields(
-        turn_id = %turn_context.sub_id,
-        model = %turn_context.model_info.slug
+        turn_id = %step_context.turn.sub_id,
+        model = %step_context.turn.model_info.slug
     )
 )]
 async fn try_run_sampling_request(
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
@@ -2163,6 +2223,7 @@ async fn try_run_sampling_request(
     prompt: &Prompt,
     cancellation_token: CancellationToken,
 ) -> CodexResult<SamplingRequestResult> {
+    let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
         approval_policy = turn_context.approval_policy.value(),
@@ -2198,6 +2259,8 @@ async fn try_run_sampling_request(
         .await??;
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
+    let mut tool_call_count = 0usize;
+    let mut workspace_cwd_call_seen = false;
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -2343,6 +2406,10 @@ async fn try_run_sampling_request(
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
+                if let Some(tool_name) = output_result.tool_name {
+                    tool_call_count += 1;
+                    workspace_cwd_call_seen |= is_set_workspace_cwd_tool(&tool_name);
+                }
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
@@ -2352,6 +2419,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        refresh_turn_context: false,
                     });
                 }
             }
@@ -2522,6 +2590,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    refresh_turn_context: false,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -2688,6 +2757,9 @@ async fn try_run_sampling_request(
     } else {
         Some(turn_context.turn_timing_state.begin_tool_blocking())
     };
+    if workspace_cwd_call_seen && tool_call_count != 1 {
+        step_context.reject_context_transition_mixed_with_sibling_tool();
+    }
     drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
     drop(tool_blocking_timing_guard);
 
@@ -2714,7 +2786,10 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    outcome.map(|mut outcome| {
+        outcome.refresh_turn_context = step_context.turn_context_refresh_requested();
+        outcome
+    })
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
