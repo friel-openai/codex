@@ -249,7 +249,7 @@ fn user_message_item(text: &str) -> ResponseItem {
 
 fn reasoning_item(id: &str, text: &str) -> ResponseItem {
     ResponseItem::Reasoning {
-        id: id.to_string(),
+        id: Some(id.to_string()),
         summary: vec![ReasoningItemReasoningSummary::SummaryText {
             text: "summary".to_string(),
         }],
