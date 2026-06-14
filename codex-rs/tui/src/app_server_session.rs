@@ -1475,6 +1475,7 @@ fn thread_start_params_from_config(
         developer_instructions: with_terminal_visualization_instructions(
             config, /*control_instructions*/ None,
         ),
+        experimental_raw_events: true,
         ..ThreadStartParams::default()
     }
 }
@@ -1977,6 +1978,7 @@ mod tests {
         );
         assert_eq!(params.model_provider, Some(config.model_provider_id));
         assert_eq!(params.thread_source, Some(ThreadSource::User));
+        assert!(params.experimental_raw_events);
     }
 
     #[tokio::test]
