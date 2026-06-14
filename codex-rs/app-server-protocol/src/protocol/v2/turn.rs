@@ -154,7 +154,7 @@ pub struct TurnStartParams {
     #[ts(optional = nullable)]
     pub collaboration_mode: Option<CollaborationMode>,
 
-    /// @deprecated Ignored. Use `effort: "ultra"` for proactive multi-agent behavior.
+    /// @deprecated Ignored. Frodex uses proactive behavior for every reasoning effort.
     #[experimental("turn/start.multiAgentMode")]
     #[ts(optional = nullable)]
     pub multi_agent_mode: Option<MultiAgentMode>,
