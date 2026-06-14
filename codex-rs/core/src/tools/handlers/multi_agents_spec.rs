@@ -158,15 +158,15 @@ pub fn create_send_message_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Relative or canonical task name to message (from spawn_agent).".to_string(),
+                "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned agent."
+                    .to_string(),
             )),
         ),
         (
             "message".to_string(),
             JsonSchema::string(Some(
                 "Message text to queue on the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            )),
         ),
     ]);
 
@@ -190,7 +190,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
+                "Agent id or canonical task name to send a follow-up task to (from spawn_agent), or `parent` from a supervisor check-in."
                     .to_string(),
             )),
         ),
@@ -198,8 +198,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
             "message".to_string(),
             JsonSchema::string(Some(
                 "Message text to send to the target agent.".to_string(),
-            ))
-            .with_encrypted(),
+            )),
         ),
     ]);
 
@@ -304,6 +303,122 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
                 "The agent status observed before shutdown was requested.",
             )),
         })],
+    })
+}
+
+pub fn create_supervisor_close_self_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "message".to_string(),
+        JsonSchema::string(Some(
+            "Optional final message sent to the parent agent before marking the goal complete."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_self".to_string(),
+        description: "Supervisor-only: mark the active goal complete, optionally send a final message to the parent agent, and end this supervisor check-in immediately."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "completed": {
+                    "type": "boolean",
+                    "description": "Whether the active goal was marked complete."
+                }
+            },
+            "required": ["completed"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_compact_parent_context_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Short reason why the parent thread should be compacted.".to_string(),
+            )),
+        ),
+        (
+            "evidence".to_string(),
+            JsonSchema::string(Some(
+                "Specific observation that the parent thread is idle or stuck.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Supervisor-only: request compaction for this supervisor helper's parent thread when it is idle and stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+pub fn create_supervisor_snooze_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "delay_seconds".to_string(),
+            JsonSchema::number(Some("Snooze delay in seconds.".to_string())),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Optional short reason for snoozing this check-in.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "snooze".to_string(),
+        description: "Supervisor-only: keep the active goal supervised, send no message for the current check-in, and wait before the next check-in."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ Some(vec!["delay_seconds".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "delay_seconds": {
+                    "type": "number",
+                    "description": "Effective snooze delay in seconds."
+                }
+            },
+            "required": ["delay_seconds"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Freeform(_)
+            | ToolSpec::ImageGeneration { .. }
+            | ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::WebSearch { .. } => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "supervisor".to_string(),
+        description: "Supervisor-only tools for active-goal lifecycle control.".to_string(),
+        tools,
     })
 }
 
@@ -601,8 +716,7 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             "message".to_string(),
             JsonSchema::string(Some(
                 "Initial plain-text task for the new agent.".to_string(),
-            ))
-            .with_encrypted(),
+            )),
         ),
         (
             "agent_type".to_string(),
