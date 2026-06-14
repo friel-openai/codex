@@ -99,10 +99,7 @@ impl AgentNavigationState {
         self.parent_owned_threads.insert(thread_id);
     }
 
-    /// Returns whether the picker cache currently knows about any threads.
-    ///
-    /// This is the cheapest way for `App` to decide whether opening the picker should show "No
-    /// agents available yet." rather than constructing picker rows from an empty state.
+    #[cfg(test)]
     pub(crate) fn is_empty(&self) -> bool {
         self.threads.is_empty()
     }
@@ -238,17 +235,6 @@ impl AgentNavigationState {
         self.parent_owned_threads.remove(&thread_id);
     }
 
-    /// Returns whether there is at least one tracked thread other than the primary one.
-    ///
-    /// `App` uses this to decide whether the picker should be available even when the collaboration
-    /// feature flag is currently disabled, because already-existing sub-agent threads should remain
-    /// inspectable.
-    pub(crate) fn has_non_primary_thread(&self, primary_thread_id: Option<ThreadId>) -> bool {
-        self.threads
-            .keys()
-            .any(|thread_id| Some(*thread_id) != primary_thread_id)
-    }
-
     /// Returns live picker rows in the same order users cycle through them.
     ///
     /// The `order` vector is intentionally historical and may briefly contain thread ids that no
@@ -269,6 +255,7 @@ impl AgentNavigationState {
             .into_iter()
             .filter(|(thread_id, entry)| {
                 Some(*thread_id) != primary_thread_id
+                    && !entry.is_goal_supervisor()
                     && entry
                         .agent_path
                         .as_deref()
