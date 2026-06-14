@@ -34,6 +34,7 @@ use codex_login::AuthManager;
 use codex_mcp::McpConfig;
 use codex_mcp::McpConnectionManager;
 use codex_mcp::McpRuntimeContext;
+use codex_mcp::ToolInfo as McpToolInfo;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -46,6 +47,11 @@ use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Default)]
+pub(crate) struct McpToolSnapshot {
+    pub(crate) tools: HashMap<String, McpToolInfo>,
+}
+
 pub(crate) struct SessionServices {
     /// Mirror of the latest manager for extension resource clients that predate runtime snapshots.
     pub(crate) mcp_connection_manager: Arc<ArcSwap<McpConnectionManager>>,
@@ -53,6 +59,7 @@ pub(crate) struct SessionServices {
     pub(crate) mcp_runtime: ArcSwapOption<McpRuntimeSnapshot>,
     /// Serializes environment-driven runtime rebuilds.
     pub(crate) mcp_projection_lock: Mutex<()>,
+    pub(crate) mcp_tool_snapshot: Mutex<Option<McpToolSnapshot>>,
     pub(crate) mcp_startup_cancellation_token: Mutex<CancellationToken>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     #[cfg_attr(not(unix), allow(dead_code))]
