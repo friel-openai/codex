@@ -191,7 +191,9 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
         ThreadItem::ContextCompaction { .. } => return Some("Compacted context".to_string()),
         ThreadItem::UserMessage { .. }
         | ThreadItem::HookPrompt { .. }
-        | ThreadItem::Sleep { .. } => return None,
+        | ThreadItem::Sleep { .. }
+        | ThreadItem::RawResponseItem { .. }
+        | ThreadItem::InterAgentCommunication { .. } => return None,
     };
     bounded_summary(summary)
 }
