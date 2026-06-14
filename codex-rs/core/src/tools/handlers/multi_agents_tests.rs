@@ -516,7 +516,9 @@ async fn spawn_agent_service_tier_inheritance_preserves_supported_or_configured_
         let mut turn = turn
             .with_model("gpt-5.4".to_string(), &session.services.models_manager)
             .await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
         let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
         config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
         turn.config = Arc::new(config);
         let manager = thread_manager();
@@ -557,7 +559,9 @@ async fn spawn_agent_service_tier_inheritance_preserves_supported_or_configured_
         let mut turn = turn
             .with_model("gpt-5.4".to_string(), &session.services.models_manager)
             .await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
         let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
         config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
         turn.config = Arc::new(config);
         let manager = thread_manager();
@@ -595,6 +599,7 @@ async fn spawn_agent_service_tier_inheritance_preserves_supported_or_configured_
 
     {
         let (mut session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
         tokio::fs::create_dir_all(&turn.config.codex_home)
             .await
             .expect("codex home should be created");
@@ -614,6 +619,7 @@ service_tier = "priority"
 
         let role_name = "service-tier-role".to_string();
         let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
         config.agent_roles.insert(
             role_name.clone(),
             AgentRoleConfig {
