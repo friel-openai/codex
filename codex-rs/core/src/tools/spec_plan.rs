@@ -24,6 +24,7 @@ use crate::tools::handlers::ReadMcpResourceHandler;
 use crate::tools::handlers::RequestPermissionsHandler;
 use crate::tools::handlers::RequestPluginInstallHandler;
 use crate::tools::handlers::RequestUserInputHandler;
+use crate::tools::handlers::SetWorkspaceCwdHandler;
 use crate::tools::handlers::ShellCommandHandler;
 use crate::tools::handlers::ShellCommandHandlerOptions;
 use crate::tools::handlers::SleepHandler;
@@ -1055,6 +1056,12 @@ fn add_core_utility_tools(context: &CoreToolPlanContext<'_>, registry: &mut Tool
 
     if environment_mode.has_environment() && features.enabled(Feature::RequestPermissionsTool) {
         registry.add(RequestPermissionsHandler);
+    }
+
+    if features.enabled(Feature::WorkspaceCwdTool)
+        && context.environments.single_local_environment().is_some()
+    {
+        planned_tools.add(SetWorkspaceCwdHandler);
     }
 
     if features.enabled(Feature::TokenBudget) {

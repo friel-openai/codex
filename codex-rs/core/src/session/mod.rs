@@ -249,6 +249,7 @@ use self::turn::agent_message_text;
 use self::turn::collect_explicit_app_ids_from_skill_items;
 use self::turn::realtime_text_for_event;
 use self::turn_context::TurnContext;
+pub(crate) use handlers::thread_settings_applied_event;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
@@ -3370,6 +3371,7 @@ impl Session {
             required_mcp_servers: required_servers.to_vec(),
             tool_router,
             loaded_agents_md,
+            context_transition: Default::default(),
         }))
     }
 
@@ -3988,8 +3990,9 @@ impl Session {
         if only_world_state_changed {
             return Ok(world_state);
         }
-        // Persist one `TurnContextItem` per real user turn so resume/lazy replay can recover the
-        // latest durable baseline even when this turn emitted no model-visible context diffs.
+        // Persist the active `TurnContextItem` so resume/lazy replay can recover the latest
+        // durable baseline. This normally records one item per user turn; a tool that changes the
+        // active context may record another item before the next model step in that turn.
         self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item.clone())])
             .await;
 

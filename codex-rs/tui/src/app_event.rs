@@ -212,6 +212,12 @@ pub(crate) enum AppEvent {
         user_message: Option<UserMessage>,
     },
 
+    /// Open a blank standalone side conversation in a separate terminal pane.
+    StartPlacedSide {
+        parent_thread_id: ThreadId,
+        placement: ForkPanePlacement,
+    },
+
     /// Submit an op to the specified thread, regardless of current focus.
     SubmitThreadOp {
         thread_id: ThreadId,
@@ -326,6 +332,7 @@ pub(crate) enum AppEvent {
     /// Fork the current session into a new thread, optionally assigning it a name.
     ForkCurrentSession {
         name: Option<String>,
+        placement: Option<ForkPanePlacement>,
     },
 
     /// Branch before a selected prompt and reopen it in the new thread's composer.
@@ -1185,6 +1192,14 @@ pub(crate) struct PermissionProfileSelection {
     pub display_label: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ForkPanePlacement {
+    Left,
+    Right,
+    Up,
+    Down,
+    Float,
+}
 /// The exit strategy requested by the UI layer.
 ///
 /// Most user-initiated exits should use `ShutdownFirst` so core cleanup runs and the UI exits only

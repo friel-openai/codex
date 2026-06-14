@@ -217,6 +217,7 @@ mod input;
 mod loaded_threads;
 mod pending_interactive_replay;
 mod pets;
+mod placed_side;
 mod platform_actions;
 mod plugin_mentions;
 mod replay_filter;
@@ -224,6 +225,7 @@ mod resize_reflow;
 mod safety_buffering;
 mod session_lifecycle;
 mod side;
+mod standalone_side;
 mod startup_prompts;
 mod thread_events;
 mod thread_goal_actions;
@@ -583,6 +585,7 @@ pub(crate) struct App {
     agent_navigation: AgentNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
     abandoned_side_threads: HashSet<ThreadId>,
+    standalone_side_active: bool,
     active_thread_id: Option<ThreadId>,
     active_thread_rx: Option<mpsc::Receiver<ThreadBufferedEvent>>,
     primary_thread_id: Option<ThreadId>,
@@ -903,6 +906,7 @@ impl App {
             &session_selection,
             SessionSelection::StartFresh | SessionSelection::Exit
         );
+        let standalone_side = matches!(&session_selection, SessionSelection::Side(_));
         let (mut chat_widget, initial_started_thread) = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 spawn_startup_thread_start(&app_server, config.clone(), app_event_tx.clone());
@@ -1018,6 +1022,44 @@ impl App {
                 };
                 (ChatWidget::new_with_app_event(init), Some(forked))
             }
+            SessionSelection::Side(target_session) => {
+                session_telemetry.counter(
+                    "codex.thread.side",
+                    /*inc*/ 1,
+                    &[("source", "internal_side_session")],
+                );
+                let side_config = Self::standalone_side_config(&config);
+                let side = Self::start_standalone_side(
+                    &mut app_server,
+                    side_config.clone(),
+                    &target_session,
+                )
+                .await?;
+                config = side_config;
+                let init = crate::chatwidget::ChatWidgetInit {
+                    config: config.clone(),
+                    frame_requester: tui.frame_requester(),
+                    app_event_tx: app_event_tx.clone(),
+                    workspace_command_runner: Some(workspace_command_runner.clone()),
+                    initial_user_message: None,
+                    enhanced_keys_supported,
+                    has_chatgpt_account,
+                    has_codex_backend_auth,
+                    model_catalog: model_catalog.clone(),
+                    feedback: feedback.clone(),
+                    is_first_run,
+                    status_account_display: status_account_display.clone(),
+                    runtime_model_provider_base_url: runtime_model_provider_base_url.clone(),
+                    initial_plan_type,
+                    model: config.model.clone(),
+                    startup_tooltip_override: None,
+                    status_line_invalid_items_warned: status_line_invalid_items_warned.clone(),
+                    terminal_title_invalid_items_warned: terminal_title_invalid_items_warned
+                        .clone(),
+                    session_telemetry: session_telemetry.clone(),
+                };
+                (ChatWidget::new_with_app_event(init), Some(side))
+            }
         };
         chat_widget.remote_connection = remote_connection;
         let thread_and_widget_ms = thread_and_widget_started_at.elapsed().as_millis();
@@ -1079,6 +1121,7 @@ See the Codex keymap documentation for supported actions and examples."
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),
+            standalone_side_active: standalone_side,
             active_thread_id: None,
             active_thread_rx: None,
             primary_thread_id: None,
@@ -1091,6 +1134,9 @@ See the Codex keymap documentation for supported actions and examples."
             pending_plugin_enabled_writes: HashMap::new(),
             pending_hook_enabled_writes: HashMap::new(),
         };
+        if standalone_side {
+            app.activate_standalone_side_ui();
+        }
         if let Some(entry) = startup_hooks_browser {
             app.chat_widget.open_hooks_browser(entry);
         }

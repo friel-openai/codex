@@ -61,6 +61,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
 use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::handlers::is_set_workspace_cwd_tool;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -173,7 +174,7 @@ pub(crate) enum RunTurnProviderStartup {
 ///
 pub(crate) async fn run_turn(
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    mut turn_context: Arc<TurnContext>,
     input: Vec<TurnInput>,
     provider_startup: RunTurnProviderStartup,
     cancellation_token: CancellationToken,
@@ -510,7 +511,32 @@ pub(crate) async fn run_turn(
                 let SamplingRequestResult {
                     needs_follow_up: model_needs_follow_up,
                     last_agent_message: sampling_request_last_agent_message,
+                    refresh_turn_context,
                 } = sampling_request_output;
+                if refresh_turn_context {
+                    let refreshed_turn_context = sess
+                        .refresh_active_turn_context(turn_context.as_ref())
+                        .await;
+                    let refreshed_step_context = sess
+                        .capture_step_context(
+                            Arc::clone(&refreshed_turn_context),
+                            &cancellation_token,
+                        )
+                        .await?;
+                    let display_roots =
+                        turn_diff_display_roots(refreshed_step_context.as_ref()).await;
+                    turn_diff_tracker
+                        .lock()
+                        .await
+                        .set_environment_display_roots(display_roots);
+                    world_state = sess
+                        .record_context_updates_and_set_reference_context_item(
+                            refreshed_step_context.as_ref(),
+                        )
+                        .await?;
+                    turn_context = refreshed_turn_context;
+                    next_step_context = Some(refreshed_step_context);
+                }
                 if model_needs_follow_up {
                     sess.input_queue
                         .accept_mailbox_delivery_for_current_turn(
@@ -1812,7 +1838,7 @@ async fn run_sampling_request(
         let err = match try_run_sampling_request(
             tool_runtime.clone(),
             Arc::clone(&sess),
-            Arc::clone(&turn_context),
+            Arc::clone(&step_context),
             Arc::clone(&turn_store),
             client_session,
             responses_metadata,
@@ -2031,6 +2057,7 @@ pub(crate) async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+    refresh_turn_context: bool,
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -2849,14 +2876,14 @@ fn append_partial_reasoning_content(
 #[instrument(level = "trace",
     skip_all,
     fields(
-        turn_id = %turn_context.sub_id,
-        model = %turn_context.model_info.slug
+        turn_id = %step_context.turn.sub_id,
+        model = %step_context.turn.model_info.slug
     )
 )]
 async fn try_run_sampling_request(
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
-    turn_context: Arc<TurnContext>,
+    step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     client_session: &mut ModelClientSession,
     responses_metadata: &CodexResponsesMetadata,
@@ -2866,6 +2893,7 @@ async fn try_run_sampling_request(
     reroute_safe: Arc<AtomicBool>,
     interrupted_response: Arc<AtomicBool>,
 ) -> CodexResult<SamplingRequestResult> {
+    let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
         approval_policy = turn_context.approval_policy(),
@@ -2901,6 +2929,8 @@ async fn try_run_sampling_request(
         .await??;
     let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
         FuturesOrdered::new();
+    let mut tool_call_count = 0usize;
+    let mut workspace_cwd_call_seen = false;
     let mut needs_follow_up = false;
     let mut last_agent_message: Option<String> = None;
     let mut active_item: Option<TurnItem> = None;
@@ -3069,6 +3099,10 @@ async fn try_run_sampling_request(
                 if let Some(tool_future) = output_result.tool_future {
                     in_flight.push_back(tool_future);
                 }
+                if let Some(tool_name) = output_result.tool_name {
+                    tool_call_count += 1;
+                    workspace_cwd_call_seen |= is_set_workspace_cwd_tool(&tool_name);
+                }
                 if let Some(agent_message) = output_result.last_agent_message {
                     last_agent_message = Some(agent_message);
                 }
@@ -3078,6 +3112,7 @@ async fn try_run_sampling_request(
                     break Ok(SamplingRequestResult {
                         needs_follow_up: true,
                         last_agent_message,
+                        refresh_turn_context: false,
                     });
                 }
             }
@@ -3261,6 +3296,7 @@ async fn try_run_sampling_request(
                 break Ok(SamplingRequestResult {
                     needs_follow_up,
                     last_agent_message,
+                    refresh_turn_context: false,
                 });
             }
             ResponseEvent::OutputTextDelta(delta) => {
@@ -3581,7 +3617,10 @@ async fn try_run_sampling_request(
         }
     }
 
-    outcome
+    outcome.map(|mut outcome| {
+        outcome.refresh_turn_context = step_context.turn_context_refresh_requested();
+        outcome
+    })
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
