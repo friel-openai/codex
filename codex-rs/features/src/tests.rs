@@ -390,6 +390,20 @@ fn multi_agent_is_stable_and_enabled_by_default() {
 }
 
 #[test]
+fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+    assert_eq!(
+        feature_for_key("agent_prompt_injection"),
+        Some(Feature::AgentPromptInjection)
+    );
+    assert_eq!(
+        Feature::AgentPromptInjection.stage(),
+        Stage::UnderDevelopment
+    );
+    assert_eq!(Feature::AgentPromptInjection.default_enabled(), false);
+    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
+}
+
+#[test]
 fn enable_fanout_is_under_development() {
     assert_eq!(Feature::SpawnCsv.stage(), Stage::UnderDevelopment);
     assert_eq!(Feature::SpawnCsv.default_enabled(), false);
