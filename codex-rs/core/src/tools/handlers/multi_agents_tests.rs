@@ -47,6 +47,7 @@ use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -434,7 +435,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (mut session, turn) = make_session_and_context().await;
+        let (mut session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let manager = thread_manager();
         let root = manager
             .start_thread(StartThreadOptions::new((*turn.config).clone()))
@@ -473,7 +478,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -499,7 +508,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -4257,6 +4270,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         .features
         .enable(Feature::Sqlite)
         .expect("test config should allow sqlite");
+    let _ = config.features.disable(Feature::MultiAgentV2);
     let state_db = init_state_db(&config).await;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
@@ -4354,7 +4368,6 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             .await,
         AgentStatus::NotFound
     );
-
     let child_resume_output = ResumeAgentHandler
         .handle(invocation(
             parent_session.clone(),
@@ -4373,6 +4386,36 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         manager.agent_control().get_status(child_thread_id).await,
         AgentStatus::NotFound
     );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        parent_session
+            .services
+            .agent_control
+            .get_agent_metadata(grandchild_thread_id)
+            .is_some(),
+        "open grandchild should remain addressable while cold"
+    );
+
+    let grandchild_send_output = SendInputHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "send_input",
+            function_payload(json!({
+                "target": grandchild_thread_id.to_string(),
+                "message": "hello resumed grandchild"
+            })),
+        ))
+        .await
+        .expect("send_input should reload the cold grandchild");
+    let (_, grandchild_send_success) = expect_text_output(grandchild_send_output);
+    assert_eq!(grandchild_send_success, Some(true));
     assert_ne!(
         manager
             .agent_control()
