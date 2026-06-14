@@ -254,7 +254,7 @@ You may also see them addressed as to=/root/..., which indicates your identity i
 "#;
 const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
 const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. `frodex.close_agent` is a separate direct tool for closing an owned descendant agent. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.
@@ -1274,6 +1274,8 @@ pub struct MultiAgentV2Config {
     pub hide_spawn_agent_metadata: bool,
     pub expose_spawn_agent_model_overrides: bool,
     pub wait_agent_enabled: bool,
+    /// Expose same-thread adoption and promotion only after explicit opt-in.
+    pub enable_thread_adoption: bool,
     pub non_code_mode_only: bool,
 }
 
@@ -1299,6 +1301,7 @@ impl MultiAgentV2Config {
             hide_spawn_agent_metadata: true,
             expose_spawn_agent_model_overrides: true,
             wait_agent_enabled: true,
+            enable_thread_adoption: false,
             non_code_mode_only: true,
         }
     }
@@ -2714,6 +2717,9 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
     let wait_agent_enabled = base
         .and_then(|config| config.wait_agent_enabled)
         .unwrap_or(default.wait_agent_enabled);
+    let enable_thread_adoption = base
+        .and_then(|config| config.enable_thread_adoption)
+        .unwrap_or(default.enable_thread_adoption);
     let mut default_root_agent_usage_hint_text = default.root_agent_usage_hint_text;
     let mut default_subagent_usage_hint_text = default.subagent_usage_hint_text;
     if expose_spawn_agent_model_overrides {
@@ -2763,6 +2769,7 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
         hide_spawn_agent_metadata,
         expose_spawn_agent_model_overrides,
         wait_agent_enabled,
+        enable_thread_adoption,
         non_code_mode_only,
     }
 }

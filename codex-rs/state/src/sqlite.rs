@@ -8,6 +8,7 @@
 use crate::DbTelemetry;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
+use crate::runtime::repair_frodex_state_migration_rows;
 use crate::telemetry;
 use crate::telemetry::DbKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -250,6 +251,9 @@ impl SqliteConfig {
         let pool = pool_result.map_err(|source| {
             RuntimeDbInitError::new(spec.label, "open", path.as_path(), source)
         })?;
+        if matches!(spec.kind, DbKind::State) {
+            repair_frodex_state_migration_rows(&pool).await?;
+        }
         let started = Instant::now();
         let migrate_result = async {
             if matches!(spec.kind, DbKind::State) {

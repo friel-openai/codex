@@ -54,7 +54,7 @@ impl Session {
         let has_user_input = input.iter().any(
             |item| matches!(item, TurnInput::UserInput { content, .. } if !content.is_empty()),
         );
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        if self.has_pending_turn_start_work().await {
             return Err(TryStartTurnIfIdleError::new(
                 TryStartTurnIfIdleRejectionReason::PendingTriggerTurn,
                 input,
@@ -79,7 +79,7 @@ impl Session {
             Arc::clone(&active_turn.turn_state)
         };
 
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        if self.has_pending_turn_start_work().await {
             self.clear_reserved_idle_turn(&turn_state).await;
             self.maybe_start_turn_for_pending_work().await;
             return Err(TryStartTurnIfIdleError::new(
@@ -101,7 +101,7 @@ impl Session {
         }
         self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
             .await;
-        if self.input_queue.has_trigger_turn_mailbox_items().await {
+        if self.has_pending_turn_start_work().await {
             self.clear_reserved_idle_turn(&turn_state).await;
             self.maybe_start_turn_for_pending_work().await;
             return Err(TryStartTurnIfIdleError::new(
