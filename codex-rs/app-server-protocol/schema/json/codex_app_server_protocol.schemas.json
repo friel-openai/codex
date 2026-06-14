@@ -11080,6 +11080,52 @@
           }
         ]
       },
+      "InterAgentCommunication": {
+        "properties": {
+          "author": {
+            "$ref": "#/definitions/v2/AgentPath"
+          },
+          "content": {
+            "type": "string"
+          },
+          "encrypted_content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "metadata": {
+            "anyOf": [
+              {
+                "$ref": "#/definitions/v2/ResponseItemMetadata"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "other_recipients": {
+            "default": [],
+            "items": {
+              "$ref": "#/definitions/v2/AgentPath"
+            },
+            "type": "array"
+          },
+          "recipient": {
+            "$ref": "#/definitions/v2/AgentPath"
+          },
+          "trigger_turn": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "author",
+          "content",
+          "recipient",
+          "trigger_turn"
+        ],
+        "type": "object"
+      },
       "ItemCompletedNotification": {
         "$schema": "http://json-schema.org/draft-07/schema#",
         "properties": {
@@ -17435,6 +17481,30 @@
               "type"
             ],
             "title": "AgentMessageThreadItem",
+            "type": "object"
+          },
+          {
+            "properties": {
+              "communication": {
+                "$ref": "#/definitions/v2/InterAgentCommunication"
+              },
+              "id": {
+                "type": "string"
+              },
+              "type": {
+                "enum": [
+                  "interAgentCommunication"
+                ],
+                "title": "InterAgentCommunicationThreadItemType",
+                "type": "string"
+              }
+            },
+            "required": [
+              "communication",
+              "id",
+              "type"
+            ],
+            "title": "InterAgentCommunicationThreadItem",
             "type": "object"
           },
           {
