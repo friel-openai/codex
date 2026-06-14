@@ -40,6 +40,7 @@ use codex_protocol::protocol::ExecCommandSource as CoreExecCommandSource;
 use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
 use codex_protocol::protocol::GuardianRiskLevel as CoreGuardianRiskLevel;
 use codex_protocol::protocol::GuardianUserAuthorization as CoreGuardianUserAuthorization;
+use codex_protocol::protocol::InterAgentCommunication as CoreInterAgentCommunication;
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
 use codex_protocol::protocol::ReviewDecision as CoreReviewDecision;
 use codex_protocol::protocol::SubAgentActivityKind as CoreSubAgentActivityKind;
@@ -249,6 +250,24 @@ pub enum ThreadItem {
     },
     #[serde(rename_all = "camelCase")]
     #[ts(rename_all = "camelCase")]
+    InterAgentCommunication {
+        id: String,
+        communication: CoreInterAgentCommunication,
+    },
+    /// Legacy app servers used this generic item for persisted inter-agent messages.
+    /// Current app servers emit `InterAgentCommunication`; clients retain this variant so an
+    /// app-server upgrade cannot make an existing TUI fail to decode `thread/resume`.
+    #[serde(skip_serializing)]
+    #[schemars(skip)]
+    #[ts(skip)]
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
+    RawResponseItem {
+        id: String,
+        item: ResponseItem,
+    },
+    #[serde(rename_all = "camelCase")]
+    #[ts(rename_all = "camelCase")]
     /// EXPERIMENTAL - proposed plan item content. The completed plan item is
     /// authoritative and may not match the concatenation of `PlanDelta` text.
     Plan {
@@ -421,6 +440,8 @@ impl ThreadItem {
             ThreadItem::UserMessage { id, .. }
             | ThreadItem::HookPrompt { id, .. }
             | ThreadItem::AgentMessage { id, .. }
+            | ThreadItem::InterAgentCommunication { id, .. }
+            | ThreadItem::RawResponseItem { id, .. }
             | ThreadItem::Plan { id, .. }
             | ThreadItem::Reasoning { id, .. }
             | ThreadItem::CommandExecution { id, .. }

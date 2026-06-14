@@ -3,6 +3,13 @@
 use super::markdown_render_cache::MarkdownRenderCache;
 use super::*;
 
+const USER_MESSAGE_RIGHT_MARGIN: u16 = 1;
+const USER_MESSAGE_MIN_ALIGNMENT_WIDTH: u16 = 40;
+
+pub(crate) fn user_message_uses_right_alignment(width: u16) -> bool {
+    width >= USER_MESSAGE_MIN_ALIGNMENT_WIDTH
+}
+
 #[derive(Debug)]
 pub(crate) struct UserHistoryCell {
     pub message: String,
@@ -106,6 +113,49 @@ fn trim_trailing_blank_lines(mut lines: Vec<Line<'static>>) -> Vec<Line<'static>
     lines
 }
 
+pub(crate) fn finish_user_message_lines(
+    mut lines: Vec<Line<'static>>,
+    width: u16,
+    available_width: u16,
+    style: Style,
+) -> Vec<Line<'static>> {
+    for line in &mut lines {
+        for span in &mut line.spans {
+            span.style = span.style.patch(line.style);
+        }
+        line.style = Style::default();
+    }
+
+    let bubble_width = lines.iter().map(Line::width).max().unwrap_or(0);
+    if bubble_width == 0 {
+        return lines;
+    }
+    let visible_bubble_width = bubble_width.min(usize::from(available_width));
+    let left_padding = if user_message_uses_right_alignment(width) {
+        usize::from(available_width).saturating_sub(bubble_width)
+    } else {
+        0
+    };
+    for line in &mut lines {
+        let line_width = line.width();
+        let mut spans = Vec::with_capacity(line.spans.len() + 2);
+        if left_padding > 0 {
+            spans.push(Span::raw(" ".repeat(left_padding)));
+        }
+        if line_width == 0 {
+            spans.push(Span::styled(" ".repeat(visible_bubble_width), style));
+        } else {
+            spans.append(&mut line.spans);
+        }
+        let right_padding = bubble_width.saturating_sub(line_width);
+        if line_width > 0 && right_padding > 0 {
+            spans.push(Span::styled(" ".repeat(right_padding), style));
+        }
+        line.spans = spans;
+    }
+    lines
+}
+
 impl HistoryCell for UserHistoryCell {
     fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
         let message = sanitize_user_text(&self.message);
@@ -114,11 +164,15 @@ impl HistoryCell for UserHistoryCell {
         } else {
             &[]
         };
-        let wrap_width = width
-            .saturating_sub(
-                LIVE_PREFIX_COLS + 1, /* keep a one-column right margin for wrapping */
-            )
-            .max(1);
+        let available_width = width.saturating_sub(USER_MESSAGE_RIGHT_MARGIN).max(1);
+        let block_width = if user_message_uses_right_alignment(width) {
+            u16::try_from(usize::from(width) * 4 / 5)
+                .unwrap_or(available_width)
+                .min(available_width)
+        } else {
+            available_width
+        };
+        let wrap_width = block_width.saturating_sub(LIVE_PREFIX_COLS).max(1);
 
         let style = user_message_style();
         let element_style = style.fg(Color::Cyan);
@@ -194,7 +248,7 @@ impl HistoryCell for UserHistoryCell {
         }
 
         lines.push(Line::from("").style(style));
-        lines
+        finish_user_message_lines(lines, width, available_width, style)
     }
 
     fn raw_lines(&self) -> Vec<Line<'static>> {
@@ -212,6 +266,31 @@ impl HistoryCell for UserHistoryCell {
             );
         }
         lines
+    }
+
+    fn desired_height(&self, width: u16) -> u16 {
+        self.display_lines(width)
+            .into_iter()
+            .map(|line| {
+                if line
+                    .spans
+                    .iter()
+                    .all(|span| span.content.chars().all(char::is_whitespace))
+                {
+                    1
+                } else {
+                    Paragraph::new(line)
+                        .wrap(Wrap { trim: false })
+                        .line_count(width.max(1))
+                }
+            })
+            .sum::<usize>()
+            .try_into()
+            .unwrap_or(u16::MAX)
+    }
+
+    fn desired_transcript_height(&self, width: u16) -> u16 {
+        self.desired_height(width)
     }
 }
 
