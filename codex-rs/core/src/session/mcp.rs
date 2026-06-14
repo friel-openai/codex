@@ -193,6 +193,7 @@ impl Session {
                 Some(self.mcp_elicitation_reviewer()),
             )
             .await;
+            *self.services.mcp_tool_snapshot.lock().await = None;
             refresh_invalidation.published = true;
             if !self
                 .mcp_refresh_pending
@@ -553,6 +554,7 @@ impl Session {
             elicitation_reviewer,
         )
         .await;
+        *self.services.mcp_tool_snapshot.lock().await = None;
     }
 
     pub(crate) fn ready_selected_capability_roots(
