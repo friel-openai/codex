@@ -28,8 +28,13 @@ fn build_permissions_update_item(
     }
 
     let prev = previous?;
+    let next_workspace_roots = next.config.effective_workspace_roots();
+    #[allow(deprecated)]
+    let filesystem_context_unchanged = prev.cwd == next.cwd
+        && prev.workspace_roots.as_deref().unwrap_or_default() == next_workspace_roots.as_slice();
     if prev.permission_profile() == next.permission_profile()
         && prev.approval_policy == next.approval_policy.value()
+        && filesystem_context_unchanged
     {
         return None;
     }
