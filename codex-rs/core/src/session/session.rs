@@ -485,6 +485,7 @@ impl Session {
         agent_control: AgentControl,
         environment_manager: Arc<EnvironmentManager>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_thread_state: InheritedThreadState,
         analytics_events_client: Option<AnalyticsEventsClient>,
         thread_store: Arc<dyn ThreadStore>,
         parent_rollout_thread_trace: ThreadTraceContext,
@@ -970,7 +971,8 @@ impl Session {
                     thread_store: &thread_extension_data,
                 }).await;
             }
-
+            let prompt_cache_key_override = inherited_thread_state.prompt_cache_key();
+            let mcp_tool_snapshot = inherited_thread_state.mcp_tool_snapshot();
             let services = SessionServices {
                 // Initialize the MCP connection manager with an uninitialized
                 // instance. It will be replaced with one created via
@@ -1016,7 +1018,8 @@ impl Session {
                 live_thread: live_thread_init.as_ref().cloned(),
                 thread_store: Arc::clone(&thread_store),
                 attestation_provider: attestation_provider.clone(),
-                model_client: ModelClient::new(
+                mcp_tool_snapshot: Mutex::new(mcp_tool_snapshot),
+                model_client: ModelClient::new_with_response_continuation(
                     Some(Arc::clone(&auth_manager)),
                     thread_id,
                     session_configuration.provider.clone(),
@@ -1026,6 +1029,8 @@ impl Session {
                     config.features.enabled(Feature::RuntimeMetrics),
                     Self::build_model_client_beta_features_header(config.as_ref()),
                     attestation_provider,
+                    prompt_cache_key_override,
+                    inherited_thread_state.response_continuation(),
                 )
                 .with_prompt_cache_key_override(
                     crate::guardian::prompt_cache_key_override_for_review_session(

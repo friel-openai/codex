@@ -1160,12 +1160,20 @@ pub(crate) async fn built_tools(
     turn_context: &TurnContext,
     cancellation_token: &CancellationToken,
 ) -> CodexResult<Arc<ToolRouter>> {
-    let mcp_connection_manager = sess.services.mcp_connection_manager.load_full();
-    let has_mcp_servers = mcp_connection_manager.has_servers();
-    let all_mcp_tools = mcp_connection_manager
-        .list_all_tools()
-        .or_cancel(cancellation_token)
-        .await?;
+    let inherited_mcp_tool_snapshot = sess.services.mcp_tool_snapshot.lock().await.clone();
+    let (has_mcp_servers, all_mcp_tools) = if let Some(snapshot) = inherited_mcp_tool_snapshot {
+        let mut tools = snapshot.tools.into_values().collect::<Vec<_>>();
+        tools.sort_by_key(codex_mcp::ToolInfo::canonical_tool_name);
+        (!tools.is_empty(), tools)
+    } else {
+        let mcp_connection_manager = sess.services.mcp_connection_manager.load_full();
+        let has_mcp_servers = mcp_connection_manager.has_servers();
+        let all_mcp_tools = mcp_connection_manager
+            .list_all_tools()
+            .or_cancel(cancellation_token)
+            .await?;
+        (has_mcp_servers, all_mcp_tools)
+    };
     let loaded_plugins = sess
         .services
         .plugins_manager
