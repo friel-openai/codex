@@ -192,6 +192,32 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
 }
 
 #[test]
+fn multi_agent_is_stable_and_enabled_by_default() {
+    assert_eq!(Feature::Collab.stage(), Stage::Stable);
+    assert_eq!(Feature::Collab.default_enabled(), true);
+}
+
+#[test]
+fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+    assert_eq!(
+        feature_for_key("agent_prompt_injection"),
+        Some(Feature::AgentPromptInjection)
+    );
+    assert_eq!(
+        Feature::AgentPromptInjection.stage(),
+        Stage::UnderDevelopment
+    );
+    assert_eq!(Feature::AgentPromptInjection.default_enabled(), false);
+    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
+}
+
+#[test]
+fn enable_fanout_is_under_development() {
+    assert_eq!(Feature::SpawnCsv.stage(), Stage::UnderDevelopment);
+    assert_eq!(Feature::SpawnCsv.default_enabled(), false);
+}
+
+#[test]
 fn enable_fanout_normalization_enables_multi_agent_one_way() {
     let mut enable_fanout_features = Features::with_defaults();
     enable_fanout_features.enable(Feature::SpawnCsv);
