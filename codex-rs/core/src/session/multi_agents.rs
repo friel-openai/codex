@@ -2,7 +2,6 @@ use crate::config::MultiAgentV2Config;
 use crate::goal_supervisor::is_goal_supervisor_helper_source;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::config_types::MultiAgentMode;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -46,11 +45,6 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
         return None;
     }
 
-    let multi_agent_mode = match turn_context.effective_reasoning_effort() {
-        Some(ReasoningEffort::Ultra) => MultiAgentMode::Proactive,
-        _ => MultiAgentMode::ExplicitRequestOnly,
-    };
-
     match &turn_context.session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
         | SessionSource::Cli
@@ -58,7 +52,7 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
         | SessionSource::Exec
         | SessionSource::Mcp
         | SessionSource::Custom(_)
-        | SessionSource::Unknown => Some(multi_agent_mode),
+        | SessionSource::Unknown => Some(MultiAgentMode::Proactive),
         SessionSource::Internal(_) | SessionSource::SubAgent(_) => None,
     }
 }
