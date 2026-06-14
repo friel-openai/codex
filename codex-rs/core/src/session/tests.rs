@@ -5159,6 +5159,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     };
@@ -7167,6 +7168,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     });
@@ -10178,8 +10180,6 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 
     assert!(prompt.contains("# You are a Subagent"));
     assert!(prompt.contains("## Subagent Responsibilities"));
-    assert!(!prompt.contains("You are also a **watchdog**"));
-    assert!(!prompt.contains("watchdog.snooze"));
 }
 
 #[tokio::test]
@@ -10194,6 +10194,12 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     )
     .await
     .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.supervisor.md"),
+        "custom supervisor",
+    )
+    .await
+    .expect("write supervisor override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -10202,6 +10208,10 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     assert_eq!(
         load_subagent_prompt(codex_home.path()).await,
         "custom subagent"
+    );
+    assert_eq!(
+        load_supervisor_agent_prompt(codex_home.path()).await,
+        "custom supervisor"
     );
 }
 

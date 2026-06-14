@@ -1,3 +1,4 @@
+use super::is_v2_resident_session_source;
 use crate::ThreadManager;
 use crate::agent::AgentControl;
 use crate::codex_thread::CodexThread;
@@ -17,6 +18,28 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use pretty_assertions::assert_eq;
 use std::sync::Arc;
+
+#[test]
+fn goal_supervisor_helper_is_not_a_v2_resident() {
+    let parent_thread_id = ThreadId::new();
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+
+    assert!(is_v2_resident_session_source(&worker_source));
+    assert!(!is_v2_resident_session_source(&supervisor_source));
+}
 
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
