@@ -1515,6 +1515,55 @@ async fn injected_models_manager_controls_refresh_policy() {
     assert!(!config.codex_home.join("models_cache.json").exists());
 }
 
+#[tokio::test]
+async fn fork_startup_append_failure_discards_before_manager_registration() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let store = Arc::new(codex_thread_store::InMemoryThreadStore::default());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        store.clone(),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    store.fail_appends().await;
+    let mut options = StartThreadOptions::new(config);
+    options.initial_history =
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("forked history"))]);
+
+    let err = match manager.start_thread(options).await {
+        Ok(_) => panic!("fork startup should fail when its initial append fails"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("injected append failure"),
+        "unexpected startup error: {err}"
+    );
+    assert!(
+        manager.list_thread_ids().await.is_empty(),
+        "failed startup must not register a child"
+    );
+    let calls = store.calls().await;
+    assert_eq!(calls.create_thread, 1);
+    assert!(calls.append_items >= 1);
+    assert_eq!(calls.discard_thread, 1);
+}
+
 #[test]
 fn interrupted_fork_snapshot_appends_interrupt_boundary() {
     let committed_history =
