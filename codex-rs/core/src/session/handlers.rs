@@ -25,6 +25,7 @@ use crate::tasks::execute_user_shell_command;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -94,15 +95,35 @@ pub async fn update_thread_settings(
     sub_id: String,
     thread_settings: ThreadSettingsOverrides,
 ) {
+    let previous_execution_settings = execution_settings(sess).await;
     let updates = thread_settings_update(sess, thread_settings).await;
     let msg = match sess.update_settings(updates).await {
-        Ok(()) => thread_settings_applied_event(sess).await,
+        Ok(()) => {
+            if execution_settings(sess).await != previous_execution_settings {
+                if let Some(active_turn) = sess.active_turn.lock().await.as_mut() {
+                    active_turn.execution_settings_refresh_requested = true;
+                }
+                crate::goal_supervisor::restart_active_helper_for_execution_settings_change(sess)
+                    .await;
+            }
+            thread_settings_applied_event(sess).await
+        }
         Err(err) => EventMsg::Error(ErrorEvent {
             message: format!("invalid thread settings override: {err}"),
             codex_error_info: Some(CodexErrorInfo::BadRequest),
         }),
     };
     sess.send_event_raw(Event { id: sub_id, msg }).await;
+}
+
+async fn execution_settings(sess: &Session) -> (String, Option<ReasoningEffort>, Option<String>) {
+    let state = sess.state.lock().await;
+    let snapshot = state.session_configuration.thread_config_snapshot();
+    (
+        snapshot.model,
+        snapshot.reasoning_effort,
+        snapshot.service_tier,
+    )
 }
 
 async fn thread_settings_update(
