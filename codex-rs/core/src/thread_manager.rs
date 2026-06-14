@@ -47,6 +47,7 @@ use codex_models_manager::manager::SharedModelsManager;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
@@ -703,31 +704,9 @@ impl ThreadManager {
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> CodexResult<StoredThread> {
-        if let Ok(thread) = self.get_thread(thread_id).await {
-            if thread.config_snapshot().await.ephemeral {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "ephemeral thread does not support metadata updates: {thread_id}"
-                )));
-            }
-            return thread
-                .update_thread_metadata(patch, include_archived)
-                .await
-                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
-        }
         self.state
-            .thread_store
-            .update_thread_metadata(UpdateThreadMetadataParams {
-                thread_id,
-                patch,
-                include_archived,
-            })
+            .update_thread_metadata(thread_id, patch, include_archived)
             .await
-            .map_err(|err| match err {
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    CodexErr::ThreadNotFound(thread_id)
-                }
-                err => thread_store_metadata_update_error(thread_id, err),
-            })
     }
 
     /// List `thread_id` plus all known descendants in its spawn subtree.
@@ -873,11 +852,77 @@ impl ThreadManager {
     pub async fn resume_thread_with_history(
         &self,
         config: Config,
-        initial_history: InitialHistory,
+        mut initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
         parent_trace: Option<W3cTraceContext>,
         supports_openai_form_elicitation: bool,
     ) -> CodexResult<NewThread> {
+        if let InitialHistory::Resumed(resumed) = &mut initial_history {
+            let metadata =
+                Arc::make_mut(&mut resumed.history)
+                    .iter_mut()
+                    .find_map(|item| match item {
+                        RolloutItem::SessionMeta(line) => Some(&mut line.meta),
+                        _ => None,
+                    });
+            if let Some(metadata) = metadata {
+                let rollout_has_ownership =
+                    metadata.source.is_non_root_agent() || metadata.parent_thread_id.is_some();
+                let stored = match self
+                    .state
+                    .read_stored_thread(ReadThreadParams {
+                        thread_id: resumed.conversation_id,
+                        include_archived: true,
+                        include_history: false,
+                    })
+                    .await
+                {
+                    Ok(stored) => Some(stored),
+                    Err(err)
+                        if !rollout_has_ownership
+                            && matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
+                    {
+                        None
+                    }
+                    Err(err) => return Err(err),
+                };
+                if let Some(stored) = stored
+                    && (rollout_has_ownership
+                        || stored.source.is_non_root_agent()
+                        || stored.parent_thread_id.is_some())
+                {
+                    if metadata.id != resumed.conversation_id {
+                        return Err(CodexErr::InvalidRequest(format!(
+                            "session metadata does not match transferred thread {}",
+                            resumed.conversation_id
+                        )));
+                    }
+                    let parent_thread_id =
+                        stored.source.parent_thread_id().or(stored.parent_thread_id);
+                    if let Some(parent_thread_id) = parent_thread_id {
+                        return Err(CodexErr::InvalidRequest(format!(
+                            "thread {} is owned by parent thread {parent_thread_id}; resume it through its parent or promote it first",
+                            resumed.conversation_id
+                        )));
+                    }
+                    if metadata.source != stored.source
+                        || metadata.parent_thread_id != parent_thread_id
+                        || metadata.thread_source != stored.thread_source
+                        || metadata.agent_path != stored.agent_path
+                        || metadata.agent_nickname != stored.agent_nickname
+                        || metadata.agent_role != stored.agent_role
+                    {
+                        metadata.session_id = resumed.conversation_id.into();
+                        metadata.source = stored.source;
+                        metadata.parent_thread_id = None;
+                        metadata.thread_source = stored.thread_source;
+                        metadata.agent_path = stored.agent_path;
+                        metadata.agent_nickname = stored.agent_nickname;
+                        metadata.agent_role = stored.agent_role;
+                    }
+                }
+            }
+        }
         let agent_control = self.agent_control_for_config(&config);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
@@ -888,11 +933,10 @@ impl ThreadManager {
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
         if let InitialHistory::Resumed(resumed) = &initial_history
-            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
             && !session_source.is_non_root_agent()
         {
             agent_control
-                .restore_v2_agent_metadata(&config, resumed.conversation_id)
+                .restore_agent_metadata(&config, resumed.conversation_id)
                 .await;
         }
         Box::pin(self.state.spawn_thread_with_source(
@@ -1339,6 +1383,39 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Update loaded metadata through its live writer and cold metadata through the thread store.
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> CodexResult<StoredThread> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support metadata updates: {thread_id}"
+                )));
+            }
+            return thread
+                .update_thread_metadata(patch, include_archived)
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+        }
+        self.thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch,
+                include_archived,
+            })
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => thread_store_metadata_update_error(thread_id, err),
+            })
+    }
+
     pub(crate) async fn snapshot_rollout_segment(
         &self,
         thread_id: ThreadId,

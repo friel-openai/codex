@@ -65,7 +65,12 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
     mount_sse_once_match(
         &server,
         |request: &wiremock::Request| {
-            body_contains(request, FIRST_TASK) && !has_function_call_output(request, "first-call")
+            body_contains(request, FIRST_TASK)
+                && request
+                    .headers
+                    .get("x-openai-subagent")
+                    .and_then(|value| value.to_str().ok())
+                    == Some("collab_spawn")
         },
         sse(vec![
             ev_response_created("first-worker-response"),
@@ -109,7 +114,7 @@ async fn v2_nested_spawn_checks_shared_active_execution_capacity() -> Result<()>
             .features
             .enable(Feature::MultiAgentV2)
             .expect("test config should allow feature update");
-        config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+        config.agent_max_threads = Some(1);
     });
     let test = builder.build(&server).await?;
     test.submit_turn(FIRST_PROMPT).await?;
