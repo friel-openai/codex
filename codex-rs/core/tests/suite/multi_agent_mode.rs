@@ -22,18 +22,22 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 
-const NO_SPAWN_TEXT: &str = "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.";
+const EXPLICIT_REQUEST_ONLY_TEXT: &str = "explicitly ask for sub-agents";
 const PROACTIVE_TEXT: &str = "Proactive multi-agent delegation is active.";
 const CUSTOM_MODE_HINT_TEXT: &str = "Use the configured delegation policy.";
 const ROOT_USAGE_HINT_TEXT: &str = "Root usage hint.";
 
-fn add_ultra_reasoning(model_info: &mut ModelInfo) {
-    model_info
-        .supported_reasoning_levels
-        .push(ReasoningEffortPreset {
+fn add_max_and_ultra_reasoning(model_info: &mut ModelInfo) {
+    model_info.supported_reasoning_levels.extend([
+        ReasoningEffortPreset {
+            effort: ReasoningEffort::Max,
+            description: "Max".to_string(),
+        },
+        ReasoningEffortPreset {
             effort: ReasoningEffort::Ultra,
             description: "Ultra".to_string(),
-        });
+        },
+    ]);
 }
 
 fn configure_multi_agent_v2(config: &mut Config) {
@@ -93,37 +97,49 @@ async fn submit_turn(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ultra_reasoning_uses_max_and_proactive_mode() -> Result<()> {
+async fn every_reasoning_effort_uses_proactive_mode_and_ultra_matches_max() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let server = start_mock_server().await;
-    let response = mount_sse_once(
-        &server,
-        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
-    )
-    .await;
-    let test = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
-        .with_config(configure_ultra)
-        .build(&server)
-        .await?;
+    let efforts = [
+        (ReasoningEffort::None, "none"),
+        (ReasoningEffort::Minimal, "minimal"),
+        (ReasoningEffort::Low, "low"),
+        (ReasoningEffort::Medium, "medium"),
+        (ReasoningEffort::High, "high"),
+        (ReasoningEffort::XHigh, "xhigh"),
+        (ReasoningEffort::Max, "max"),
+        (ReasoningEffort::Ultra, "max"),
+    ];
+    for (effort, expected_effort) in efforts {
+        let server = start_mock_server().await;
+        let response = mount_sse_once(
+            &server,
+            sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+        )
+        .await;
+        let test = test_codex()
+            .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
+            .with_config(configure_ultra)
+            .build(&server)
+            .await?;
 
-    submit_turn(&test.codex, "hello", /*effort*/ None).await?;
+        submit_turn(&test.codex, "hello", Some(effort)).await?;
 
-    let request = response.single_request();
-    assert_eq!(
-        request.body_json()["reasoning"]["effort"].as_str(),
-        Some("max")
-    );
-    let input = request.input();
-    let texts = developer_texts(&input);
-    assert_eq!(
-        (
-            count_containing(&texts, NO_SPAWN_TEXT),
-            count_containing(&texts, PROACTIVE_TEXT),
-        ),
-        (0, 1)
-    );
+        let request = response.single_request();
+        assert_eq!(
+            request.body_json()["reasoning"]["effort"].as_str(),
+            Some(expected_effort)
+        );
+        let input = request.input();
+        let texts = developer_texts(&input);
+        assert_eq!(
+            (
+                count_containing(&texts, EXPLICIT_REQUEST_ONLY_TEXT),
+                count_containing(&texts, PROACTIVE_TEXT),
+            ),
+            (0, 1)
+        );
+    }
 
     Ok(())
 }
@@ -146,7 +162,7 @@ async fn configured_mode_hint_uses_custom_mode_across_reasoning_efforts() -> Res
     )
     .await;
     let test = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+        .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
         .with_config(configure_custom_mode_hint)
         .build(&server)
         .await?;
@@ -161,7 +177,7 @@ async fn configured_mode_hint_uses_custom_mode_across_reasoning_efforts() -> Res
     let instruction_counts = |texts: &[&str]| {
         (
             count_containing(texts, CUSTOM_MODE_HINT_TEXT),
-            count_containing(texts, NO_SPAWN_TEXT),
+            count_containing(texts, EXPLICIT_REQUEST_ONLY_TEXT),
             count_containing(texts, PROACTIVE_TEXT),
         )
     };
@@ -195,7 +211,7 @@ async fn empty_configured_mode_hint_emits_no_mode_message() -> Result<()> {
     assert_eq!(
         (
             count_containing(&texts, MULTI_AGENT_MODE_OPEN_TAG),
-            count_containing(&texts, NO_SPAWN_TEXT),
+            count_containing(&texts, EXPLICIT_REQUEST_ONLY_TEXT),
             count_containing(&texts, PROACTIVE_TEXT),
         ),
         (0, 0, 0)
@@ -254,7 +270,7 @@ async fn changing_configured_mode_hint_to_empty_emits_no_update() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Result<()> {
+async fn live_effort_change_keeps_proactive_mode_without_reappending_usage_hint() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -271,7 +287,7 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
     )
     .await;
     let test = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+        .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
         .with_config(|config| {
             configure_ultra(config);
             config.multi_agent_v2.root_agent_usage_hint_text =
@@ -307,9 +323,9 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
         (
             count_containing(&second_texts, ROOT_USAGE_HINT_TEXT),
             count_containing(&second_texts, PROACTIVE_TEXT),
-            count_containing(&second_texts, NO_SPAWN_TEXT),
+            count_containing(&second_texts, EXPLICIT_REQUEST_ONLY_TEXT),
         ),
-        (1, 1, 1),
+        (1, 1, 0),
     );
     test.codex.ensure_rollout_materialized().await;
     test.codex.flush_rollout().await?;
@@ -326,16 +342,13 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
                 .cloned()
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        recorded_modes,
-        [json!("proactive"), json!("explicitRequestOnly")]
-    );
+    assert_eq!(recorded_modes, [json!("proactive")]);
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
+async fn leaving_ultra_after_cold_resume_keeps_proactive_mode() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -352,7 +365,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
     )
     .await;
     let initial = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+        .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
         .with_config(configure_ultra)
         .build(&server)
         .await?;
@@ -360,7 +373,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
     submit_turn(&initial.codex, "before resume", /*effort*/ None).await?;
 
     let mut resume_builder = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+        .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
         .with_config(configure_ultra);
     let resumed = resume_builder.restart(&server, &initial).await?;
     drop(initial);
@@ -383,10 +396,10 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
     assert_eq!(
         (
             count_containing(&texts, MULTI_AGENT_MODE_OPEN_TAG),
-            count_containing(&texts, NO_SPAWN_TEXT),
+            count_containing(&texts, EXPLICIT_REQUEST_ONLY_TEXT),
             count_containing(&texts, PROACTIVE_TEXT),
         ),
-        (2, 1, 1)
+        (1, 0, 1)
     );
 
     Ok(())
@@ -403,7 +416,7 @@ async fn ultra_on_multi_agent_v1_uses_max_without_mode_instructions() -> Result<
     )
     .await;
     let test = test_codex()
-        .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+        .with_model_info_override("gpt-5.4", add_max_and_ultra_reasoning)
         .with_config(|config| {
             config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
         })
