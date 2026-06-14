@@ -228,7 +228,9 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
         | ThreadItem::AgentMessage { .. }
         | ThreadItem::Plan { .. }
         | ThreadItem::Reasoning { .. }
-        | ThreadItem::Sleep { .. } => return None,
+        | ThreadItem::Sleep { .. }
+        | ThreadItem::RawResponseItem { .. }
+        | ThreadItem::InterAgentCommunication { .. } => return None,
     };
     (!lines.is_empty()).then(|| PlainHistoryCell::new(lines))
 }
