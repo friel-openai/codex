@@ -53,7 +53,7 @@
           "type": "integer"
         },
         "max_threads": {
-          "description": "Maximum number of agent threads that can be open concurrently. When unset, no limit is enforced.",
+          "description": "Maximum number of agent threads that can be open concurrently. With multi-agent v2, this excludes the root thread and overrides `features.multi_agent_v2.max_concurrent_threads_per_session`.",
           "format": "uint",
           "minimum": 1.0,
           "type": "integer"
