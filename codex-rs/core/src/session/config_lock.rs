@@ -177,13 +177,7 @@ fn save_config_resolved_fields(
     )?);
 
     let agents = lock_config.agents.get_or_insert_with(Default::default);
-    // Multi-agent v2 owns thread fanout through its feature config. Preserve
-    // the legacy agents.max_threads setting only when v2 is disabled.
-    agents.max_threads = if config.features.enabled(Feature::MultiAgentV2) {
-        None
-    } else {
-        config.agent_max_threads
-    };
+    agents.max_threads = config.agent_max_threads;
     agents.max_depth = Some(config.agent_max_depth);
     agents.job_max_runtime_seconds = config.agent_job_max_runtime_seconds;
     agents.interrupt_message = Some(config.agent_interrupt_message_enabled);
@@ -325,7 +319,7 @@ mod tests {
         assert!(matches!(
             multi_agent_v2,
             FeatureToml::Config(MultiAgentV2ConfigToml {
-                enabled: Some(false),
+                enabled: Some(_),
                 max_concurrent_threads_per_session: Some(_),
                 min_wait_timeout_ms: Some(_),
                 max_wait_timeout_ms: Some(_),
@@ -334,6 +328,14 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            multi_agent_v2.enabled(),
+            Some(
+                sc.original_config_do_not_use
+                    .features
+                    .enabled(Feature::MultiAgentV2)
+            )
+        );
 
         assert_eq!(
             features.token_budget,
@@ -371,6 +373,40 @@ mod tests {
         );
 
         assert_eq!(lockfile.version, crate::config_lock::CONFIG_LOCK_VERSION);
+    }
+
+    #[tokio::test]
+    async fn lock_preserves_agents_max_threads_with_multi_agent_v2() {
+        let mut sc = crate::session::tests::make_session_configuration_for_tests().await;
+        let mut config = (*sc.original_config_do_not_use).clone();
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow multi-agent v2");
+        config.agent_max_threads = Some(3);
+        config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+        sc.original_config_do_not_use = Arc::new(config);
+
+        let lockfile = sc.to_config_lockfile_toml().expect("lock should serialize");
+        assert_eq!(
+            lockfile
+                .config
+                .agents
+                .as_ref()
+                .and_then(|agents| agents.max_threads),
+            Some(3)
+        );
+        assert!(matches!(
+            lockfile
+                .config
+                .features
+                .as_ref()
+                .and_then(|features| features.multi_agent_v2.as_ref()),
+            Some(FeatureToml::Config(MultiAgentV2ConfigToml {
+                max_concurrent_threads_per_session: Some(4),
+                ..
+            }))
+        ));
     }
 
     #[tokio::test]

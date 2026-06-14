@@ -40,14 +40,15 @@ pub fn create_spawn_agents_on_csv_tool() -> ToolSpec {
         (
             "max_concurrency".to_string(),
             JsonSchema::number(Some(
-                "Maximum concurrent workers for this job. Defaults to 16 and is capped by config."
+                "Maximum concurrent workers for this job. Defaults to the configured agent limit, which is 256 unless overridden."
                     .to_string(),
             )),
         ),
         (
             "max_workers".to_string(),
             JsonSchema::number(Some(
-                "Alias for max_concurrency. Defaults to 16 and is capped by config.".to_string(),
+                "Alias for max_concurrency. Defaults to the configured agent limit, which is 256 unless overridden."
+                    .to_string(),
             )),
         ),
         (
