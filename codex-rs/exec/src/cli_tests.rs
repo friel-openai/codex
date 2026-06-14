@@ -73,3 +73,22 @@ fn parses_config_isolation_flags() {
     assert!(cli.ignore_user_config);
     assert!(cli.ignore_rules);
 }
+
+#[test]
+fn fork_option_parses_prompt() {
+    const PROMPT: &str = "echo fork-non-interactive";
+    let cli = Cli::parse_from(["codex-exec", "--fork", "session-123", "--json", PROMPT]);
+
+    assert_eq!(cli.fork_session_id.as_deref(), Some("session-123"));
+    assert_eq!(cli.prompt.as_deref(), Some(PROMPT));
+    assert!(cli.command.is_none());
+}
+
+#[test]
+fn fork_option_conflicts_with_subcommands() {
+    let err = Cli::try_parse_from(["codex-exec", "--fork", "session-123", "resume"])
+        .and_then(Cli::validate)
+        .expect_err("fork should conflict with subcommands");
+
+    assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+}
