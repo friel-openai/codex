@@ -10168,7 +10168,7 @@ enabled = true
             config.agent_max_threads,
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(3))
+        (None, Some(8))
     );
 
     Ok(())
@@ -10184,7 +10184,7 @@ max_concurrent_threads_per_session = 17
     )
     .expect("multi-agent v2 config should parse");
 
-    let config = resolve_multi_agent_v2_config(&config_toml);
+    let config = resolve_multi_agent_v2_config(&config_toml, /*agent_max_threads*/ None);
     let concurrency_guidance = "There are 17 available concurrency slots, meaning that up to 17 agents can be active at once, including you.";
     let expected_suffix =
         format!("{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{concurrency_guidance}");
@@ -10223,7 +10223,7 @@ subagent_usage_hint_text = ""
 }
 
 #[tokio::test]
-async fn multi_agent_v2_feature_rejects_agents_max_threads() -> std::io::Result<()> {
+async fn multi_agent_v2_uses_agents_max_threads_as_subagent_cap() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -10240,25 +10240,32 @@ max_threads = 3
         .fallback_cwd(Some(codex_home.path().to_path_buf()))
         .build()
         .await?;
-    let err = config
-        .validate_multi_agent_v2_config()
-        .expect_err("agents.max_threads should conflict with multi_agent_v2");
 
-    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert_eq!(
-        err.to_string(),
-        "agents.max_threads cannot be set when features.multi_agent_v2 is enabled"
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(3), 4, Some(3))
     );
-    assert_eq!(
-        config.effective_agent_max_threads(MultiAgentVersion::V2),
-        Some(3)
+    let concurrency_guidance = "There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.";
+    let expected_suffix =
+        format!("{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{concurrency_guidance}");
+    assert!(
+        [
+            config.multi_agent_v2.root_agent_usage_hint_text,
+            config.multi_agent_v2.subagent_usage_hint_text,
+        ]
+        .into_iter()
+        .all(|hint| hint.is_some_and(|hint| hint.ends_with(expected_suffix.as_str())))
     );
 
     Ok(())
 }
 
 #[tokio::test]
-async fn catalog_v2_allows_agents_max_threads_when_feature_disabled() -> std::io::Result<()> {
+async fn multi_agent_v2_disabled_keeps_agents_max_threads_for_v1() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     std::fs::write(
         codex_home.path().join(CONFIG_TOML_FILE),
@@ -10276,10 +10283,14 @@ max_threads = 3
         .build()
         .await?;
 
-    config.validate_multi_agent_v2_config()?;
     assert_eq!(
-        config.effective_agent_max_threads(MultiAgentVersion::V2),
-        Some(3)
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V1),
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (Some(3), 4, Some(3), Some(3))
     );
 
     Ok(())
