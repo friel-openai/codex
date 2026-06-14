@@ -105,6 +105,7 @@ pub enum SessionSelection {
     StartFresh,
     Resume(SessionTarget),
     Fork(SessionTarget),
+    Side(SessionTarget),
     Exit,
 }
 
