@@ -387,13 +387,16 @@ impl Session {
         .await;
         refreshed_manager
             .set_elicitations_auto_deny(current_runtime.manager().elicitations_auto_deny());
-        self.services.publish_mcp_runtime(
+        let runtime = self.services.publish_mcp_runtime(
             mcp_config,
             plugins_available,
             mcp_runtime_context,
             available_environment_ids.to_vec(),
             refreshed_manager,
-        )
+        );
+        let mut snapshot = self.services.mcp_tool_snapshot.lock().await;
+        *snapshot = None;
+        runtime
     }
 
     #[expect(
