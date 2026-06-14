@@ -315,6 +315,7 @@ use codex_core::exec::ExecCapturePolicy;
 use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
+use codex_core::materialize_rollout_items_for_replay;
 use codex_core::path_utils;
 #[cfg(test)]
 use codex_core::read_head_for_summary;
@@ -614,4 +615,25 @@ pub(crate) fn build_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<T
         }
     }
     builder.finish()
+}
+
+fn materialize_rollout_items_for_app_server<'a>(
+    codex_home: &'a Path,
+    rollout_items: &'a [RolloutItem],
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Vec<RolloutItem>> + Send + 'a>> {
+    let fallback_items = rollout_items.to_vec();
+    let codex_home = codex_home.to_path_buf();
+    let rollout_items = fallback_items.clone();
+    let task = tokio::spawn(async move {
+        materialize_rollout_items_for_replay(codex_home.as_path(), &rollout_items).await
+    });
+    Box::pin(async move {
+        match task.await {
+            Ok(materialized) => materialized,
+            Err(err) => {
+                tracing::warn!("failed to join rollout reference materialization task: {err}");
+                fallback_items
+            }
+        }
+    })
 }

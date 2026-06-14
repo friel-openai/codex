@@ -594,6 +594,7 @@ async fn resume_replays_legacy_js_repl_image_rollout_shapes() {
                 meta: SessionMeta {
                     id: ThreadId::default(),
                     parent_thread_id: None,
+                    segment_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
@@ -727,6 +728,7 @@ async fn resume_replays_image_tool_outputs_with_detail() {
                 meta: SessionMeta {
                     id: ThreadId::default(),
                     parent_thread_id: None,
+                    segment_id: None,
                     timestamp: "2024-01-01T00:00:00Z".to_string(),
                     cwd: ".".into(),
                     originator: "test_originator".to_string(),
