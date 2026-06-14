@@ -531,6 +531,7 @@ pub async fn reconcile_rollout(
     if let Some(existing_metadata) = existing_metadata.as_ref() {
         metadata.prefer_existing_git_info(existing_metadata);
         metadata.prefer_existing_explicit_title(existing_metadata);
+        metadata.prefer_existing_ownership(existing_metadata);
     }
     match archived_only {
         Some(true) if metadata.archived_at.is_none() => {
@@ -541,7 +542,7 @@ pub async fn reconcile_rollout(
         }
         Some(true) | None => {}
     }
-    if let Err(err) = ctx.upsert_thread(&metadata).await {
+    if let Err(err) = ctx.upsert_thread_from_rollout(&metadata).await {
         warn!(
             "state db reconcile_rollout upsert failed {}: {err}",
             rollout_path.display()

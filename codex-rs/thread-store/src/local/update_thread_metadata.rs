@@ -611,7 +611,9 @@ fn sqlite_write_failure_should_block(patch: &ThreadMetadataPatch) -> bool {
     // look broken. Explicit git-only updates still require SQLite because partial git patches need
     // the existing SQLite value to preserve unspecified fields. User-selected pin state is
     // SQLite-only, so losing its write must also fail the explicit metadata update.
-    patch.is_pinned.is_some() || (patch.git_info.is_some() && !has_observed_metadata_facts(patch))
+    patch.require_sqlite_write
+        || patch.is_pinned.is_some()
+        || (patch.git_info.is_some() && !has_observed_metadata_facts(patch))
 }
 
 fn sqlite_write_error_is_best_effort(err: &ThreadStoreError) -> bool {
@@ -865,9 +867,12 @@ fn rollout_path_is_archived(store: &LocalThreadStore, path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use codex_protocol::AgentPath;
     use codex_protocol::models::PermissionProfile;
     use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::ThreadHistoryMode;
+    use codex_protocol::protocol::ThreadSource;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use serde_json::Value;
@@ -1864,6 +1869,74 @@ mod tests {
         assert_eq!(memory_mode.as_deref(), Some("disabled"));
     }
 
+    #[tokio::test]
+    async fn sqlite_ownership_metadata_survives_rollout_history_hydration() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config, Some(runtime));
+        let uuid = Uuid::from_u128(322);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let parent_thread_id = ThreadId::new();
+        let rollout_path =
+            write_session_file(home.path(), "2025-01-03T20-00-00", uuid).expect("session file");
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: Some(AgentPath::root().join("adopted").expect("valid agent path")),
+            agent_nickname: Some("Ada".to_string()),
+            agent_role: Some("worker".to_string()),
+        });
+
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch: ThreadMetadataPatch {
+                    source: Some(source.clone()),
+                    thread_source: Some(Some(ThreadSource::Subagent)),
+                    agent_path: Some(Some("/root/adopted".to_string())),
+                    agent_nickname: Some(Some("Ada".to_string())),
+                    agent_role: Some(Some("worker".to_string())),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("persist adopted ownership in SQLite");
+
+        let thread_by_id = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("read thread with rollout history");
+        let thread_by_path = store
+            .read_thread_by_rollout_path(
+                rollout_path,
+                /*include_archived*/ false,
+                /*include_history*/ true,
+            )
+            .await
+            .expect("read thread by rollout path with history");
+
+        for thread in [&thread_by_id, &thread_by_path] {
+            assert_eq!(thread.source, source);
+            assert_eq!(thread.parent_thread_id, Some(parent_thread_id));
+            assert_eq!(thread.thread_source, Some(ThreadSource::Subagent));
+            assert_eq!(thread.agent_path.as_deref(), Some("/root/adopted"));
+            assert_eq!(thread.agent_nickname.as_deref(), Some("Ada"));
+            assert_eq!(thread.agent_role.as_deref(), Some("worker"));
+            assert!(thread.history.is_some());
+        }
+    }
+
     #[test]
     fn sqlite_failures_are_best_effort_for_legacy_rollout_compat_updates() {
         assert!(!sqlite_write_failure_should_block(&ThreadMetadataPatch {
@@ -1908,6 +1981,15 @@ mod tests {
     fn sqlite_failures_block_for_explicit_pin_updates() {
         assert!(sqlite_write_failure_should_block(&ThreadMetadataPatch {
             is_pinned: Some(false),
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn sqlite_failures_block_for_required_metadata_updates() {
+        assert!(sqlite_write_failure_should_block(&ThreadMetadataPatch {
+            require_sqlite_write: true,
+            source: Some(SessionSource::Cli),
             ..Default::default()
         }));
     }
