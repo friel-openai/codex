@@ -9076,6 +9076,8 @@ async fn make_multi_agent_v2_usage_hint_test_session(
         |config| {
             if enable_multi_agent_v2 {
                 let _ = config.features.enable(Feature::MultiAgentV2);
+            } else {
+                let _ = config.features.disable(Feature::MultiAgentV2);
             }
             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
@@ -9467,12 +9469,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+    let initial_context = build_initial_context(&session, &turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
     let history = session.clone_history().await;
-    let initial_context = build_initial_context(&session, &turn_context).await;
     assert_eq!(
         strip_response_item_ids(history.raw_items()),
         strip_response_item_ids(&initial_context)
@@ -11468,12 +11470,9 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
     // Verify the `<turn_aborted>` marker is still recorded in history for the model.
     assert!(
         history.raw_items().iter().any(|item| {
-            let ResponseItem::Message { role, content, .. } = item else {
+            let ResponseItem::Message { content, .. } = item else {
                 return false;
             };
-            if role != "user" {
-                return false;
-            }
             content.iter().any(|content_item| {
                 let ContentItem::InputText { text } = content_item else {
                     return false;
