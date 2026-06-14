@@ -405,7 +405,7 @@ ON CONFLICT(child_thread_id) DO NOTHING
             .await
     }
 
-    /// List direct children of `parent_thread_id` using persisted spawn edges.
+    /// List direct open children of `parent_thread_id` using persisted spawn edges.
     pub async fn list_threads_by_parent(
         &self,
         page_size: usize,
@@ -1108,6 +1108,8 @@ fn push_list_threads_query(
             " AND threads.id IN (SELECT child_thread_id FROM thread_spawn_edges WHERE parent_thread_id = ",
         );
         builder.push_bind(parent_thread_id.to_string());
+        builder.push(" AND status = ");
+        builder.push_bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref());
         builder.push(")");
     }
     let order_by_index = match filters.cwd_filters {
@@ -1844,7 +1846,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_threads_by_parent_filters_direct_children_with_keyset_pagination() {
+    async fn list_threads_by_parent_filters_open_direct_children_with_keyset_pagination() {
         let codex_home = unique_temp_dir();
         let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
@@ -1854,12 +1856,15 @@ mod tests {
             ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid thread id");
         let second_child_id =
             ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid thread id");
+        let closed_child_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000003").expect("valid thread id");
         let grandchild_id = ThreadId::new();
 
         for (thread_id, created_at) in [
             (first_child_id, 1_700_000_100),
             (second_child_id, 1_700_000_200),
-            (grandchild_id, 1_700_000_300),
+            (closed_child_id, 1_700_000_300),
+            (grandchild_id, 1_700_000_400),
         ] {
             let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
             metadata.created_at =
@@ -1879,6 +1884,11 @@ mod tests {
             (
                 parent_id,
                 second_child_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                parent_id,
+                closed_child_id,
                 DirectionalThreadSpawnEdgeStatus::Closed,
             ),
             (

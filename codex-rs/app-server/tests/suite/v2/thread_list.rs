@@ -987,6 +987,7 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
     let parent_id = ThreadId::new();
     let older_child_id = ThreadId::new();
     let newer_child_id = ThreadId::new();
+    let closed_child_id = ThreadId::new();
     let grandchild_id = ThreadId::new();
     let state_db = codex_state::StateRuntime::init(
         codex_home.path().to_path_buf(),
@@ -1004,6 +1005,12 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
             newer_child_id,
             "2025-02-01T11:00:00Z",
             CoreSessionSource::Cli,
+            "mock_provider",
+        ),
+        (
+            closed_child_id,
+            "2025-02-01T11:30:00Z",
+            CoreSessionSource::SubAgent(SubAgentSource::Other("agent_job:closed".to_string())),
             "mock_provider",
         ),
         (
@@ -1028,17 +1035,30 @@ async fn thread_list_parent_filter_reads_direct_children_from_state_db() -> Resu
         metadata.first_user_message = metadata.preview.clone();
         state_db.upsert_thread(&metadata).await?;
     }
-    for (parent_thread_id, child_thread_id) in [
-        (parent_id, older_child_id),
-        (parent_id, newer_child_id),
-        (newer_child_id, grandchild_id),
+    for (parent_thread_id, child_thread_id, status) in [
+        (
+            parent_id,
+            older_child_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        ),
+        (
+            parent_id,
+            newer_child_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        ),
+        (
+            parent_id,
+            closed_child_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        ),
+        (
+            newer_child_id,
+            grandchild_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        ),
     ] {
         state_db
-            .upsert_thread_spawn_edge(
-                parent_thread_id,
-                child_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Open,
-            )
+            .upsert_thread_spawn_edge(parent_thread_id, child_thread_id, status)
             .await?;
     }
     state_db
