@@ -442,6 +442,20 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
 }
 
 #[test]
+fn goal_supervisor_is_experimental_and_disabled_by_default() {
+    assert_eq!(
+        feature_for_key("goal_supervisor"),
+        Some(Feature::GoalSupervisor)
+    );
+    assert!(matches!(
+        Feature::GoalSupervisor.stage(),
+        Stage::Experimental { .. }
+    ));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), false);
+    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+}
+
+#[test]
 fn enable_fanout_is_under_development() {
     assert_eq!(Feature::SpawnCsv.stage(), Stage::UnderDevelopment);
     assert_eq!(Feature::SpawnCsv.default_enabled(), false);

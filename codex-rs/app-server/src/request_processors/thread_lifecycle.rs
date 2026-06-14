@@ -1,4 +1,5 @@
 use super::*;
+use crate::bespoke_event_handling::is_inter_agent_message_item;
 use codex_protocol::config_types::MultiAgentMode;
 
 pub(super) const THREAD_UNLOADING_DELAY: Duration = Duration::from_secs(30 * 60);
@@ -316,7 +317,12 @@ pub(super) async fn ensure_listener_task_running(
                         thread_state.track_current_turn_event(&event.id, &event.msg);
                         thread_state.experimental_raw_events
                     };
-                    if matches!(&event.msg, EventMsg::RawResponseItem(_)) && !raw_events_enabled {
+                    if matches!(
+                        &event.msg,
+                        EventMsg::RawResponseItem(event)
+                            if !is_inter_agent_message_item(&event.item)
+                    ) && !raw_events_enabled
+                    {
                         continue;
                     }
                     let subscribed_connection_ids = thread_state_manager
