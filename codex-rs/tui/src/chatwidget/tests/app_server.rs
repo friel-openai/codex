@@ -4,7 +4,7 @@ use codex_app_server_protocol::SubAgentActivityKind;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_protocol::AgentPath;
 use codex_protocol::protocol::InterAgentCommunication;
-use codex_protocol::protocol::RolloutItem;
+use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 
 const SAFETY_BUFFERING_HEADER_TEXT: &str =

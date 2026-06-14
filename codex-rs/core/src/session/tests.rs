@@ -232,6 +232,7 @@ impl StepContext {
                 Vec::new(),
             )),
             loaded_agents_md: None,
+            context_transition: Default::default(),
         })
     }
 
