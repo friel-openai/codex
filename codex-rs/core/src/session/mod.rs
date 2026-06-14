@@ -701,9 +701,6 @@ impl Codex {
         let multi_agent_version =
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version);
         let multi_agent_mode = initial_multi_agent_mode;
-        config
-            .validate_multi_agent_v2_config()
-            .map_err(|err| CodexErr::InvalidRequest(err.to_string()))?;
         let base_instructions = config
             .base_instructions
             .clone()
