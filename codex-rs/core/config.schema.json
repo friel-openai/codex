@@ -777,6 +777,9 @@
             "web_search_request": {
               "type": "boolean"
             },
+            "workspace_cwd_tool": {
+              "type": "boolean"
+            },
             "workspace_dependencies": {
               "type": "boolean"
             },
@@ -5442,6 +5445,9 @@
           "type": "boolean"
         },
         "web_search_request": {
+          "type": "boolean"
+        },
+        "workspace_cwd_tool": {
           "type": "boolean"
         },
         "workspace_dependencies": {
