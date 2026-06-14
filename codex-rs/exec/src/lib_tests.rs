@@ -885,6 +885,7 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
         },
         active_permission_profile: None,
         reasoning_effort: None,
+        multi_agent_mode: Default::default(),
     };
 
     let event = session_configured_from_thread_fork_response(&response, &config)
