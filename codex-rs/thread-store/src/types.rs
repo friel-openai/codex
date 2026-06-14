@@ -295,6 +295,7 @@ pub(crate) struct PrepareForkParams {
 #[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct PreparedFork {
+    #[allow(dead_code)]
     pub(crate) source_thread_id: ThreadId,
     pub(crate) history_base: Option<HistoryPosition>,
     pub(crate) model_context: Arc<Vec<RolloutItem>>,
@@ -818,6 +819,9 @@ pub struct ThreadMetadataPatch {
     pub git_info: Option<GitInfoPatch>,
     /// Thread memory behavior.
     pub memory_mode: Option<MemoryMode>,
+    /// Require this update to reach SQLite before reporting success.
+    #[serde(skip)]
+    pub require_sqlite_write: bool,
 }
 
 impl ThreadMetadataPatch {
@@ -901,6 +905,7 @@ impl ThreadMetadataPatch {
         if next.memory_mode.is_some() {
             self.memory_mode = next.memory_mode;
         }
+        self.require_sqlite_write |= next.require_sqlite_write;
     }
 
     pub fn is_empty(&self) -> bool {
@@ -928,6 +933,7 @@ impl ThreadMetadataPatch {
             && self.is_pinned.is_none()
             && self.git_info.is_none()
             && self.memory_mode.is_none()
+            && !self.require_sqlite_write
     }
 }
 

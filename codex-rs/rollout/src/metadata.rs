@@ -274,6 +274,7 @@ pub(crate) async fn backfill_sessions_with_lease(
                     let restore_memory_mode_from_rollout = existing_metadata.is_none()
                         || matches!(metadata.history_mode, ThreadHistoryMode::Legacy);
                     if let Some(existing_metadata) = existing_metadata.as_ref() {
+                        metadata.prefer_existing_ownership(existing_metadata);
                         metadata.prefer_existing_git_info(existing_metadata);
                         metadata.prefer_existing_explicit_title(existing_metadata);
                     }
@@ -283,7 +284,7 @@ pub(crate) async fn backfill_sessions_with_lease(
                             .await
                             .or(Some(fallback_archived_at));
                     }
-                    if let Err(err) = runtime.upsert_thread(&metadata).await {
+                    if let Err(err) = runtime.upsert_thread_from_rollout(&metadata).await {
                         stats.failed = stats.failed.saturating_add(1);
                         warn!("failed to upsert rollout {}: {err}", rollout.path.display());
                     } else {

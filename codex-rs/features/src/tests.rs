@@ -205,6 +205,21 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
     assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
 }
 
+#[test]
+fn goal_supervisor_is_experimental_and_disabled_by_default() {
+    assert_eq!(
+        feature_for_key("goal_supervisor"),
+        Some(Feature::GoalSupervisor)
+    );
+    assert!(matches!(
+        Feature::GoalSupervisor.stage(),
+        Stage::Experimental { .. }
+    ));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), false);
+    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+}
+
+#[test]
 fn apps_require_feature_flag_and_chatgpt_auth() {
     let mut features = Features::with_defaults();
     assert!(!features.apps_enabled_for_auth(/*has_chatgpt_auth*/ false));
@@ -452,6 +467,7 @@ non_code_mode_only = true
             hide_spawn_agent_metadata: Some(true),
             expose_spawn_agent_model_overrides: Some(true),
             wait_agent_enabled: Some(false),
+            enable_thread_adoption: None,
             non_code_mode_only: Some(true),
         }))
     );

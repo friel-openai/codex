@@ -265,6 +265,18 @@ impl ThreadMetadataBuilder {
 }
 
 impl ThreadMetadata {
+    /// Preserve mutable ownership when rollout-derived metadata is reconciled.
+    ///
+    /// The initial `SessionMeta` is immutable, while adoption and promotion update ownership in
+    /// SQLite. Once a row exists, its ownership fields are therefore newer than the rollout copy.
+    pub fn prefer_existing_ownership(&mut self, existing: &Self) {
+        self.source.clone_from(&existing.source);
+        self.thread_source.clone_from(&existing.thread_source);
+        self.agent_nickname.clone_from(&existing.agent_nickname);
+        self.agent_role.clone_from(&existing.agent_role);
+        self.agent_path.clone_from(&existing.agent_path);
+    }
+
     /// Preserve SQLite-owned Git fields when rollout-derived metadata is reconciled.
     pub fn prefer_existing_git_info(&mut self, existing: &Self) {
         if matches!(self.history_mode, ThreadHistoryMode::Paginated)

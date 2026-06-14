@@ -7,6 +7,8 @@ use super::sqlite_integer;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+// Boundary offsets are currently consumed by the test-only paginated fork preparer.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(in crate::local) struct TurnRow {
     pub physical_thread_id: ThreadId,
     pub rollout_ordinal: i64,

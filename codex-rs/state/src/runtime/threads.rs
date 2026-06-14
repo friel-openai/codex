@@ -526,8 +526,22 @@ ON CONFLICT(child_thread_id) DO NOTHING
 
     /// Insert or replace thread metadata directly.
     pub async fn upsert_thread(&self, metadata: &crate::ThreadMetadata) -> anyhow::Result<()> {
-        self.upsert_thread_with_creation_memory_mode(metadata, /*creation_memory_mode*/ None)
-            .await
+        self.upsert_thread_with_creation_memory_mode(
+            metadata, /*creation_memory_mode*/ None,
+            /*preserve_existing_ownership*/ false,
+        )
+        .await
+    }
+
+    /// Insert rollout-derived metadata without replacing mutable ownership on an existing row.
+    pub async fn upsert_thread_from_rollout(
+        &self,
+        metadata: &crate::ThreadMetadata,
+    ) -> anyhow::Result<()> {
+        self.upsert_thread_with_creation_memory_mode(
+            metadata, /*creation_memory_mode*/ None, /*preserve_existing_ownership*/ true,
+        )
+        .await
     }
 
     pub async fn insert_thread_if_absent(
@@ -815,6 +829,7 @@ WHERE id = ?
         &self,
         metadata: &crate::ThreadMetadata,
         creation_memory_mode: Option<&str>,
+        preserve_existing_ownership: bool,
     ) -> anyhow::Result<()> {
         let updated_at = self.allocate_thread_updated_at(metadata.updated_at)?;
         let insert_recency_at = self.allocate_thread_recency_at(metadata.recency_at)?;
@@ -867,12 +882,12 @@ ON CONFLICT(id) DO UPDATE SET
     created_at_ms = excluded.created_at_ms,
     updated_at_ms = excluded.updated_at_ms,
     recency_at_ms = threads.recency_at_ms,
-    source = excluded.source,
+    source = CASE WHEN ? THEN threads.source ELSE excluded.source END,
     history_mode = excluded.history_mode,
-    thread_source = excluded.thread_source,
-    agent_nickname = excluded.agent_nickname,
-    agent_role = excluded.agent_role,
-    agent_path = excluded.agent_path,
+    thread_source = CASE WHEN ? THEN threads.thread_source ELSE excluded.thread_source END,
+    agent_nickname = CASE WHEN ? THEN threads.agent_nickname ELSE excluded.agent_nickname END,
+    agent_role = CASE WHEN ? THEN threads.agent_role ELSE excluded.agent_role END,
+    agent_path = CASE WHEN ? THEN threads.agent_path ELSE excluded.agent_path END,
     model_provider = excluded.model_provider,
     model = excluded.model,
     reasoning_effort = excluded.reasoning_effort,
@@ -934,9 +949,22 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(metadata.git_branch.as_deref())
         .bind(metadata.git_origin_url.as_deref())
         .bind(creation_memory_mode.unwrap_or("enabled"))
+        .bind(preserve_existing_ownership)
+        .bind(preserve_existing_ownership)
+        .bind(preserve_existing_ownership)
+        .bind(preserve_existing_ownership)
+        .bind(preserve_existing_ownership)
         .execute(self.pool.as_ref())
         .await?;
-        self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, metadata.source.as_str())
+        let ownership_source = if preserve_existing_ownership {
+            self.get_thread(metadata.id)
+                .await?
+                .map(|persisted| persisted.source)
+                .unwrap_or_else(|| metadata.source.clone())
+        } else {
+            metadata.source.clone()
+        };
+        self.insert_thread_spawn_edge_from_source_if_absent(metadata.id, ownership_source.as_str())
             .await?;
         Ok(())
     }
@@ -961,6 +989,7 @@ ON CONFLICT(id) DO UPDATE SET
             apply_rollout_item(&mut metadata, item, &self.default_provider);
         }
         if let Some(existing_metadata) = existing_metadata.as_ref() {
+            metadata.prefer_existing_ownership(existing_metadata);
             metadata.prefer_existing_git_info(existing_metadata);
         }
         let updated_at = match updated_at_override {
@@ -971,10 +1000,14 @@ ON CONFLICT(id) DO UPDATE SET
             metadata.updated_at = updated_at;
         }
         let upsert_result = if existing_metadata.is_none() {
-            self.upsert_thread_with_creation_memory_mode(&metadata, new_thread_memory_mode)
-                .await
+            self.upsert_thread_with_creation_memory_mode(
+                &metadata,
+                new_thread_memory_mode,
+                /*preserve_existing_ownership*/ false,
+            )
+            .await
         } else {
-            self.upsert_thread(&metadata).await
+            self.upsert_thread_from_rollout(&metadata).await
         };
         upsert_result?;
         if let Some(memory_mode) = extract_memory_mode(items)
@@ -1439,7 +1472,11 @@ mod tests {
         let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
 
         runtime
-            .upsert_thread_with_creation_memory_mode(&metadata, Some("disabled"))
+            .upsert_thread_with_creation_memory_mode(
+                &metadata,
+                Some("disabled"),
+                /*preserve_existing_ownership*/ false,
+            )
             .await
             .expect("initial insert should succeed");
 
@@ -2502,6 +2539,58 @@ mod tests {
             persisted.git_origin_url.as_deref(),
             Some("git@example.com:openai/codex.git")
         );
+    }
+
+    #[tokio::test]
+    async fn rollout_upsert_preserves_concurrently_updated_ownership() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000459").expect("valid thread id");
+        let root_metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        runtime
+            .upsert_thread(&root_metadata)
+            .await
+            .expect("initial upsert should succeed");
+
+        let mut stale_rollout_metadata = root_metadata.clone();
+        stale_rollout_metadata.title = "reconciled title".to_string();
+
+        let mut adopted_metadata = root_metadata;
+        adopted_metadata.source = "adopted-source".to_string();
+        adopted_metadata.thread_source = Some(codex_protocol::protocol::ThreadSource::Subagent);
+        adopted_metadata.agent_nickname = Some("Ada".to_string());
+        adopted_metadata.agent_role = Some("worker".to_string());
+        adopted_metadata.agent_path = Some("/root/adopted".to_string());
+        runtime
+            .upsert_thread(&adopted_metadata)
+            .await
+            .expect("ownership update should succeed");
+
+        runtime
+            .upsert_thread_from_rollout(&stale_rollout_metadata)
+            .await
+            .expect("stale rollout upsert should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(persisted.title, "reconciled title");
+        assert_eq!(persisted.source, "adopted-source");
+        assert_eq!(
+            persisted.thread_source,
+            Some(codex_protocol::protocol::ThreadSource::Subagent)
+        );
+        assert_eq!(persisted.agent_nickname.as_deref(), Some("Ada"));
+        assert_eq!(persisted.agent_role.as_deref(), Some("worker"));
+        assert_eq!(persisted.agent_path.as_deref(), Some("/root/adopted"));
     }
 
     #[tokio::test]

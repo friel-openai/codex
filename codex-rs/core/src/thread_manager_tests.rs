@@ -13,6 +13,7 @@ use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::ResponseItemId;
 use codex_protocol::capabilities::CapabilityRootLocation;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
+use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
@@ -24,9 +25,13 @@ use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_thread_store::CreateThreadParams;
+use codex_thread_store::ThreadPersistenceMetadata;
 use codex_utils_path_uri::PathUri;
 use core_test_support::PathBufExt;
 use core_test_support::PathExt;
@@ -1277,6 +1282,121 @@ async fn resume_stopped_thread_from_rollout_preserves_thread_source() {
         .shutdown_and_wait()
         .await
         .expect("shutdown resumed thread");
+}
+
+#[tokio::test]
+async fn reconcile_resumed_v2_ownership_repairs_stale_session_id() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let store = Arc::new(InMemoryThreadStore::default());
+    let parent_thread_id = ThreadId::new();
+    let child_thread_id = ThreadId::new();
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    for (thread_id, session_id, source, parent_thread_id, thread_source) in [
+        (
+            parent_thread_id,
+            SessionId::from(parent_thread_id),
+            SessionSource::Cli,
+            None,
+            Some(ThreadSource::User),
+        ),
+        (
+            child_thread_id,
+            SessionId::from(parent_thread_id),
+            child_source.clone(),
+            Some(parent_thread_id),
+            Some(ThreadSource::Subagent),
+        ),
+    ] {
+        store
+            .create_thread(CreateThreadParams {
+                session_id,
+                thread_id,
+                extra_config: None,
+                forked_from_id: None,
+                parent_thread_id,
+                source,
+                thread_source,
+                originator: "thread-manager-test".to_string(),
+                base_instructions: BaseInstructions::default(),
+                dynamic_tools: Vec::new(),
+                selected_capability_roots: Vec::new(),
+                multi_agent_version: Some(MultiAgentVersion::V2),
+                history_mode: ThreadHistoryMode::Legacy,
+                history_base: None,
+                subagent_history_start_ordinal: None,
+                persistence_mode: Default::default(),
+                initial_rollout_ordinal: 0,
+                initial_window_id: uuid::Uuid::now_v7().to_string(),
+                metadata: ThreadPersistenceMetadata {
+                    cwd: Some(config.cwd.to_path_buf()),
+                    model_provider: config.model_provider_id.clone(),
+                    memory_mode: ThreadMemoryMode::Disabled,
+                },
+            })
+            .await
+            .expect("seed stored thread");
+    }
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        store,
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let stale_session_id = SessionId::from(ThreadId::new());
+    let mut initial_history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: child_thread_id,
+        history: Arc::new(vec![RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: child_thread_id,
+                session_id: stale_session_id,
+                source: child_source.clone(),
+                parent_thread_id: Some(parent_thread_id),
+                thread_source: Some(ThreadSource::Subagent),
+                multi_agent_version: Some(MultiAgentVersion::V2),
+                ..SessionMeta::default()
+            },
+            git: None,
+        })]),
+        rollout_path: None,
+    });
+
+    manager
+        .reconcile_resumed_thread_ownership(&mut initial_history)
+        .await
+        .expect("ownership reconciliation should succeed");
+
+    let InitialHistory::Resumed(resumed) = initial_history else {
+        panic!("history should remain resumed");
+    };
+    let RolloutItem::SessionMeta(line) = &resumed.history[0] else {
+        panic!("history should retain session metadata");
+    };
+    assert_eq!(line.meta.session_id, SessionId::from(parent_thread_id));
+    assert_eq!(line.meta.source, child_source);
 }
 
 #[tokio::test]
