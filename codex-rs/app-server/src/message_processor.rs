@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -70,6 +71,8 @@ use codex_core::config::Config;
 use codex_core::config::ThreadStoreConfig;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_goal_extension::GoalActivator;
+use codex_goal_extension::GoalSchedulerHandle;
 use codex_goal_extension::GoalService;
 use codex_home::CodexHomeUserInstructionsProvider;
 use codex_login::AuthManager;
@@ -93,6 +96,36 @@ use tracing::Instrument;
 use crate::models_refresh_worker::ModelsRefreshWorker;
 
 const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
+type InitializedRequestFuture = Pin<
+    Box<
+        dyn Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>>
+            + Send
+            + 'static,
+    >,
+>;
+
+#[inline(never)]
+fn build_boxed_request_future<Builder, RequestFuture>(builder: Builder) -> InitializedRequestFuture
+where
+    Builder: FnOnce() -> RequestFuture,
+    RequestFuture:
+        Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>> + Send + 'static,
+{
+    Box::pin(builder())
+}
+
+// Erase each request handler's concrete future before the caller awaits it. Awaiting inside one
+// match would make the caller's debug poll function reserve stack for every request variant.
+macro_rules! boxed_request_future {
+    ($request:expr, { $($pattern:pat => $body:expr $(,)?)+ }) => {
+        match $request {
+            $(
+                $pattern => build_boxed_request_future(move || async move { $body }),
+            )+
+        }
+    };
+}
 
 fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
     ClientRequest::try_from(request)
@@ -120,6 +153,7 @@ pub(crate) struct MessageProcessor {
     plugin_processor: PluginRequestProcessor,
     remote_control_processor: RemoteControlRequestProcessor,
     search_processor: SearchRequestProcessor,
+    goal_scheduler: Option<GoalSchedulerHandle>,
     thread_goal_processor: ThreadGoalRequestProcessor,
     thread_processor: ThreadRequestProcessor,
     turn_processor: TurnRequestProcessor,
@@ -246,6 +280,7 @@ impl MessageProcessor {
             remote_control_handle,
             plugin_startup_tasks,
         } = args;
+        let start_goal_scheduler = !matches!(rpc_transport, AppServerRpcTransport::InProcess);
         let thread_state_manager = ThreadStateManager::new();
         // The thread store is intentionally process-scoped. Config reloads can
         // affect per-thread behavior, but they must not move newly started,
@@ -450,6 +485,22 @@ impl MessageProcessor {
             Arc::clone(&skills_watcher),
             config_warnings,
         );
+        let goal_scheduler = if start_goal_scheduler {
+            state_db.as_ref().map(|state_db| {
+                let thread_processor = thread_processor.clone();
+                let activator: GoalActivator = Arc::new(move |schedule| {
+                    let thread_processor = thread_processor.clone();
+                    Box::pin(async move {
+                        thread_processor
+                            .activate_goal_supervisor_schedule(schedule)
+                            .await
+                    })
+                });
+                GoalSchedulerHandle::start(Arc::clone(state_db), activator)
+            })
+        } else {
+            None
+        };
         let turn_processor = TurnRequestProcessor::new(
             auth_manager.clone(),
             Arc::clone(&thread_manager),
@@ -521,6 +572,7 @@ impl MessageProcessor {
             plugin_processor,
             remote_control_processor,
             search_processor,
+            goal_scheduler,
             thread_goal_processor,
             thread_processor,
             turn_processor,
@@ -534,6 +586,9 @@ impl MessageProcessor {
         self.apps_processor.shutdown();
         self.models_refresh_worker.shutdown();
         self.skills_watcher.shutdown();
+        if let Some(goal_scheduler) = self.goal_scheduler.as_ref() {
+            goal_scheduler.stop();
+        }
     }
 
     pub(crate) async fn process_request(
@@ -882,6 +937,7 @@ impl MessageProcessor {
         Ok(())
     }
 
+    #[deny(clippy::large_stack_frames)]
     async fn handle_initialized_client_request(
         self: Arc<Self>,
         connection_request_id: ConnectionRequestId,
@@ -896,10 +952,14 @@ impl MessageProcessor {
             connection_id,
             request_id: codex_request.id().clone(),
         };
+        let response_request_id = request_id.clone();
+        let response_outgoing = Arc::clone(&self.outgoing);
 
-        let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
+        let request_future = boxed_request_future!(codex_request, {
             ClientRequest::Initialize { .. } => {
-                panic!("Initialize should be handled before initialized request dispatch");
+                Err(invalid_request(
+                    "Initialize should be handled before initialized request dispatch",
+                ))
             }
             ClientRequest::ServerDiagnostics { .. } => Ok(Some(read_server_diagnostics().into())),
             ClientRequest::ConfigRead { params, .. } => self
@@ -1486,17 +1546,20 @@ impl MessageProcessor {
             ClientRequest::FeedbackUpload { params, .. } => {
                 self.feedback_processor.feedback_upload(params).await
             }
-        };
+        });
+        let result = request_future.await;
 
         match result {
             Ok(Some(response)) => {
-                self.outgoing
-                    .send_response_as(request_id.clone(), response)
+                response_outgoing
+                    .send_response_as(response_request_id.clone(), response)
                     .await;
             }
             Ok(None) => {}
             Err(error) => {
-                self.outgoing.send_error(request_id.clone(), error).await;
+                response_outgoing
+                    .send_error(response_request_id.clone(), error)
+                    .await;
             }
         }
         Ok(())

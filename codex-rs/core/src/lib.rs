@@ -1,5 +1,6 @@
 //! Root of the `codex-core` library.
 
+#![recursion_limit = "256"]
 // Prevent accidental direct writes to stdout/stderr in library code. All
 // user-visible output must go through the appropriate abstraction (e.g.,
 // the TUI or the tracing stack).
@@ -53,6 +54,7 @@ pub mod exec_env;
 mod exec_policy;
 #[cfg(test)]
 mod git_info_tests;
+mod goal_supervisor;
 mod guardian;
 mod hook_runtime;
 mod image_preparation;

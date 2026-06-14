@@ -60,6 +60,66 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
+#[test]
+fn plaintext_multi_agent_tools_use_plaintext_message_source() {
+    for (namespace, name) in [
+        ("collaboration", "spawn_agent"),
+        ("collaboration", "send_message"),
+        ("collaboration", "followup_task"),
+        ("frodex", "adopt_agent"),
+    ] {
+        let call = ToolCall {
+            tool_name: ToolName::namespaced(namespace, name),
+            call_id: format!("call-{namespace}-{name}"),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            encrypted_function_args: Some(Vec::new()),
+        };
+        assert_eq!(
+            call.direct_source(),
+            ToolCallSource::DirectPlaintextMessage,
+            "{namespace}.{name} should preserve its plaintext message"
+        );
+    }
+
+    let promote = ToolCall {
+        tool_name: ToolName::namespaced("frodex", "promote_agent"),
+        call_id: "call-frodex-promote-agent".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        encrypted_function_args: Some(Vec::new()),
+    };
+    assert_eq!(promote.direct_source(), ToolCallSource::Direct);
+
+    let adopt_without_encryption_marker = ToolCall {
+        tool_name: ToolName::namespaced("frodex", "adopt_agent"),
+        call_id: "call-frodex-adopt-agent-unmarked".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        encrypted_function_args: None,
+    };
+    assert_eq!(
+        adopt_without_encryption_marker.direct_source(),
+        ToolCallSource::DirectPlaintextMessage
+    );
+
+    let adopt_with_encrypted_arguments = ToolCall {
+        tool_name: ToolName::namespaced("frodex", "adopt_agent"),
+        call_id: "call-frodex-adopt-agent-encrypted".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        encrypted_function_args: Some(vec!["message".to_string()]),
+    };
+    assert_eq!(
+        adopt_with_encrypted_arguments.direct_source(),
+        ToolCallSource::Direct
+    );
+}
+
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,

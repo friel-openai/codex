@@ -276,7 +276,8 @@ fn run_current_thread_test_with_stack<F>(name: &str, future: F) -> Result<()>
 where
     F: Future<Output = Result<()>> + Send + 'static,
 {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    // The current-thread runtime keeps the complete app-server request future on this stack.
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
     let handle = std::thread::Builder::new()
         .name(name.to_string())
@@ -635,9 +636,16 @@ fn thread_start_jsonrpc_span_exports_server_span_and_parents_children() -> Resul
     )
 }
 
-#[tokio::test(flavor = "current_thread")]
+#[test]
 #[serial(app_server_tracing)]
-async fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
+fn turn_start_jsonrpc_span_parents_core_turn_spans() -> Result<()> {
+    run_current_thread_test_with_stack(
+        "turn_start_jsonrpc_span_parents_core_turn_spans",
+        turn_start_jsonrpc_span_parents_core_turn_spans_inner(),
+    )
+}
+
+async fn turn_start_jsonrpc_span_parents_core_turn_spans_inner() -> Result<()> {
     let mut harness = TracingHarness::new().await?;
     let thread_start_response = harness.start_thread(/*request_id*/ 2, /*trace*/ None).await;
     let thread_id = thread_start_response.thread.id.clone();

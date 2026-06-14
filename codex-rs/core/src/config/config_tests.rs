@@ -11300,6 +11300,27 @@ max_concurrent_threads_per_session = 9
     Ok(())
 }
 
+#[test]
+fn multi_agent_v2_thread_adoption_is_disabled_by_default() {
+    let config = resolve_multi_agent_v2_config(&ConfigToml::default());
+
+    assert!(!config.enable_thread_adoption);
+}
+
+#[test]
+fn multi_agent_v2_thread_adoption_can_be_enabled_from_feature_table() {
+    let config_toml = toml::from_str(
+        r#"[features.multi_agent_v2]
+enable_thread_adoption = true
+"#,
+    )
+    .expect("multi-agent v2 thread adoption config should parse");
+
+    let config = resolve_multi_agent_v2_config(&config_toml);
+
+    assert!(config.enable_thread_adoption);
+}
+
 #[tokio::test]
 async fn multi_agent_v2_default_session_thread_cap_counts_root() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;

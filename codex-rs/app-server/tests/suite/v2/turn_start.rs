@@ -3334,6 +3334,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::Collab)
+        .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -3382,6 +3383,8 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             status: CollabAgentToolCallStatus::InProgress,
             sender_thread_id: thread.id.clone(),
             receiver_thread_ids: Vec::new(),
+            receiver_agent_nickname: None,
+            receiver_agent_role: None,
             prompt: Some(CHILD_PROMPT.to_string()),
             model: Some(REQUESTED_MODEL.to_string()),
             reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
@@ -3411,6 +3414,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
         model,
         reasoning_effort,
         agents_states,
+        ..
     } = spawn_completed
     else {
         unreachable!("loop ensures we break on collab agent tool call items");
@@ -3534,6 +3538,34 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
         })
         .await?;
 
+    let parent_thread_id = thread.id.clone();
+    let child_match_parent_id = parent_thread_id.clone();
+    let child_turn = responses::mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            let body = serde_json::from_slice::<Value>(&request.body)
+                .expect("request body should be valid JSON");
+            body["client_metadata"]["thread_id"] != child_match_parent_id
+                && body_contains(request, CHILD_PROMPT)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("resp-child-direct-input"),
+            responses::ev_assistant_message("msg-child-direct-input", "child done"),
+            responses::ev_completed("resp-child-direct-input"),
+        ]),
+    )
+    .await;
+    let _parent_follow_up = responses::mount_sse_once_match(
+        &server,
+        |req: &wiremock::Request| body_contains(req, SPAWN_CALL_ID),
+        responses::sse(vec![
+            responses::ev_response_created("resp-parent-direct-input-follow-up"),
+            responses::ev_assistant_message("msg-parent-direct-input-follow-up", "parent done"),
+            responses::ev_completed("resp-parent-direct-input-follow-up"),
+        ]),
+    )
+    .await;
+
     let _: TurnStartResponse = mcp
         .request(|request_id| ClientRequest::TurnStart {
             request_id,
@@ -3566,33 +3598,53 @@ async fn direct_input_to_multi_agent_v2_subagent_is_rejected() -> Result<()> {
     })
     .await??;
 
-    let listed: codex_app_server_protocol::ThreadListResponse = mcp
-        .request(|request_id| ClientRequest::ThreadList {
-            request_id,
-            params: codex_app_server_protocol::ThreadListParams {
-                cursor: None,
-                limit: Some(10),
-                sort_key: None,
-                sort_direction: None,
-                model_providers: None,
-                source_kinds: Some(vec![
-                    codex_app_server_protocol::ThreadSourceKind::SubAgentThreadSpawn,
-                ]),
-                archived: None,
-                section_id: None,
-                cwd: None,
-                use_state_db_only: true,
-                search_term: None,
-                parent_thread_id: None,
-                ancestor_thread_id: None,
-            },
-        })
-        .await?;
-    let listed_child = listed
-        .data
-        .iter()
-        .find(|listed| listed.id == child_thread_id)
-        .context("spawned child is missing from thread/list")?;
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let completed: TurnCompletedNotification =
+                mcp.read_notification("turn/completed").await?;
+            if completed.thread_id == child_thread_id {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+    assert!(!child_turn.requests().is_empty());
+
+    let listed_child = timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let listed: codex_app_server_protocol::ThreadListResponse = mcp
+                .request(|request_id| ClientRequest::ThreadList {
+                    request_id,
+                    params: codex_app_server_protocol::ThreadListParams {
+                        cursor: None,
+                        limit: Some(10),
+                        sort_key: None,
+                        sort_direction: None,
+                        model_providers: None,
+                        source_kinds: Some(vec![
+                            codex_app_server_protocol::ThreadSourceKind::SubAgentThreadSpawn,
+                        ]),
+                        archived: None,
+                        section_id: None,
+                        cwd: None,
+                        use_state_db_only: true,
+                        search_term: None,
+                        parent_thread_id: Some(parent_thread_id.clone()),
+                        ancestor_thread_id: None,
+                    },
+                })
+                .await?;
+            if let Some(listed_child) = listed
+                .data
+                .into_iter()
+                .find(|listed| listed.id == child_thread_id)
+            {
+                return Ok::<_, anyhow::Error>(listed_child);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
     assert!(matches!(
         &listed_child.source,
         codex_app_server_protocol::SessionSource::SubAgent(
@@ -3706,6 +3758,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::Collab)
+        .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),
@@ -3774,6 +3827,7 @@ config_file = "./custom-role.toml"
         model,
         reasoning_effort,
         agents_states,
+        ..
     } = spawn_completed
     else {
         unreachable!("loop ensures we break on collab agent tool call items");

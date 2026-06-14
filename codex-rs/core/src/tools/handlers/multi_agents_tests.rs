@@ -14,9 +14,12 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
+use crate::tools::handlers::multi_agents_v2::CloseAgentHandler as CloseAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::PromoteAgentHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -51,6 +54,7 @@ use codex_protocol::protocol::FileSystemSandboxEntry;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::NetworkSandboxPolicy;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
@@ -392,7 +396,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (mut session, turn) = make_session_and_context().await;
+        let (mut session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let manager = thread_manager();
         let root = manager
             .start_thread(StartThreadOptions::new((*turn.config).clone()))
@@ -431,7 +439,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -457,7 +469,11 @@ async fn spawn_agent_service_tier_override_validates_the_effective_child_model()
     }
 
     {
-        let (session, turn) = make_session_and_context().await;
+        let (session, mut turn) = make_session_and_context().await;
+        turn.multi_agent_version = MultiAgentVersion::V1;
+        let mut config = (*turn.config).clone();
+        let _ = config.features.disable(Feature::MultiAgentV2);
+        set_turn_config(&mut turn, config);
         let err = SpawnAgentHandler::default()
             .handle(invocation(
                 Arc::new(session),
@@ -992,6 +1008,150 @@ async fn multi_agent_v2_spawn_requires_task_name() {
         panic!("missing task_name should surface as a model-facing error");
     };
     assert!(message.contains("missing field `task_name`"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_adoption_rejects_existing_threads_when_disabled() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let Err(error) = AdoptAgentHandler::new(false)
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "adopt_agent",
+            function_payload(json!({
+                "message": "continue the existing thread",
+                "task_name": "adopted_worker",
+                "existing_thread_id": ThreadId::new(),
+            })),
+        ))
+        .await
+    else {
+        panic!("existing-thread adoption must be disabled by default");
+    };
+
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(
+            "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_promotion_rejects_invocations_when_disabled() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+
+    let Err(error) = PromoteAgentHandler
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "promote_agent",
+            function_payload(json!({ "target": "worker" })),
+        ))
+        .await
+    else {
+        panic!("subagent promotion must be disabled by default");
+    };
+
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(
+            "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
+                .to_string()
+        )
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config.multi_agent_v2.enable_thread_adoption = true;
+    set_turn_config(&mut turn, config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for overrides in [
+        json!({ "fork_turns": "all" }),
+        json!({ "fork_context": true }),
+        json!({ "agent_type": "default" }),
+        json!({ "model": "another-model" }),
+        json!({ "reasoning_effort": "high" }),
+        json!({ "service_tier": "fast" }),
+    ] {
+        let mut arguments = json!({
+            "message": "continue the existing thread",
+            "task_name": "adopted_worker",
+            "existing_thread_id": ThreadId::new(),
+        });
+        arguments
+            .as_object_mut()
+            .expect("adoption arguments should be an object")
+            .extend(
+                overrides
+                    .as_object()
+                    .expect("adoption overrides should be an object")
+                    .clone(),
+            );
+
+        let err = AdoptAgentHandler::new(false)
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "adopt_agent",
+                function_payload(arguments),
+            ))
+            .await
+            .err()
+            .expect("adoption must reject fork and configuration overrides");
+
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "existing_thread_id cannot be combined with fork, agent type, model, reasoning effort, or service tier overrides".to_string()
+            )
+        );
+    }
 }
 
 #[tokio::test]
@@ -3931,6 +4091,383 @@ async fn multi_agent_v2_interrupt_agent_accepts_task_name_target() {
 }
 
 #[tokio::test]
+async fn multi_agent_v2_close_agent_closes_owned_live_subtree_and_persisted_edge() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    config.agent_max_depth = 3;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should enable MultiAgentV2");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should enable SQLite");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("SQLite state database should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "start worker", "task_name": "worker"})),
+        ))
+        .await
+        .expect("worker spawn should succeed");
+    let worker_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker task name should resolve");
+    let worker_session = manager
+        .get_thread(worker_id)
+        .await
+        .expect("worker thread should be live")
+        .session
+        .clone();
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            worker_session.clone(),
+            worker_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "start child", "task_name": "child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let child_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker/child")
+        .await
+        .expect("child task name should resolve");
+    let previous_status = manager.agent_control().get_status(worker_id).await;
+
+    let output = CloseAgentHandlerV2
+        .handle(invocation(
+            session.clone(),
+            turn,
+            "close_agent",
+            function_payload(json!({"target": "worker"})),
+        ))
+        .await
+        .expect("close_agent should close the owned worker");
+    let (content, success) = expect_text_output(output);
+    let result: close_agent::CloseAgentResult =
+        serde_json::from_str(&content).expect("close_agent result should be JSON");
+    assert_eq!(result.previous_status, previous_status);
+    assert_eq!(success, Some(true));
+    assert_eq!(
+        manager.agent_control().get_status(worker_id).await,
+        AgentStatus::NotFound
+    );
+    assert_eq!(
+        manager.agent_control().get_status(child_id).await,
+        AgentStatus::NotFound
+    );
+    for thread_id in [worker_id, child_id] {
+        assert!(manager.captured_ops().iter().any(|(target, operation)| {
+            *target == thread_id && matches!(operation, Op::Shutdown)
+        }));
+    }
+    assert_eq!(
+        state_db
+            .list_thread_spawn_children_with_status(
+                root.thread_id,
+                DirectionalThreadSpawnEdgeStatus::Closed,
+            )
+            .await
+            .expect("closed worker edge should load"),
+        vec![worker_id]
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_close_agent_accepts_owned_thread_uuid() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should enable MultiAgentV2");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "start worker", "task_name": "worker"})),
+        ))
+        .await
+        .expect("worker spawn should succeed");
+    let worker_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker task name should resolve");
+
+    CloseAgentHandlerV2
+        .handle(invocation(
+            session,
+            turn,
+            "close_agent",
+            function_payload(json!({"target": worker_id.to_string()})),
+        ))
+        .await
+        .expect("close_agent should accept the owned worker UUID");
+    assert_eq!(
+        manager.agent_control().get_status(worker_id).await,
+        AgentStatus::NotFound
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_close_agent_rejects_root_self_sibling_and_missing_caller_path() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config.agent_max_depth = 3;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should enable MultiAgentV2");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    for name in ["worker", "worker_other"] {
+        SpawnAgentHandlerV2::default()
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "spawn_agent",
+                function_payload(json!({"message": "start worker", "task_name": name})),
+            ))
+            .await
+            .expect("worker spawn should succeed");
+    }
+    let worker_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker")
+        .await
+        .expect("worker task name should resolve");
+    let sibling_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker_other")
+        .await
+        .expect("sibling task name should resolve");
+    let worker_session = manager
+        .get_thread(worker_id)
+        .await
+        .expect("worker thread should be live")
+        .session
+        .clone();
+    SpawnAgentHandlerV2::default()
+        .handle(invocation(
+            worker_session.clone(),
+            worker_session.new_default_turn().await,
+            "spawn_agent",
+            function_payload(json!({"message": "start child", "task_name": "child"})),
+        ))
+        .await
+        .expect("child spawn should succeed");
+    let child_id = session
+        .services
+        .agent_control
+        .resolve_agent_reference(session.thread_id, &turn.session_source, "worker/child")
+        .await
+        .expect("child task name should resolve");
+
+    for target in ["/root".to_string(), root.thread_id.to_string()] {
+        let error = CloseAgentHandlerV2
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "close_agent",
+                function_payload(json!({"target": target})),
+            ))
+            .await
+            .err()
+            .expect("close_agent must reject the root");
+        assert_eq!(
+            error,
+            FunctionCallError::RespondToModel("root is not a spawned agent".to_string())
+        );
+    }
+
+    for target in [worker_id.to_string(), "/root/worker".to_string()] {
+        let error = CloseAgentHandlerV2
+            .handle(invocation(
+                worker_session.clone(),
+                worker_session.new_default_turn().await,
+                "close_agent",
+                function_payload(json!({"target": target})),
+            ))
+            .await
+            .err()
+            .expect("close_agent must reject the calling agent");
+        assert_eq!(
+            error,
+            FunctionCallError::RespondToModel("an agent cannot close itself".to_string())
+        );
+    }
+
+    let error = CloseAgentHandlerV2
+        .handle(invocation(
+            worker_session.clone(),
+            worker_session.new_default_turn().await,
+            "close_agent",
+            function_payload(json!({"target": sibling_id.to_string()})),
+        ))
+        .await
+        .err()
+        .expect("close_agent must reject component-prefix sibling agents");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel("target agent is not an owned descendant".to_string())
+    );
+
+    let (mut malformed_session, mut malformed_turn) = make_session_and_context().await;
+    malformed_session.services.agent_control = manager.agent_control();
+    malformed_session.thread_id = worker_id;
+    malformed_turn.parent_thread_id = None;
+    malformed_turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: root.thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let error = CloseAgentHandlerV2
+        .handle(invocation(
+            Arc::new(malformed_session),
+            Arc::new(malformed_turn),
+            "close_agent",
+            function_payload(json!({"target": child_id.to_string()})),
+        ))
+        .await
+        .err()
+        .expect("close_agent must reject nonroot callers without a canonical path");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel("calling agent is missing an agent_path".to_string())
+    );
+
+    for thread_id in [worker_id, sibling_id, child_id] {
+        assert_ne!(
+            manager.agent_control().get_status(thread_id).await,
+            AgentStatus::NotFound
+        );
+    }
+    assert!(
+        !manager
+            .captured_ops()
+            .iter()
+            .any(|(_, operation)| matches!(operation, Op::Shutdown))
+    );
+}
+
+#[tokio::test]
+async fn multi_agent_v2_close_agent_rejects_internal_goal_supervisor() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config.ephemeral = true;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should enable MultiAgentV2");
+    set_turn_config(&mut turn, config.clone());
+    let supervisor_id = session
+        .services
+        .agent_control
+        .spawn_agent_with_metadata(
+            config,
+            vec![UserInput::Text {
+                text: "supervise".to_string(),
+                text_elements: Vec::new(),
+            }],
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: Some(
+                    AgentPath::root()
+                        .join("goal_supervisor")
+                        .expect("goal supervisor path should be valid"),
+                ),
+                agent_nickname: None,
+                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+            })),
+            crate::agent::control::SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("goal supervisor agent should spawn")
+        .thread_id;
+
+    let error = CloseAgentHandlerV2
+        .handle(invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "close_agent",
+            function_payload(json!({"target": supervisor_id.to_string()})),
+        ))
+        .await
+        .err()
+        .expect("close_agent must not stop internal goal supervisors");
+    assert_eq!(
+        error,
+        FunctionCallError::RespondToModel(
+            "goal supervisor agents cannot be closed with close_agent".to_string()
+        )
+    );
+    assert_ne!(
+        manager.agent_control().get_status(supervisor_id).await,
+        AgentStatus::NotFound
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
     let (mut session, mut turn) = make_session_and_context().await;
     let mut config = (*turn.config).clone();
@@ -4272,6 +4809,7 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         .features
         .enable(Feature::Sqlite)
         .expect("test config should allow sqlite");
+    let _ = config.features.disable(Feature::MultiAgentV2);
     let state_db = init_state_db(&config).await;
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
     let manager = ThreadManager::new(
@@ -4369,7 +4907,6 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             .await,
         AgentStatus::NotFound
     );
-
     let child_resume_output = ResumeAgentHandler
         .handle(invocation(
             parent_session.clone(),
@@ -4388,6 +4925,36 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         manager.agent_control().get_status(child_thread_id).await,
         AgentStatus::NotFound
     );
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+    assert!(
+        parent_session
+            .services
+            .agent_control
+            .get_agent_metadata(grandchild_thread_id)
+            .is_some(),
+        "open grandchild should remain addressable while cold"
+    );
+
+    let grandchild_send_output = SendInputHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "send_input",
+            function_payload(json!({
+                "target": grandchild_thread_id.to_string(),
+                "message": "hello resumed grandchild"
+            })),
+        ))
+        .await
+        .expect("send_input should reload the cold grandchild");
+    let (_, grandchild_send_success) = expect_text_output(grandchild_send_output);
+    assert_eq!(grandchild_send_success, Some(true));
     assert_ne!(
         manager
             .agent_control()

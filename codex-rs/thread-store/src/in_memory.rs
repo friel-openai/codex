@@ -40,6 +40,7 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreFuture;
 use crate::ThreadStoreResult;
+use crate::TouchRootThreadRecencyParams;
 use crate::UpdateThreadMetadataParams;
 use crate::error::reject_paginated_history_mode;
 
@@ -385,6 +386,117 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn descendant_activity_advances_only_in_memory_root_recency() {
+        let store = InMemoryThreadStore::default();
+        let root_id = ThreadId::new();
+        let child_id = ThreadId::new();
+        let grandchild_id = ThreadId::new();
+        for (thread_id, parent_thread_id) in [
+            (root_id, None),
+            (child_id, Some(root_id)),
+            (grandchild_id, Some(child_id)),
+        ] {
+            let mut params = create_thread_params(thread_id, ThreadHistoryMode::Legacy);
+            params.parent_thread_id = parent_thread_id;
+            store
+                .create_thread(params)
+                .await
+                .expect("thread should be created");
+        }
+        let created_root_recency_at = store
+            .read_thread(ReadThreadParams {
+                thread_id: root_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("root should load")
+            .recency_at;
+        let immediate_retry = store
+            .touch_root_thread_recency(TouchRootThreadRecencyParams {
+                descendant_thread_id: grandchild_id,
+                activity_at: Utc::now(),
+                minimum_interval: std::time::Duration::from_secs(60 * 60),
+            })
+            .await
+            .expect("new root debounce should succeed")
+            .expect("grandchild should resolve to a root");
+        assert!(immediate_retry <= std::time::Duration::from_secs(60 * 60));
+        assert_eq!(
+            store
+                .read_thread(ReadThreadParams {
+                    thread_id: root_id,
+                    include_archived: false,
+                    include_history: false,
+                })
+                .await
+                .expect("root should load")
+                .recency_at,
+            created_root_recency_at
+        );
+        let initial_recency_at =
+            DateTime::<Utc>::from_timestamp(1_700_000_000, 0).expect("timestamp");
+        store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id: root_id,
+                patch: ThreadMetadataPatch {
+                    advance_recency_at: Some(initial_recency_at),
+                    ..Default::default()
+                },
+                include_archived: false,
+            })
+            .await
+            .expect("root recency should be seeded");
+
+        let activity_at = initial_recency_at + chrono::Duration::hours(2);
+        assert_eq!(
+            store
+                .touch_root_thread_recency(TouchRootThreadRecencyParams {
+                    descendant_thread_id: grandchild_id,
+                    activity_at,
+                    minimum_interval: std::time::Duration::from_secs(60 * 60),
+                })
+                .await
+                .expect("root recency touch should succeed"),
+            Some(std::time::Duration::from_secs(60 * 60))
+        );
+        assert_eq!(
+            store
+                .read_thread(ReadThreadParams {
+                    thread_id: root_id,
+                    include_archived: false,
+                    include_history: false,
+                })
+                .await
+                .expect("root should load")
+                .recency_at,
+            activity_at
+        );
+        assert_eq!(
+            store
+                .touch_root_thread_recency(TouchRootThreadRecencyParams {
+                    descendant_thread_id: grandchild_id,
+                    activity_at: activity_at + chrono::Duration::minutes(30),
+                    minimum_interval: std::time::Duration::from_secs(60 * 60),
+                })
+                .await
+                .expect("debounced root recency touch should succeed"),
+            Some(std::time::Duration::from_secs(30 * 60))
+        );
+        assert_eq!(
+            store
+                .touch_root_thread_recency(TouchRootThreadRecencyParams {
+                    descendant_thread_id: root_id,
+                    activity_at: activity_at + chrono::Duration::hours(2),
+                    minimum_interval: std::time::Duration::from_secs(60 * 60),
+                })
+                .await
+                .expect("root input should be ignored"),
+            None
+        );
+    }
+
     fn create_thread_params(
         thread_id: ThreadId,
         history_mode: ThreadHistoryMode,
@@ -454,6 +566,7 @@ pub struct InMemoryThreadStoreCalls {
     pub read_thread_by_rollout_path: usize,
     pub list_threads: usize,
     pub update_thread_metadata: usize,
+    pub touch_root_thread_recency: usize,
     pub archive_thread: usize,
     pub unarchive_thread: usize,
     pub delete_thread: usize,
@@ -472,7 +585,9 @@ pub struct InMemoryThreadStore {
 #[derive(Default)]
 struct InMemoryThreadStoreState {
     calls: InMemoryThreadStoreCalls,
+    fail_appends: bool,
     created_threads: HashMap<ThreadId, CreateThreadParams>,
+    creation_times: HashMap<ThreadId, DateTime<Utc>>,
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
     metadata_updates: HashMap<ThreadId, ThreadMetadataPatch>,
     sections: HashMap<ThreadId, String>,
@@ -503,10 +618,16 @@ impl InMemoryThreadStore {
         self.state.lock().await.calls.clone()
     }
 
+    /// Makes non-empty appends fail. Intended for startup failure-path tests.
+    pub async fn fail_appends(&self) {
+        self.state.lock().await.fail_appends = true;
+    }
+
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
         reject_paginated_history_mode(params.history_mode)?;
         let mut state = self.state.lock().await;
         state.calls.create_thread += 1;
+        let created_at = Utc::now();
         let session_meta = SessionMeta {
             session_id: params.session_id,
             id: params.thread_id,
@@ -540,6 +661,7 @@ impl InMemoryThreadStore {
                 meta: session_meta,
                 git: None,
             }));
+        state.creation_times.insert(params.thread_id, created_at);
         state.created_threads.insert(params.thread_id, params);
         Ok(())
     }
@@ -565,6 +687,12 @@ impl InMemoryThreadStore {
             return Ok(());
         }
         let mut state = self.state.lock().await;
+        if state.fail_appends {
+            state.calls.append_items += 1;
+            return Err(ThreadStoreError::Internal {
+                message: "injected append failure".to_string(),
+            });
+        }
         let history_mode = history_mode_from_state(&state, params.thread_id);
         let persisted_items = persisted_rollout_items(params.items.as_slice(), history_mode);
         if persisted_items.is_empty() {
@@ -688,6 +816,57 @@ impl InMemoryThreadStore {
             .or_default()
             .merge(params.patch);
         stored_thread_from_state(&state, params.thread_id, /*include_history*/ false)
+    }
+
+    async fn touch_root_thread_recency(
+        &self,
+        params: TouchRootThreadRecencyParams,
+    ) -> ThreadStoreResult<Option<std::time::Duration>> {
+        let mut state = self.state.lock().await;
+        state.calls.touch_root_thread_recency += 1;
+        let mut current_thread_id = params.descendant_thread_id;
+        let mut visited = HashSet::from([current_thread_id]);
+        let mut found_parent = false;
+        while let Some(parent_thread_id) = state
+            .created_threads
+            .get(&current_thread_id)
+            .and_then(|thread| thread.parent_thread_id)
+        {
+            if !visited.insert(parent_thread_id) {
+                return Ok(None);
+            }
+            found_parent = true;
+            current_thread_id = parent_thread_id;
+        }
+        if !found_parent || !state.created_threads.contains_key(&current_thread_id) {
+            return Ok(None);
+        }
+
+        let Some(root_recency_at) = state
+            .metadata_updates
+            .get(&current_thread_id)
+            .and_then(|metadata| metadata.advance_recency_at.or(metadata.updated_at))
+            .or_else(|| state.creation_times.get(&current_thread_id).copied())
+        else {
+            return Ok(None);
+        };
+        let elapsed = params.activity_at.signed_duration_since(root_recency_at);
+        let Ok(elapsed) = elapsed.to_std() else {
+            let future_offset = root_recency_at
+                .signed_duration_since(params.activity_at)
+                .to_std()
+                .unwrap_or(std::time::Duration::MAX);
+            return Ok(Some(params.minimum_interval.saturating_add(future_offset)));
+        };
+        if elapsed < params.minimum_interval {
+            return Ok(Some(params.minimum_interval.saturating_sub(elapsed)));
+        }
+        state
+            .metadata_updates
+            .entry(current_thread_id)
+            .or_default()
+            .advance_recency_at = Some(params.activity_at);
+        Ok(Some(params.minimum_interval))
     }
 
     async fn move_thread_to_section(
@@ -934,6 +1113,13 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::update_thread_metadata(self, params))
     }
 
+    fn touch_root_thread_recency(
+        &self,
+        params: TouchRootThreadRecencyParams,
+    ) -> ThreadStoreFuture<'_, Option<std::time::Duration>> {
+        Box::pin(InMemoryThreadStore::touch_root_thread_recency(self, params))
+    }
+
     fn move_thread_to_section(
         &self,
         params: MoveThreadToSectionParams,
@@ -977,6 +1163,11 @@ fn stored_thread_from_state(
     });
     let name = state.names.get(&thread_id).cloned().flatten();
     let metadata = state.metadata_updates.get(&thread_id);
+    let created_at = state
+        .creation_times
+        .get(&thread_id)
+        .copied()
+        .unwrap_or_else(Utc::now);
     let rollout_path = state
         .rollout_paths
         .iter()
@@ -1005,13 +1196,13 @@ fn stored_thread_from_state(
             .flatten(),
         created_at: metadata
             .and_then(|metadata| metadata.created_at)
-            .unwrap_or_else(Utc::now),
+            .unwrap_or(created_at),
         updated_at: metadata
             .and_then(|metadata| metadata.updated_at)
-            .unwrap_or_else(Utc::now),
+            .unwrap_or(created_at),
         recency_at: metadata
             .and_then(|metadata| metadata.advance_recency_at.or(metadata.updated_at))
-            .unwrap_or_else(Utc::now),
+            .unwrap_or(created_at),
         archived_at: None,
         section: state
             .sections

@@ -2,10 +2,13 @@ use anyhow::Result;
 use codex_config::types::Personality;
 use codex_core::CodexThread;
 use codex_core::ForkSnapshot;
+use codex_core::config::Config;
+use codex_extension_api::ExtensionRegistry;
+use codex_extension_api::ExtensionRegistryBuilder;
 use codex_features::Feature;
 use codex_login::CodexAuth;
-use codex_models_manager::bundled_models_response;
 use codex_models_manager::CustomModelConfig;
+use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
@@ -29,14 +32,21 @@ use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::UserInput;
+use codex_skills_extension::SkillsExtensionConfig;
+use codex_skills_extension::install;
+use core_test_support::responses::ev_assistant_message;
+use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_completed_with_tokens;
+use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_image_generation_call;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_models_once;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_completed;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
@@ -45,9 +55,25 @@ use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
-use test_case::test_case;
+use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
+use test_case::test_case;
+use tokio::time::sleep;
+use tokio::time::timeout;
 use wiremock::MockServer;
+
+fn skills_extensions() -> Arc<ExtensionRegistry<Config>> {
+    let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+    install(&mut extensions, |config: &Config| SkillsExtensionConfig {
+        include_instructions: config.include_skill_instructions,
+        bundled_skills_enabled: config.bundled_skills_enabled(),
+        orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+        shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
+    });
+    Arc::new(extensions.build())
+}
 
 fn read_only_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -> Op {
     let (sandbox_policy, permission_profile) =
@@ -516,6 +542,148 @@ async fn model_and_personality_change_only_appends_model_instructions() -> Resul
             .iter()
             .any(|text| text.contains("<personality_spec>")),
         "did not expect personality update message when model changed in same turn"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execution_settings_change_applies_to_next_request_in_active_turn() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let original_model = "gpt-5.4";
+    let next_model = "gpt-5.5";
+    let call_id = "active-turn-settings-shell";
+    let command_args = json!({
+        "command": "printf active-turn-settings",
+        "login": false,
+    });
+    let response_mock = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_response_created("resp-before-settings-change"),
+                ev_function_call(
+                    call_id,
+                    "shell_command",
+                    &serde_json::to_string(&command_args)?,
+                ),
+                ev_completed("resp-before-settings-change"),
+            ]))
+            .set_delay(Duration::from_secs(1)),
+            sse_response(sse(vec![
+                ev_response_created("resp-after-settings-change"),
+                ev_assistant_message("msg-after-settings-change", "done"),
+                ev_completed("resp-after-settings-change"),
+            ])),
+        ],
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_extensions(skills_extensions())
+        .with_model_info_override(original_model, |model_info| {
+            model_info.include_skills_usage_instructions = false;
+        })
+        .with_model_info_override(next_model, |model_info| {
+            model_info.include_skills_usage_instructions = true;
+        })
+        .with_model(original_model)
+        .with_pre_build_hook(|home| {
+            let skill_dir = home.join("skills/active-turn-settings");
+            std::fs::create_dir_all(&skill_dir).expect("create test skill directory");
+            std::fs::write(
+                skill_dir.join("SKILL.md"),
+                "---\nname: active-turn-settings\ndescription: active turn settings test\n---\n",
+            )
+            .expect("write test skill");
+        })
+        .with_config(|config| {
+            config.model_reasoning_effort = Some(ReasoningEffort::Medium);
+            config
+                .features
+                .enable(Feature::FastMode)
+                .expect("test config should allow fast mode");
+        });
+    let test = builder.build(&server).await?;
+
+    test.codex
+        .submit(read_only_user_turn(
+            &test,
+            vec![UserInput::Text {
+                text: "run one tool".into(),
+                text_elements: Vec::new(),
+            }],
+            original_model.to_string(),
+        ))
+        .await?;
+    timeout(Duration::from_secs(5), async {
+        while response_mock.requests().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the first request should start");
+
+    core_test_support::submit_thread_settings(
+        &test.codex,
+        codex_protocol::protocol::ThreadSettingsOverrides {
+            model: Some(next_model.to_string()),
+            effort: Some(Some(ReasoningEffort::High)),
+            service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
+            ..Default::default()
+        },
+    )
+    .await?;
+
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+    let requests = response_mock.requests();
+    assert_eq!(requests.len(), 2);
+    let first_body = requests[0].body_json();
+    assert_eq!(first_body["model"].as_str(), Some(original_model));
+    assert_eq!(first_body["reasoning"]["effort"].as_str(), Some("medium"));
+    assert_eq!(first_body.get("service_tier"), None);
+    assert!(
+        !requests[0]
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains("### How to use skills")),
+        "the original model should not receive skills usage instructions"
+    );
+
+    let second_body = requests[1].body_json();
+    assert_eq!(second_body["model"].as_str(), Some(next_model));
+    assert_eq!(second_body["reasoning"]["effort"].as_str(), Some("high"));
+    assert_eq!(second_body["service_tier"].as_str(), Some("priority"));
+    assert!(
+        requests[1]
+            .message_input_texts("developer")
+            .iter()
+            .any(|text| text.contains("### How to use skills")),
+        "the continuation should receive the selected model's skills usage instructions"
+    );
+    let call_item_types: Vec<String> = requests[1]
+        .input()
+        .into_iter()
+        .filter(|item| item.get("call_id").and_then(serde_json::Value::as_str) == Some(call_id))
+        .filter_map(|item| {
+            item.get("type")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect();
+    assert_eq!(
+        call_item_types,
+        vec!["function_call", "function_call_output"]
+    );
+    assert_eq!(
+        requests[1]
+            .function_call_output(call_id)
+            .get("call_id")
+            .and_then(serde_json::Value::as_str),
+        Some(call_id)
     );
 
     Ok(())

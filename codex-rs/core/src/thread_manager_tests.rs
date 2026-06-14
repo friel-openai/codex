@@ -240,6 +240,7 @@ async fn child_session_inherits_client_mcp_extensions() {
 struct FakeAgentGraphStore {
     root_thread_id: ThreadId,
     descendant_thread_ids: Vec<ThreadId>,
+    expected_status_filter: Option<codex_agent_graph_store::ThreadSpawnEdgeStatus>,
 }
 
 impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
@@ -274,7 +275,7 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         status_filter: Option<codex_agent_graph_store::ThreadSpawnEdgeStatus>,
     ) -> codex_agent_graph_store::AgentGraphStoreFuture<'_, Vec<ThreadId>> {
         assert_eq!(root_thread_id, self.root_thread_id);
-        assert_eq!(status_filter, None);
+        assert_eq!(status_filter, self.expected_status_filter);
         let descendant_thread_ids = self.descendant_thread_ids.clone();
         Box::pin(async move { Ok(descendant_thread_ids) })
     }
@@ -1510,6 +1511,7 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
     let agent_graph_store = Arc::new(FakeAgentGraphStore {
         root_thread_id,
         descendant_thread_ids: descendant_thread_ids.clone(),
+        expected_status_filter: None,
     });
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -1539,6 +1541,185 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
             .expect("subtree should load from injected graph store"),
         expected_thread_ids
     );
+}
+
+#[tokio::test]
+async fn agent_identity_restoration_uses_injected_graph_store_with_local_state_db() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("local state db should initialize");
+
+    let root_thread_id = ThreadId::new();
+    let allowed_thread_id = ThreadId::new();
+    let denied_thread_id = ThreadId::new();
+    for (thread_id, task_name) in [(allowed_thread_id, "allowed"), (denied_thread_id, "denied")] {
+        let agent_path = codex_protocol::AgentPath::root()
+            .join(task_name)
+            .expect("valid agent path");
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_path: Some(agent_path),
+            agent_nickname: None,
+            agent_role: None,
+        });
+        let metadata = codex_state::ThreadMetadataBuilder::new(
+            thread_id,
+            config
+                .codex_home
+                .join(format!("{thread_id}.jsonl"))
+                .to_path_buf(),
+            chrono::Utc::now(),
+            source,
+        )
+        .build("openai");
+        state_db
+            .upsert_thread(&metadata)
+            .await
+            .expect("child metadata should persist");
+        state_db
+            .upsert_thread_spawn_edge(
+                root_thread_id,
+                thread_id,
+                codex_state::DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("child edge should persist");
+    }
+
+    let agent_graph_store = Arc::new(FakeAgentGraphStore {
+        root_thread_id,
+        descendant_thread_ids: vec![allowed_thread_id],
+        expected_status_filter: Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+    });
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, Some(state_db)),
+        Some(agent_graph_store),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    let agent_control = manager.agent_control();
+
+    agent_control
+        .restore_v2_agent_metadata(&config, root_thread_id)
+        .await;
+
+    assert!(
+        agent_control
+            .get_agent_metadata(allowed_thread_id)
+            .is_some()
+    );
+    assert!(agent_control.get_agent_metadata(denied_thread_id).is_none());
+}
+
+#[tokio::test]
+async fn loaded_thread_ancestry_uses_persisted_unloaded_intermediates() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root");
+    let intermediate = manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            ..StartThreadOptions::new(config.clone())
+        })
+        .await
+        .expect("start intermediate");
+    let grandchild = manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: intermediate.thread_id,
+                depth: 2,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            ..StartThreadOptions::new(config)
+        })
+        .await
+        .expect("start grandchild");
+
+    intermediate.thread.ensure_rollout_materialized().await;
+    intermediate
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush intermediate rollout");
+    intermediate
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown intermediate");
+    manager.remove_thread(&intermediate.thread_id).await;
+
+    assert!(
+        manager
+            .loaded_thread_descends_from(grandchild.thread_id, root.thread_id)
+            .await
+            .expect("resolve grandchild ancestry")
+    );
+    assert!(
+        !manager
+            .loaded_thread_descends_from(root.thread_id, grandchild.thread_id)
+            .await
+            .expect("resolve unrelated ancestry")
+    );
+
+    grandchild
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown grandchild");
+    root.thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown root");
 }
 
 #[tokio::test]
@@ -1730,6 +1911,55 @@ async fn injected_models_manager_controls_refresh_policy() {
         2
     );
     assert!(!config.codex_home.join("models_cache.json").exists());
+}
+
+#[tokio::test]
+async fn fork_startup_append_failure_discards_before_manager_registration() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let store = Arc::new(codex_thread_store::InMemoryThreadStore::default());
+    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
+    let manager = ThreadManager::new(
+        &config,
+        Arc::clone(&auth_manager),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        store.clone(),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+    store.fail_appends().await;
+    let mut options = StartThreadOptions::new(config);
+    options.initial_history =
+        InitialHistory::Forked(vec![RolloutItem::ResponseItem(user_msg("forked history"))]);
+
+    let err = match manager.start_thread(options).await {
+        Ok(_) => panic!("fork startup should fail when its initial append fails"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("injected append failure"),
+        "unexpected startup error: {err}"
+    );
+    assert!(
+        manager.list_thread_ids().await.is_empty(),
+        "failed startup must not register a child"
+    );
+    let calls = store.calls().await;
+    assert_eq!(calls.create_thread, 1);
+    assert!(calls.append_items >= 1);
+    assert_eq!(calls.discard_thread, 1);
 }
 
 #[test]

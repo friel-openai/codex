@@ -35,6 +35,7 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_features::Feature;
 use codex_git_utils::GitSha;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::GitInfo as CoreGitInfo;
@@ -2098,6 +2099,171 @@ async fn thread_list_sort_recency_at_uses_state_db_order_with_provider_filter() 
         vec![id_new.as_str(), id_old.as_str()]
     );
     assert!(data.iter().all(|thread| thread.recency_at.is_some()));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn descendant_activity_moves_root_to_front_of_recency_sort() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::MultiAgentV2)
+        .write(codex_home.path())?;
+    let root_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-01T10-00-00",
+        "2025-01-01T10:00:00Z",
+        "Background root",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let newer_root_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-02T10-00-00",
+        "2025-01-02T10:00:00Z",
+        "Newer foreground root",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let root_thread_id = ThreadId::from_string(&root_id)?;
+    let child_id = create_fake_parented_rollout_with_source(
+        codex_home.path(),
+        "2025-01-01T11-00-00",
+        "2025-01-01T11:00:00Z",
+        "Background child",
+        Some("mock_provider"),
+        /*git_info*/ None,
+        CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: root_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
+        root_thread_id.into(),
+        root_thread_id,
+    )?;
+    let mut mcp = init_mcp(codex_home.path()).await?;
+
+    let before = list_threads_with_sort(
+        &mut mcp,
+        /*cursor*/ None,
+        Some(10),
+        Some(vec!["mock_provider".to_string()]),
+        Some(vec![ThreadSourceKind::Cli]),
+        Some(ThreadSortKey::RecencyAt),
+        /*archived*/ None,
+    )
+    .await?;
+    assert_eq!(
+        before
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![newer_root_id.as_str(), root_id.as_str()]
+    );
+    let root_before = before
+        .data
+        .iter()
+        .find(|thread| thread.id == root_id)
+        .expect("root should be listed");
+    let root_updated_at = root_before.updated_at;
+    let root_recency_at = root_before.recency_at;
+
+    let request_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: child_id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: child_id.clone(),
+            input: vec![UserInput::Text {
+                text: "Continue background work".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+
+    let after = list_threads_with_sort(
+        &mut mcp,
+        /*cursor*/ None,
+        Some(10),
+        Some(vec!["mock_provider".to_string()]),
+        Some(vec![ThreadSourceKind::Cli]),
+        Some(ThreadSortKey::RecencyAt),
+        /*archived*/ None,
+    )
+    .await?;
+    assert_eq!(
+        after
+            .data
+            .iter()
+            .map(|thread| thread.id.as_str())
+            .collect::<Vec<_>>(),
+        vec![root_id.as_str(), newer_root_id.as_str()]
+    );
+    let root_after = after
+        .data
+        .iter()
+        .find(|thread| thread.id == root_id)
+        .expect("root should be listed");
+    assert_eq!(root_after.updated_at, root_updated_at);
+    assert!(root_after.recency_at > root_recency_at);
+    let first_background_recency_at = root_after.recency_at;
+
+    timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
+    let mut restarted_mcp = init_mcp(codex_home.path()).await?;
+    let request_id = restarted_mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: child_id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        restarted_mcp.read_response(request_id),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        restarted_mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: child_id,
+            input: vec![UserInput::Text {
+                text: "Continue again after restart".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    let debounced = list_threads_with_sort(
+        &mut restarted_mcp,
+        /*cursor*/ None,
+        Some(10),
+        Some(vec!["mock_provider".to_string()]),
+        Some(vec![ThreadSourceKind::Cli]),
+        Some(ThreadSortKey::RecencyAt),
+        /*archived*/ None,
+    )
+    .await?;
+    let root_after_restart = debounced
+        .data
+        .iter()
+        .find(|thread| thread.id == root_id)
+        .expect("root should be listed after restart");
+    assert_eq!(root_after_restart.updated_at, root_updated_at);
+    assert_eq!(root_after_restart.recency_at, first_background_recency_at);
 
     Ok(())
 }

@@ -721,6 +721,12 @@ wait_agent_enabled = {wait_agent_enabled}
             std::fs::write(home.join("config.toml"), &config_toml)
                 .expect("write multi-agent configuration");
         })
+        .with_config(|config| {
+            config
+                .features
+                .enable(Feature::MultiAgentV2)
+                .expect("test config should allow feature update");
+        })
         .build_with_auto_env(&server)
         .await?;
 

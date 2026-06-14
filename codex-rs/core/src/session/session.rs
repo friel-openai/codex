@@ -70,6 +70,7 @@ pub(crate) struct Session {
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) next_internal_sub_id: AtomicU64,
@@ -138,6 +139,14 @@ pub(crate) struct SessionConfiguration {
 }
 
 impl SessionConfiguration {
+    pub(super) fn is_system_ephemeral(&self) -> bool {
+        self.original_config_do_not_use.ephemeral
+            && matches!(
+                self.thread_source.as_ref(),
+                Some(ThreadSource::Feature(feature)) if feature == "system"
+            )
+    }
+
     pub(super) fn cwd(&self) -> &AbsolutePathBuf {
         &self.environments.legacy_fallback_cwd
     }
@@ -594,6 +603,7 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
         plugins_manager: Arc<PluginsManager>,
@@ -744,11 +754,7 @@ impl Session {
         // - initialize thread persistence with new or resumed session info
         // - perform default shell discovery
         // - load history metadata (skipped for subagents)
-        let system_ephemeral = config.ephemeral
-            && matches!(
-                session_configuration.thread_source.as_ref(),
-                Some(ThreadSource::Feature(feature)) if feature == "system"
-            );
+        let system_ephemeral = session_configuration.is_system_ephemeral();
         let materialize_ephemeral_rollout =
             materialize_ephemeral_rollouts_for_debug() && !system_ephemeral;
         let defer_ephemeral_rollout = config.ephemeral && !materialize_ephemeral_rollout;
@@ -1382,6 +1388,7 @@ impl Session {
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
                 git_enrichment_policy,
                 next_internal_sub_id: AtomicU64::new(0),
@@ -1476,7 +1483,13 @@ impl Session {
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
-            Box::pin(sess.record_initial_history(initial_history)).await?;
+            Box::pin(
+                sess.record_initial_history_with_fork_startup_items(
+                    initial_history,
+                    fork_startup_items,
+                ),
+            )
+            .await?;
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
                     /*window_number*/ 0,

@@ -65,18 +65,26 @@ impl ThreadGoalRequestProcessor {
             .map(|()| None)
     }
 
-    pub(crate) async fn emit_resume_goal_snapshot(&self, thread_id: ThreadId) {
-        if !self.config.features.enabled(Feature::Goals) {
-            return;
+    pub(crate) async fn emit_resume_goal_snapshot_and_continue(
+        &self,
+        thread_id: ThreadId,
+        thread: &CodexThread,
+    ) {
+        if thread.enabled(Feature::Goals) {
+            self.emit_thread_goal_snapshot(thread_id).await;
         }
-        self.emit_thread_goal_snapshot(thread_id).await;
+        // App-server owns resume response and snapshot ordering, so wait until
+        // those are sent before letting extensions react to the idle thread.
+        thread
+            .emit_thread_idle_lifecycle_if_idle(codex_extension_api::ThreadIdleCause::Completed)
+            .await;
     }
 
     pub(crate) async fn pending_resume_goal_state(
         &self,
         thread: &CodexThread,
     ) -> (bool, Option<StateDbHandle>) {
-        let emit_thread_goal_update = self.config.features.enabled(Feature::Goals);
+        let emit_thread_goal_update = thread.enabled(Feature::Goals);
         let thread_goal_state_db = if emit_thread_goal_update {
             if let Some(state_db) = thread.state_db() {
                 Some(state_db)

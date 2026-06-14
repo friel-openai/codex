@@ -91,6 +91,10 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
         .is_some_and(|body| body.contains(text))
 }
 
+fn request_header<'a>(req: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+    req.headers.get(name).and_then(|value| value.to_str().ok())
+}
+
 fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
     decoded_body(req)
         .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
@@ -99,27 +103,6 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
             items
                 .iter()
                 .any(|item| item.get("type").and_then(Value::as_str) == Some(ty))
-        })
-}
-
-fn request_has_user_input_text(req: &wiremock::Request, text: &str) -> bool {
-    decoded_body(req)
-        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
-        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("type").and_then(Value::as_str) == Some("message")
-                    && item.get("role").and_then(Value::as_str) == Some("user")
-                    && item
-                        .get("content")
-                        .and_then(Value::as_array)
-                        .is_some_and(|content| {
-                            content.iter().any(|span| {
-                                span.get("type").and_then(Value::as_str) == Some("input_text")
-                                    && span.get("text").and_then(Value::as_str) == Some(text)
-                            })
-                        })
-            })
         })
 }
 
@@ -489,24 +472,34 @@ async fn wait_for_requests(
     }
 }
 
-async fn wait_for_request_with_model(
+async fn wait_for_matching_request<F>(
     mock: &core_test_support::responses::ResponseMock,
-    model: &str,
-) -> Result<ResponsesRequest> {
+    mut predicate: F,
+) -> Result<ResponsesRequest>
+where
+    F: FnMut(&ResponsesRequest) -> bool,
+{
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
         if let Some(request) = mock
             .requests()
             .into_iter()
-            .find(|request| request.body_json()["model"] == model)
+            .find(|request| predicate(request))
         {
             return Ok(request);
         }
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for request using model {model}");
+            anyhow::bail!("timed out waiting for matching request");
         }
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_request_with_model(
+    mock: &core_test_support::responses::ResponseMock,
+    model: &str,
+) -> Result<ResponsesRequest> {
+    wait_for_matching_request(mock, |request| request.body_json()["model"] == model).await
 }
 
 async fn setup_turn_one_with_spawned_child(
@@ -1048,7 +1041,8 @@ async fn spawned_child_receives_forked_parent_context(
     let child_request_log = mount_sse_once_match(
         &server,
         |req: &wiremock::Request| {
-            body_contains(req, CHILD_PROMPT) && !body_contains(req, SPAWN_CALL_ID)
+            body_contains(req, CHILD_PROMPT)
+                && request_header(req, "x-openai-subagent") == Some("collab_spawn")
         },
         sse(vec![
             ev_response_created("resp-child-1"),
@@ -1089,8 +1083,15 @@ async fn spawned_child_receives_forked_parent_context(
     test.submit_turn(TURN_1_PROMPT).await?;
     let parent_body = spawn_turn.single_request().body_json();
 
-    let child_request = wait_for_request_with_model(&child_request_log, REQUESTED_MODEL).await?;
+    let child_request = wait_for_matching_request(&child_request_log, |request| {
+        request.header("x-openai-subagent").as_deref() == Some("collab_spawn")
+    })
+    .await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    assert!(child_request.body_contains_text(TURN_1_PROMPT));
+    assert!(child_request.body_contains_text(SPAWN_CALL_ID));
+    assert!(child_request.body_contains_text(CHILD_PROMPT));
+    assert!(child_request.body_contains_text("# Subagent Assignment"));
     let child_body = child_request.body_json();
     let original_parent_turn_id = parent_body["client_metadata"]["turn_id"]
         .as_str()
@@ -1458,24 +1459,32 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() -> 
                 kind: ToolSuggestDiscoverableType::Plugin,
                 id: format!("{plugin_name}@{OPENAI_CURATED_MARKETPLACE_NAME}"),
             }];
+            config.agent_max_depth = 2;
         });
     let test = builder.build(&server).await?;
     test.codex
         .set_app_server_client_info(
             Some("codex-tui".to_string()),
             Some("test-client-version".to_string()),
-            false,
+            /*mcp_elicitations_auto_deny*/ false,
         )
         .await?;
 
     test.submit_turn(TURN_1_PROMPT).await?;
-    let root_tool_names = tool_names(&spawn_turn.single_request().body_json());
-    let child_requests = wait_for_requests(&child_turn).await?;
-    let child_tool_names = tool_names(&child_requests[0].body_json());
+    let root_request = spawn_turn.single_request();
+    let root_tools = root_request.body_json()["tools"].clone();
+    let root_tool_names = tool_names(&root_request.body_json());
+    let child_request = wait_for_matching_request(&child_turn, |request| {
+        request.header("x-openai-subagent").as_deref() == Some("collab_spawn")
+    })
+    .await?;
+    let child_tools = child_request.body_json()["tools"].clone();
+    let child_tool_names = tool_names(&child_request.body_json());
 
     // `request_plugin_install` is controlled by client-sensitive discoverable-tool
     // filtering. Forked children must inherit the parent client metadata so the
     // backend-visible tool list stays byte-compatible with the parent request.
+    assert_eq!(child_tools, root_tools);
     assert_eq!(child_tool_names, root_tool_names);
     assert!(
         !root_tool_names

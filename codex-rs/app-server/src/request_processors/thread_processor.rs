@@ -2562,8 +2562,22 @@ impl ThreadRequestProcessor {
         {
             stored_thread = stored_thread_with_history;
         }
+        let ownership_session_id =
+            if let Some(parent_thread_id) = stored_thread.source.parent_thread_id() {
+                stored_thread.parent_thread_id = Some(parent_thread_id);
+                self.persisted_thread_root_session_id(thread_id, stored_thread.parent_thread_id)
+                    .await?
+            } else if !stored_thread.source.is_non_root_agent() {
+                stored_thread.parent_thread_id = None;
+                Some(thread_id.to_string())
+            } else {
+                None
+            };
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
+        if let Some(session_id) = ownership_session_id {
+            thread.session_id = session_id;
+        }
         if include_turns {
             if paginated {
                 thread.turns = self
@@ -2575,6 +2589,37 @@ impl ThreadRequestProcessor {
             }
         }
         Ok(Some(thread))
+    }
+
+    async fn persisted_thread_root_session_id(
+        &self,
+        thread_id: ThreadId,
+        mut parent_thread_id: Option<ThreadId>,
+    ) -> Result<Option<String>, ThreadReadViewError> {
+        let mut visited = HashSet::from([thread_id]);
+        while let Some(ancestor_thread_id) = parent_thread_id {
+            if !visited.insert(ancestor_thread_id) {
+                return Err(ThreadReadViewError::InvalidRequest(format!(
+                    "thread parent cycle for thread id {thread_id}"
+                )));
+            }
+            if let Ok(loaded_ancestor) = self.thread_manager.get_thread(ancestor_thread_id).await {
+                return Ok(Some(
+                    loaded_ancestor.session_configured().session_id.to_string(),
+                ));
+            }
+            let Some(stored_ancestor) = self
+                .read_stored_thread_for_read(ancestor_thread_id, /*include_history*/ false)
+                .await?
+            else {
+                return Ok(None);
+            };
+            parent_thread_id = stored_ancestor.source.parent_thread_id();
+            if parent_thread_id.is_none() {
+                return Ok(Some(stored_ancestor.thread_id.to_string()));
+            }
+        }
+        Ok(Some(thread_id.to_string()))
     }
 
     async fn read_stored_thread_for_read(
@@ -2633,6 +2678,15 @@ impl ThreadRequestProcessor {
                 thread.path = fallback_thread.path.clone();
             }
             thread.session_id.clone_from(&fallback_thread.session_id);
+            if thread.parent_thread_id != fallback_thread.parent_thread_id {
+                thread
+                    .parent_thread_id
+                    .clone_from(&fallback_thread.parent_thread_id);
+                thread.source.clone_from(&fallback_thread.source);
+                thread
+                    .thread_source
+                    .clone_from(&fallback_thread.thread_source);
+            }
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
@@ -4528,10 +4582,7 @@ impl ThreadRequestProcessor {
                     .await;
                 }
                 self.thread_goal_processor
-                    .emit_resume_goal_snapshot(thread_id)
-                    .await;
-                codex_thread
-                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                    .emit_resume_goal_snapshot_and_continue(thread_id, codex_thread.as_ref())
                     .await;
             }
             Err(err) => {
@@ -5228,6 +5279,13 @@ impl ThreadRequestProcessor {
             )),
         };
         let mut thread = thread?;
+        let parent_thread_id = config_snapshot
+            .parent_thread_id
+            .map(|parent_thread_id| parent_thread_id.to_string());
+        if thread.parent_thread_id != parent_thread_id {
+            thread.parent_thread_id = parent_thread_id;
+            thread.source = config_snapshot.session_source.clone().into();
+        }
         thread.can_accept_direct_input = Some(can_accept_direct_input);
         thread.id = thread_id.to_string();
         thread.session_id = session_id;
@@ -7093,6 +7151,8 @@ fn build_thread_from_loaded_snapshot(
         loaded_thread.rollout_path(),
     )
 }
+
+mod goal_scheduler;
 
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]

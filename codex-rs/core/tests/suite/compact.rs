@@ -1,5 +1,6 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use chrono::Utc;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::compact::SUMMARY_PREFIX;
 use codex_core::config::Config;
@@ -37,6 +38,7 @@ use core_test_support::responses::ev_reasoning_item;
 use core_test_support::responses::mount_models_once;
 use core_test_support::responses::strip_response_item_ids_from_json;
 use core_test_support::skip_if_no_network;
+use core_test_support::test_codex::TestCodexHarness;
 use core_test_support::test_codex::local_selections;
 use core_test_support::test_codex::test_codex;
 use core_test_support::test_codex::turn_permission_fields;
@@ -4242,6 +4244,181 @@ async fn snapshot_request_shape_mid_turn_continuation_compaction() {
             ]
         )
     );
+}
+
+#[test]
+fn post_compaction_root_continues_with_active_goal() -> Result<()> {
+    let test_thread = std::thread::Builder::new()
+        .name("post_compaction_root_continues_with_active_goal".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            runtime.block_on(post_compaction_root_continues_with_active_goal_impl(
+                /*supervisor_snoozed*/ false,
+            ))
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
+#[test]
+fn post_compaction_root_continues_while_goal_supervisor_is_snoozed() -> Result<()> {
+    let test_thread = std::thread::Builder::new()
+        .name("post_compaction_root_continues_while_goal_supervisor_is_snoozed".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()?;
+            runtime.block_on(post_compaction_root_continues_with_active_goal_impl(
+                /*supervisor_snoozed*/ true,
+            ))
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
+async fn post_compaction_root_continues_with_active_goal_impl(
+    supervisor_snoozed: bool,
+) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let context_window = 100_000;
+    let limit = context_window * 90 / 100;
+    let over_limit_tokens = context_window * 95 / 100 + 1;
+    let harness = TestCodexHarness::with_builder(
+        test_codex()
+            .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+            .with_config(move |config| {
+                config.model_provider.supports_websockets = false;
+                config.model_context_window = Some(context_window);
+                config.model_auto_compact_token_limit = Some(limit);
+                config
+                    .features
+                    .disable(Feature::RemoteCompactionV2)
+                    .expect("use /responses/compact");
+                config
+                    .features
+                    .enable(Feature::Goals)
+                    .expect("enable goals");
+                config
+                    .features
+                    .enable(Feature::GoalSupervisor)
+                    .expect("enable goal supervisor");
+                config
+                    .features
+                    .enable(Feature::Sqlite)
+                    .expect("enable sqlite");
+            }),
+    )
+    .await?;
+    let response_sequence = vec![
+        sse(vec![
+            ev_function_call(DUMMY_CALL_ID, DUMMY_FUNCTION_NAME, "{}"),
+            ev_completed_with_tokens("root-response", over_limit_tokens),
+        ]),
+        sse(vec![
+            ev_assistant_message("root-continuation", "root continued after compaction"),
+            ev_completed_with_tokens("root-continuation-response", /*total_tokens*/ 10),
+        ]),
+    ];
+    let request_log = mount_sse_sequence(harness.server(), response_sequence).await;
+    let compact_mock = responses::mount_compact_user_history_with_summary_once(
+        harness.server(),
+        &summary_with_prefix(AUTO_SUMMARY_TEXT),
+    )
+    .await;
+    let test = harness.test();
+    let parent_thread_id = test.session_configured.thread_id;
+    let state_db = test
+        .codex
+        .state_db()
+        .expect("sqlite state should be available");
+    let state_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            parent_thread_id,
+            "Continue the exact active goal after compaction.",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    if supervisor_snoozed {
+        state_db
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                parent_thread_id,
+                &state_goal.goal_id,
+                Some(Utc::now().timestamp_millis() + 3_600_000),
+            )
+            .await?;
+    }
+
+    test.submit_turn("Trigger mid-turn compaction, then continue the active goal.")
+        .await?;
+    let requests = request_log.requests();
+    assert_eq!(
+        requests.len(),
+        2,
+        "the root should continue after compaction"
+    );
+    assert_eq!(compact_mock.requests().len(), 1);
+    let request_paths = harness
+        .server()
+        .received_requests()
+        .await
+        .expect("mock server should retain received requests")
+        .into_iter()
+        .filter(|request| request.method.as_str() == "POST")
+        .map(|request| request.url.path().to_string())
+        .filter(|path| path.contains("/responses"))
+        .collect::<Vec<_>>();
+    let expected_request_paths = vec![
+        "/v1/responses".to_string(),
+        "/v1/responses/compact".to_string(),
+        "/v1/responses".to_string(),
+    ];
+    assert_eq!(request_paths, expected_request_paths);
+    let parent_thread_id = parent_thread_id.to_string();
+    assert_eq!(
+        requests[0].header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    assert_eq!(
+        requests[1].header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    assert_eq!(
+        compact_mock.single_request().header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    let initial_root_body = requests[0].body_json();
+    let continuation_root_body = requests[1].body_json();
+    let root_turn_id = initial_root_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("initial root request should include a turn id");
+    assert_eq!(
+        continuation_root_body["client_metadata"]["turn_id"].as_str(),
+        Some(root_turn_id),
+        "post-compaction sampling should continue the same root turn"
+    );
+    let root_continuation_body = requests[1].body_json().to_string();
+    assert!(body_contains_text(
+        &root_continuation_body,
+        AUTO_SUMMARY_TEXT
+    ));
+
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

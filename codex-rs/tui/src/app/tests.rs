@@ -86,6 +86,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadClosedNotification;
+use codex_app_server_protocol::ThreadGoalStatus;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadSettings;
 use codex_app_server_protocol::ThreadSettingsUpdatedNotification;
@@ -1436,6 +1437,8 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: None,
                 model: None,
                 reasoning_effort: None,
@@ -1457,6 +1460,59 @@ async fn collab_receiver_notification_caches_thread_without_app_server_read() {
 }
 
 #[tokio::test]
+async fn goal_supervisor_spawn_notification_is_hidden_without_thread_started() {
+    // Regression guard for internal supervisor helpers: a spawn-complete notification can arrive
+    // before ThreadStarted metadata. The /agent picker must still hide the helper immediately.
+    let mut app = make_test_app().await;
+    let supervisor_thread_id =
+        ThreadId::from_string("00000000-0000-0000-0000-000000000125").expect("valid thread id");
+
+    app.handle_thread_event_now(ThreadBufferedEvent::Notification(Box::new(
+        ServerNotification::ItemCompleted(codex_app_server_protocol::ItemCompletedNotification {
+            thread_id: ThreadId::new().to_string(),
+            turn_id: "turn-1".to_string(),
+            completed_at_ms: 0,
+            item: ThreadItem::CollabAgentToolCall {
+                id: "spawn-goal-supervisor".to_string(),
+                tool: codex_app_server_protocol::CollabAgentTool::SpawnAgent,
+                status: codex_app_server_protocol::CollabAgentToolCallStatus::Completed,
+                sender_thread_id: ThreadId::new().to_string(),
+                receiver_thread_ids: vec![supervisor_thread_id.to_string()],
+                receiver_agent_nickname: Some("Goal supervisor".to_string()),
+                receiver_agent_role: Some("goal_supervisor".to_string()),
+                prompt: Some("supervise the goal".to_string()),
+                model: Some("gpt-5.4-ultrafast".to_string()),
+                reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Low),
+                agents_states: HashMap::from([(
+                    supervisor_thread_id.to_string(),
+                    codex_app_server_protocol::CollabAgentState {
+                        status: codex_app_server_protocol::CollabAgentStatus::PendingInit,
+                        message: None,
+                    },
+                )]),
+            },
+        }),
+    )));
+
+    assert_eq!(
+        app.agent_navigation.get(&supervisor_thread_id),
+        Some(&AgentPickerThreadEntry {
+            agent_nickname: Some("Goal supervisor".to_string()),
+            agent_role: Some("goal_supervisor".to_string()),
+            agent_path: None,
+            is_running: false,
+            is_closed: false,
+        })
+    );
+    assert!(
+        app.agent_navigation
+            .get(&supervisor_thread_id)
+            .is_some_and(AgentPickerThreadEntry::is_goal_supervisor),
+        "goal supervisor helpers must not appear in the /agent picker"
+    );
+}
+
+#[tokio::test]
 async fn collab_receiver_notification_does_not_cache_not_found_thread() {
     let mut app = make_test_app().await;
     let receiver_thread_id =
@@ -1473,6 +1529,8 @@ async fn collab_receiver_notification_does_not_cache_not_found_thread() {
                 status: codex_app_server_protocol::CollabAgentToolCallStatus::Failed,
                 sender_thread_id: ThreadId::new().to_string(),
                 receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 prompt: Some("hello".to_string()),
                 model: None,
                 reasoning_effort: None,
@@ -4978,9 +5036,21 @@ async fn make_test_app_with_channels() -> (
     )
 }
 
-#[tokio::test]
-async fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_paste() -> Result<()>
-{
+#[test]
+fn set_thread_goal_draft_materializes_long_objective_and_confirms_before_paste() -> Result<()> {
+    const WORKER_THREADS: usize = 1;
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS)
+        .thread_stack_size(TEST_STACK_SIZE_BYTES)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(set_thread_goal_draft_materialization_test())
+}
+
+async fn set_thread_goal_draft_materialization_test() -> Result<()> {
     let mut app = make_test_app().await;
     let mut app_server =
         crate::start_embedded_app_server_for_picker(app.chat_widget.config_ref()).await?;
@@ -5196,6 +5266,131 @@ async fn replace_goal_confirmation_snapshot() {
         "replace_goal_confirmation",
         render_bottom_popup(&app.chat_widget, /*width*/ 80)
     );
+}
+
+#[test]
+fn reactivating_goal_clears_legacy_budget_and_preserves_progress() -> Result<()> {
+    const WORKER_THREADS: usize = 1;
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(WORKER_THREADS)
+        .thread_stack_size(TEST_STACK_SIZE_BYTES)
+        .enable_all()
+        .build()?;
+
+    runtime.block_on(async {
+        let (mut app, _app_event_rx, _op_rx) = Box::pin(make_test_app_with_channels()).await;
+        let codex_home = tempdir()?;
+        app.config.codex_home = codex_home.path().to_path_buf().abs();
+        app.config.sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+        app.config.features.enable(Feature::Goals)?;
+
+        let mut app_server =
+            Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
+        let started = app_server.start_thread(&app.config).await?;
+        let thread_id = started.session.thread_id;
+        let objective = "finish the recovery safely".to_string();
+        app.active_thread_id = Some(thread_id);
+
+        app_server
+            .thread_goal_set(
+                thread_id,
+                Some(objective.clone()),
+                Some(ThreadGoalStatus::Active),
+                /*token_budget*/ None,
+            )
+            .await?;
+        let state_db = codex_state::StateRuntime::init(
+            app.config.sqlite.clone(),
+            app.config.model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let persisted_goal = state_db
+            .thread_goals()
+            .get_thread_goal(thread_id)
+            .await
+            .expect("goal query should succeed")
+            .expect("goal should be readable");
+        let persisted_goal = state_db
+            .thread_goals()
+            .update_thread_goal(
+                thread_id,
+                codex_state::GoalUpdate {
+                    objective: None,
+                    status: None,
+                    token_budget: Some(Some(40)),
+                    expected_goal_id: Some(persisted_goal.goal_id),
+                },
+            )
+            .await
+            .expect("legacy token budget update should succeed")
+            .expect("legacy token budget should be seeded");
+        state_db
+            .thread_goals()
+            .account_thread_goal_usage(
+                thread_id,
+                /*time_delta_seconds*/ 12,
+                /*token_delta*/ 50,
+                codex_state::GoalAccountingMode::ActiveOnly,
+                Some(persisted_goal.goal_id.as_str()),
+            )
+            .await
+            .expect("legacy goal accounting should succeed");
+
+        let before = app_server
+            .thread_goal_get(thread_id)
+            .await?
+            .goal
+            .expect("goal should remain available");
+        assert_eq!(
+            (
+                before.objective.as_str(),
+                before.status,
+                before.token_budget,
+                before.tokens_used,
+                before.time_used_seconds,
+            ),
+            (
+                objective.as_str(),
+                ThreadGoalStatus::BudgetLimited,
+                Some(40),
+                50,
+                12,
+            )
+        );
+
+        Box::pin(app.set_thread_goal_draft(
+            &mut app_server,
+            thread_id,
+            goal_files::GoalDraft {
+                objective: objective.clone(),
+                ..Default::default()
+            },
+            ThreadGoalSetMode::ReactivateExisting,
+        ))
+        .await;
+
+        let after = app_server
+            .thread_goal_get(thread_id)
+            .await?
+            .goal
+            .expect("goal should remain available");
+        assert_eq!(
+            (
+                after.objective.as_str(),
+                after.status,
+                after.token_budget,
+                after.tokens_used,
+                after.time_used_seconds,
+            ),
+            (objective.as_str(), ThreadGoalStatus::Active, None, 50, 12,)
+        );
+
+        app_server.shutdown().await?;
+        Ok(())
+    })
 }
 
 fn test_thread_session(thread_id: ThreadId, cwd: PathBuf) -> ThreadSessionState {
@@ -6979,6 +7174,8 @@ async fn replace_chat_widget_reseeds_collab_agent_metadata_for_replay() {
                                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress,
                             sender_thread_id: ThreadId::new().to_string(),
                             receiver_thread_ids: vec![receiver_thread_id.to_string()],
+                            receiver_agent_nickname: None,
+                            receiver_agent_role: None,
                             prompt: None,
                             model: None,
                             reasoning_effort: None,

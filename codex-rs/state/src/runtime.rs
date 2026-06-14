@@ -21,6 +21,7 @@ use crate::model::epoch_millis_to_datetime;
 use crate::paths::file_modified_time_utc;
 use crate::telemetry::DbKind;
 use crate::telemetry::DbTelemetry;
+use anyhow::Context;
 use chrono::DateTime;
 use chrono::Utc;
 use codex_protocol::ThreadId;
@@ -58,10 +59,13 @@ pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportFailureRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportHistoryRecord;
 pub use external_agent_config_imports::ExternalAgentConfigImportSuccessRecord;
+pub use goals::ActiveGoalSupervisorSchedule;
+pub use goals::ActiveGoalSupervisorSchedulesPage;
 pub use goals::GoalAccountingMode;
 pub use goals::GoalAccountingOutcome;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
+pub use goals::ListActiveGoalSupervisorSchedulesParams;
 pub use memories::MemoryStore;
 pub use queued_items::SqliteQueueStore;
 pub use recovery::RuntimeDbBackup;
@@ -82,6 +86,8 @@ pub use threads::ThreadFilterOptions;
 // metadata, rather than the exact sum of all persisted SQLite column bytes.
 const LOG_PARTITION_SIZE_LIMIT_BYTES: i64 = 10 * 1024 * 1024;
 const LOG_PARTITION_ROW_LIMIT: i64 = 1_000;
+const FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION: &str =
+    "thread goal supervisor state";
 
 #[derive(Clone)]
 pub struct StateRuntime {
@@ -195,6 +201,25 @@ impl StateRuntime {
                 return Err(err);
             }
         };
+        let thread_goals = GoalStore::new(Arc::clone(&goals_pool));
+        let thread_goals_init_result = async {
+            thread_goals
+                .ensure_thread_goal_supervisor_state_table()
+                .await?;
+            migrate_frodex_goal_supervisor_state_from_state_db(pool.as_ref(), &thread_goals).await
+        }
+        .await;
+        if let Err(err) = thread_goals_init_result {
+            close_sqlite_pools(&[
+                pool.as_ref(),
+                logs_pool.as_ref(),
+                goals_pool.as_ref(),
+                memories_pool.as_ref(),
+                queue_pool.as_ref(),
+            ])
+            .await;
+            return Err(err);
+        }
         let started = Instant::now();
         let backfill_state_result = ensure_backfill_state_row_in_pool(pool.as_ref()).await;
         crate::telemetry::record_init_result(
@@ -248,7 +273,7 @@ impl StateRuntime {
         let thread_updated_at_millis = thread_updated_at_millis.unwrap_or(0);
         let thread_recency_at_millis = thread_recency_at_millis.unwrap_or(0);
         let runtime = Arc::new(Self {
-            thread_goals: GoalStore::new(Arc::clone(&goals_pool)),
+            thread_goals,
             memories: MemoryStore::new(Arc::clone(&memories_pool), Arc::clone(&pool)),
             thread_queue: SqliteQueueStore::new(queue_pool),
             pool,
@@ -324,6 +349,80 @@ pub async fn open_thread_history_db(sqlite: &SqliteConfig) -> anyhow::Result<Sql
         .await
 }
 
+pub(super) async fn repair_frodex_state_migration_rows(pool: &SqlitePool) -> anyhow::Result<()> {
+    let migrations_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?;
+    if migrations_table_exists == 0 {
+        return Ok(());
+    }
+
+    let frodex_versions = sqlx::query_scalar::<_, i64>(
+        r#"
+SELECT version
+FROM _sqlx_migrations
+WHERE description = ?
+  AND success = 1
+  AND version IN (33, 34)
+ORDER BY version
+        "#,
+    )
+    .bind(FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION)
+    .fetch_all(pool)
+    .await?;
+    if frodex_versions.is_empty() {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+DELETE FROM _sqlx_migrations
+WHERE description = ?
+  AND success = 1
+  AND version IN (33, 34)
+        "#,
+    )
+    .bind(FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION)
+    .execute(pool)
+    .await
+    .context("removing frodex state migration rows")?;
+    warn!("removed frodex state migration rows at versions {frodex_versions:?}");
+    Ok(())
+}
+
+async fn migrate_frodex_goal_supervisor_state_from_state_db(
+    state_pool: &SqlitePool,
+    thread_goals: &GoalStore,
+) -> anyhow::Result<()> {
+    let supervisor_table_exists: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
+    )
+    .fetch_one(state_pool)
+    .await?;
+    if supervisor_table_exists == 0 {
+        return Ok(());
+    }
+
+    let supervisor_rows = sqlx::query_as::<_, (String, String, Option<i64>, i64)>(
+        r#"
+SELECT thread_id, goal_id, snoozed_until_ms, updated_at_ms
+FROM thread_goal_supervisor_state
+        "#,
+    )
+    .fetch_all(state_pool)
+    .await?;
+    thread_goals
+        .upsert_frodex_goal_supervisor_state_rows(supervisor_rows)
+        .await?;
+    sqlx::query("DROP TABLE thread_goal_supervisor_state")
+        .execute(state_pool)
+        .await
+        .context("dropping frodex supervisor state from state db")?;
+    Ok(())
+}
+
 pub(super) async fn ensure_backfill_state_row_in_pool(
     pool: &sqlx::SqlitePool,
 ) -> anyhow::Result<()> {
@@ -367,6 +466,7 @@ pub async fn sqlite_integrity_check(
 
 #[cfg(test)]
 mod tests {
+    use super::FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION;
     use super::StateRuntime;
     use super::runtime_state_migrator;
     use super::sqlite_integrity_check;
@@ -374,10 +474,14 @@ mod tests {
     use crate::DB_INIT_METRIC;
     use crate::DbTelemetry;
     use crate::migrations::STATE_MIGRATOR;
+    use codex_protocol::ThreadId;
     use codex_utils_absolute_path::test_support::PathExt;
     use pretty_assertions::assert_eq;
     use sqlx::SqlitePool;
     use sqlx::migrate::MigrateError;
+    use sqlx::migrate::Migration;
+    use sqlx::migrate::Migrator;
+    use std::borrow::Cow;
     use std::collections::BTreeMap;
     use std::collections::BTreeSet;
     use std::path::Path;
@@ -439,6 +543,147 @@ mod tests {
             .open_read_write_pool(path)
             .await
             .expect("open sqlite pool")
+    }
+
+    async fn seed_frodex_supervisor_state_migration(
+        state_path: &Path,
+        recorded_version: i64,
+    ) -> (String, String) {
+        let thread_id = "00000000-0000-0000-0000-000000000321".to_string();
+        let goal_id = "goal-321".to_string();
+        let pool = open_db_pool(state_path).await;
+        let latest_upstream_version = if recorded_version == 33 { 32 } else { 33 };
+        let upstream_migrations = STATE_MIGRATOR
+            .iter()
+            .filter(|migration| migration.version <= latest_upstream_version)
+            .cloned()
+            .collect::<Vec<Migration>>();
+        Migrator {
+            migrations: Cow::Owned(upstream_migrations),
+            ignore_missing: false,
+            locking: STATE_MIGRATOR.locking,
+            no_tx: STATE_MIGRATOR.no_tx,
+            table_name: STATE_MIGRATOR.table_name.clone(),
+            create_schemas: STATE_MIGRATOR.create_schemas.clone(),
+        }
+        .run(&pool)
+        .await
+        .expect("apply migrations through 33");
+        sqlx::query(
+            r#"
+INSERT INTO threads (
+    id,
+    rollout_path,
+    created_at,
+    updated_at,
+    created_at_ms,
+    updated_at_ms,
+    source,
+    model_provider,
+    cwd,
+    cli_version,
+    title,
+    preview,
+    sandbox_policy,
+    approval_mode,
+    tokens_used,
+    first_user_message,
+    archived,
+    memory_mode
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind("/tmp/rollout.jsonl")
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .bind("cli")
+        .bind("test-provider")
+        .bind("/tmp")
+        .bind("0.0.0")
+        .bind("")
+        .bind("")
+        .bind("{}")
+        .bind("on-request")
+        .bind(0_i64)
+        .bind("")
+        .bind(false)
+        .bind("enabled")
+        .execute(&pool)
+        .await
+        .expect("insert thread");
+        sqlx::query(
+            r#"
+INSERT INTO thread_goals (
+    thread_id,
+    goal_id,
+    objective,
+    status,
+    token_budget,
+    tokens_used,
+    time_used_seconds,
+    created_at_ms,
+    updated_at_ms
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(goal_id.as_str())
+        .bind("persist supervisor snooze")
+        .bind("active")
+        .bind(Option::<i64>::None)
+        .bind(0_i64)
+        .bind(0_i64)
+        .bind(1_i64)
+        .bind(1_i64)
+        .execute(&pool)
+        .await
+        .expect("insert goal");
+        sqlx::query(
+            r#"
+CREATE TABLE thread_goal_supervisor_state (
+    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+    goal_id TEXT NOT NULL,
+    snoozed_until_ms INTEGER,
+    updated_at_ms INTEGER NOT NULL
+)
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create old frodex supervisor state table");
+        sqlx::query(
+            r#"
+INSERT INTO thread_goal_supervisor_state (
+    thread_id,
+    goal_id,
+    snoozed_until_ms,
+    updated_at_ms
+) VALUES (?, ?, ?, ?)
+            "#,
+        )
+        .bind(thread_id.as_str())
+        .bind(goal_id.as_str())
+        .bind(123_456_i64)
+        .bind(7_i64)
+        .execute(&pool)
+        .await
+        .expect("insert old frodex supervisor state");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(recorded_version)
+        .bind(FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION)
+        .bind(true)
+        .bind(vec![9_u8, 9, 9, 9])
+        .bind(0_i64)
+        .execute(&pool)
+        .await
+        .expect("record old frodex supervisor state migration");
+        pool.close().await;
+        (thread_id, goal_id)
     }
 
     #[tokio::test]
@@ -511,6 +756,100 @@ mod tests {
             .expect("runtime migrator should tolerate newer applied migrations");
         tolerant_pool.close().await;
 
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn open_state_sqlite_repairs_frodex_supervisor_state_migration_rows() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let state_path = sqlite.state_db_path();
+        seed_frodex_supervisor_state_migration(state_path.as_path(), /*recorded_version*/ 34).await;
+
+        let strict_pool = open_db_pool(state_path.as_path()).await;
+        let strict_err = STATE_MIGRATOR
+            .run(&strict_pool)
+            .await
+            .expect_err("strict migrator should reject the old frodex migration 34");
+        assert!(matches!(strict_err, MigrateError::VersionMismatch(34)));
+        strict_pool.close().await;
+
+        let tolerant_migrator = runtime_state_migrator();
+        let repaired_pool = sqlite
+            .open_state_db(&tolerant_migrator, /*telemetry_override*/ None)
+            .await
+            .expect("runtime migrator should repair old frodex migration rows");
+        let applied = sqlx::query_as::<_, (i64, String)>(
+            "SELECT version, description FROM _sqlx_migrations WHERE version IN (33, 34) ORDER BY version",
+        )
+        .fetch_all(&repaired_pool)
+        .await
+        .expect("read repaired migrations");
+        assert_eq!(
+            applied,
+            vec![
+                (33, "thread goal stopped statuses".to_string()),
+                (34, "drop thread goals".to_string()),
+            ]
+        );
+        repaired_pool.close().await;
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn state_runtime_moves_frodex_supervisor_state_out_of_state_db() {
+        let codex_home = unique_temp_dir();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let sqlite = crate::SqliteConfig::new_for_testing(codex_home.as_path().abs());
+        let state_path = sqlite.state_db_path();
+        let (thread_id, goal_id) = seed_frodex_supervisor_state_migration(
+            state_path.as_path(),
+            /*recorded_version*/ 33,
+        )
+        .await;
+
+        let runtime = StateRuntime::init(sqlite, "test-provider".to_string())
+            .await
+            .expect("state runtime should repair old frodex supervisor state");
+        let thread_id = ThreadId::from_string(thread_id.as_str()).expect("valid thread id");
+        assert_eq!(
+            Some(123_456),
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, goal_id.as_str())
+                .await
+                .expect("migrated supervisor snooze should read")
+        );
+        let state_supervisor_table_exists: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
+        )
+        .fetch_one(runtime.pool.as_ref())
+        .await
+        .expect("read repaired state schema");
+        assert_eq!(0, state_supervisor_table_exists);
+        let applied = sqlx::query_as::<_, (i64, String)>(
+            "SELECT version, description FROM _sqlx_migrations WHERE version IN (33, 34) ORDER BY version",
+        )
+        .fetch_all(runtime.pool.as_ref())
+        .await
+        .expect("read repaired state migrations");
+        assert_eq!(
+            applied,
+            vec![
+                (33, "thread goal stopped statuses".to_string()),
+                (34, "drop thread goals".to_string()),
+            ]
+        );
+
+        runtime.pool.close().await;
+        runtime.logs_pool.close().await;
+        drop(runtime);
         let _ = tokio::fs::remove_dir_all(codex_home).await;
     }
 

@@ -1,8 +1,14 @@
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
+use app_test_support::to_response;
 use app_test_support::write_models_cache;
 use codex_app_server_protocol::ClientRequest;
+use codex_app_server_protocol::ItemCompletedNotification;
+use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadCompactStartParams;
+use codex_app_server_protocol::ThreadCompactStartResponse;
+use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -82,14 +88,6 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             | "implicit configured default"
             | "full fork skips default role"
     );
-    let expected = match case {
-        "unset override" | "configured role without instructions" => Some(PARENT_INSTRUCTIONS),
-        "blank override" => None,
-        "explicit configured role"
-        | "full history configured role"
-        | "implicit configured default" => Some(ROLE_INSTRUCTIONS),
-        _ => Some(CHILD_INSTRUCTIONS),
-    };
     const PARENT_PROMPT: &str = "spawn the instruction override worker";
     const CHILD_PROMPT: &str = "perform the instruction override task";
     const SPAWN_CALL_ID: &str = "spawn-instruction-override-worker";
@@ -242,9 +240,16 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
             )
         })
         .collect::<Vec<_>>();
-    let expected_instruction_texts = match expected {
-        Some(instructions) => vec![instructions],
-        None => Vec::new(),
+    let expected_instruction_texts = match case {
+        "full history" | "full fork skips default role" => {
+            vec![PARENT_INSTRUCTIONS, CHILD_INSTRUCTIONS]
+        }
+        "full history configured role" => vec![PARENT_INSTRUCTIONS, ROLE_INSTRUCTIONS],
+        "configured role without instructions" | "unset override" | "blank override" => {
+            vec![PARENT_INSTRUCTIONS]
+        }
+        "explicit configured role" | "implicit configured default" => vec![ROLE_INSTRUCTIONS],
+        _ => vec![CHILD_INSTRUCTIONS],
     };
     assert_eq!(
         instruction_texts, expected_instruction_texts,
@@ -258,7 +263,7 @@ async fn spawned_subagents_apply_configured_developer_instruction_precedence(
     Ok(())
 }
 
-/// A full-history worker fork replaces parent instructions inside persisted compacted history.
+/// A full-history worker fork preserves compacted parent context before child instructions.
 #[tokio::test]
 async fn compacted_full_history_fork_replaces_parent_developer_instructions() -> Result<()> {
     const COMPACT_SETUP_PROMPT: &str = "prepare the parent for compaction";
@@ -266,7 +271,6 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
     const COMPACTED_SUMMARY: &str = "preserved compacted parent summary";
     const SPAWN_PROMPT: &str = "spawn the compacted-history worker";
     const CHILD_PROMPT: &str = "inspect the compacted parent history";
-    const SETUP_CALL_ID: &str = "trigger-parent-compaction";
     const SPAWN_CALL_ID: &str = "spawn-compacted-history-worker";
 
     let server = responses::start_mock_server().await;
@@ -275,24 +279,13 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
         vec![
             responses::sse(vec![
                 responses::ev_response_created("parent-before-compaction"),
-                responses::ev_function_call(SETUP_CALL_ID, "unsupported_tool", "{}"),
-                responses::ev_completed_with_tokens(
-                    "parent-before-compaction",
-                    /*total_tokens*/ 96,
-                ),
+                responses::ev_assistant_message("parent-ready", "parent ready for compaction"),
+                responses::ev_completed("parent-before-compaction"),
             ]),
             responses::sse(vec![
                 responses::ev_response_created("parent-compaction"),
                 responses::ev_assistant_message("parent-summary", COMPACTED_SUMMARY),
                 responses::ev_completed_with_tokens("parent-compaction", /*total_tokens*/ 10),
-            ]),
-            responses::sse(vec![
-                responses::ev_response_created("parent-after-compaction"),
-                responses::ev_assistant_message("parent-ready", "parent history compacted"),
-                responses::ev_completed_with_tokens(
-                    "parent-after-compaction",
-                    /*total_tokens*/ 10,
-                ),
             ]),
         ],
     )
@@ -315,37 +308,11 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
         ]),
     )
     .await;
-    let child_request = responses::mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| {
-            let body = String::from_utf8_lossy(&request.body);
-            body.contains(CHILD_PROMPT) && !body.contains(SPAWN_CALL_ID)
-        },
-        responses::sse(vec![
-            responses::ev_response_created("compacted-child-work"),
-            responses::ev_assistant_message("compacted-child-message", "child complete"),
-            responses::ev_completed("compacted-child-work"),
-        ]),
-    )
-    .await;
-    responses::mount_sse_once_match(
-        &server,
-        |request: &wiremock::Request| {
-            String::from_utf8_lossy(&request.body).contains(SPAWN_CALL_ID)
-        },
-        responses::sse(vec![
-            responses::ev_response_created("compacted-parent-complete"),
-            responses::ev_assistant_message("compacted-parent-message", "parent complete"),
-            responses::ev_completed("compacted-parent-complete"),
-        ]),
-    )
-    .await;
-
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
         .with_root_config(&format!(
-            "developer_instructions = {PARENT_INSTRUCTIONS:?}\nmodel_context_window = 100\nmodel_auto_compact_token_limit = 90\ncompact_prompt = {COMPACT_PROMPT:?}"
+            "developer_instructions = {PARENT_INSTRUCTIONS:?}\ncompact_prompt = {COMPACT_PROMPT:?}"
         ))
         .with_extra_config(&format!(
             "[features.multi_agent_v2]\nenabled = true\nsubagent_developer_instructions = {CHILD_INSTRUCTIONS:?}"
@@ -376,19 +343,68 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
     )
     .await??;
 
+    let compact_id = app_server
+        .send_thread_compact_start_request(ThreadCompactStartParams {
+            thread_id: thread.id.clone(),
+        })
+        .await?;
+    let compact_response = timeout(
+        READ_TIMEOUT,
+        app_server.read_stream_until_response_message(RequestId::Integer(compact_id)),
+    )
+    .await??;
+    let _: ThreadCompactStartResponse = to_response(compact_response)?;
+    timeout(READ_TIMEOUT, async {
+        loop {
+            let completed: ItemCompletedNotification =
+                app_server.read_notification("item/completed").await?;
+            if matches!(completed.item, ThreadItem::ContextCompaction { .. }) {
+                return Ok::<(), anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+
     let compaction_requests = compaction_requests.requests();
-    assert_eq!(compaction_requests.len(), 3);
+    assert_eq!(compaction_requests.len(), 2);
     assert!(
         compaction_requests[1].body_contains_text(COMPACT_PROMPT),
-        "the setup turn should perform actual mid-turn compaction"
+        "thread/compact/start should perform actual compaction"
     );
-    assert!(
-        compaction_requests[2]
-            .message_input_texts("developer")
-            .iter()
-            .any(|text| text == PARENT_INSTRUCTIONS),
-        "mid-turn compaction should retain parent instructions in its replacement history"
-    );
+
+    let parent_thread_id = thread.id.clone();
+    let child_work_parent_id = parent_thread_id.clone();
+    let child_request = responses::mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            let body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .expect("request body should be valid JSON");
+            body["client_metadata"]["thread_id"] != child_work_parent_id.as_str()
+                && body.to_string().contains(CHILD_PROMPT)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("compacted-child-work"),
+            responses::ev_assistant_message("compacted-child-message", "child complete"),
+            responses::ev_completed("compacted-child-work"),
+        ]),
+    )
+    .await;
+    let parent_continuation_id = parent_thread_id.clone();
+    responses::mount_sse_once_match(
+        &server,
+        move |request: &wiremock::Request| {
+            let body = serde_json::from_slice::<serde_json::Value>(&request.body)
+                .expect("request body should be valid JSON");
+            body["client_metadata"]["thread_id"] == parent_continuation_id.as_str()
+                && body.to_string().contains(SPAWN_CALL_ID)
+        },
+        responses::sse(vec![
+            responses::ev_response_created("compacted-parent-complete"),
+            responses::ev_assistant_message("compacted-parent-message", "parent complete"),
+            responses::ev_completed("compacted-parent-complete"),
+        ]),
+    )
+    .await;
 
     let _: TurnStartResponse = app_server
         .request(|request_id| ClientRequest::TurnStart {
@@ -438,11 +454,13 @@ async fn compacted_full_history_fork_replaces_parent_developer_instructions() ->
         1,
         "the child should receive its configured developer instructions exactly once"
     );
-    assert!(
+    assert_eq!(
         child_developer_texts
             .iter()
-            .all(|text| text != PARENT_INSTRUCTIONS),
-        "the child should not inherit parent instructions from compacted history"
+            .filter(|text| text.as_str() == PARENT_INSTRUCTIONS)
+            .count(),
+        1,
+        "the child should retain compacted parent instructions exactly once"
     );
 
     Ok(())

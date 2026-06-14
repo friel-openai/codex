@@ -37,6 +37,7 @@ use crate::ThreadPage;
 use crate::ThreadSearchPage;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::TouchRootThreadRecencyParams;
 use crate::TurnPage;
 use crate::UpdateThreadMetadataParams;
 
@@ -237,6 +238,17 @@ pub trait ThreadStore: Any + Send + Sync {
         &self,
         params: UpdateThreadMetadataParams,
     ) -> ThreadStoreFuture<'_, StoredThread>;
+
+    /// Advances the top-level ancestor's recency after spawned-descendant activity.
+    ///
+    /// Returns the remaining persisted debounce interval when a complete parent chain exists.
+    /// Roots and descendants without a complete parent chain return `None`.
+    fn touch_root_thread_recency(
+        &self,
+        _params: TouchRootThreadRecencyParams,
+    ) -> ThreadStoreFuture<'_, Option<std::time::Duration>> {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Moves a thread to, within, or out of a server-ordered section.
     fn move_thread_to_section(

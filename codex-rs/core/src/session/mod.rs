@@ -260,7 +260,10 @@ pub(crate) use handlers::thread_settings_applied_event;
 mod rollout_reconstruction_tests;
 
 const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
+const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
+    include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -281,8 +284,43 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
 }
 
+async fn load_root_agent_supervisor_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK,
+        "AGENTS.root-supervisor.md",
+    )
+    .await
+}
+
 pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_supervisor_agent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        SUPERVISOR_AGENT_PROMPT_FALLBACK,
+        "AGENTS.supervisor.md",
+    )
+    .await
+}
+
+fn history_contains_developer_text(
+    history: &crate::context_manager::ContextManager,
+    expected: &str,
+) -> bool {
+    history.raw_items().iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text == expected
+                    ))
+        )
+    })
 }
 
 pub(crate) async fn load_agent_role_prompt(
@@ -294,6 +332,11 @@ pub(crate) async fn load_agent_role_prompt(
     }
 
     let role_prompt = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
+            if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
+        {
+            load_supervisor_agent_prompt(&config.codex_home).await
+        }
         SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
         SessionSource::Cli
         | SessionSource::VSCode
@@ -301,7 +344,19 @@ pub(crate) async fn load_agent_role_prompt(
         | SessionSource::Mcp
         | SessionSource::Custom(_)
         | SessionSource::Internal(_)
-        | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
+        | SessionSource::Unknown => {
+            let mut prompt = load_root_agent_prompt(&config.codex_home).await;
+            if config.features.enabled(Feature::Goals)
+                && config.features.enabled(Feature::GoalSupervisor)
+            {
+                let supervisor_prompt = load_root_agent_supervisor_prompt(&config.codex_home).await;
+                if !supervisor_prompt.trim().is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&supervisor_prompt);
+                }
+            }
+            prompt
+        }
     };
 
     if role_prompt.trim().is_empty() {
@@ -558,6 +613,7 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) code_mode_session_provider: Arc<dyn codex_code_mode::CodeModeSessionProvider>,
     pub(crate) extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     pub(crate) conversation_history: InitialHistory,
+    pub(crate) fork_startup_items: ForkStartupItems,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
     pub(crate) session_source: SessionSource,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
@@ -721,6 +777,7 @@ impl Session {
             code_mode_session_provider,
             extensions,
             conversation_history,
+            fork_startup_items,
             requested_history_mode,
             session_source,
             forked_from_thread_id,
@@ -878,9 +935,21 @@ impl Session {
         {
             self::token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         }
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        let configured_multi_agent_version = config.multi_agent_version_override();
+        let multi_agent_version =
+            if configured_multi_agent_version == Some(MultiAgentVersion::Disabled) {
+                configured_multi_agent_version
+            } else {
+                conversation_history
+                    .get_multi_agent_version()
+                    .or(configured_multi_agent_version)
+                    .or_else(|| {
+                        resolve_multi_agent_version(
+                            &conversation_history,
+                            inherited_multi_agent_version,
+                        )
+                    })
+            };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -970,6 +1039,7 @@ impl Session {
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
+            fork_startup_items,
             session_source_clone,
             skills_service,
             plugins_manager,
@@ -1547,9 +1617,22 @@ impl Session {
         state.clear_connector_selection();
     }
 
+    #[cfg(test)]
     async fn record_initial_history(
         &self,
         conversation_history: InitialHistory,
+    ) -> CodexResult<()> {
+        self.record_initial_history_with_fork_startup_items(
+            conversation_history,
+            ForkStartupItems::default(),
+        )
+        .await
+    }
+
+    async fn record_initial_history_with_fork_startup_items(
+        &self,
+        conversation_history: InitialHistory,
+        mut fork_startup_items: ForkStartupItems,
     ) -> CodexResult<()> {
         let (is_subagent, is_paginated_subagent) = {
             let state = self.state.lock().await;
@@ -1646,11 +1729,6 @@ impl Session {
                     .iter()
                     .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
-                let mut persisted_rollout_items = rollout_items
-                    .iter()
-                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
                         Some(model_history) => model_history,
@@ -1745,13 +1823,22 @@ impl Session {
                 if is_paginated_subagent && !has_rollout_reference {
                     // Paginated subagents persist inherited model context while creating the live
                     // thread so the copied prefix is not observed as child-owned metadata.
-                    self.persist_rollout_items(&[thread_settings_applied]).await;
+                    let mut persisted_rollout_items = vec![thread_settings_applied];
+                    persisted_rollout_items.append(&mut startup_rollout_items);
+                    self.persist_initial_rollout_items(&persisted_rollout_items)
+                        .await?;
                 } else {
                     // Keep the compact inherited reference and the child's effective settings in
-                    // one append so a cold resume cannot observe inherited settings as the
-                    // child's latest value.
+                    // one append so a cold resume cannot observe a partial fork startup.
+                    let mut persisted_rollout_items = rollout_items
+                        .iter()
+                        .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                        .cloned()
+                        .collect::<Vec<_>>();
                     persisted_rollout_items.push(thread_settings_applied);
-                    self.persist_rollout_items(&persisted_rollout_items).await;
+                    persisted_rollout_items.append(&mut startup_rollout_items);
+                    self.persist_initial_rollout_items(&persisted_rollout_items)
+                        .await?;
                 }
 
                 // Durable forks should remain file-backed immediately after startup. Ephemeral
@@ -2106,6 +2193,16 @@ impl Session {
             .clone()
     }
 
+    pub(crate) async fn session_source(&self) -> SessionSource {
+        let state = self.state.lock().await;
+        state.session_configuration.session_source.clone()
+    }
+
+    pub(crate) async fn effective_session_config(&self) -> Config {
+        let state = self.state.lock().await;
+        Self::build_effective_session_config(&state.session_configuration)
+    }
+
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {
         self.services.agents_md_manager.user_instructions()
     }
@@ -2453,11 +2550,15 @@ impl Session {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
+            agent_role,
             ..
         }) = &turn_context.session_source
         else {
             return;
         };
+        if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) {
+            return;
+        }
 
         let status = match turn_context.terminal_error.lock().await.take() {
             Some(error) => {
@@ -3567,6 +3668,30 @@ impl Session {
         }
         self.persist_rollout_response_items(items).await;
         self.send_raw_response_items(turn_context, items).await;
+    }
+
+    async fn persist_initial_rollout_items(&self, items: &[RolloutItem]) -> CodexResult<()> {
+        let Some(live_thread) = self.live_thread() else {
+            if self
+                .state
+                .lock()
+                .await
+                .session_configuration
+                .is_system_ephemeral()
+            {
+                return Ok(());
+            }
+            return Err(CodexErr::Fatal(format!(
+                "thread {} does not have a live rollout writer during startup",
+                self.thread_id()
+            )));
+        };
+        live_thread.append_items(items).await.map_err(|err| {
+            CodexErr::Fatal(format!(
+                "failed to persist initial history for thread {}: {err}",
+                self.thread_id()
+            ))
+        })
     }
 
     pub(crate) async fn record_step_world_state_if_changed(

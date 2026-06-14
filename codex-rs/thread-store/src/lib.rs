@@ -87,5 +87,6 @@ pub use types::ThreadPersistenceMode;
 pub use types::ThreadRelationFilter;
 pub use types::ThreadSearchPage;
 pub use types::ThreadSortKey;
+pub use types::TouchRootThreadRecencyParams;
 pub use types::TurnPage;
 pub use types::UpdateThreadMetadataParams;

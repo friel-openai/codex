@@ -64,10 +64,8 @@ use crate::history_cell::HistoryCell;
 pub(crate) enum ThreadGoalSetMode {
     ConfirmIfExists,
     ReplaceExisting,
-    UpdateExisting {
-        status: ThreadGoalStatus,
-        token_budget: Option<i64>,
-    },
+    UpdateExisting { status: ThreadGoalStatus },
+    ReactivateExisting,
 }
 
 /// One absolute history offset returned by a batch lookup.

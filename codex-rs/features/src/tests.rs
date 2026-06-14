@@ -260,6 +260,21 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
     assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
 }
 
+#[test]
+fn goal_supervisor_is_experimental_and_disabled_by_default() {
+    assert_eq!(
+        feature_for_key("goal_supervisor"),
+        Some(Feature::GoalSupervisor)
+    );
+    assert!(matches!(
+        Feature::GoalSupervisor.stage(),
+        Stage::Experimental { .. }
+    ));
+    assert_eq!(Feature::GoalSupervisor.default_enabled(), false);
+    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+}
+
+#[test]
 fn apps_require_feature_flag_and_chatgpt_auth() {
     let mut features = Features::with_defaults();
     assert!(!features.apps_enabled_for_auth(/*has_chatgpt_auth*/ false));
@@ -509,6 +524,7 @@ non_code_mode_only = true
             hide_spawn_agent_metadata: Some(true),
             expose_spawn_agent_model_overrides: Some(true),
             wait_agent_enabled: Some(false),
+            enable_thread_adoption: None,
             non_code_mode_only: Some(true),
         }))
     );
@@ -552,6 +568,50 @@ server_names = ["history", "notes"]
                 server_names: Some(vec!["history".to_string(), "notes".to_string()]),
             }
         ))
+    );
+}
+
+#[test]
+fn multi_agent_v2_feature_config_usage_hint_enabled_does_not_enable_feature() {
+    let features_toml: FeaturesToml = toml::from_str(
+        r#"
+[multi_agent_v2]
+usage_hint_enabled = false
+"#,
+    )
+    .expect("features table should deserialize");
+    let features = Features::from_sources(
+        FeatureConfigSource {
+            features: Some(&features_toml),
+            ..Default::default()
+        },
+        FeatureConfigSource::default(),
+        FeatureOverrides::default(),
+    );
+
+    assert_eq!(features.enabled(Feature::MultiAgentV2), true);
+    assert_eq!(features_toml.entries(), BTreeMap::new());
+    assert_eq!(
+        features_toml.multi_agent_v2,
+        Some(crate::FeatureToml::Config(crate::MultiAgentV2ConfigToml {
+            enabled: None,
+            max_concurrent_threads_per_session: None,
+            min_wait_timeout_ms: None,
+            max_wait_timeout_ms: None,
+            default_wait_timeout_ms: None,
+            usage_hint_enabled: Some(false),
+            usage_hint_text: None,
+            root_agent_usage_hint_text: None,
+            subagent_usage_hint_text: None,
+            multi_agent_mode_hint_text: None,
+            tool_namespace: None,
+            hide_spawn_agent_metadata: None,
+            expose_spawn_agent_model_overrides: None,
+            wait_agent_enabled: None,
+            enable_thread_adoption: None,
+            non_code_mode_only: None,
+            subagent_developer_instructions: None,
+        }))
     );
 }
 
