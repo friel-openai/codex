@@ -107,7 +107,7 @@ async fn goal_edit_prompt_snapshot() {
 }
 
 #[tokio::test]
-async fn goal_edit_prompt_submits_preserved_status_and_budget() {
+async fn goal_edit_prompt_submits_preserved_status_without_budget_write() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
     let thread_id = ThreadId::new();
 
@@ -126,11 +126,7 @@ async fn goal_edit_prompt_submits_preserved_status_and_budget() {
         Ok(AppEvent::SetThreadGoalDraft {
             thread_id: event_thread_id,
             draft,
-            mode:
-                crate::app_event::ThreadGoalSetMode::UpdateExisting {
-                    status,
-                    token_budget,
-                },
+            mode: crate::app_event::ThreadGoalSetMode::UpdateExisting { status },
         }) => {
             assert_eq!(event_thread_id, thread_id);
             assert_eq!(
@@ -138,7 +134,6 @@ async fn goal_edit_prompt_submits_preserved_status_and_budget() {
                 "Keep improving the bare goal command until it feels calm and useful. with clearer wording"
             );
             assert_eq!(status, AppThreadGoalStatus::Paused);
-            assert_eq!(token_budget, Some(80_000));
         }
         other => panic!("expected SetThreadGoalDraft event, got {other:?}"),
     }
@@ -166,15 +161,10 @@ async fn goal_edit_prompt_preserves_resumable_stopped_statuses() {
 
         match rx.try_recv() {
             Ok(AppEvent::SetThreadGoalDraft {
-                mode:
-                    crate::app_event::ThreadGoalSetMode::UpdateExisting {
-                        status,
-                        token_budget,
-                    },
+                mode: crate::app_event::ThreadGoalSetMode::UpdateExisting { status },
                 ..
             }) => {
                 assert_eq!(status, stopped_status);
-                assert_eq!(token_budget, Some(80_000));
             }
             other => panic!("expected SetThreadGoalDraft event, got {other:?}"),
         }
@@ -182,40 +172,50 @@ async fn goal_edit_prompt_preserves_resumable_stopped_statuses() {
 }
 
 #[tokio::test]
-async fn goal_edit_prompt_resets_terminal_status_to_active() {
-    let cases = [
-        AppThreadGoalStatus::BudgetLimited,
-        AppThreadGoalStatus::Complete,
-    ];
+async fn goal_edit_prompt_reactivates_budget_limited_goal() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
 
-    for terminal_status in cases {
-        let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
-        let thread_id = ThreadId::new();
-
-        chat.show_goal_edit_prompt(
+    chat.show_goal_edit_prompt(
+        thread_id,
+        test_goal(
             thread_id,
-            test_goal(
-                thread_id,
-                terminal_status,
-                /*token_budget*/ Some(80_000),
-            ),
-        );
-        chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+            AppThreadGoalStatus::BudgetLimited,
+            /*token_budget*/ Some(80_000),
+        ),
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
-        match rx.try_recv() {
-            Ok(AppEvent::SetThreadGoalDraft {
-                mode:
-                    crate::app_event::ThreadGoalSetMode::UpdateExisting {
-                        status,
-                        token_budget,
-                    },
-                ..
-            }) => {
-                assert_eq!(status, AppThreadGoalStatus::Active);
-                assert_eq!(token_budget, Some(80_000));
-            }
-            other => panic!("expected SetThreadGoalDraft event, got {other:?}"),
-        }
+    assert!(matches!(
+        rx.try_recv(),
+        Ok(AppEvent::SetThreadGoalDraft {
+            mode: crate::app_event::ThreadGoalSetMode::ReactivateExisting,
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn goal_edit_prompt_resets_completed_status_to_active() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+    let thread_id = ThreadId::new();
+
+    chat.show_goal_edit_prompt(
+        thread_id,
+        test_goal(
+            thread_id,
+            AppThreadGoalStatus::Complete,
+            /*token_budget*/ Some(80_000),
+        ),
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    match rx.try_recv() {
+        Ok(AppEvent::SetThreadGoalDraft {
+            mode: crate::app_event::ThreadGoalSetMode::UpdateExisting { status },
+            ..
+        }) => assert_eq!(status, AppThreadGoalStatus::Active),
+        other => panic!("expected SetThreadGoalDraft event, got {other:?}"),
     }
 }
 

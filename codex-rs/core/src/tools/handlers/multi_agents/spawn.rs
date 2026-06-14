@@ -129,6 +129,7 @@ async fn handle_spawn_agent(
             parent_thread_id: Some(session.thread_id),
             parent_turn_id: Some(turn.sub_id.clone()),
             environments: Some(turn.environments.to_selections()),
+            initial_task_message: Some(prompt.clone()),
         },
     ))
     .await

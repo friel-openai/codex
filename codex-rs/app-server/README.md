@@ -626,19 +626,18 @@ Experimental: use `memory/reset` to clear local memory artifacts and sqlite-back
 
 ### Example: Set and update a thread goal
 
-Use `thread/goal/set` to create or update the current goal for a materialized thread. Clients can set `budgetLimited` when they stop because a token budget is exhausted or nearly exhausted, `blocked` when progress is waiting on outside intervention, and `usageLimited` when usage availability stops further work. The system also sets `budgetLimited` when accounting crosses a configured token budget and `usageLimited` when a turn ends on a hard usage-limit error.
+Use `thread/goal/set` to create or update the current goal for a materialized thread. Goal objectives are limited to 16,000 characters. Clients can set `blocked` when progress is waiting on outside intervention and `usageLimited` when usage availability stops further work. This private Frodex build rejects numeric token-budget writes and client-authored `budgetLimited` status updates. Omitting `tokenBudget` preserves any legacy persisted budget, while explicitly setting `"tokenBudget": null` clears it. Existing persisted token budgets may still cause the system to set `budgetLimited` when accounting crosses the stored limit, and the system sets `usageLimited` when a turn ends on a hard usage-limit error.
 
 ```json
 { "method": "thread/goal/set", "id": 27, "params": {
     "threadId": "thr_123",
-    "objective": "Keep improving the benchmark until p95 latency is under 120ms",
-    "tokenBudget": 200000
+    "objective": "Keep improving the benchmark until p95 latency is under 120ms"
 } }
 { "id": 27, "result": { "goal": {
     "threadId": "thr_123",
     "objective": "Keep improving the benchmark until p95 latency is under 120ms",
     "status": "active",
-    "tokenBudget": 200000,
+    "tokenBudget": null,
     "tokensUsed": 0,
     "timeUsedSeconds": 0,
     "createdAt": 1776272400,
@@ -648,7 +647,7 @@ Use `thread/goal/set` to create or update the current goal for a materialized th
     "threadId": "thr_123",
     "objective": "Keep improving the benchmark until p95 latency is under 120ms",
     "status": "active",
-    "tokenBudget": 200000,
+    "tokenBudget": null,
     "tokensUsed": 0,
     "timeUsedSeconds": 0,
     "createdAt": 1776272400,
@@ -665,7 +664,7 @@ Use `thread/goal/set` to create or update the current goal for a materialized th
     "threadId": "thr_123",
     "objective": "Keep improving the benchmark until p95 latency is under 120ms",
     "status": "blocked",
-    "tokenBudget": 200000,
+    "tokenBudget": null,
     "tokensUsed": 10000,
     "timeUsedSeconds": 60,
     "createdAt": 1776272400,
