@@ -2102,11 +2102,11 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, history_before_seed.raw_items());
 
+    let initial_context = build_initial_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await;
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
     assert_eq!(expected, history_after_seed.raw_items());
@@ -5609,6 +5609,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     };
@@ -7689,6 +7690,7 @@ where
         active_turn: Mutex::new(None),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
+        goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         next_internal_sub_id: AtomicU64::new(0),
     });
@@ -8843,12 +8845,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
  {
     let (session, turn_context) = make_session_and_context().await;
     let turn_context = Arc::new(turn_context);
+    let initial_context = build_initial_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await;
     let history = session.clone_history().await;
-    let initial_context = build_initial_context(&session, &turn_context).await;
     assert_eq!(history.raw_items().to_vec(), initial_context);
 
     let current_context = session.reference_context_item().await;
@@ -8890,14 +8892,13 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
             /*reference_context_item*/ None,
         )
         .await;
-
+    let initial_context = build_initial_context(&session, &turn_context).await;
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await;
 
     let history = session.clone_history().await;
     let mut expected_history = vec![compacted_summary];
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected_history.extend(initial_context);
     assert_eq!(history.raw_items().to_vec(), expected_history);
 }
@@ -10863,8 +10864,6 @@ async fn subagent_prompt_is_for_regular_subagents_only() {
 
     assert!(prompt.contains("# You are a Subagent"));
     assert!(prompt.contains("## Subagent Responsibilities"));
-    assert!(!prompt.contains("You are also a **watchdog**"));
-    assert!(!prompt.contains("watchdog.snooze"));
 }
 
 #[tokio::test]
@@ -10879,6 +10878,12 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     )
     .await
     .expect("write subagent override");
+    tokio::fs::write(
+        codex_home.path().join("AGENTS.supervisor.md"),
+        "custom supervisor",
+    )
+    .await
+    .expect("write supervisor override");
 
     assert_eq!(
         load_root_agent_prompt(codex_home.path()).await,
@@ -10887,6 +10892,10 @@ async fn agent_prompt_loader_prefers_home_overrides() {
     assert_eq!(
         load_subagent_prompt(codex_home.path()).await,
         "custom subagent"
+    );
+    assert_eq!(
+        load_supervisor_agent_prompt(codex_home.path()).await,
+        "custom supervisor"
     );
 }
 

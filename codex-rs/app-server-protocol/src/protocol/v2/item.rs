@@ -346,6 +346,10 @@ pub enum ThreadItem {
         /// Thread ID of the receiving agent, when applicable. In case of spawn operation,
         /// this corresponds to the newly spawned agent.
         receiver_thread_ids: Vec<String>,
+        /// Nickname for the single receiver agent when the source event reports one.
+        receiver_agent_nickname: Option<String>,
+        /// Role for the single receiver agent when the source event reports one.
+        receiver_agent_role: Option<String>,
         /// Prompt text sent as part of the collab tool call, when available.
         prompt: Option<String>,
         /// Model requested for the spawned agent, when applicable.
