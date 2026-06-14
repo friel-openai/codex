@@ -20,6 +20,8 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
+const SPAWN_AGENT_THREAD_ADOPTION_DESCRIPTION: &str = "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish. Do not combine with fork or configuration overrides.";
+const SPAWN_AGENT_THREAD_ADOPTION_GUIDANCE: &str = "Set `existing_thread_id` to adopt an existing independent thread without copying or forking its history. Preserve its configuration and descendants, wait for active turns to finish, and do not combine adoption with `fork_turns`, `agent_type`, `model`, `reasoning_effort`, or `service_tier`.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -29,6 +31,7 @@ pub struct SpawnAgentToolOptions {
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
     pub expose_spawn_agent_model_overrides: bool,
+    pub enable_thread_adoption: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
 }
@@ -41,6 +44,7 @@ impl Default for SpawnAgentToolOptions {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: false,
+            enable_thread_adoption: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
         }
@@ -124,6 +128,12 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
                 .to_string(),
         )),
     );
+    if options.enable_thread_adoption {
+        properties.insert(
+            "existing_thread_id".to_string(),
+            JsonSchema::string(Some(SPAWN_AGENT_THREAD_ADOPTION_DESCRIPTION.to_string())),
+        );
+    }
 
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
@@ -131,6 +141,7 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
             available_models_description.as_deref(),
             inherited_model_guidance,
             options.usage_hint_text,
+            options.enable_thread_adoption,
         ),
         strict: false,
         defer_loading: None,
@@ -142,6 +153,29 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         output_schema: Some(spawn_agent_output_schema_v2(
             options.hide_agent_type_model_reasoning,
         )),
+    })
+}
+
+pub fn create_promote_agent_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "target".to_string(),
+        JsonSchema::string(Some(
+            "Canonical task name or thread ID of the subagent to promote into an independent root."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "promote_agent".to_string(),
+        description: "Promote an existing subagent and its descendants into an independent root thread. Preserve their thread IDs, conversation history, and configuration; wait for any active turn to finish.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec!["target".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: None,
     })
 }
 
@@ -334,6 +368,121 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
                 "The agent status observed before shutdown was requested.",
             )),
         })],
+    })
+}
+
+pub fn create_supervisor_close_self_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "message".to_string(),
+        JsonSchema::string(Some(
+            "Optional final message sent to the parent agent before marking the goal complete."
+                .to_string(),
+        )),
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "close_self".to_string(),
+        description: "Supervisor-only: mark the active goal complete, optionally send a final message to the parent agent, and end this supervisor check-in immediately."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "completed": {
+                    "type": "boolean",
+                    "description": "Whether the active goal was marked complete."
+                }
+            },
+            "required": ["completed"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_compact_parent_context_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Short reason why the parent thread should be compacted.".to_string(),
+            )),
+        ),
+        (
+            "evidence".to_string(),
+            JsonSchema::string(Some(
+                "Specific observation that the parent thread is idle or stuck.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "compact_parent_context".to_string(),
+        description: "Supervisor-only: request compaction for this supervisor helper's parent thread when it is idle and stuck."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(properties, /*required*/ None, Some(false.into())),
+        output_schema: None,
+    })
+}
+
+pub fn create_supervisor_snooze_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "delay_seconds".to_string(),
+            JsonSchema::number(Some("Snooze delay in seconds.".to_string())),
+        ),
+        (
+            "reason".to_string(),
+            JsonSchema::string(Some(
+                "Optional short reason for snoozing this check-in.".to_string(),
+            )),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "snooze".to_string(),
+        description: "Supervisor-only: keep the active goal supervised, send no message for the current check-in, and wait before the next check-in."
+            .to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            /*required*/ Some(vec!["delay_seconds".to_string()]),
+            Some(false.into()),
+        ),
+        output_schema: Some(json!({
+            "type": "object",
+            "properties": {
+                "delay_seconds": {
+                    "type": "number",
+                    "description": "Effective snooze delay in seconds."
+                }
+            },
+            "required": ["delay_seconds"],
+            "additionalProperties": false
+        })),
+    })
+}
+
+pub fn create_supervisor_tools_namespace(tools: Vec<ToolSpec>) -> ToolSpec {
+    let tools = tools
+        .into_iter()
+        .filter_map(|tool| match tool {
+            ToolSpec::Function(tool) => Some(ResponsesApiNamespaceTool::Function(tool)),
+            ToolSpec::Freeform(_)
+            | ToolSpec::Namespace(_)
+            | ToolSpec::ToolSearch { .. }
+            | ToolSpec::WebSearch { .. } => None,
+        })
+        .collect();
+
+    ToolSpec::Namespace(ResponsesApiNamespace {
+        name: "supervisor".to_string(),
+        description: "Supervisor-only tools for active-goal lifecycle control.".to_string(),
+        tools,
     })
 }
 
@@ -750,9 +899,15 @@ fn spawn_agent_tool_description_v2(
     available_models_description: Option<&str>,
     inherited_model_guidance: Option<&str>,
     usage_hint_text: Option<String>,
+    enable_thread_adoption: bool,
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
+    let thread_adoption_guidance = if enable_thread_adoption {
+        SPAWN_AGENT_THREAD_ADOPTION_GUIDANCE
+    } else {
+        ""
+    };
 
     let tool_description = format!(
         r#"
@@ -764,6 +919,8 @@ The spawned agent will have the same tools as you and the ability to spawn its o
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
+
+{thread_adoption_guidance}
 
 Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
     );

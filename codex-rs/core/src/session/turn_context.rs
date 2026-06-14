@@ -405,7 +405,7 @@ impl TurnContext {
             multi_agent_mode: None,
             realtime_active: Some(self.realtime_active),
             effort: self.reasoning_effort.clone(),
-            summary: ReasoningSummaryConfig::Auto,
+            summary: self.reasoning_summary,
         }
     }
 
