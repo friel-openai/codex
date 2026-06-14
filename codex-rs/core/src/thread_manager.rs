@@ -11,6 +11,7 @@ use crate::environment_selection::default_thread_environment_selections;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
+use crate::session::ForkStartupItems;
 use crate::session::GitEnrichmentPolicy;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::SessionIo;
@@ -44,9 +45,11 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
@@ -699,31 +702,9 @@ impl ThreadManager {
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> CodexResult<StoredThread> {
-        if let Ok(thread) = self.get_thread(thread_id).await {
-            if thread.config_snapshot().await.ephemeral {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "ephemeral thread does not support metadata updates: {thread_id}"
-                )));
-            }
-            return thread
-                .update_thread_metadata(patch, include_archived)
-                .await
-                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
-        }
         self.state
-            .thread_store
-            .update_thread_metadata(UpdateThreadMetadataParams {
-                thread_id,
-                patch,
-                include_archived,
-            })
+            .update_thread_metadata(thread_id, patch, include_archived)
             .await
-            .map_err(|err| match err {
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    CodexErr::ThreadNotFound(thread_id)
-                }
-                err => thread_store_metadata_update_error(thread_id, err),
-            })
     }
 
     /// Moves a persisted thread to, within, or out of a server-ordered section.
@@ -815,6 +796,7 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread_with_source(
             options.config,
             options.initial_history,
+            ForkStartupItems::default(),
             options.history_mode,
             options.allow_provider_model_fallback,
             Arc::clone(&self.state.auth_manager),
@@ -895,11 +877,101 @@ impl ThreadManager {
     pub async fn resume_thread_with_history(
         &self,
         config: Config,
-        initial_history: InitialHistory,
+        mut initial_history: InitialHistory,
         auth_manager: Arc<AuthManager>,
         parent_trace: Option<W3cTraceContext>,
         supports_openai_form_elicitation: bool,
     ) -> CodexResult<NewThread> {
+        if let InitialHistory::Resumed(resumed) = &mut initial_history {
+            let metadata =
+                Arc::make_mut(&mut resumed.history)
+                    .iter_mut()
+                    .find_map(|item| match item {
+                        RolloutItem::SessionMeta(line) => Some(&mut line.meta),
+                        _ => None,
+                    });
+            if let Some(metadata) = metadata {
+                let rollout_has_ownership =
+                    metadata.source.is_non_root_agent() || metadata.parent_thread_id.is_some();
+                let stored = match self
+                    .state
+                    .read_stored_thread(ReadThreadParams {
+                        thread_id: resumed.conversation_id,
+                        include_archived: true,
+                        include_history: false,
+                    })
+                    .await
+                {
+                    Ok(stored) => Some(stored),
+                    Err(err)
+                        if !rollout_has_ownership
+                            && matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
+                    {
+                        None
+                    }
+                    Err(err) => return Err(err),
+                };
+                if let Some(stored) = stored
+                    && (rollout_has_ownership
+                        || stored.source.is_non_root_agent()
+                        || stored.parent_thread_id.is_some())
+                {
+                    if metadata.id != resumed.conversation_id {
+                        return Err(CodexErr::InvalidRequest(format!(
+                            "session metadata does not match transferred thread {}",
+                            resumed.conversation_id
+                        )));
+                    }
+                    let parent_thread_id =
+                        stored.source.parent_thread_id().or(stored.parent_thread_id);
+                    if metadata.source != stored.source
+                        || metadata.parent_thread_id != parent_thread_id
+                        || metadata.thread_source != stored.thread_source
+                        || metadata.agent_path != stored.agent_path
+                        || metadata.agent_nickname != stored.agent_nickname
+                        || metadata.agent_role != stored.agent_role
+                    {
+                        let session_id = if let Some(parent_thread_id) = parent_thread_id {
+                            let mut ancestor_thread_id = parent_thread_id;
+                            let mut visited = HashSet::from([resumed.conversation_id]);
+                            loop {
+                                if !visited.insert(ancestor_thread_id) {
+                                    return Err(CodexErr::InvalidRequest(format!(
+                                        "thread parent cycle for thread {}",
+                                        resumed.conversation_id
+                                    )));
+                                }
+                                let ancestor = self
+                                    .state
+                                    .read_stored_thread(ReadThreadParams {
+                                        thread_id: ancestor_thread_id,
+                                        include_archived: true,
+                                        include_history: false,
+                                    })
+                                    .await?;
+                                match ancestor
+                                    .source
+                                    .parent_thread_id()
+                                    .or(ancestor.parent_thread_id)
+                                {
+                                    Some(parent_thread_id) => ancestor_thread_id = parent_thread_id,
+                                    None => break SessionId::from(ancestor_thread_id),
+                                }
+                            }
+                        } else {
+                            SessionId::from(resumed.conversation_id)
+                        };
+                        metadata.session_id = session_id;
+                        metadata.source = stored.source;
+                        metadata.parent_thread_id = parent_thread_id;
+                        metadata.thread_source = stored.thread_source;
+                        metadata.agent_path = stored.agent_path;
+                        metadata.agent_nickname = stored.agent_nickname;
+                        metadata.agent_role = stored.agent_role;
+                    }
+                }
+            }
+        }
         let agent_control = self.agent_control_for_config(&config);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
@@ -920,6 +992,7 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
+            ForkStartupItems::default(),
             /*history_mode*/ None,
             /*allow_provider_model_fallback*/ false,
             auth_manager,
@@ -994,6 +1067,7 @@ impl ThreadManager {
         Box::pin(self.state.spawn_thread_with_source(
             config,
             initial_history,
+            ForkStartupItems::default(),
             /*history_mode*/ None,
             /*allow_provider_model_fallback*/ false,
             auth_manager,
@@ -1361,6 +1435,39 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Update loaded metadata through its live writer and cold metadata through the thread store.
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> CodexResult<StoredThread> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support metadata updates: {thread_id}"
+                )));
+            }
+            return thread
+                .update_thread_metadata(patch, include_archived)
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+        }
+        self.thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch,
+                include_archived,
+            })
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => thread_store_metadata_update_error(thread_id, err),
+            })
+    }
+
     pub(crate) async fn snapshot_rollout_segment(
         &self,
         thread_id: ThreadId,
@@ -1476,6 +1583,21 @@ impl ThreadManagerState {
 
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
+    }
+
+    pub(crate) async fn indexed_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<codex_state::ThreadMetadata> {
+        self.thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()?
+            .state_db()
+            .await?
+            .get_thread(thread_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
@@ -1594,7 +1716,14 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
+        let configured_multi_agent_version = config.multi_agent_version_override();
+        if configured_multi_agent_version == Some(MultiAgentVersion::Disabled) {
+            return MultiAgentVersion::Disabled;
+        }
+        if let Some(multi_agent_version) = initial_history.get_multi_agent_version() {
+            return multi_agent_version;
+        }
+        if let Some(multi_agent_version) = configured_multi_agent_version {
             return multi_agent_version;
         }
         self.initial_multi_agent_version_for_spawn(
@@ -1792,6 +1921,7 @@ impl ThreadManagerState {
         Box::pin(self.spawn_thread_with_source(
             config,
             InitialHistory::New,
+            ForkStartupItems::default(),
             history_mode,
             /*allow_provider_model_fallback*/ false,
             Arc::clone(&self.auth_manager),
@@ -1837,6 +1967,7 @@ impl ThreadManagerState {
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
+            ForkStartupItems::default(),
             /*history_mode*/ None,
             /*allow_provider_model_fallback*/ false,
             Arc::clone(&self.auth_manager),
@@ -1864,6 +1995,7 @@ impl ThreadManagerState {
         &self,
         config: Config,
         initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         history_mode: Option<ThreadHistoryMode>,
         agent_control: AgentControl,
         session_source: SessionSource,
@@ -1886,6 +2018,7 @@ impl ThreadManagerState {
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
+            fork_startup_items,
             history_mode,
             /*allow_provider_model_fallback*/ false,
             Arc::clone(&self.auth_manager),
@@ -1930,6 +2063,7 @@ impl ThreadManagerState {
         Box::pin(self.spawn_thread_with_source(
             config,
             initial_history,
+            ForkStartupItems::default(),
             /*history_mode*/ None,
             /*allow_provider_model_fallback*/ false,
             auth_manager,
@@ -1957,6 +2091,7 @@ impl ThreadManagerState {
         &self,
         config: Config,
         initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         history_mode: Option<ThreadHistoryMode>,
         allow_provider_model_fallback: bool,
         auth_manager: Arc<AuthManager>,
@@ -2054,6 +2189,7 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
+            fork_startup_items,
             requested_history_mode: history_mode,
             session_source,
             forked_from_thread_id,
