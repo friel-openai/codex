@@ -55,6 +55,7 @@ use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::handlers::is_set_workspace_cwd_tool;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -95,7 +96,6 @@ use codex_protocol::items::build_hook_prompt_message;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageContentDeltaEvent;
 use codex_protocol::protocol::AgentReasoningSectionBreakEvent;
@@ -268,6 +268,28 @@ pub(crate) async fn run_turn(
 
     let mut next_step_context = Some(first_step_context);
     loop {
+        let execution_settings_refresh_requested = {
+            let mut active_turn = sess.active_turn.lock().await;
+            active_turn.as_mut().is_some_and(|active_turn| {
+                std::mem::take(&mut active_turn.execution_settings_refresh_requested)
+            })
+        };
+        if execution_settings_refresh_requested {
+            let refreshed_turn_context = sess
+                .refresh_active_turn_context(turn_context.as_ref())
+                .await;
+            let refreshed_step_context = sess
+                .capture_step_context(Arc::clone(&refreshed_turn_context), &cancellation_token)
+                .await?;
+            world_state = sess
+                .record_context_updates_and_set_reference_context_item(
+                    refreshed_step_context.as_ref(),
+                )
+                .await?;
+            turn_context = refreshed_turn_context;
+            next_step_context = Some(refreshed_step_context);
+        }
+
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
@@ -2117,13 +2139,14 @@ async fn handle_assistant_item_done_in_plan_mode(
 
 #[instrument(level = "trace", skip_all)]
 async fn drain_in_flight(
-    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>>,
+    in_flight: &mut FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallResponse>>>,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let mut terminal_no_response = false;
     while let Some(res) = in_flight.next().await {
         match res {
-            Ok(response_input) => {
+            Ok(ToolCallResponse::Response(response_input)) => {
                 let response_item = response_input.into();
                 sess.record_conversation_items(&turn_context, std::slice::from_ref(&response_item))
                     .await;
@@ -2134,12 +2157,15 @@ async fn drain_in_flight(
                 )
                 .await;
             }
+            Ok(ToolCallResponse::TerminalNoResponse) => {
+                terminal_no_response = true;
+            }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
             }
         }
     }
-    Ok(())
+    Ok(terminal_no_response)
 }
 
 fn assign_missing_streamed_response_item_id(
@@ -2210,7 +2236,7 @@ async fn try_run_sampling_request(
         .instrument(trace_span!("stream_request"))
         .or_cancel(&cancellation_token)
         .await??;
-    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ResponseInputItem>>> =
+    let mut in_flight: FuturesOrdered<BoxFuture<'static, CodexResult<ToolCallResponse>>> =
         FuturesOrdered::new();
     let mut tool_call_count = 0usize;
     let mut workspace_cwd_call_seen = false;
@@ -2741,7 +2767,8 @@ async fn try_run_sampling_request(
     if workspace_cwd_call_seen && tool_call_count != 1 {
         step_context.reject_context_transition_mixed_with_sibling_tool();
     }
-    drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
+    let terminal_no_response =
+        drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await?;
     drop(tool_blocking_timing_guard);
 
     if should_emit_token_count {
@@ -2750,6 +2777,10 @@ async fn try_run_sampling_request(
         // turn is waiting on the user. This also needs to happen before returning cancellation so
         // token usage already recorded from the completed response is still persisted.
         sess.send_token_count_event(&turn_context).await;
+    }
+
+    if terminal_no_response {
+        return Err(CodexErr::TurnAborted);
     }
 
     if cancellation_token.is_cancelled() {

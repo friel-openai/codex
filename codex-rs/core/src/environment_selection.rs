@@ -457,6 +457,16 @@ impl TurnEnvironmentSnapshot {
             .collect()
     }
 
+    pub(crate) fn to_spawn_selections(&self) -> Vec<TurnEnvironmentSelection> {
+        self.environments
+            .iter()
+            .map(|environment| match environment {
+                TurnEnvironmentState::Ready(environment) => environment.selection(),
+                TurnEnvironmentState::Starting(environment) => environment.selection.clone(),
+            })
+            .collect()
+    }
+
     pub(crate) fn primary_filesystem(&self) -> Option<Arc<dyn ExecutorFileSystem>> {
         self.primary()
             .map(|environment| environment.environment.get_filesystem())
@@ -897,6 +907,10 @@ url = "ws://127.0.0.1:8765"
             vec![remote.clone()]
         );
         assert_eq!(starting.to_selections(), vec![local.clone()]);
+        assert_eq!(
+            starting.to_spawn_selections(),
+            vec![remote.clone(), local.clone()]
+        );
         assert!(starting.single_local_environment().is_none());
 
         let server = tokio::spawn(serve_environment_info(listener));
@@ -923,6 +937,7 @@ url = "ws://127.0.0.1:8765"
             vec![remote.clone(), local.clone()]
         );
         assert_eq!(attached.to_selections(), vec![remote, local]);
+        assert_eq!(attached.to_spawn_selections(), attached.to_selections());
         server.await.expect("server task");
     }
 

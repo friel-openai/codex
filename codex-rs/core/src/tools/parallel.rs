@@ -37,6 +37,12 @@ struct ToolCallTimingGuard {
     tool_name: codex_tools::ToolName,
 }
 
+#[derive(Debug, PartialEq)]
+pub(crate) enum ToolCallResponse {
+    Response(ResponseInputItem),
+    TerminalNoResponse,
+}
+
 #[derive(Clone)]
 pub(crate) struct ToolCallRuntime {
     session: Arc<Session>,
@@ -74,15 +80,17 @@ impl ToolCallRuntime {
         self,
         call: ToolCall,
         cancellation_token: CancellationToken,
-    ) -> impl std::future::Future<Output = Result<ResponseInputItem, CodexErr>> {
+    ) -> impl std::future::Future<Output = Result<ToolCallResponse, CodexErr>> {
         let error_call = call.clone();
         let source = call.direct_source();
         let future = self.handle_tool_call_with_source(call, source, cancellation_token);
         async move {
             match future.await {
-                Ok(response) => Ok(response.into_response()),
+                Ok(response) => Ok(Self::response_for_tool_result(response)),
                 Err(FunctionCallError::Fatal(message)) => Err(CodexErr::Fatal(message)),
-                Err(other) => Ok(Self::failure_response(error_call, other)),
+                Err(other) => Ok(ToolCallResponse::Response(Self::failure_response(
+                    error_call, other,
+                ))),
             }
         }
         .in_current_span()
@@ -223,6 +231,14 @@ impl ToolCallRuntime {
 }
 
 impl ToolCallRuntime {
+    fn response_for_tool_result(response: AnyToolResult) -> ToolCallResponse {
+        if response.result.terminal_no_response() {
+            ToolCallResponse::TerminalNoResponse
+        } else {
+            ToolCallResponse::Response(response.into_response())
+        }
+    }
+
     fn tool_task_join_error(err: JoinError) -> FunctionCallError {
         FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
     }
@@ -745,7 +761,7 @@ mod tests {
                 success: Some(true),
             },
         };
-        assert_eq!(expected_response, response);
+        assert_eq!(ToolCallResponse::Response(expected_response), response);
 
         let actual = records
             .lock()
@@ -813,7 +829,9 @@ mod tests {
             .await
             .expect("timed out waiting for tool response")
             .expect("tool response task should join")?;
-        let ResponseInputItem::FunctionCallOutput { output, .. } = response else {
+        let ToolCallResponse::Response(ResponseInputItem::FunctionCallOutput { output, .. }) =
+            response
+        else {
             anyhow::bail!("cancelled tool should return function output");
         };
         let FunctionCallOutputBody::Text(text) = output.body else {
@@ -829,5 +847,25 @@ mod tests {
         assert_eq!(vec![ToolCallOutcome::Aborted], actual);
 
         Ok(())
+    }
+
+    #[test]
+    fn terminal_tool_result_does_not_create_response_item() {
+        let result = AnyToolResult {
+            call_id: "call-1".to_string(),
+            payload: ToolPayload::Function {
+                arguments: "{}".to_string(),
+            },
+            result: Box::new(
+                FunctionToolOutput::from_text(String::new(), Some(true))
+                    .into_terminal_no_response(),
+            ),
+            post_tool_use_payload: None,
+        };
+
+        assert_eq!(
+            ToolCallResponse::TerminalNoResponse,
+            ToolCallRuntime::response_for_tool_result(result)
+        );
     }
 }
