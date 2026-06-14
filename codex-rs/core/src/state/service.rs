@@ -27,6 +27,7 @@ use codex_extension_api::ExtensionRegistry;
 use codex_hooks::Hooks;
 use codex_login::AuthManager;
 use codex_mcp::McpConnectionManager;
+use codex_mcp::ToolInfo as McpToolInfo;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_rollout::state_db::StateDbHandle;
@@ -39,9 +40,15 @@ use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
+#[derive(Clone, Default)]
+pub(crate) struct McpToolSnapshot {
+    pub(crate) tools: HashMap<String, McpToolInfo>,
+}
+
 pub(crate) struct SessionServices {
     /// The latest manager; callers retain an owned handle while performing MCP I/O.
     pub(crate) mcp_connection_manager: Arc<ArcSwap<McpConnectionManager>>,
+    pub(crate) mcp_tool_snapshot: Mutex<Option<McpToolSnapshot>>,
     pub(crate) mcp_startup_cancellation_token: Mutex<CancellationToken>,
     pub(crate) unified_exec_manager: UnifiedExecProcessManager,
     #[cfg_attr(not(unix), allow(dead_code))]

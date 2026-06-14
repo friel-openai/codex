@@ -31,6 +31,8 @@ use codex_app_server_protocol::ReviewTarget as ApiReviewTarget;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::Thread as AppServerThread;
+use codex_app_server_protocol::ThreadForkParams;
+use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadItem as AppServerThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -138,6 +140,7 @@ pub use exec_events::TurnStartedEvent;
 pub use exec_events::Usage;
 pub use exec_events::WebSearchItem;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::future::Future;
 use std::io::IsTerminal;
 use std::io::Read;
@@ -206,6 +209,7 @@ struct ExecRunArgs {
     config: Config,
     dangerously_bypass_approvals_and_sandbox: bool,
     exec_span: tracing::Span,
+    fork_session_id: Option<String>,
     images: Vec<PathBuf>,
     json_mode: bool,
     last_message_file: Option<PathBuf>,
@@ -247,6 +251,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let Cli {
         command,
         strict_config,
+        fork_session_id,
         shared,
         skip_git_repo_check,
         ephemeral,
@@ -564,6 +569,7 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
         config,
         dangerously_bypass_approvals_and_sandbox,
         exec_span: exec_span.clone(),
+        fork_session_id,
         images,
         json_mode,
         last_message_file,
@@ -661,6 +667,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         config,
         dangerously_bypass_approvals_and_sandbox,
         exec_span,
+        fork_session_id,
         images,
         json_mode,
         last_message_file,
@@ -778,58 +785,79 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
             anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
         })?;
 
-    // Handle resume subcommand through existing `thread/list` + `thread/resume`
-    // APIs so exec no longer reaches into rollout storage directly.
-    let (primary_thread_id, fallback_session_configured) = if let Some(ExecCommand::Resume(args)) =
-        command.as_ref()
-    {
-        if let Some(thread_id) =
-            resolve_resume_thread_id(&client, &config, state_db.as_ref(), args).await?
-        {
-            let response: ThreadResumeResponse = send_request_with_response(
-                &client,
-                ClientRequest::ThreadResume {
-                    request_id: request_ids.next(),
-                    params: thread_resume_params_from_config(&config, thread_id),
-                },
-                "thread/resume",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            let session_configured =
-                session_configured_from_thread_resume_response(&response, &config)
-                    .map_err(anyhow::Error::msg)?;
-            (session_configured.thread_id, session_configured)
-        } else {
-            let response: ThreadStartResponse = send_request_with_response(
-                &client,
-                ClientRequest::ThreadStart {
-                    request_id: request_ids.next(),
-                    params: thread_start_params_from_config(&config),
-                },
-                "thread/start",
-            )
-            .await
-            .map_err(anyhow::Error::msg)?;
-            let session_configured =
-                session_configured_from_thread_start_response(&response, &config)
-                    .map_err(anyhow::Error::msg)?;
-            (session_configured.thread_id, session_configured)
+    // Handle resume/fork/start through app-server APIs so exec no longer reaches into
+    // rollout storage directly for normal bootstrap.
+    let (primary_thread_id, fallback_session_configured) = match command.as_ref() {
+        Some(ExecCommand::Resume(args)) => {
+            if let Some(thread_id) =
+                resolve_resume_thread_id(&client, &config, state_db.as_ref(), args).await?
+            {
+                let response: ThreadResumeResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ThreadResume {
+                        request_id: request_ids.next(),
+                        params: thread_resume_params_from_config(&config, thread_id),
+                    },
+                    "thread/resume",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let session_configured =
+                    session_configured_from_thread_resume_response(&response, &config)
+                        .map_err(anyhow::Error::msg)?;
+                (session_configured.thread_id, session_configured)
+            } else {
+                let response: ThreadStartResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ThreadStart {
+                        request_id: request_ids.next(),
+                        params: thread_start_params_from_config(&config),
+                    },
+                    "thread/start",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let session_configured =
+                    session_configured_from_thread_start_response(&response, &config)
+                        .map_err(anyhow::Error::msg)?;
+                (session_configured.thread_id, session_configured)
+            }
         }
-    } else {
-        let response: ThreadStartResponse = send_request_with_response(
-            &client,
-            ClientRequest::ThreadStart {
-                request_id: request_ids.next(),
-                params: thread_start_params_from_config(&config),
-            },
-            "thread/start",
-        )
-        .await
-        .map_err(anyhow::Error::msg)?;
-        let session_configured = session_configured_from_thread_start_response(&response, &config)
-            .map_err(anyhow::Error::msg)?;
-        (session_configured.thread_id, session_configured)
+        Some(ExecCommand::Review(_)) | None => {
+            if let Some(session_id) = fork_session_id.as_deref() {
+                let response: ThreadForkResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ThreadFork {
+                        request_id: request_ids.next(),
+                        params: thread_fork_params_from_config(
+                            &config, session_id, /*path*/ None,
+                        ),
+                    },
+                    "thread/fork",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let session_configured =
+                    session_configured_from_thread_fork_response(&response, &config)
+                        .map_err(anyhow::Error::msg)?;
+                (session_configured.thread_id, session_configured)
+            } else {
+                let response: ThreadStartResponse = send_request_with_response(
+                    &client,
+                    ClientRequest::ThreadStart {
+                        request_id: request_ids.next(),
+                        params: thread_start_params_from_config(&config),
+                    },
+                    "thread/start",
+                )
+                .await
+                .map_err(anyhow::Error::msg)?;
+                let session_configured =
+                    session_configured_from_thread_start_response(&response, &config)
+                        .map_err(anyhow::Error::msg)?;
+                (session_configured.thread_id, session_configured)
+            }
+        }
     };
 
     let primary_thread_id_for_span = primary_thread_id.to_string();
@@ -1126,6 +1154,77 @@ fn approvals_reviewer_override_from_config(
     Some(config.approvals_reviewer.into())
 }
 
+fn config_request_overrides_from_config(
+    config: &Config,
+) -> Option<HashMap<String, serde_json::Value>> {
+    let mut overrides = HashMap::new();
+    let mut insert = |key: &str, value: Option<String>| {
+        if let Some(value) = value {
+            overrides.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    };
+    insert(
+        "model_reasoning_effort",
+        config
+            .model_reasoning_effort
+            .as_ref()
+            .map(std::string::ToString::to_string),
+    );
+    insert(
+        "model_reasoning_summary",
+        config
+            .model_reasoning_summary
+            .map(|summary| summary.to_string()),
+    );
+    insert(
+        "model_verbosity",
+        config
+            .model_verbosity
+            .map(|verbosity| verbosity.to_string()),
+    );
+    insert(
+        "personality",
+        config
+            .personality
+            .map(|personality| personality.to_string()),
+    );
+    insert(
+        "web_search",
+        Some(config.web_search_mode.value().to_string()),
+    );
+    if config.bypass_hook_trust {
+        overrides.insert("bypass_hook_trust".to_string(), true.into());
+    }
+    Some(overrides)
+}
+
+fn thread_fork_params_from_config(
+    config: &Config,
+    thread_id: &str,
+    path: Option<PathBuf>,
+) -> ThreadForkParams {
+    let permissions = permissions_selection_from_config(config);
+    let sandbox = permissions.is_none().then(|| {
+        sandbox_mode_from_permission_profile(
+            &config.permissions.effective_permission_profile(),
+            config.cwd.as_path(),
+        )
+    });
+    ThreadForkParams {
+        thread_id: thread_id.to_string(),
+        path,
+        model: config.model.clone(),
+        model_provider: Some(config.model_provider_id.clone()),
+        cwd: Some(config.cwd.to_string_lossy().to_string()),
+        approval_policy: Some(config.permissions.approval_policy.value().into()),
+        approvals_reviewer: approvals_reviewer_override_from_config(config),
+        sandbox: sandbox.flatten(),
+        permissions,
+        config: config_request_overrides_from_config(config),
+        ..ThreadForkParams::default()
+    }
+}
+
 async fn send_request_with_response<T>(
     client: &InProcessAppServerClient,
     request: ClientRequest,
@@ -1168,6 +1267,29 @@ fn session_configured_from_thread_start_response(
 
 fn session_configured_from_thread_resume_response(
     response: &ThreadResumeResponse,
+    config: &Config,
+) -> Result<SessionConfiguredEvent, String> {
+    session_configured_from_thread_response(
+        &response.thread.session_id,
+        &response.thread.id,
+        response.thread.parent_thread_id.as_deref(),
+        response.thread.thread_source.clone().map(Into::into),
+        response.thread.name.clone(),
+        response.thread.path.clone(),
+        response.model.clone(),
+        response.model_provider.clone(),
+        response.service_tier.clone(),
+        response.approval_policy.to_core(),
+        response.approvals_reviewer.to_core(),
+        config.permissions.effective_permission_profile(),
+        response.active_permission_profile.clone().map(Into::into),
+        response.cwd.clone(),
+        response.reasoning_effort.clone(),
+    )
+}
+
+fn session_configured_from_thread_fork_response(
+    response: &ThreadForkResponse,
     config: &Config,
 ) -> Result<SessionConfiguredEvent, String> {
     session_configured_from_thread_response(

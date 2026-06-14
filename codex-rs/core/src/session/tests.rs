@@ -4829,6 +4829,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         codex_extension_api::ExtensionDataInit::default(),
         AgentControl::default(),
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Default::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -4944,6 +4945,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
@@ -5168,6 +5170,7 @@ async fn make_session_with_config_and_rx(
         codex_extension_api::ExtensionDataInit::default(),
         AgentControl::default(),
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Default::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -5270,6 +5273,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         codex_extension_api::ExtensionDataInit::default(),
         agent_control,
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Default::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -6949,6 +6953,7 @@ where
                 config.prefix_mcp_tool_names(),
             ),
         )),
+        mcp_tool_snapshot: Mutex::new(None),
         mcp_startup_cancellation_token: Mutex::new(CancellationToken::new()),
         unified_exec_manager: UnifiedExecProcessManager::new(
             config.background_terminal_max_timeout,
