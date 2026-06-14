@@ -376,6 +376,8 @@ impl Session {
             .mcp_connection_manager
             .swap(Arc::new(refreshed_manager));
         superseded_manager.shutdown().await;
+        let mut snapshot = self.services.mcp_tool_snapshot.lock().await;
+        *snapshot = None;
     }
 
     pub(crate) async fn refresh_mcp_servers_if_requested(
