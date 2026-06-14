@@ -76,6 +76,7 @@ use core_test_support::responses::ev_function_call;
 use core_test_support::responses::ev_function_call_with_namespace;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_once_match;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
@@ -114,6 +115,7 @@ use tempfile::TempDir;
 use test_case::test_case;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
+use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::accept_async;
@@ -127,6 +129,31 @@ use wiremock::matchers::path;
 const WAIT_FOR_ENVIRONMENT_TEST_TOOL_DESCRIPTION: &str = "Test wait tool description";
 const WAIT_FOR_ENVIRONMENT_TEST_ENVIRONMENT_ID_DESCRIPTION: &str =
     "Test environment ID description";
+
+fn response_body_contains(request: &wiremock::Request, text: &str) -> bool {
+    std::str::from_utf8(&request.body).is_ok_and(|body| body.contains(text))
+}
+
+fn response_is_subagent(request: &wiremock::Request) -> bool {
+    request
+        .headers
+        .get("x-openai-subagent")
+        .and_then(|value| value.to_str().ok())
+        == Some("collab_spawn")
+}
+
+async fn wait_for_response(mock_response: &ResponseMock) -> Result<ResponsesRequest> {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(request) = mock_response.last_request() {
+                return request;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .context("response request should not time out")
+}
 
 struct WaitForEnvironmentTestExtension;
 
@@ -758,6 +785,191 @@ async fn deferred_executor_promotes_primary_environment_when_startup_completes()
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_executor_full_history_child_preserves_starting_environment_selection()
+-> Result<()> {
+    const ROOT_PROMPT: &str = "spawn a child while the remote environment is starting";
+    const CHILD_PROMPT: &str = "inspect the starting environment";
+    const PAUSE_CALL_ID: &str = "pause-child-for-environment";
+    const SPAWN_CALL_ID: &str = "spawn-deferred-environment-child";
+
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let server = start_mock_server().await;
+    mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("root-spawn-response"),
+            ev_function_call_with_namespace(
+                SPAWN_CALL_ID,
+                "collaboration",
+                "spawn_agent",
+                &json!({
+                    "message": CHILD_PROMPT,
+                    "task_name": "deferred_environment_child",
+                    "fork_turns": "all",
+                })
+                .to_string(),
+            ),
+            ev_completed("root-spawn-response"),
+        ]),
+    )
+    .await;
+    let child_initial = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            response_is_subagent(request) && response_body_contains(request, CHILD_PROMPT)
+        },
+        sse(vec![
+            ev_response_created("child-starting-response"),
+            ev_function_call(
+                PAUSE_CALL_ID,
+                "exec_command",
+                &json!({ "cmd": "sleep 2", "yield_time_ms": 3_000 }).to_string(),
+            ),
+            ev_completed("child-starting-response"),
+        ]),
+    )
+    .await;
+    let root_follow_up = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| {
+            !response_is_subagent(request) && response_body_contains(request, SPAWN_CALL_ID)
+        },
+        sse(vec![
+            ev_response_created("root-follow-up-response"),
+            ev_assistant_message("root-follow-up-message", "child started"),
+            ev_completed("root-follow-up-response"),
+        ]),
+    )
+    .await;
+    let child_ready = mount_sse_once_match(
+        &server,
+        |request: &wiremock::Request| response_body_contains(request, PAUSE_CALL_ID),
+        sse(vec![
+            ev_response_created("child-ready-response"),
+            ev_assistant_message("child-ready-message", "ready environment observed"),
+            ev_completed("child-ready-response"),
+        ]),
+    )
+    .await;
+
+    let mut builder = test_codex()
+        .with_exec_server_url(format!("ws://{}", listener.local_addr()?))
+        .with_config(|config| {
+            config.project_doc_max_bytes = 0;
+            let _ = config.features.disable(Feature::EnableRequestCompression);
+            assert!(config.features.enable(Feature::Collab).is_ok());
+            assert!(config.features.enable(Feature::MultiAgentV2).is_ok());
+            assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
+        });
+    let test = builder.build_with_remote_and_local_env(&server).await?;
+    let local_selection = local(test.config.cwd.clone());
+    let remote_selection = TurnEnvironmentSelection {
+        environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&test.config.cwd),
+        workspace_roots: vec![PathUri::from_abs_path(&test.config.cwd)],
+    };
+    let mut created_threads = test.thread_manager.subscribe_thread_created();
+    test.codex
+        .submit(Op::UserInput {
+            items: vec![UserInput::Text {
+                text: ROOT_PROMPT.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            responsesapi_client_metadata: None,
+            additional_context: Default::default(),
+            thread_settings: ThreadSettingsOverrides {
+                environments: Some(TurnEnvironmentSelections::new(
+                    test.config.cwd.clone(),
+                    vec![remote_selection, local_selection],
+                )),
+                ..Default::default()
+            },
+        })
+        .await?;
+    let child_thread_id = match timeout(Duration::from_secs(10), created_threads.recv()).await {
+        Ok(result) => result?,
+        Err(err) => {
+            anyhow::bail!(
+                "child thread creation should not time out: {err}; root follow-up: {:?}",
+                root_follow_up
+                    .last_request()
+                    .and_then(|request| request.function_call_output_text(SPAWN_CALL_ID))
+            );
+        }
+    };
+    let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
+
+    let child_initial_request = wait_for_response(&child_initial).await.with_context(|| {
+        let request = root_follow_up.last_request();
+        format!(
+            "root follow-up capture while waiting for child: {:?}",
+            request.as_ref().map(|request| (
+                request.header("x-openai-subagent"),
+                request.body_json()["client_metadata"].clone()
+            ))
+        )
+    })?;
+    let initial_context = child_initial_request
+        .message_input_texts("user")
+        .into_iter()
+        .rfind(|text| text.contains("<environment_context>"))
+        .context("child starting environment context")?;
+    assert!(initial_context.contains("<environment id=\"local\" primary=\"true\">"));
+    assert!(initial_context.contains("<environment id=\"remote\" primary=\"false\">"));
+    assert!(initial_context.contains("<status>starting</status>"));
+    serve_environment_info_requests(listener, 2).await;
+    timeout(
+        Duration::from_secs(5),
+        test.thread_manager
+            .environment_manager()
+            .get_environment(REMOTE_ENVIRONMENT_ID)
+            .context("remote environment")?
+            .wait_until_ready(),
+    )
+    .await
+    .context("remote environment readiness should not time out")??;
+
+    let child_ready_request = wait_for_response(&child_ready).await?;
+    let ready_contexts = child_ready_request
+        .message_input_texts("user")
+        .into_iter()
+        .filter(|text| text.contains("<environment_context>"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ready_contexts
+            .iter()
+            .filter(|text| text.contains("<environment id=\"remote\" primary=\"true\">"))
+            .count(),
+        1
+    );
+    assert!(
+        ready_contexts
+            .iter()
+            .any(|text| text.contains("<environment id=\"local\" primary=\"false\">"))
+    );
+
+    child_thread.ensure_rollout_materialized().await;
+    child_thread.flush_rollout().await?;
+    let rollout_path = child_thread.rollout_path().context("child rollout path")?;
+    let primary_promotion_count =
+        materialize_rollout_items(test.config.codex_home.as_path(), rollout_path.as_path())
+            .await?
+            .into_iter()
+            .filter_map(|item| match item {
+                RolloutItem::WorldState(item) if !item.full => Some(item.state),
+                _ => None,
+            })
+            .filter(|patch| {
+                patch.pointer("/environments/environments/remote/is_primary") == Some(&json!(true))
+            })
+            .count();
+    assert_eq!(primary_promotion_count, 1);
+
+    Ok(())
+}
+
 async fn read_exec_server_json(websocket: &mut WebSocketStream<TcpStream>) -> Value {
     loop {
         match timeout(Duration::from_secs(5), websocket.next())
@@ -818,8 +1030,14 @@ async fn send_environment_info(websocket: &mut WebSocketStream<TcpStream>) {
 }
 
 async fn serve_environment_info(listener: TcpListener) {
+    serve_environment_info_requests(listener, 1).await;
+}
+
+async fn serve_environment_info_requests(listener: TcpListener, request_count: usize) {
     let mut websocket = accept_initialized_exec_server(listener).await;
-    send_environment_info(&mut websocket).await;
+    for _ in 0..request_count {
+        send_environment_info(&mut websocket).await;
+    }
 }
 
 async fn serve_environment_with_agents_md(

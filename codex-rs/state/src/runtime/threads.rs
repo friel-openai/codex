@@ -177,6 +177,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
             .await
     }
 
+    /// Load identities reachable through open relationships without reading unrelated thread data.
+    pub async fn list_open_thread_spawn_descendant_identities(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> anyhow::Result<Vec<crate::ThreadSpawnDescendantIdentity>> {
+        let rows = sqlx::query(
+            r#"
+WITH RECURSIVE subtree(child_thread_id, depth) AS (
+    SELECT child_thread_id, 1
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ? AND status = ? AND child_thread_id != ?
+    UNION ALL
+    SELECT edge.child_thread_id, subtree.depth + 1
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE edge.status = ? AND edge.child_thread_id != ?
+)
+SELECT
+    subtree.child_thread_id,
+    threads.source,
+    threads.agent_path,
+    threads.agent_role,
+    threads.agent_nickname
+FROM subtree
+LEFT JOIN threads ON threads.id = subtree.child_thread_id
+ORDER BY subtree.depth ASC, subtree.child_thread_id ASC
+            "#,
+        )
+        .bind(root_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(root_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
+        .bind(root_thread_id.to_string())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                Ok(crate::ThreadSpawnDescendantIdentity {
+                    thread_id: ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?)?,
+                    source: row.try_get("source")?,
+                    agent_path: row.try_get("agent_path")?,
+                    agent_role: row.try_get("agent_role")?,
+                    agent_nickname: row.try_get("agent_nickname")?,
+                })
+            })
+            .collect()
+    }
+
     /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
     pub async fn find_thread_spawn_child_by_path(
         &self,
@@ -3397,6 +3446,161 @@ mod tests {
             .await
             .expect("all descendants should load");
         assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
+    }
+
+    #[tokio::test]
+    async fn open_thread_spawn_descendant_identities_preserve_open_ancestry_and_missing_rows() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let root_thread_id = ThreadId::new();
+        let open_child_thread_id = ThreadId::new();
+        let open_grandchild_thread_id = ThreadId::new();
+        let closed_child_thread_id = ThreadId::new();
+        let hidden_grandchild_thread_id = ThreadId::new();
+        let missing_metadata_thread_id = ThreadId::new();
+        let other_root_thread_id = ThreadId::new();
+        let other_child_thread_id = ThreadId::new();
+
+        for (thread_id, agent_path, agent_role, agent_nickname) in [
+            (
+                open_child_thread_id,
+                "/root/worker",
+                Some("worker"),
+                Some("first worker"),
+            ),
+            (
+                open_grandchild_thread_id,
+                "/root/worker/researcher",
+                Some("researcher"),
+                Some("nested worker"),
+            ),
+            (closed_child_thread_id, "/root/closed", None, None),
+            (
+                hidden_grandchild_thread_id,
+                "/root/closed/hidden",
+                None,
+                None,
+            ),
+            (other_child_thread_id, "/root/other", None, None),
+        ] {
+            let mut metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+            metadata.agent_path = Some(agent_path.to_string());
+            metadata.agent_role = agent_role.map(str::to_string);
+            metadata.agent_nickname = agent_nickname.map(str::to_string);
+            runtime
+                .upsert_thread(&metadata)
+                .await
+                .expect("thread metadata should persist");
+        }
+
+        for (parent_thread_id, child_thread_id, status) in [
+            (
+                root_thread_id,
+                open_child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                open_child_thread_id,
+                open_grandchild_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                root_thread_id,
+                closed_child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Closed,
+            ),
+            (
+                closed_child_thread_id,
+                hidden_grandchild_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                root_thread_id,
+                missing_metadata_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                other_root_thread_id,
+                other_child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+            (
+                open_grandchild_thread_id,
+                root_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            ),
+        ] {
+            runtime
+                .upsert_thread_spawn_edge(parent_thread_id, child_thread_id, status)
+                .await
+                .expect("thread spawn edge should persist");
+        }
+
+        let identities = runtime
+            .list_open_thread_spawn_descendant_identities(root_thread_id)
+            .await
+            .expect("open descendant identities should load");
+
+        assert_eq!(identities.len(), 3);
+        assert_eq!(identities[2].thread_id, open_grandchild_thread_id);
+        let open_child = identities
+            .iter()
+            .find(|identity| identity.thread_id == open_child_thread_id)
+            .expect("open child should be included");
+        assert_eq!(open_child.source.as_deref(), Some("cli"));
+        assert_eq!(open_child.agent_path.as_deref(), Some("/root/worker"));
+        assert_eq!(open_child.agent_role.as_deref(), Some("worker"));
+        assert_eq!(open_child.agent_nickname.as_deref(), Some("first worker"));
+
+        let missing_metadata = identities
+            .iter()
+            .find(|identity| identity.thread_id == missing_metadata_thread_id)
+            .expect("open edge without a metadata row should remain available for fallback");
+        assert_eq!(missing_metadata.source, None);
+        assert!(
+            identities.iter().all(|identity| {
+                identity.thread_id != closed_child_thread_id
+                    && identity.thread_id != hidden_grandchild_thread_id
+                    && identity.thread_id != other_child_thread_id
+            }),
+            "closed ancestors and unrelated roots must remain inaccessible"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_thread_spawn_descendant_identities_ignore_root_self_loop() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(
+            crate::SqliteConfig::new_for_testing(codex_home.as_path().abs()),
+            "test-provider".to_string(),
+        )
+        .await
+        .expect("state db should initialize");
+        let root_thread_id = ThreadId::new();
+        let child_thread_id = ThreadId::new();
+        for child_thread_id in [root_thread_id, child_thread_id] {
+            runtime
+                .upsert_thread_spawn_edge(
+                    root_thread_id,
+                    child_thread_id,
+                    DirectionalThreadSpawnEdgeStatus::Open,
+                )
+                .await
+                .expect("thread spawn edge should persist");
+        }
+
+        let identities = runtime
+            .list_open_thread_spawn_descendant_identities(root_thread_id)
+            .await
+            .expect("root self-loop must not recurse indefinitely");
+
+        assert_eq!(identities.len(), 1);
+        assert_eq!(identities[0].thread_id, child_thread_id);
     }
 
     #[tokio::test]

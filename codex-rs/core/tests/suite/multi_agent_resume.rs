@@ -472,6 +472,21 @@ async fn cold_root_resume_restores_agent_identity_and_role_on_followup() -> Resu
     resumed.submit_turn(QUEUE_PROMPT).await?;
     resumed.submit_turn(FOLLOWUP_PROMPT).await?;
 
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        if followup_child_request.requests().iter().any(|request| {
+            request.body_contains_text(FOLLOWUP_TASK)
+                && request.body_contains_text(ROLE_DEVELOPER_INSTRUCTIONS)
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for the resumed worker's follow-up request with its original role developer instructions"
+            );
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
     let reloaded_worker = resumed
         .thread_manager
         .get_thread(worker_thread_id)

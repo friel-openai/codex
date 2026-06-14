@@ -39,6 +39,33 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
+fn spawn_agent_tool_v2_hides_thread_adoption_by_default() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        multi_agent_version: MultiAgentVersion::V2,
+        ..Default::default()
+    });
+
+    let ToolSpec::Function(ResponsesApiTool {
+        description,
+        parameters,
+        ..
+    }) = tool
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+
+    assert!(properties.contains_key("task_name"));
+    assert!(properties.contains_key("message"));
+    assert!(!properties.contains_key("existing_thread_id"));
+    assert!(!description.contains("existing_thread_id"));
+}
+
+#[test]
 fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     let mut legacy = model_preset("legacy", /*show_in_picker*/ true);
     legacy.multi_agent_version = Some(MultiAgentVersion::V1);
@@ -78,6 +105,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("The spawned agent will have the same tools as you"));
+    assert!(!description.contains("existing_thread_id"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(
@@ -94,6 +122,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("disabled-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
+    assert!(!properties.contains_key("existing_thread_id"));
     assert_eq!(
         properties
             .get("message")
@@ -132,6 +161,77 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
 }
 
 #[test]
+fn adopt_agent_tool_requires_thread_task_and_message() {
+    let tool = create_adopt_agent_tool(/*hide_agent_metadata*/ false);
+
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        parameters,
+        output_schema,
+        ..
+    }) = tool
+    else {
+        panic!("adopt_agent should be a function tool");
+    };
+
+    assert_eq!(name, "adopt_agent");
+    assert_eq!(
+        parameters.required,
+        Some(vec![
+            "existing_thread_id".to_string(),
+            "task_name".to_string(),
+            "message".to_string(),
+        ])
+    );
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("adopt_agent should use object params");
+    assert_eq!(
+        properties.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "existing_thread_id".to_string(),
+            "message".to_string(),
+            "task_name".to_string(),
+        ]
+    );
+    assert_eq!(properties["message"].encrypted, None);
+    assert_eq!(
+        output_schema.expect("adopt_agent output schema")["required"],
+        json!(["task_name", "nickname"])
+    );
+}
+
+#[test]
+fn promote_agent_tool_requires_target() {
+    let tool = create_promote_agent_tool();
+
+    let ToolSpec::Function(ResponsesApiTool {
+        name, parameters, ..
+    }) = tool
+    else {
+        panic!("promote_agent should be a function tool");
+    };
+
+    assert_eq!(name, "promote_agent");
+    assert_eq!(
+        parameters.schema_type,
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
+    );
+    assert_eq!(parameters.required, Some(vec!["target".to_string()]));
+    assert_eq!(
+        parameters
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("target"))
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Canonical task name or thread ID of the subagent to promote into an independent root."
+        )
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: Vec::new(),
@@ -163,6 +263,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    assert!(!properties.contains_key("existing_thread_id"));
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::string(Some(format!(
@@ -383,10 +484,79 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(
+        properties
+            .get("target")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Agent id or canonical task name to send a follow-up task to (from spawn_agent).")
+    );
+    assert_eq!(
         parameters.required.as_ref(),
         Some(&vec!["target".to_string(), "message".to_string()])
     );
     assert_eq!(output_schema, None);
+}
+
+#[test]
+fn supervisor_tools_do_not_mark_parameters_encrypted() {
+    for tool in [
+        create_supervisor_close_self_tool(),
+        create_supervisor_compact_parent_context_tool(),
+        create_supervisor_snooze_tool(),
+    ] {
+        let ToolSpec::Function(ResponsesApiTool {
+            name, parameters, ..
+        }) = tool
+        else {
+            panic!("supervisor tool should be a function tool");
+        };
+        for (property_name, schema) in parameters
+            .properties
+            .as_ref()
+            .expect("supervisor tool should use object params")
+        {
+            assert_eq!(
+                schema.encrypted, None,
+                "{name}.{property_name} should not use encrypted tool parameters"
+            );
+        }
+    }
+}
+
+#[test]
+fn close_agent_tool_v2_uses_owned_task_targets_and_previous_status_output() {
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        description,
+        parameters,
+        output_schema,
+        ..
+    }) = create_close_agent_tool_v2()
+    else {
+        panic!("close_agent should be a function tool");
+    };
+
+    assert_eq!(name, "close_agent");
+    assert_eq!(
+        description,
+        "Close an owned descendant agent and its live descendants, then return its previous status."
+    );
+    assert!(!description.contains("concurrency"));
+    assert_eq!(
+        parameters.required.as_ref(),
+        Some(&vec!["target".to_string()])
+    );
+    assert_eq!(
+        parameters
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("target"))
+            .and_then(|target| target.description.as_deref()),
+        Some("Canonical task name or thread ID of an owned descendant agent to close.")
+    );
+    assert_eq!(
+        output_schema.expect("close_agent output schema")["required"],
+        json!(["previous_status"])
+    );
 }
 
 #[test]
