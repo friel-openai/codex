@@ -107,7 +107,7 @@ pub(super) async fn emit_applied(session: &Session, submission_id: String) {
 
 /// Builds the effective thread-settings event used by live updates and
 /// synthesized fork history.
-pub(super) async fn applied_event(session: &Session) -> EventMsg {
+pub(crate) async fn applied_event(session: &Session) -> EventMsg {
     let snapshot = {
         let state = session.state.lock().await;
         state.session_configuration.thread_config_snapshot()

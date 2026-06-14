@@ -1456,6 +1456,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     &mut app_server,
                     AppEvent::ForkCurrentSession {
                         name: Some("Add User Fork".to_string()),
+                        placement: None,
                     },
                 ))
                 .await?;
@@ -1484,6 +1485,7 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     &mut app_server,
                     AppEvent::ForkCurrentSession {
                         name: Some("Failed Fork".to_string()),
+                        placement: None,
                     },
                 ))
                 .await?;

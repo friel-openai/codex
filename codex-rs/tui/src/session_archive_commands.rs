@@ -293,6 +293,7 @@ async fn start_app_server_for_archive_command(
         explicit_remote_endpoint,
         default_daemon,
         reuse_implicit_local_daemon,
+        /*force_embedded*/ false,
     );
     let remote_cwd_override = cli
         .cwd
