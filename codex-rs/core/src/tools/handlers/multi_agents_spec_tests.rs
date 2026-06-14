@@ -38,6 +38,33 @@ fn model_preset(id: &str, show_in_picker: bool) -> ModelPreset {
 }
 
 #[test]
+fn spawn_agent_tool_v2_hides_thread_adoption_by_default() {
+    let tool = create_spawn_agent_tool_v2(SpawnAgentToolOptions {
+        multi_agent_version: MultiAgentVersion::V2,
+        ..Default::default()
+    });
+
+    let ToolSpec::Function(ResponsesApiTool {
+        description,
+        parameters,
+        ..
+    }) = tool
+    else {
+        panic!("spawn_agent should be a function tool");
+    };
+
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("spawn_agent should use object params");
+
+    assert!(properties.contains_key("task_name"));
+    assert!(properties.contains_key("message"));
+    assert!(!properties.contains_key("existing_thread_id"));
+    assert!(!description.contains("existing_thread_id"));
+}
+
+#[test]
 fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     let mut incompatible = model_preset("incompatible", /*show_in_picker*/ true);
     incompatible.multi_agent_version = Some(MultiAgentVersion::V1);
@@ -51,6 +78,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        enable_thread_adoption: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -74,6 +102,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("The spawned agent will have the same tools as you"));
+    assert!(description.contains("existing_thread_id"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(
@@ -87,6 +116,14 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("incompatible-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
+    assert_eq!(
+        properties
+            .get("existing_thread_id")
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish. Do not combine with fork or configuration overrides."
+        )
+    );
     assert_eq!(
         properties
             .get("message")
@@ -125,6 +162,35 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
 }
 
 #[test]
+fn promote_agent_tool_requires_target() {
+    let tool = create_promote_agent_tool();
+
+    let ToolSpec::Function(ResponsesApiTool {
+        name, parameters, ..
+    }) = tool
+    else {
+        panic!("promote_agent should be a function tool");
+    };
+
+    assert_eq!(name, "promote_agent");
+    assert_eq!(
+        parameters.schema_type,
+        Some(JsonSchemaType::Single(JsonSchemaPrimitiveType::Object))
+    );
+    assert_eq!(parameters.required, Some(vec!["target".to_string()]));
+    assert_eq!(
+        parameters
+            .properties
+            .as_ref()
+            .and_then(|properties| properties.get("target"))
+            .and_then(|schema| schema.description.as_deref()),
+        Some(
+            "Canonical task name or thread ID of the subagent to promote into an independent root."
+        )
+    );
+}
+
+#[test]
 fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
     let tool = create_spawn_agent_tool_v1(SpawnAgentToolOptions {
         available_models: Vec::new(),
@@ -132,6 +198,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
     });
@@ -156,6 +223,7 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
 
     assert!(properties.contains_key("fork_context"));
     assert!(!properties.contains_key("fork_turns"));
+    assert!(!properties.contains_key("existing_thread_id"));
     assert_eq!(
         properties.get("agent_type"),
         Some(&JsonSchema::string(Some(format!(
@@ -197,6 +265,7 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
+        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -243,6 +312,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: true,
+        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -276,6 +346,7 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: false,
+        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -376,10 +447,42 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
     );
     assert!(!properties.contains_key("items"));
     assert_eq!(
+        properties
+            .get("target")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Agent id or canonical task name to send a follow-up task to (from spawn_agent).")
+    );
+    assert_eq!(
         parameters.required.as_ref(),
         Some(&vec!["target".to_string(), "message".to_string()])
     );
     assert_eq!(output_schema, None);
+}
+
+#[test]
+fn supervisor_tools_do_not_mark_parameters_encrypted() {
+    for tool in [
+        create_supervisor_close_self_tool(),
+        create_supervisor_compact_parent_context_tool(),
+        create_supervisor_snooze_tool(),
+    ] {
+        let ToolSpec::Function(ResponsesApiTool {
+            name, parameters, ..
+        }) = tool
+        else {
+            panic!("supervisor tool should be a function tool");
+        };
+        for (property_name, schema) in parameters
+            .properties
+            .as_ref()
+            .expect("supervisor tool should use object params")
+        {
+            assert_eq!(
+                schema.encrypted, None,
+                "{name}.{property_name} should not use encrypted tool parameters"
+            );
+        }
+    }
 }
 
 #[test]
