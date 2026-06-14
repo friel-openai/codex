@@ -12,6 +12,7 @@ use super::*;
 fn model_with_shell_type(shell_type: ConfigShellToolType) -> ModelInfo {
     ModelInfo {
         slug: "test-model".to_string(),
+        request_model: None,
         display_name: "Test Model".to_string(),
         description: None,
         default_reasoning_level: None,
