@@ -13,7 +13,11 @@ impl ChatWidget {
     pub(crate) fn show_goal_edit_prompt(&mut self, thread_id: ThreadId, goal: AppThreadGoal) {
         let tx = self.app_event_tx.clone();
         let status = edited_goal_status(goal.status);
-        let token_budget = goal.token_budget;
+        let mode = if goal.status == AppThreadGoalStatus::BudgetLimited {
+            crate::app_event::ThreadGoalSetMode::ReactivateExisting
+        } else {
+            crate::app_event::ThreadGoalSetMode::UpdateExisting { status }
+        };
         let view = CustomPromptView::new(
             "Edit goal".to_string(),
             "Type a goal objective and press Enter".to_string(),
@@ -26,10 +30,7 @@ impl ChatWidget {
                         objective,
                         ..Default::default()
                     },
-                    mode: crate::app_event::ThreadGoalSetMode::UpdateExisting {
-                        status,
-                        token_budget,
-                    },
+                    mode,
                 });
             }),
         );

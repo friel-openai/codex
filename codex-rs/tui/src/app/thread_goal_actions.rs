@@ -193,10 +193,8 @@ impl App {
             ThreadGoalSetMode::ConfirmIfExists | ThreadGoalSetMode::ReplaceExisting => {
                 (ThreadGoalStatus::Active, None)
             }
-            ThreadGoalSetMode::UpdateExisting {
-                status,
-                token_budget,
-            } => (status, Some(token_budget)),
+            ThreadGoalSetMode::UpdateExisting { status } => (status, None),
+            ThreadGoalSetMode::ReactivateExisting => (ThreadGoalStatus::Active, Some(None)),
         };
 
         let result = app_server
