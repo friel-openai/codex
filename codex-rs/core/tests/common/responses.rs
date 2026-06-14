@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -38,6 +39,29 @@ use wiremock::matchers::path_regex;
 #[derive(Debug, Clone)]
 pub struct ResponseMock {
     requests: Arc<Mutex<Vec<ResponsesRequest>>>,
+}
+
+/// Controls one response in a mounted response sequence.
+///
+/// The responder blocks one runtime worker while it waits for release, so callers must use a
+/// multithreaded Tokio test runtime.
+pub struct ResponseGate {
+    entered: oneshot::Receiver<()>,
+    release: mpsc::Sender<()>,
+}
+
+impl ResponseGate {
+    pub async fn wait_until_entered(&mut self) {
+        (&mut self.entered)
+            .await
+            .expect("gated response should be entered");
+    }
+
+    pub fn release(self) {
+        self.release
+            .send(())
+            .expect("gated response should still be waiting");
+    }
 }
 
 impl ResponseMock {
@@ -1597,6 +1621,73 @@ pub async fn mount_response_sequence(
         .mount(server)
         .await;
     response_mock
+}
+
+/// Mounts a response sequence and blocks one response until its gate is released.
+///
+/// Callers must use a multithreaded Tokio test runtime because the gate blocks one runtime worker.
+pub async fn mount_gated_response_sequence(
+    server: &MockServer,
+    responses: Vec<ResponseTemplate>,
+    gated_index: usize,
+) -> (ResponseMock, ResponseGate) {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    struct SeqResponder {
+        num_calls: AtomicUsize,
+        responses: Vec<ResponseTemplate>,
+        gated_index: usize,
+        gate: Mutex<Option<(oneshot::Sender<()>, mpsc::Receiver<()>)>>,
+    }
+
+    impl Respond for SeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            if call_num == self.gated_index {
+                let (entered, release) = self
+                    .gate
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("gated response should only be entered once");
+                let _ = entered.send(());
+                release.recv().expect("gated response should be released");
+            }
+            self.responses
+                .get(call_num)
+                .expect("missing response for call")
+                .clone()
+        }
+    }
+
+    assert!(
+        gated_index < responses.len(),
+        "gated response index must be in range"
+    );
+    let num_calls = responses.len();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let responder = SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        responses,
+        gated_index,
+        gate: Mutex::new(Some((entered_tx, release_rx))),
+    };
+
+    let (mock, response_mock) = base_mock();
+    mock.respond_with(responder)
+        .up_to_n_times(num_calls as u64)
+        .expect(num_calls as u64)
+        .mount(server)
+        .await;
+    (
+        response_mock,
+        ResponseGate {
+            entered: entered_rx,
+            release: release_tx,
+        },
+    )
 }
 
 /// Mounts a sequence of responses for each POST to `/v1/responses/compact`.
