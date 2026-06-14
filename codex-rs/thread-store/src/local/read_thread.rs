@@ -4,7 +4,9 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSource;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::find_archived_thread_path_by_id_str;
 use codex_rollout::find_thread_name_by_id;
@@ -49,7 +51,7 @@ pub(super) async fn read_thread(
             .await)
     {
         let metadata_sandbox_policy = metadata.sandbox_policy.clone();
-        let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
+        let mut thread = stored_thread_from_sqlite_metadata(store, &metadata).await?;
         if (!params.include_history || thread.preview.is_empty())
             && let Some(rollout_path) = thread.rollout_path.clone()
             && let Ok(mut rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
@@ -57,16 +59,18 @@ pub(super) async fn read_thread(
             && (params.include_archived || rollout_thread.archived_at.is_none())
             && !rollout_thread.preview.is_empty()
         {
+            let ownership = StoredThreadOwnership::from_stored_thread(&thread);
             rollout_thread.recency_at = thread.recency_at;
             rollout_thread.is_pinned = thread.is_pinned;
             if thread.name.is_some() {
                 rollout_thread.name = thread.name;
             }
-            rollout_thread.git_info = thread.git_info;
+            rollout_thread.git_info.clone_from(&thread.git_info);
             rollout_thread.permission_profile = permission_profile_from_metadata_value(
                 &metadata_sandbox_policy,
                 rollout_thread.cwd.as_path(),
             );
+            ownership.apply_to(&mut rollout_thread);
             thread = rollout_thread;
         }
         attach_history_if_requested(store, &mut thread, params.include_history).await?;
@@ -124,6 +128,8 @@ pub(super) async fn read_thread_by_rollout_path(
         }
         thread.recency_at = metadata.recency_at;
         thread.is_pinned = metadata.is_pinned;
+        StoredThreadOwnership::from_sqlite_metadata(&metadata, thread.parent_thread_id)
+            .apply_to(&mut thread);
         thread.git_info = if thread.history_mode == ThreadHistoryMode::Paginated {
             // A paginated rollout only has the initial Git tuple. Do not turn an explicit SQLite
             // clear back into the stale rollout value while reading by path.
@@ -346,7 +352,7 @@ async fn read_sqlite_metadata(
 
 async fn stored_thread_from_sqlite_metadata(
     store: &LocalThreadStore,
-    metadata: ThreadMetadata,
+    metadata: &ThreadMetadata,
 ) -> ThreadStoreResult<StoredThread> {
     let session_meta = match read_required_session_meta_line(metadata.rollout_path.as_path()).await
     {
@@ -369,6 +375,7 @@ async fn stored_thread_from_sqlite_metadata(
     };
     let rollout_path = codex_rollout::plain_rollout_path(metadata.rollout_path.as_path());
     let forked_from_id = session_meta.as_ref().and_then(|meta| meta.forked_from_id);
+    let source = parse_session_source(&metadata.source);
     let parent_thread_id = session_meta.as_ref().and_then(|meta| meta.parent_thread_id);
     let history_mode = session_meta
         .as_ref()
@@ -382,7 +389,7 @@ async fn stored_thread_from_sqlite_metadata(
         .unwrap_or_default();
     let permission_profile =
         permission_profile_from_metadata_value(&metadata.sandbox_policy, metadata.cwd.as_path());
-    Ok(StoredThread {
+    let mut thread = StoredThread {
         thread_id: metadata.id,
         extra_config: None,
         rollout_path: Some(rollout_path),
@@ -393,34 +400,97 @@ async fn stored_thread_from_sqlite_metadata(
         model_provider: if metadata.model_provider.is_empty() {
             store.config.default_model_provider_id.clone()
         } else {
-            metadata.model_provider
+            metadata.model_provider.clone()
         },
-        model: metadata.model,
-        reasoning_effort: metadata.reasoning_effort,
+        model: metadata.model.clone(),
+        reasoning_effort: metadata.reasoning_effort.clone(),
         created_at: metadata.created_at,
         updated_at: metadata.updated_at,
         recency_at: metadata.recency_at,
         archived_at: metadata.archived_at,
         is_pinned: metadata.is_pinned,
-        cwd: metadata.cwd,
-        cli_version: metadata.cli_version,
-        source: parse_session_source(&metadata.source),
+        cwd: metadata.cwd.clone(),
+        cli_version: metadata.cli_version.clone(),
+        source,
         history_mode,
-        thread_source: metadata.thread_source,
-        agent_nickname: metadata.agent_nickname,
-        agent_role: metadata.agent_role,
-        agent_path: metadata.agent_path,
+        thread_source: session_meta
+            .as_ref()
+            .and_then(|meta| meta.thread_source.clone()),
+        agent_nickname: session_meta
+            .as_ref()
+            .and_then(|meta| meta.agent_nickname.clone()),
+        agent_role: session_meta
+            .as_ref()
+            .and_then(|meta| meta.agent_role.clone()),
+        agent_path: session_meta
+            .as_ref()
+            .and_then(|meta| meta.agent_path.clone()),
         git_info: git_info_from_parts(
-            metadata.git_sha,
-            metadata.git_branch,
-            metadata.git_origin_url,
+            metadata.git_sha.clone(),
+            metadata.git_branch.clone(),
+            metadata.git_origin_url.clone(),
         ),
         approval_mode: parse_or_default(&metadata.approval_mode, AskForApproval::OnRequest),
         permission_profile,
         token_usage: None,
-        first_user_message: metadata.first_user_message,
+        first_user_message: metadata.first_user_message.clone(),
         history: None,
-    })
+    };
+    StoredThreadOwnership::from_sqlite_metadata(metadata, parent_thread_id).apply_to(&mut thread);
+    Ok(thread)
+}
+
+struct StoredThreadOwnership {
+    parent_thread_id: Option<codex_protocol::ThreadId>,
+    source: SessionSource,
+    thread_source: Option<ThreadSource>,
+    agent_path: Option<String>,
+    agent_nickname: Option<String>,
+    agent_role: Option<String>,
+}
+
+impl StoredThreadOwnership {
+    fn from_sqlite_metadata(
+        metadata: &ThreadMetadata,
+        rollout_parent_thread_id: Option<codex_protocol::ThreadId>,
+    ) -> Self {
+        let source = parse_session_source(&metadata.source);
+        let parent_thread_id = match &source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id, ..
+            }) => Some(*parent_thread_id),
+            source if source.is_non_root_agent() => rollout_parent_thread_id,
+            _ => None,
+        };
+        Self {
+            parent_thread_id,
+            source,
+            thread_source: metadata.thread_source.clone(),
+            agent_path: metadata.agent_path.clone(),
+            agent_nickname: metadata.agent_nickname.clone(),
+            agent_role: metadata.agent_role.clone(),
+        }
+    }
+
+    fn from_stored_thread(thread: &StoredThread) -> Self {
+        Self {
+            parent_thread_id: thread.parent_thread_id,
+            source: thread.source.clone(),
+            thread_source: thread.thread_source.clone(),
+            agent_path: thread.agent_path.clone(),
+            agent_nickname: thread.agent_nickname.clone(),
+            agent_role: thread.agent_role.clone(),
+        }
+    }
+
+    fn apply_to(self, thread: &mut StoredThread) {
+        thread.parent_thread_id = self.parent_thread_id;
+        thread.source = self.source;
+        thread.thread_source = self.thread_source;
+        thread.agent_path = self.agent_path;
+        thread.agent_nickname = self.agent_nickname;
+        thread.agent_role = self.agent_role;
+    }
 }
 
 async fn thread_name_from_metadata(
