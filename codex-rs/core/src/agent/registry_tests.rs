@@ -14,6 +14,14 @@ fn agent_metadata(thread_id: ThreadId) -> AgentMetadata {
     }
 }
 
+fn goal_supervisor_agent_metadata(thread_id: ThreadId) -> AgentMetadata {
+    AgentMetadata {
+        agent_id: Some(thread_id),
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn format_agent_nickname_adds_ordinals_after_reset() {
     assert_eq!(
@@ -100,6 +108,69 @@ fn commit_holds_slot_until_release() {
     let reservation = registry
         .reserve_spawn_slot(Some(1))
         .expect("slot released after thread removal");
+    drop(reservation);
+}
+
+#[test]
+fn uncounted_spawn_reservation_does_not_count_against_thread_limit() {
+    let registry = Arc::new(AgentRegistry::default());
+    let reservation = registry.reserve_uncounted_spawn_slot();
+    let supervisor_id = ThreadId::new();
+    reservation.commit(goal_supervisor_agent_metadata(supervisor_id));
+
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("uncounted reservation should not consume a counted slot");
+    let worker_id = ThreadId::new();
+    reservation.commit(agent_metadata(worker_id));
+
+    let err = match registry.reserve_spawn_slot(Some(1)) {
+        Ok(_) => panic!("worker should consume the counted slot"),
+        Err(err) => err,
+    };
+    let CodexErr::AgentLimitReached { max_threads } = err else {
+        panic!("expected CodexErr::AgentLimitReached");
+    };
+    assert_eq!(max_threads, 1);
+
+    registry.release_spawned_thread(supervisor_id);
+    registry.release_spawned_thread(worker_id);
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("counted slot should be available");
+    drop(reservation);
+}
+
+#[test]
+fn released_goal_supervisor_helper_does_not_decrement_counted_thread_total() {
+    let registry = Arc::new(AgentRegistry::default());
+    let reservation = registry.reserve_uncounted_spawn_slot();
+    let supervisor_id = ThreadId::new();
+    reservation.commit(goal_supervisor_agent_metadata(supervisor_id));
+
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("uncounted goal supervisor helper should not consume the counted slot");
+    let worker_id = ThreadId::new();
+    reservation.commit(agent_metadata(worker_id));
+
+    registry.release_spawned_thread(supervisor_id);
+
+    let err = match registry.reserve_spawn_slot(Some(1)) {
+        Ok(_) => {
+            panic!("releasing an uncounted goal supervisor helper must not free a counted slot")
+        }
+        Err(err) => err,
+    };
+    let CodexErr::AgentLimitReached { max_threads } = err else {
+        panic!("expected CodexErr::AgentLimitReached");
+    };
+    assert_eq!(max_threads, 1);
+
+    registry.release_spawned_thread(worker_id);
+    let reservation = registry
+        .reserve_spawn_slot(Some(1))
+        .expect("counted slot should be available after releasing worker");
     drop(reservation);
 }
 
