@@ -250,6 +250,58 @@ use self::turn_context::TurnContext;
 #[cfg(test)]
 mod rollout_reconstruction_tests;
 
+const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
+const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+
+async fn load_agent_prompt_fallback(
+    codex_home: &Path,
+    fallback: &str,
+    override_filename: &str,
+) -> String {
+    let override_path = codex_home.join(override_filename);
+    if let Ok(contents) = tokio::fs::read_to_string(&override_path).await
+        && !contents.trim().is_empty()
+    {
+        return contents;
+    }
+
+    fallback.to_string()
+}
+
+pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
+}
+
+pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_agent_role_prompt(
+    config: &Config,
+    session_source: &SessionSource,
+) -> Option<String> {
+    if !config.features.enabled(Feature::AgentPromptInjection) {
+        return None;
+    }
+
+    let role_prompt = match session_source {
+        SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
+        SessionSource::Cli
+        | SessionSource::VSCode
+        | SessionSource::Exec
+        | SessionSource::Mcp
+        | SessionSource::Custom(_)
+        | SessionSource::Internal(_)
+        | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
+    };
+
+    if role_prompt.trim().is_empty() {
+        None
+    } else {
+        Some(role_prompt)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
@@ -348,6 +400,7 @@ use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -3489,13 +3542,20 @@ impl Session {
         let mut developer_sections = Vec::<String>::with_capacity(8);
         let mut contextual_user_sections = Vec::<String>::with_capacity(2);
         let mut separate_developer_sections = Vec::<String>::new();
-        let (session_source, auto_compact_window_ids) = {
+        let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
             (
                 state.session_configuration.session_source.clone(),
                 state.auto_compact_window_ids(),
+                state.history.clone(),
             )
         };
+        if let Some(role_prompt) =
+            load_agent_role_prompt(&turn_context.config, &session_source).await
+            && !history_contains_developer_text(&history, &role_prompt)
+        {
+            developer_sections.push(role_prompt);
+        }
         let separate_guardian_developer_message =
             crate::guardian::is_guardian_reviewer_source(&session_source);
         // Keep the guardian policy prompt out of the aggregated developer bundle so it
