@@ -35,6 +35,7 @@ use crate::image_preparation::ImagePreparationMode;
 use crate::image_preparation::ImageResizeNoticeMode;
 use crate::image_preparation::prepare_response_items as prepare_image_response_items;
 use crate::image_preparation::unified_image_budget_enabled;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::parse_turn_item;
 use crate::realtime_conversation::RealtimeConversationManager;
 use crate::session::step_context::StepContext;
@@ -451,6 +452,7 @@ pub(crate) struct SessionSpawnArgs {
     /// Root sessions and non-thread-spawn subagents pass a disabled context;
     /// `Session::new` creates the root trace itself when rollout tracing is enabled.
     pub(crate) parent_rollout_thread_trace: ThreadTraceContext,
+    pub(crate) inherited_thread_state: InheritedThreadState,
     pub(crate) user_shell_override: Option<shell::Shell>,
     pub(crate) parent_trace: Option<W3cTraceContext>,
     pub(crate) environment_selections: Vec<TurnEnvironmentSelection>,
@@ -544,6 +546,7 @@ impl Session {
             inherited_exec_policy,
             inherited_environments,
             parent_rollout_thread_trace,
+            inherited_thread_state,
             parent_trace: _,
             environment_selections,
             thread_extension_init,
@@ -791,6 +794,7 @@ impl Session {
             agent_control,
             environment_manager,
             inherited_environments,
+            inherited_thread_state,
             analytics_events_client,
             thread_store,
             parent_rollout_thread_trace,
@@ -1211,6 +1215,16 @@ impl Session {
         mode: ThreadMemoryMode,
     ) -> anyhow::Result<()> {
         handlers::persist_thread_memory_mode_update(self, mode).await
+    }
+
+    pub(crate) fn prompt_cache_key(&self) -> ThreadId {
+        self.services.model_client.fork_prompt_cache_key()
+    }
+
+    pub(crate) fn response_continuation_for_fork(
+        &self,
+    ) -> Option<crate::client::ResponseContinuation> {
+        self.services.model_client.response_continuation_for_fork()
     }
 
     /// Flush rollout writes and return the final durability-barrier result.
@@ -4179,6 +4193,7 @@ pub(crate) fn emit_subagent_session_started(
     let AppServerClientMetadata {
         client_name,
         client_version,
+        ..
     } = client_metadata;
     let (Some(client_name), Some(client_version)) = (client_name, client_version) else {
         tracing::warn!("skipping subagent thread analytics: missing inherited client metadata");

@@ -34,6 +34,10 @@ fn main() -> anyhow::Result<()> {
         // Merge root-level overrides into inner CLI struct so downstream logic remains unchanged.
         let mut inner = top_cli.inner;
         inner.psp = top_cli.psp;
+        let mut inner = match inner.validate() {
+            Ok(inner) => inner,
+            Err(err) => err.exit(),
+        };
         inner
             .config_overrides
             .prepend_root_overrides(top_cli.config_overrides);
