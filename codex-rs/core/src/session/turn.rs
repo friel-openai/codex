@@ -1332,7 +1332,10 @@ pub(crate) async fn built_tools(
     step_store: &ExtensionData,
     prepared_recommendations: PreparedToolRecommendations,
 ) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
-    let all_mcp_tools = mcp.tools().to_vec();
+    let inherited_mcp_tool_snapshot = sess.services.mcp_tool_snapshot.lock().await.clone();
+    let all_mcp_tools = inherited_mcp_tool_snapshot
+        .map(|snapshot| snapshot.tools)
+        .unwrap_or_else(|| mcp.tools().to_vec());
     let connector_snapshot = mcp.config().connector_snapshot.clone();
 
     let apps_enabled = turn_context.apps_enabled();
