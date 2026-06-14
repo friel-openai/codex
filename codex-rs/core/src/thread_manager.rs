@@ -8,6 +8,7 @@ use crate::config::ThreadStoreConfig;
 use crate::current_time::TimeProvider;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::environment_selection::default_thread_environment_selections;
+use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
 use crate::session::ForkPersistence;
@@ -270,6 +271,7 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) parent_thread_id: Option<ThreadId>,
     pub(crate) inherited_environments: Option<TurnEnvironmentSnapshot>,
     pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+    pub(crate) inherited_thread_state: InheritedThreadState,
 }
 
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
@@ -810,6 +812,7 @@ impl ThreadManager {
             options.metrics_service_name,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             options.parent_trace,
             environments,
             options.thread_extension_init,
@@ -917,6 +920,7 @@ impl ThreadManager {
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             parent_trace,
             environments,
             /*thread_extension_init*/ ExtensionDataInit::default(),
@@ -992,6 +996,7 @@ impl ThreadManager {
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             /*parent_trace*/ None,
             environments,
             /*thread_extension_init*/ ExtensionDataInit::default(),
@@ -1532,6 +1537,7 @@ impl ThreadManagerState {
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
             /*environments*/ None,
+            Default::default(),
         ))
         .await
     }
@@ -1550,6 +1556,7 @@ impl ThreadManagerState {
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
+        inherited_thread_state: InheritedThreadState,
     ) -> CodexResult<NewThread> {
         let environments = environments.unwrap_or_else(|| {
             default_thread_environment_selections(
@@ -1574,6 +1581,7 @@ impl ThreadManagerState {
             metrics_service_name,
             inherited_environments,
             inherited_exec_policy,
+            inherited_thread_state,
             /*parent_trace*/ None,
             environments,
             /*thread_extension_init*/ ExtensionDataInit::default(),
@@ -1595,6 +1603,7 @@ impl ThreadManagerState {
             parent_thread_id,
             inherited_environments,
             inherited_exec_policy,
+            inherited_thread_state,
         } = options;
         let environments = default_thread_environment_selections(
             self.environment_manager.as_ref(),
@@ -1618,6 +1627,7 @@ impl ThreadManagerState {
             /*metrics_service_name*/ None,
             inherited_environments,
             inherited_exec_policy,
+            inherited_thread_state,
             /*parent_trace*/ None,
             environments,
             /*thread_extension_init*/ ExtensionDataInit::default(),
@@ -1641,6 +1651,7 @@ impl ThreadManagerState {
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
+        inherited_thread_state: InheritedThreadState,
         thread_extension_init: ExtensionDataInit,
     ) -> CodexResult<NewThread> {
         let environments = environments.unwrap_or_else(|| {
@@ -1666,6 +1677,7 @@ impl ThreadManagerState {
             /*metrics_service_name*/ None,
             inherited_environments,
             inherited_exec_policy,
+            inherited_thread_state,
             /*parent_trace*/ None,
             environments,
             thread_extension_init,
@@ -1711,6 +1723,7 @@ impl ThreadManagerState {
             metrics_service_name,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
+            Default::default(),
             parent_trace,
             environments,
             thread_extension_init,
@@ -1738,6 +1751,7 @@ impl ThreadManagerState {
         metrics_service_name: Option<String>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        inherited_thread_state: InheritedThreadState,
         parent_trace: Option<W3cTraceContext>,
         environments: Vec<TurnEnvironmentSelection>,
         thread_extension_init: ExtensionDataInit,
@@ -1835,6 +1849,7 @@ impl ThreadManagerState {
             inherited_environments,
             inherited_exec_policy,
             parent_rollout_thread_trace,
+            inherited_thread_state,
             user_shell_override,
             parent_trace,
             environment_selections: environments,
