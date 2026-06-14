@@ -698,7 +698,7 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     let config = std::fs::read_to_string(&config_path)?;
     std::fs::write(
         &config_path,
-        format!("{config}\n[features]\ngoals = true\n"),
+        format!("{config}\n[features]\ngoals = true\ngoal_supervisor = false\n"),
     )?;
 
     let mut mcp = TestAppServer::builder()
@@ -845,7 +845,10 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
         2,
         "deferred goal should not issue a model request while forking"
     );
-
+    state_db
+        .thread_goals()
+        .replace_thread_goal_snapshot(&source_goal)
+        .await?;
     let forked_thread = forked_threads.pop().expect("empty-prefix fork");
     let forked_thread_id = ThreadId::from_string(&forked_thread.id)?;
     drop(mcp);

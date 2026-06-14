@@ -49,6 +49,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const FRODEX_AGENT_OWNERSHIP_NAMESPACE: &str = "frodex";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -1454,6 +1455,8 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "assign_task",
         "list_agents",
+        "adopt_agent",
+        "promote_agent",
     ]);
     assert_eq!(
         v1.namespace_function_names(MULTI_AGENT_V1_NAMESPACE),
@@ -1510,6 +1513,8 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "resume_agent",
         "assign_task",
         "close_agent",
+        "adopt_agent",
+        "promote_agent",
     ]);
     for tool_name in [
         "spawn_agent",
@@ -1547,6 +1552,12 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     for property in ["model", "reasoning_effort"] {
         assert!(spawn_agent_properties.contains_key(property));
     }
+    assert!(!spawn_agent_properties.contains_key("existing_thread_id"));
+    assert!(
+        !v2.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| name == "promote_agent")
+    );
     for property in ["agent_type", "service_tier"] {
         assert!(!spawn_agent_properties.contains_key(property));
     }
@@ -1555,6 +1566,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     assert!(spawn_agent_description.contains(
         "Note that passing `fork_turns=\"none\"` will not pass any surrounding context to the spawned subagent"
     ));
+    assert!(!spawn_agent_description.contains("existing_thread_id"));
 
     let direct_model_only = probe(|turn| {
         set_features(
@@ -1571,12 +1583,117 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
     })
     .await;
     direct_model_only.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
-    direct_model_only.assert_visible_lacks(&["spawn_agent", "send_message", "wait_agent"]);
+    direct_model_only.assert_visible_lacks(&[
+        "spawn_agent",
+        "send_message",
+        "wait_agent",
+        "adopt_agent",
+        "promote_agent",
+    ]);
     assert_eq!(
         direct_model_only
             .exposure(&ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "spawn_agent").to_string()),
         ToolExposure::DirectModelOnly
     );
+}
+
+#[tokio::test]
+async fn multi_agent_thread_adoption_tools_require_explicit_configuration() {
+    let disabled = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+    })
+    .await;
+
+    let ToolSpec::Namespace(disabled_namespace) = disabled.visible_spec(MULTI_AGENT_V2_NAMESPACE)
+    else {
+        panic!("expected the default multi-agent namespace");
+    };
+    assert!(
+        !disabled
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| matches!(name.as_str(), "adopt_agent" | "promote_agent"))
+    );
+    disabled.assert_visible_lacks(&[FRODEX_AGENT_OWNERSHIP_NAMESPACE]);
+    let Some(ResponsesApiNamespaceTool::Function(disabled_spawn)) =
+        disabled_namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
+            )
+        })
+    else {
+        panic!("ordinary agent spawning must remain enabled");
+    };
+    assert!(
+        !disabled_spawn
+            .parameters
+            .properties
+            .as_ref()
+            .expect("spawn_agent should use object params")
+            .contains_key("existing_thread_id")
+    );
+    assert!(!disabled_spawn.description.contains("existing_thread_id"));
+
+    let enabled = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        update_config(turn, |config| {
+            config.multi_agent_v2.enable_thread_adoption = true;
+        });
+    })
+    .await;
+
+    let ToolSpec::Namespace(enabled_namespace) = enabled.visible_spec(MULTI_AGENT_V2_NAMESPACE)
+    else {
+        panic!("expected the explicitly enabled multi-agent namespace");
+    };
+    assert!(
+        !enabled
+            .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+            .iter()
+            .any(|name| matches!(name.as_str(), "adopt_agent" | "promote_agent"))
+    );
+    assert_eq!(
+        enabled.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
+        disabled.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+    );
+    assert_eq!(
+        enabled.namespace_function_names(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+        &["adopt_agent".to_string(), "promote_agent".to_string()]
+    );
+    let Some(ResponsesApiNamespaceTool::Function(enabled_spawn)) =
+        enabled_namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "spawn_agent"
+            )
+        })
+    else {
+        panic!("explicit thread adoption must preserve agent spawning");
+    };
+    assert_eq!(enabled_spawn, disabled_spawn);
+    let ToolSpec::Namespace(frodex_namespace) =
+        enabled.visible_spec(FRODEX_AGENT_OWNERSHIP_NAMESPACE)
+    else {
+        panic!("expected the Frodex ownership namespace");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(adopt_agent)) =
+        frodex_namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "adopt_agent"
+            )
+        })
+    else {
+        panic!("explicit thread adoption must expose adopt_agent");
+    };
+    let adopt_properties = adopt_agent
+        .parameters
+        .properties
+        .as_ref()
+        .expect("adopt_agent should use object params");
+    assert!(adopt_properties.contains_key("existing_thread_id"));
+    assert_eq!(adopt_properties["message"].encrypted, None);
 }
 
 #[tokio::test]
