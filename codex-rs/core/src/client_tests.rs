@@ -1,8 +1,11 @@
 use super::AuthRequestTelemetryContext;
 use super::CompactConversationRequestSettings;
+use super::LastResponse;
 use super::ModelClient;
 use super::PendingUnauthorizedRetry;
 use super::Prompt;
+use super::ResponseContinuation;
+use super::ResponsesApiRequest;
 use super::UnauthorizedRecoveryExecution;
 use super::X_CODEX_INSTALLATION_ID_HEADER;
 use super::X_CODEX_PARENT_THREAD_ID_HEADER;
@@ -45,6 +48,8 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelsResponse;
@@ -432,6 +437,76 @@ fn output_message(id: &str, text: &str) -> ResponseItem {
     }
 }
 
+fn user_message_item(text: &str) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+fn reasoning_item(id: &str, text: &str) -> ResponseItem {
+    ResponseItem::Reasoning {
+        id: Some(codex_protocol::ResponseItemId::new(id)),
+        summary: vec![ReasoningItemReasoningSummary::SummaryText {
+            text: "summary".to_string(),
+        }],
+        content: Some(vec![ReasoningItemContent::ReasoningText {
+            text: text.to_string(),
+        }]),
+        encrypted_content: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+#[test]
+fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() {
+    let user_message = user_message_item("hello");
+    let old_reasoning = reasoning_item("rs-old", "old analysis");
+    let latest_reasoning = reasoning_item("rs-latest", "latest analysis");
+    let latest_message = output_message("msg-latest", "assistant output");
+    let response_continuation = ResponseContinuation {
+        request: ResponsesApiRequest {
+            model: "gpt-test".to_string(),
+            instructions: "base instructions".to_string(),
+            input: vec![user_message.clone(), old_reasoning],
+            tools: Some(
+                Arc::<serde_json::value::RawValue>::from(
+                    serde_json::value::RawValue::from_string("[]".to_string())
+                        .expect("valid tool JSON"),
+                )
+                .into(),
+            ),
+            tool_choice: "auto".to_string(),
+            parallel_tool_calls: false,
+            reasoning: None,
+            store: false,
+            stream: true,
+            stream_options: None,
+            include: Vec::new(),
+            service_tier: None,
+            prompt_cache_key: Some(ThreadId::new().to_string()),
+            text: None,
+            client_metadata: None,
+        },
+        last_response: LastResponse {
+            response_id: "parent-resp".to_string(),
+            items_added: vec![latest_reasoning.clone(), latest_message.clone()],
+        },
+    }
+    .for_fork();
+
+    assert_eq!(response_continuation.request.input, vec![user_message]);
+    assert_eq!(
+        response_continuation.last_response.items_added,
+        vec![latest_reasoning, latest_message]
+    );
+}
+
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
     let mut rollout = replay_bundle(temp.path())?;
     for _ in 0..50 {
@@ -486,7 +561,10 @@ fn build_subagent_headers_sets_other_subagent_label() {
 #[test]
 fn internal_session_prompt_cache_key_is_scoped_to_parent_thread() {
     let parent_thread_id = ThreadId::new();
-    let client = test_model_client(SessionSource::Internal(InternalSessionSource::Guardian));
+    let mut client = test_model_client(SessionSource::Internal(InternalSessionSource::Guardian));
+    Arc::get_mut(&mut client.state)
+        .expect("new client state is uniquely owned")
+        .prompt_cache_key_override = Some(parent_thread_id);
     let metadata = test_responses_metadata_for_client(
         &client,
         Some("turn-123"),
@@ -616,6 +694,8 @@ async fn dropped_response_stream_traces_cancelled_partial_output() -> anyhow::Re
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*client_state*/ None,
+        /*request*/ None,
     );
 
     let observed = stream
@@ -666,6 +746,8 @@ async fn response_stream_records_last_model_feedback_ids() {
         test_session_telemetry(),
         InferenceTraceAttempt::disabled(),
         test_model_provider(),
+        /*client_state*/ None,
+        /*request*/ None,
     );
 
     while stream.next().await.is_some() {}
@@ -850,6 +932,8 @@ async fn dropped_backpressured_response_stream_traces_cancelled_partial_output()
         test_session_telemetry(),
         attempt,
         test_model_provider(),
+        /*client_state*/ None,
+        /*request*/ None,
     );
 
     // Fill the mapper channel with non-terminal events, then yield one output
