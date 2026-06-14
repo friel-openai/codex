@@ -498,6 +498,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
 
     let remote_model = ModelInfo {
         slug: REMOTE_MODEL_SLUG.to_string(),
+        request_model: None,
         display_name: "Remote Test".to_string(),
         description: Some("A remote model that requires the test shell".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
@@ -766,6 +767,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
     let remote_instructions = "Use the remote instructions template only.";
     let remote_model = ModelInfo {
         slug: model.to_string(),
+        request_model: None,
         display_name: "Parallel Remote".to_string(),
         description: Some("A remote model with custom instructions".to_string()),
         default_reasoning_level: Some(ReasoningEffort::Medium),
@@ -1348,6 +1350,7 @@ fn test_remote_model_with_policy(
 ) -> ModelInfo {
     ModelInfo {
         slug: slug.to_string(),
+        request_model: None,
         display_name: format!("{slug} display"),
         description: Some(format!("{slug} description")),
         default_reasoning_level: Some(ReasoningEffort::Medium),
