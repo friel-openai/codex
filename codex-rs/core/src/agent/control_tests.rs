@@ -2125,7 +2125,11 @@ while True:
         .thread
         .inject_user_message_without_turn("parent seed".to_string())
         .await;
-    parent.thread.session.ensure_rollout_materialized().await;
+    parent
+        .thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
     parent.thread.session.flush_rollout().await?;
 
     // The child has no independently configured MCP servers. Its first request can only advertise
