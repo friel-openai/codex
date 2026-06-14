@@ -1282,7 +1282,10 @@ pub(crate) async fn built_tools(
     mcp: &codex_mcp::McpBinding,
     step_store: &ExtensionData,
 ) -> (Vec<ToolInfo>, Arc<ToolRouter>) {
-    let all_mcp_tools = mcp.tools().to_vec();
+    let inherited_mcp_tool_snapshot = sess.services.mcp_tool_snapshot.lock().await.clone();
+    let all_mcp_tools = inherited_mcp_tool_snapshot
+        .map(|snapshot| snapshot.tools)
+        .unwrap_or_else(|| mcp.tools().to_vec());
     let loaded_plugins = sess
         .services
         .plugins_manager
