@@ -73,6 +73,7 @@ fn overview_thread(
         thread_source: None,
         agent_nickname: None,
         agent_role: None,
+        agent_status: None,
         git_info: None,
         name: Some(name.to_string()),
         turns: Vec::new(),
