@@ -49,6 +49,7 @@ use tokio_util::sync::CancellationToken;
 
 #[derive(Clone, Default)]
 pub(crate) struct McpToolSnapshot {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) tools: HashMap<String, McpToolInfo>,
 }
 
