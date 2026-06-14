@@ -63,6 +63,7 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) next_internal_sub_id: AtomicU64,
@@ -512,6 +513,7 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         session_source: SessionSource,
         skills_service: Arc<SkillsService>,
         plugins_manager: Arc<PluginsManager>,
@@ -1242,6 +1244,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
                 git_enrichment_policy,
                 next_internal_sub_id: AtomicU64::new(0),
@@ -1333,7 +1336,13 @@ impl Session {
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
-            Box::pin(sess.record_initial_history(initial_history)).await?;
+            Box::pin(
+                sess.record_initial_history_with_fork_startup_items(
+                    initial_history,
+                    fork_startup_items,
+                ),
+            )
+            .await?;
             {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);

@@ -472,6 +472,7 @@ pub struct InMemoryThreadStore {
 #[derive(Default)]
 struct InMemoryThreadStoreState {
     calls: InMemoryThreadStoreCalls,
+    fail_appends: bool,
     created_threads: HashMap<ThreadId, CreateThreadParams>,
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
     metadata_updates: HashMap<ThreadId, ThreadMetadataPatch>,
@@ -501,6 +502,11 @@ impl InMemoryThreadStore {
     /// Returns the calls observed by this store.
     pub async fn calls(&self) -> InMemoryThreadStoreCalls {
         self.state.lock().await.calls.clone()
+    }
+
+    /// Makes non-empty appends fail. Intended for startup failure-path tests.
+    pub async fn fail_appends(&self) {
+        self.state.lock().await.fail_appends = true;
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -565,6 +571,12 @@ impl InMemoryThreadStore {
             return Ok(());
         }
         let mut state = self.state.lock().await;
+        if state.fail_appends {
+            state.calls.append_items += 1;
+            return Err(ThreadStoreError::Internal {
+                message: "injected append failure".to_string(),
+            });
+        }
         let history_mode = history_mode_from_state(&state, params.thread_id);
         let persisted_items = persisted_rollout_items(params.items.as_slice(), history_mode);
         if persisted_items.is_empty() {
