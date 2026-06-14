@@ -668,7 +668,8 @@ where
 #[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Maximum number of agent threads that can be open concurrently.
-    /// When unset, no limit is enforced.
+    /// With multi-agent v2, this excludes the root thread and overrides
+    /// `features.multi_agent_v2.max_concurrent_threads_per_session`.
     #[schemars(range(min = 1))]
     pub max_threads: Option<usize>,
     /// Maximum nesting depth allowed for spawned agent threads.
