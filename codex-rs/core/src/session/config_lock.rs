@@ -339,7 +339,7 @@ mod tests {
         assert!(matches!(
             multi_agent_v2,
             FeatureToml::Config(MultiAgentV2ConfigToml {
-                enabled: Some(false),
+                enabled: Some(_),
                 max_concurrent_threads_per_session: Some(_),
                 min_wait_timeout_ms: Some(_),
                 max_wait_timeout_ms: Some(_),
@@ -348,6 +348,14 @@ mod tests {
                 ..
             })
         ));
+        assert_eq!(
+            multi_agent_v2.enabled(),
+            Some(
+                sc.original_config_do_not_use
+                    .features
+                    .enabled(Feature::MultiAgentV2)
+            )
+        );
 
         assert_eq!(
             features.token_budget,
@@ -385,6 +393,40 @@ mod tests {
         );
 
         assert_eq!(lockfile.version, crate::config_lock::CONFIG_LOCK_VERSION);
+    }
+
+    #[tokio::test]
+    async fn lock_preserves_agents_max_concurrent_threads_with_multi_agent_v2() {
+        let mut sc = crate::session::tests::make_session_configuration_for_tests().await;
+        let mut config = (*sc.original_config_do_not_use).clone();
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow multi-agent v2");
+        config.agent_max_threads = Some(3);
+        config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+        sc.original_config_do_not_use = Arc::new(config);
+
+        let lockfile = sc.to_config_lockfile_toml().expect("lock should serialize");
+        assert_eq!(
+            lockfile
+                .config
+                .agents
+                .as_ref()
+                .and_then(|agents| agents.max_concurrent_threads_per_session),
+            Some(3)
+        );
+        assert!(matches!(
+            lockfile
+                .config
+                .features
+                .as_ref()
+                .and_then(|features| features.multi_agent_v2.as_ref()),
+            Some(FeatureToml::Config(MultiAgentV2ConfigToml {
+                max_concurrent_threads_per_session: Some(4),
+                ..
+            }))
+        ));
     }
 
     #[tokio::test]
