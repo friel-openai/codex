@@ -106,6 +106,7 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::models::format_allow_prefixes;
@@ -258,7 +259,10 @@ pub(crate) use handlers::thread_settings_applied_event;
 mod rollout_reconstruction_tests;
 
 const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
+const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
+    include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
+const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -279,8 +283,43 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
 }
 
+async fn load_root_agent_supervisor_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK,
+        "AGENTS.root-supervisor.md",
+    )
+    .await
+}
+
 pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+pub(crate) async fn load_supervisor_agent_prompt(codex_home: &Path) -> String {
+    load_agent_prompt_fallback(
+        codex_home,
+        SUPERVISOR_AGENT_PROMPT_FALLBACK,
+        "AGENTS.supervisor.md",
+    )
+    .await
+}
+
+fn history_contains_developer_text(
+    history: &crate::context_manager::ContextManager,
+    expected: &str,
+) -> bool {
+    history.raw_items().iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text == expected
+                    ))
+        )
+    })
 }
 
 pub(crate) async fn load_agent_role_prompt(
@@ -292,6 +331,11 @@ pub(crate) async fn load_agent_role_prompt(
     }
 
     let role_prompt = match session_source {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
+            if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
+        {
+            load_supervisor_agent_prompt(&config.codex_home).await
+        }
         SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
         SessionSource::Cli
         | SessionSource::VSCode
@@ -299,7 +343,19 @@ pub(crate) async fn load_agent_role_prompt(
         | SessionSource::Mcp
         | SessionSource::Custom(_)
         | SessionSource::Internal(_)
-        | SessionSource::Unknown => load_root_agent_prompt(&config.codex_home).await,
+        | SessionSource::Unknown => {
+            let mut prompt = load_root_agent_prompt(&config.codex_home).await;
+            if config.features.enabled(Feature::Goals)
+                && config.features.enabled(Feature::GoalSupervisor)
+            {
+                let supervisor_prompt = load_root_agent_supervisor_prompt(&config.codex_home).await;
+                if !supervisor_prompt.trim().is_empty() {
+                    prompt.push_str("\n\n");
+                    prompt.push_str(&supervisor_prompt);
+                }
+            }
+            prompt
+        }
     };
 
     if role_prompt.trim().is_empty() {
@@ -1808,6 +1864,16 @@ impl Session {
             .clone()
     }
 
+    pub(crate) async fn session_source(&self) -> SessionSource {
+        let state = self.state.lock().await;
+        state.session_configuration.session_source.clone()
+    }
+
+    pub(crate) async fn effective_session_config(&self) -> Config {
+        let state = self.state.lock().await;
+        Self::build_effective_session_config(&state.session_configuration)
+    }
+
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {
         self.services.agents_md_manager.user_instructions()
     }
@@ -2063,11 +2129,15 @@ impl Session {
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             agent_path: Some(child_agent_path),
+            agent_role,
             ..
         }) = &turn_context.session_source
         else {
             return;
         };
+        if agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) {
+            return;
+        }
 
         let status = match turn_context.terminal_error.lock().await.take() {
             Some(error) => {
