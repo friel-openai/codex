@@ -539,6 +539,9 @@
             "fast_mode": {
               "type": "boolean"
             },
+            "goal_supervisor": {
+              "type": "boolean"
+            },
             "goals": {
               "type": "boolean"
             },
@@ -1822,6 +1825,10 @@
           "maximum": 3600000.0,
           "minimum": 0.0,
           "type": "integer"
+        },
+        "enable_thread_adoption": {
+          "description": "Expose same-thread adoption and subagent promotion only when explicitly enabled.",
+          "type": "boolean"
         },
         "enabled": {
           "type": "boolean"
@@ -5119,6 +5126,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "goal_supervisor": {
           "type": "boolean"
         },
         "goals": {
