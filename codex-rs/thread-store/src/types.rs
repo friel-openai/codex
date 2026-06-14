@@ -762,6 +762,11 @@ impl GitInfoPatch {
 /// inner `Option`, where `Some(None)` clears the field.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ThreadMetadataPatch {
+    /// Whether failure to persist this patch in SQLite must fail the operation.
+    ///
+    /// This is an in-process durability requirement, not persisted metadata.
+    #[serde(skip)]
+    pub require_sqlite_write: bool,
     /// Replacement user-facing thread name.
     #[serde(
         default,
@@ -849,6 +854,7 @@ impl ThreadMetadataPatch {
     /// current value, including clear requests like `Some(None)`. Nested patches use the same
     /// semantics.
     pub fn merge(&mut self, next: Self) {
+        self.require_sqlite_write |= next.require_sqlite_write;
         if next.name.is_some() {
             self.name = next.name;
         }
