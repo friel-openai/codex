@@ -29,6 +29,8 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
+use codex_state::StateRuntime;
+use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use pretty_assertions::assert_eq;
@@ -240,6 +242,168 @@ async fn auto_compaction_remote_emits_started_and_completed_items() -> Result<()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn post_compaction_root_completes_before_goal_supervisor_starts() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = responses::start_mock_server().await;
+    let root_response = responses::sse(vec![
+        responses::ev_function_call(
+            "root-goal-call",
+            "exec_command",
+            &serde_json::json!({"cmd": "true"}).to_string(),
+        ),
+        responses::ev_completed_with_tokens("root-response", /*total_tokens*/ 70_000),
+    ]);
+    let root_continuation = responses::sse(vec![
+        responses::ev_function_call(
+            "root-continuation-call",
+            "exec_command",
+            &serde_json::json!({"cmd": "true"}).to_string(),
+        ),
+        responses::ev_completed_with_tokens("root-continuation", /*total_tokens*/ 10),
+    ]);
+    let root_final = responses::sse(vec![
+        responses::ev_assistant_message("root-final", "root continued after compaction"),
+        responses::ev_completed_with_tokens("root-final", /*total_tokens*/ 10),
+    ]);
+    let supervisor_response = responses::sse(vec![
+        responses::ev_function_call_with_namespace(
+            "supervisor-snooze",
+            "supervisor",
+            "snooze",
+            &serde_json::json!({"delay_seconds": 3_600}).to_string(),
+        ),
+        responses::ev_completed_with_tokens("supervisor-response", /*total_tokens*/ 10),
+    ]);
+    let (responses_log, mut continuation_gate) = responses::mount_gated_response_sequence(
+        &server,
+        vec![
+            responses::sse_response(root_response),
+            responses::sse_response(root_continuation),
+            responses::sse_response(root_final),
+            responses::sse_response(supervisor_response),
+        ],
+        /*gated_index*/ 1,
+    )
+    .await;
+    let compact_mock = responses::mount_compact_json_once(
+        &server,
+        serde_json::json!({
+            "output": [ResponseItem::Compaction {
+                id: None,
+                encrypted_content: "ENCRYPTED_COMPACTION_SUMMARY".to_string(),
+                internal_chat_message_metadata_passthrough: None,
+            }]
+        }),
+    )
+    .await;
+
+    let codex_home = TempDir::new()?;
+    compaction_config(&server.uri(), AUTO_COMPACT_LIMIT)
+        .disable_feature(Feature::RemoteCompactionV2)
+        .enable_feature(Feature::Goals)
+        .enable_feature(Feature::GoalSupervisor)
+        .with_provider_name("OpenAI")
+        .with_provider_config("requires_openai_auth = true")
+        .write(codex_home.path())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("access-chatgpt").plan_type("pro"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("OPENAI_API_KEY", None)])
+        .build()
+        .await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    let thread_id = start_thread(&mut mcp).await?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    state_db
+        .thread_goals()
+        .replace_thread_goal(
+            codex_protocol::ThreadId::from_string(&thread_id)?,
+            "continue only after the root turn completes",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+
+    let turn_request_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Trigger mid-turn compaction, then finish the root turn.".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let TurnStartResponse { turn } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(turn_request_id)).await??;
+
+    timeout(DEFAULT_READ_TIMEOUT, continuation_gate.wait_until_entered())
+        .await
+        .expect("root continuation should reach the response gate");
+    assert_eq!(
+        responses_log.requests().len(),
+        2,
+        "the goal supervisor must not start while root continuation is in flight"
+    );
+    assert_eq!(
+        compact_mock.requests().len(),
+        1,
+        "root continuation must start only after compaction completes"
+    );
+    continuation_gate.release();
+    wait_for_turn_completed(&mut mcp, &turn.id).await?;
+    wait_for_responses_request_count(&server, /*expected_count*/ 4).await?;
+
+    let response_requests = responses_log.requests();
+    let parent_thread_id = response_requests[0]
+        .header("thread-id")
+        .expect("root request should include thread-id");
+    assert_eq!(
+        response_requests[1].header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    assert_eq!(
+        response_requests[2].header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    assert_ne!(
+        response_requests[3].header("thread-id").as_deref(),
+        Some(parent_thread_id.as_str())
+    );
+    let initial_root_body = response_requests[0].body_json();
+    let continuation_root_body = response_requests[1].body_json();
+    let root_turn_id = initial_root_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("root request should include turn id");
+    assert_eq!(
+        continuation_root_body["client_metadata"]["turn_id"].as_str(),
+        Some(root_turn_id),
+        "root sampling after compaction should remain in the same turn"
+    );
+    assert_eq!(
+        response_requests[2].body_json()["client_metadata"]["turn_id"].as_str(),
+        Some(root_turn_id),
+        "final root sampling should remain in the same turn"
+    );
+    let supervisor_body = response_requests[3].body_json().to_string();
+    assert!(supervisor_body.contains("# Goal Supervisor Assignment"));
+    assert!(supervisor_body.contains("root continued after compaction"));
+    assert_eq!(compact_mock.requests().len(), 1);
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn thread_compact_start_triggers_compaction_and_returns_empty_response() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -419,6 +583,36 @@ async fn wait_for_turn_completed(mcp: &mut TestAppServer, turn_id: &str) -> Resu
             return Ok(());
         }
     }
+}
+
+async fn wait_for_responses_request_count(
+    server: &wiremock::MockServer,
+    expected_count: usize,
+) -> Result<()> {
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let Some(requests) = server.received_requests().await else {
+                anyhow::bail!("wiremock did not record requests");
+            };
+            let responses_request_count = requests
+                .iter()
+                .filter(|request| {
+                    request.method == "POST" && request.url.path().ends_with("/responses")
+                })
+                .count();
+            if responses_request_count == expected_count {
+                return Ok::<(), anyhow::Error>(());
+            }
+            if responses_request_count > expected_count {
+                anyhow::bail!(
+                    "expected exactly {expected_count} /responses requests, got {responses_request_count}"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    Ok(())
 }
 
 async fn wait_for_context_compaction_started(
