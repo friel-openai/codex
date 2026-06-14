@@ -70,7 +70,7 @@ impl ThreadGoalRequestProcessor {
         thread_id: ThreadId,
         thread: &CodexThread,
     ) {
-        if !self.config.features.enabled(Feature::Goals) {
+        if !thread.enabled(Feature::Goals) {
             return;
         }
         self.emit_thread_goal_snapshot(thread_id).await;
@@ -83,7 +83,7 @@ impl ThreadGoalRequestProcessor {
         &self,
         thread: &CodexThread,
     ) -> (bool, Option<StateDbHandle>) {
-        let emit_thread_goal_update = self.config.features.enabled(Feature::Goals);
+        let emit_thread_goal_update = thread.enabled(Feature::Goals);
         let thread_goal_state_db = if emit_thread_goal_update {
             if let Some(state_db) = thread.state_db() {
                 Some(state_db)
