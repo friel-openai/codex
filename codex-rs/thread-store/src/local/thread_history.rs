@@ -319,6 +319,8 @@ WHERE thread_id = ? AND turn_id = ?
                 .map_err(thread_history_error)?;
             }
             ThreadItem::HookPrompt { .. }
+            | ThreadItem::InterAgentCommunication { .. }
+            | ThreadItem::RawResponseItem { .. }
             | ThreadItem::Plan { .. }
             | ThreadItem::Reasoning { .. }
             | ThreadItem::CommandExecution { .. }

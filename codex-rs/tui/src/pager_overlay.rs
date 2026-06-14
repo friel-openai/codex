@@ -21,6 +21,7 @@ use std::sync::Arc;
 use crate::chatwidget::ActiveCellTranscriptKey;
 use crate::history_cell::HistoryCell;
 use crate::history_cell::UserHistoryCell;
+use crate::history_cell::user_message_uses_right_alignment;
 use crate::key_hint;
 use crate::key_hint::KeyBinding;
 use crate::key_hint::KeyBindingListExt;
@@ -28,7 +29,6 @@ use crate::keymap::PagerKeymap;
 use crate::render::Insets;
 use crate::render::renderable::InsetRenderable;
 use crate::render::renderable::Renderable;
-use crate::style::user_message_style;
 use crate::terminal_hyperlinks::HyperlinkLine;
 use crate::terminal_hyperlinks::mark_buffer_hyperlinks;
 use crate::terminal_hyperlinks::visible_lines;
@@ -393,14 +393,31 @@ impl Renderable for CachedRenderable {
 
 struct CellRenderable {
     cell: Arc<dyn HistoryCell>,
-    style: Style,
+    highlight_user: bool,
 }
 
 impl Renderable for CellRenderable {
     fn render(&self, area: Rect, buf: &mut Buffer) {
-        let hyperlink_lines = self.cell.transcript_hyperlink_lines(area.width);
+        let mut hyperlink_lines = self.cell.transcript_hyperlink_lines(area.width);
+        if self.highlight_user {
+            let uses_right_alignment = user_message_uses_right_alignment(area.width);
+            for line in &mut hyperlink_lines {
+                let alignment_prefix = uses_right_alignment
+                    && line.line.spans.first().is_some_and(|span| {
+                        span.style == Style::default()
+                            && span.content.chars().all(char::is_whitespace)
+                    });
+                for span in line
+                    .line
+                    .spans
+                    .iter_mut()
+                    .skip(usize::from(alignment_prefix))
+                {
+                    span.style = span.style.reversed();
+                }
+            }
+        }
         let p = Paragraph::new(Text::from(visible_lines(hyperlink_lines.clone())))
-            .style(self.style)
             .wrap(Wrap { trim: false });
         p.render(area, buf);
         mark_buffer_hyperlinks(buf, area, &hyperlink_lines, /*scroll_rows*/ 0);
@@ -493,16 +510,12 @@ impl TranscriptOverlay {
                 let mut cell_renderable = if c.as_any().is::<UserHistoryCell>() {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: if highlight_cell == Some(i) {
-                            user_message_style().reversed()
-                        } else {
-                            user_message_style()
-                        },
+                        highlight_user: highlight_cell == Some(i),
                     })) as Box<dyn Renderable>
                 } else {
                     Box::new(CachedRenderable::new(CellRenderable {
                         cell: c.clone(),
-                        style: Style::default(),
+                        highlight_user: false,
                     })) as Box<dyn Renderable>
                 };
                 if !c.is_stream_continuation() && i > 0 {

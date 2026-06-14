@@ -1,4 +1,9 @@
 use super::*;
+use codex_app_server_protocol::RawResponseItemCompletedNotification;
+use codex_app_server_protocol::build_turns_from_rollout_items;
+use codex_protocol::AgentPath;
+use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::RolloutItem;
 use pretty_assertions::assert_eq;
 
 const SAFETY_BUFFERING_HEADER_TEXT: &str =
@@ -477,6 +482,128 @@ async fn collab_spawn_end_shows_requested_model_and_effort() {
         rendered.contains("Spawned Robie [explorer] (gpt-5 high)"),
         "expected spawn line to include agent metadata and requested model, got {rendered:?}"
     );
+}
+
+#[tokio::test]
+async fn live_app_server_inter_agent_message_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ready for review".to_string(),
+        /*trigger_turn*/ true,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("live_app_server_inter_agent_message", rendered);
+}
+
+#[tokio::test]
+async fn replayed_inter_agent_message_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ready for review".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let turns =
+        build_turns_from_rollout_items(&[RolloutItem::InterAgentCommunication(communication)]);
+
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("replayed_inter_agent_message", rendered);
+}
+
+#[tokio::test]
+async fn replayed_legacy_raw_response_item_renders_agent_message_cell() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ready for review".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let turns = vec![Turn {
+        id: "turn-1".to_string(),
+        items_view: codex_app_server_protocol::TurnItemsView::Full,
+        items: vec![ThreadItem::RawResponseItem {
+            id: "legacy-item-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }],
+        status: TurnStatus::Completed,
+        error: None,
+        started_at: None,
+        completed_at: None,
+        duration_ms: None,
+    }];
+
+    chat.replay_thread_turns(turns, ReplayKind::ResumeInitialMessages);
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("replayed_inter_agent_message", rendered);
+}
+
+#[tokio::test]
+async fn subagent_completion_message_renders_status_without_payload_markup() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let notification = format!(
+        "<subagent_notification>\n{}\n</subagent_notification>",
+        serde_json::json!({
+            "agent_path": "/root/worker",
+            "status": codex_protocol::protocol::AgentStatus::Completed(
+                Some("analysis complete".to_string())
+            ),
+        })
+    );
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        notification,
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_response_input_item().into(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .map(|lines| lines_to_single_string(&lines))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_chatwidget_snapshot!("subagent_completion_message", rendered);
 }
 
 #[tokio::test]
