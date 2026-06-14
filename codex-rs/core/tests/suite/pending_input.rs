@@ -1242,8 +1242,29 @@ async fn user_input_does_not_preempt_after_reasoning_item() {
     server.shutdown().await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact() {
+#[test]
+fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact() {
+    let test_thread = std::thread::Builder::new()
+        .name("steered_user_input_waits_for_model_continuation_after_mid_turn_compact".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(32 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .expect("build queued-input test runtime")
+                .block_on(
+                    steered_user_input_waits_for_model_continuation_after_mid_turn_compact_impl(),
+                );
+        })
+        .expect("spawn queued-input test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact_impl() {
     let first_chunks = vec![
         chunk(ev_response_created("resp-1")),
         chunk(ev_function_call("call-1", "test_tool", "{}")),
@@ -1292,17 +1313,42 @@ async fn steered_user_input_waits_for_model_continuation_after_mid_turn_compact(
     ])
     .await;
 
-    let codex = test_codex()
+    let test = test_codex()
         .with_model("gpt-5.4")
         .with_config(|config| {
             config.model_provider.name = "OpenAI (test)".to_string();
             config.model_provider.supports_websockets = false;
             config.model_auto_compact_token_limit = Some(200);
+            config
+                .features
+                .enable(Feature::Goals)
+                .expect("enable goals");
+            config
+                .features
+                .enable(Feature::GoalSupervisor)
+                .expect("enable goal supervisor");
+            config
+                .features
+                .enable(Feature::Sqlite)
+                .expect("enable sqlite");
         })
         .build_with_streaming_server(&server)
         .await
-        .expect("build streaming Codex test session")
-        .codex;
+        .expect("build streaming Codex test session");
+    let thread_id = test.session_configured.thread_id;
+    let codex = Arc::clone(&test.codex);
+    codex
+        .state_db()
+        .expect("sqlite state db should be available")
+        .thread_goals()
+        .replace_thread_goal(
+            thread_id,
+            "Keep the active goal behind queued user input.",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await
+        .expect("create active goal");
 
     submit_user_input(&codex, "first prompt").await;
     submit_user_input(&codex, "second prompt").await;
