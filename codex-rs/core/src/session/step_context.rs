@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 
 use crate::agents_md::LoadedAgentsMd;
 use crate::environment_selection::TurnEnvironmentSnapshot;
@@ -17,6 +19,18 @@ pub(crate) struct StepContext {
     pub(crate) mcp: Arc<McpRuntimeSnapshot>,
     /// The canonical AGENTS.md value observed with this environment snapshot.
     pub(crate) loaded_agents_md: Option<Arc<LoadedAgentsMd>>,
+    /// Coordinates a tool-triggered context transition at a model sampling boundary.
+    context_transition: ContextTransitionState,
+}
+
+/// Request-scoped state for a tool that replaces the active turn context.
+///
+/// A transition tool must be the only tool call in its model response. Once it succeeds, the
+/// caller rebuilds the turn context before sending another model request.
+#[derive(Debug, Default)]
+struct ContextTransitionState {
+    mixed_with_sibling_tool: AtomicBool,
+    refresh_requested: AtomicBool,
 }
 
 impl StepContext {
@@ -33,6 +47,31 @@ impl StepContext {
             selected_capability_roots,
             mcp,
             loaded_agents_md,
+            context_transition: ContextTransitionState::default(),
         }
+    }
+
+    pub(crate) fn reject_context_transition_mixed_with_sibling_tool(&self) {
+        self.context_transition
+            .mixed_with_sibling_tool
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn context_transition_has_sibling_tool(&self) -> bool {
+        self.context_transition
+            .mixed_with_sibling_tool
+            .load(Ordering::Acquire)
+    }
+
+    pub(crate) fn request_turn_context_refresh(&self) {
+        self.context_transition
+            .refresh_requested
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn turn_context_refresh_requested(&self) -> bool {
+        self.context_transition
+            .refresh_requested
+            .load(Ordering::Acquire)
     }
 }

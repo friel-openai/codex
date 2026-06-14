@@ -28,20 +28,23 @@ fn build_permissions_update_item(
     }
 
     let prev = previous?;
-    if prev.permission_profile() == next.permission_profile()
-        && prev.approval_policy == next.approval_policy.value()
-    {
+    let next_workspace_roots = next.config.effective_workspace_roots();
+    #[allow(deprecated)]
+    let filesystem_context_unchanged = prev.cwd == next.cwd
+        && prev.workspace_roots.as_deref().unwrap_or_default() == next_workspace_roots.as_slice();
+    let permission_settings_unchanged = prev.permission_profile() == next.permission_profile()
+        && prev.approval_policy == next.approval_policy.value();
+    if permission_settings_unchanged && filesystem_context_unchanged {
         return None;
     }
 
-    Some(
+    let render_permissions = |permission_profile, approval_policy, cwd| {
         PermissionsInstructions::from_permission_profile(
-            &next.permission_profile,
-            next.approval_policy.value(),
+            permission_profile,
+            approval_policy,
             next.config.approvals_reviewer,
             exec_policy,
-            #[allow(deprecated)]
-            &next.cwd,
+            cwd,
             next.config
                 .features
                 .enabled(Feature::ExecPermissionApprovals),
@@ -49,8 +52,22 @@ fn build_permissions_update_item(
                 .features
                 .enabled(Feature::RequestPermissionsTool),
         )
-        .render(),
-    )
+        .render()
+    };
+    let next_permissions = render_permissions(
+        &next.permission_profile,
+        next.approval_policy.value(),
+        #[allow(deprecated)]
+        &next.cwd,
+    );
+    if permission_settings_unchanged
+        && render_permissions(&prev.permission_profile(), prev.approval_policy, &prev.cwd)
+            == next_permissions
+    {
+        return None;
+    }
+
+    Some(next_permissions)
 }
 
 fn build_collaboration_mode_update_item(
