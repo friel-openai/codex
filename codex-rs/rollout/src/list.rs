@@ -19,6 +19,8 @@ use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
+use crate::list_reference::ListingSummaryContext;
+use crate::list_reference::resolve_rollout_reference as resolve_rollout_reference_for_listing;
 use crate::protocol::EventMsg;
 use crate::state_db;
 use codex_file_search as file_search;
@@ -115,6 +117,15 @@ const MAX_SCAN_FILES: usize = 10000;
 const MAX_SUMMARY_REFERENCE_DEPTH: usize = 8;
 const HEAD_RECORD_LIMIT: usize = 10;
 const USER_EVENT_SCAN_LIMIT: usize = 200;
+const LIST_SUMMARY_MAX_REFERENCE_FILES: usize = 2;
+// Metadata reads are independent, but result processing remains in candidate order.
+const LIST_METADATA_READ_CONCURRENCY: usize = 64;
+
+/// Per-result limits and request-wide path cache used only while building list summaries.
+struct ListingSummaryState<'a> {
+    context: &'a mut ListingSummaryContext,
+    remaining_reference_files: usize,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSortKey {
@@ -225,6 +236,7 @@ struct FilesByCreatedAtVisitor<'a> {
     allowed_sources: &'a [SessionSource],
     provider_matcher: Option<&'a ProviderMatcher<'a>>,
     cwd_filters: Option<&'a [PathBuf]>,
+    summary_context: &'a mut ListingSummaryContext,
 }
 
 impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
@@ -256,6 +268,7 @@ impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
             self.provider_matcher,
             self.cwd_filters,
             updated_at,
+            self.summary_context,
         )
         .await
         {
@@ -496,6 +509,7 @@ async fn traverse_directories_for_paths_created(
     let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
     let mut scanned_files = 0usize;
     let mut more_matches_available = false;
+    let mut summary_context = ListingSummaryContext::default();
     let mut visitor = FilesByCreatedAtVisitor {
         items: &mut items,
         page_size,
@@ -504,6 +518,7 @@ async fn traverse_directories_for_paths_created(
         allowed_sources,
         provider_matcher,
         cwd_filters,
+        summary_context: &mut summary_context,
     };
     walk_rollout_files(&root, &mut scanned_files, &mut visitor).await?;
     more_matches_available = visitor.more_matches_available;
@@ -546,6 +561,7 @@ async fn traverse_directories_for_paths_updated(
     let mut scanned_files = 0usize;
     let mut anchor_state = AnchorState::new(anchor);
     let mut more_matches_available = false;
+    let mut summary_context = ListingSummaryContext::default();
 
     let mut candidates = collect_files_by_updated_at(&root, &mut scanned_files).await?;
     candidates.sort_by_key(|candidate| {
@@ -553,27 +569,35 @@ async fn traverse_directories_for_paths_updated(
         (Reverse(ts), Reverse(candidate.id))
     });
 
-    for candidate in candidates.into_iter() {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        if anchor_state.should_skip(ts, candidate.id) {
-            continue;
-        }
-        if items.len() == page_size {
-            more_matches_available = true;
-            break;
-        }
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            !anchor_state.should_skip(ts, candidate.id)
+        })
+        .collect::<Vec<_>>();
 
-        let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            candidate.path,
-            allowed_sources,
-            provider_matcher,
-            cwd_filters,
-            updated_at_fallback,
-        )
-        .await
-        {
-            items.push(item);
+    'batches: for candidates in candidates.chunks(LIST_METADATA_READ_CONCURRENCY) {
+        let session_meta = read_candidate_session_meta_batch(candidates).await?;
+        for (candidate, session_meta) in candidates.iter().zip(session_meta) {
+            if items.len() == page_size {
+                more_matches_available = true;
+                break 'batches;
+            }
+            let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
+            if let Some(item) = build_thread_item_with_session_meta(
+                candidate.path.clone(),
+                allowed_sources,
+                provider_matcher,
+                cwd_filters,
+                updated_at_fallback,
+                &mut summary_context,
+                session_meta,
+            )
+            .await
+            {
+                items.push(item);
+            }
         }
     }
 
@@ -607,6 +631,7 @@ async fn traverse_flat_paths_created(
     let mut scanned_files = 0usize;
     let mut anchor_state = AnchorState::new(anchor);
     let mut more_matches_available = false;
+    let mut summary_context = ListingSummaryContext::default();
 
     let files = collect_flat_rollout_files(&root, &mut scanned_files).await?;
     for (ts, id, path) in files.into_iter() {
@@ -627,6 +652,7 @@ async fn traverse_flat_paths_created(
             provider_matcher,
             cwd_filters,
             updated_at,
+            &mut summary_context,
         )
         .await
         {
@@ -664,6 +690,7 @@ async fn traverse_flat_paths_updated(
     let mut scanned_files = 0usize;
     let mut anchor_state = AnchorState::new(anchor);
     let mut more_matches_available = false;
+    let mut summary_context = ListingSummaryContext::default();
 
     let mut candidates = collect_flat_files_by_updated_at(&root, &mut scanned_files).await?;
     candidates.sort_by_key(|candidate| {
@@ -671,27 +698,35 @@ async fn traverse_flat_paths_updated(
         (Reverse(ts), Reverse(candidate.id))
     });
 
-    for candidate in candidates.into_iter() {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        if anchor_state.should_skip(ts, candidate.id) {
-            continue;
-        }
-        if items.len() == page_size {
-            more_matches_available = true;
-            break;
-        }
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
+            !anchor_state.should_skip(ts, candidate.id)
+        })
+        .collect::<Vec<_>>();
 
-        let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            candidate.path,
-            allowed_sources,
-            provider_matcher,
-            cwd_filters,
-            updated_at_fallback,
-        )
-        .await
-        {
-            items.push(item);
+    'batches: for candidates in candidates.chunks(LIST_METADATA_READ_CONCURRENCY) {
+        let session_meta = read_candidate_session_meta_batch(candidates).await?;
+        for (candidate, session_meta) in candidates.iter().zip(session_meta) {
+            if items.len() == page_size {
+                more_matches_available = true;
+                break 'batches;
+            }
+            let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
+            if let Some(item) = build_thread_item_with_session_meta(
+                candidate.path.clone(),
+                allowed_sources,
+                provider_matcher,
+                cwd_filters,
+                updated_at_fallback,
+                &mut summary_context,
+                session_meta,
+            )
+            .await
+            {
+                items.push(item);
+            }
         }
     }
 
@@ -750,10 +785,46 @@ async fn build_thread_item(
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
     updated_at: Option<String>,
+    summary_context: &mut ListingSummaryContext,
 ) -> Option<ThreadItem> {
+    let session_meta = read_first_session_meta_line(&path).await;
+    build_thread_item_with_session_meta(
+        path,
+        allowed_sources,
+        provider_matcher,
+        cwd_filters,
+        updated_at,
+        summary_context,
+        session_meta,
+    )
+    .await
+}
+
+async fn build_thread_item_with_session_meta(
+    path: PathBuf,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+    updated_at: Option<String>,
+    summary_context: &mut ListingSummaryContext,
+    session_meta: io::Result<SessionMetaLine>,
+) -> Option<ThreadItem> {
+    if let Ok(session_meta) = session_meta
+        && !session_meta_matches_filters(
+            &session_meta,
+            allowed_sources,
+            provider_matcher,
+            cwd_filters,
+        )
+    {
+        return None;
+    }
+
     // Read head and detect preview-bearing events; goal previews can appear before
     // the first normal user message.
-    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT)
+    #[cfg(test)]
+    crate::list_work::record_full_head_summary();
+    let summary = read_head_summary_for_listing(&path, HEAD_RECORD_LIMIT, summary_context)
         .await
         .unwrap_or_default();
     if !allowed_sources.is_empty()
@@ -825,18 +896,74 @@ async fn build_thread_item(
     None
 }
 
+fn session_meta_matches_filters(
+    session_meta: &SessionMetaLine,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+) -> bool {
+    if !allowed_sources.is_empty() && !allowed_sources.contains(&session_meta.meta.source) {
+        return false;
+    }
+    if let Some(matcher) = provider_matcher
+        && !matcher.matches(session_meta.meta.model_provider.as_deref())
+    {
+        return false;
+    }
+    if let Some(cwd_filters) = cwd_filters
+        && !cwd_filters.iter().any(|filter| {
+            path_utils::paths_match_after_normalization(&session_meta.meta.cwd, filter)
+        })
+    {
+        return false;
+    }
+    true
+}
+
+/// Reads only the first non-empty rollout record and requires it to be session metadata.
+pub(crate) async fn read_first_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> {
+    let mut lines = compression::open_rollout_line_reader(path).await?;
+    while let Some(line) = lines.next_line().await? {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let rollout_line = serde_json::from_str::<RolloutLine>(trimmed).map_err(|err| {
+            io::Error::other(format!(
+                "rollout at {} has invalid first record: {err}",
+                path.display()
+            ))
+        })?;
+        let RolloutItem::SessionMeta(session_meta) = rollout_line.item else {
+            return Err(io::Error::other(format!(
+                "rollout at {} does not start with session metadata",
+                path.display()
+            )));
+        };
+        #[cfg(test)]
+        crate::list_work::record_session_meta();
+        return Ok(session_meta);
+    }
+    Err(io::Error::other(format!(
+        "rollout at {} is empty",
+        path.display()
+    )))
+}
+
 /// Read a single rollout file into the same summary item shape used by thread listing.
 ///
 /// This is for callers that already resolved a rollout path and need the same
 /// metadata/preview extraction as list operations without scanning the whole
 /// sessions tree.
 pub async fn read_thread_item_from_rollout(path: PathBuf) -> Option<ThreadItem> {
+    let mut summary_context = ListingSummaryContext::default();
     build_thread_item(
         path,
         &[],
         /*provider_matcher*/ None,
         /*cwd_filters*/ None,
         /*updated_at*/ None,
+        &mut summary_context,
     )
     .await
 }
@@ -974,6 +1101,34 @@ struct ThreadCandidate {
     updated_at: Option<OffsetDateTime>,
 }
 
+/// Reads one metadata record per candidate concurrently and returns results in candidate order.
+async fn read_candidate_session_meta_batch(
+    candidates: &[ThreadCandidate],
+) -> io::Result<Vec<io::Result<SessionMetaLine>>> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let path = candidate.path.clone();
+        tasks.spawn(async move { (index, read_first_session_meta_line(path.as_path()).await) });
+    }
+
+    let mut results = Vec::with_capacity(candidates.len());
+    while let Some(result) = tasks.join_next().await {
+        let result = result.map_err(io::Error::other)?;
+        results.push(result);
+    }
+    results.sort_by_key(|(index, _)| *index);
+    Ok(results
+        .into_iter()
+        .map(|(_, result)| {
+            #[cfg(test)]
+            if result.is_ok() {
+                crate::list_work::record_session_meta();
+            }
+            result
+        })
+        .collect())
+}
+
 async fn collect_files_by_updated_at(
     root: &Path,
     scanned_files: &mut usize,
@@ -1098,6 +1253,26 @@ impl<'a> ProviderMatcher<'a> {
 async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
     read_head_summary_with_references(
         path, head_limit, /*reference_depth*/ 0, /*rollout_reference_depth*/ 0,
+        /*listing_state*/ None,
+    )
+    .await
+}
+
+async fn read_head_summary_for_listing(
+    path: &Path,
+    head_limit: usize,
+    context: &mut ListingSummaryContext,
+) -> io::Result<HeadTailSummary> {
+    let mut state = ListingSummaryState {
+        context,
+        remaining_reference_files: LIST_SUMMARY_MAX_REFERENCE_FILES,
+    };
+    read_head_summary_with_references(
+        path,
+        head_limit,
+        /*reference_depth*/ 0,
+        /*rollout_reference_depth*/ 0,
+        Some(&mut state),
     )
     .await
 }
@@ -1107,6 +1282,7 @@ async fn read_head_summary_with_references(
     head_limit: usize,
     reference_depth: usize,
     rollout_reference_depth: usize,
+    mut listing_state: Option<&mut ListingSummaryState<'_>>,
 ) -> io::Result<HeadTailSummary> {
     let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
@@ -1169,19 +1345,43 @@ async fn read_head_summary_with_references(
                 } else {
                     rollout_reference_depth + 1
                 };
-                let resolved_path = match codex_home_from_rollout_path(path) {
-                    Some(codex_home) => {
-                        resolve_rollout_reference_rollout_path(codex_home, &reference)
-                            .await
-                            .unwrap_or_else(|_| reference.rollout_path.clone())
+                let resolved_path = match listing_state.as_deref_mut() {
+                    Some(state) => {
+                        if state.remaining_reference_files == 0 {
+                            continue;
+                        }
+                        state.remaining_reference_files -= 1;
+                        let Some(codex_home) = codex_home_from_rollout_path(path) else {
+                            continue;
+                        };
+                        let Some(resolved_path) = resolve_rollout_reference_for_listing(
+                            codex_home,
+                            &reference,
+                            state.context,
+                        )
+                        .await?
+                        else {
+                            continue;
+                        };
+                        #[cfg(test)]
+                        crate::list_work::record_referenced_file();
+                        resolved_path
                     }
-                    None => reference.rollout_path.clone(),
+                    None => match codex_home_from_rollout_path(path) {
+                        Some(codex_home) => {
+                            resolve_rollout_reference_rollout_path(codex_home, &reference)
+                                .await
+                                .unwrap_or_else(|_| reference.rollout_path.clone())
+                        }
+                        None => reference.rollout_path.clone(),
+                    },
                 };
                 let referenced = Box::pin(read_head_summary_with_references(
                     resolved_path.as_path(),
                     head_limit,
                     reference_depth + 1,
                     next_rollout_reference_depth,
+                    listing_state.as_deref_mut(),
                 ))
                 .await
                 .unwrap_or_default();
@@ -1699,6 +1899,8 @@ async fn find_rollout_path_by_segment_id_in_subdir(
     thread_id: ThreadId,
     segment_id: SegmentId,
 ) -> io::Result<Option<PathBuf>> {
+    #[cfg(test)]
+    crate::list_work::record_compatibility_search();
     let root = codex_home.join(subdir);
     if !tokio::fs::try_exists(&root).await.unwrap_or(false) {
         return Ok(None);
@@ -1716,6 +1918,8 @@ async fn find_rollout_path_by_segment_id_in_subdir(
             }
         };
         while let Some(entry) = read_dir.next_entry().await? {
+            #[cfg(test)]
+            crate::list_work::record_compatibility_directory_entry();
             let path = entry.path();
             let file_type = entry.file_type().await?;
             if file_type.is_dir() {
@@ -1832,7 +2036,7 @@ pub async fn resolve_rollout_reference_rollout_path(
     Ok(rollout_path.to_path_buf())
 }
 
-fn rollout_path_for_timestamp_file(
+pub(crate) fn rollout_path_for_timestamp_file(
     codex_home: &Path,
     rollout_timestamp: &str,
     file_name: &str,
