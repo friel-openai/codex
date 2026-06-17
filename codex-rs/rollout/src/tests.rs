@@ -873,7 +873,7 @@ async fn thread_list_rejected_subagent_does_not_resolve_reference() {
 
     assert_eq!(page.items.len(), 50);
     assert!((5_050..=5_114).contains(&work.session_meta_records));
-    assert_eq!(work.full_head_summaries, 50);
+    assert!((50..=64).contains(&work.full_head_summaries));
     assert_eq!(work.referenced_files, 0);
     assert_eq!(work.compatibility_searches, 0);
     assert_eq!(work.compatibility_directory_entries, 0);

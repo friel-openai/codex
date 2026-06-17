@@ -23,6 +23,21 @@ struct ThreadListWorkRecorder {
     compatibility_directory_entries: AtomicUsize,
 }
 
+#[derive(Clone)]
+pub(crate) struct ThreadListWorkScope(Option<Arc<ThreadListWorkRecorder>>);
+
+impl ThreadListWorkScope {
+    pub(crate) async fn scope<F>(self, future: F) -> F::Output
+    where
+        F: Future,
+    {
+        match self.0 {
+            Some(recorder) => THREAD_LIST_WORK.scope(recorder, future).await,
+            None => future.await,
+        }
+    }
+}
+
 impl ThreadListWorkRecorder {
     fn snapshot(&self) -> ThreadListWork {
         ThreadListWork {
@@ -48,6 +63,10 @@ where
     let recorder = Arc::new(ThreadListWorkRecorder::default());
     let output = THREAD_LIST_WORK.scope(Arc::clone(&recorder), future).await;
     (output, recorder.snapshot())
+}
+
+pub(crate) fn capture_thread_list_work() -> ThreadListWorkScope {
+    ThreadListWorkScope(THREAD_LIST_WORK.try_with(Arc::clone).ok())
 }
 
 pub(crate) fn record_session_meta() {
