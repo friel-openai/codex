@@ -87,6 +87,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
@@ -437,6 +438,10 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
         panic!("expected session metadata in rollout");
     };
     assert_eq!(session_meta.meta.session_id, session_id);
+    assert!(
+        session_meta.meta.segment_id.is_some(),
+        "new rollout metadata should include a segment_id for durable references"
+    );
     let buffered_idx = text
         .find("buffered-event")
         .expect("buffered event in rollout");
