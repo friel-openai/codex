@@ -7,6 +7,9 @@ use codex_protocol::protocol::SessionSource;
 pub(crate) mod compression;
 pub(crate) mod config;
 pub(crate) mod list;
+pub(crate) mod list_reference;
+#[cfg(test)]
+pub(crate) mod list_work;
 pub(crate) mod metadata;
 pub(crate) mod policy;
 pub(crate) mod recorder;
@@ -23,6 +26,7 @@ pub(crate) use codex_protocol::protocol;
 
 pub const SESSIONS_SUBDIR: &str = "sessions";
 pub const ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
+pub const ROTATED_ROLLOUT_SEGMENTS_SUBDIR: &str = "rotated_rollout_segments";
 pub static INTERACTIVE_SESSION_SOURCES: LazyLock<Vec<SessionSource>> = LazyLock::new(|| {
     vec![
         SessionSource::Cli,
@@ -41,6 +45,7 @@ pub use compression::spawn_rollout_compression_worker;
 pub use config::Config;
 pub use config::RolloutConfig;
 pub use config::RolloutConfigView;
+pub use list::ArchivedThreadRolloutDisposition;
 pub use list::Cursor;
 pub use list::SortDirection;
 pub use list::ThreadItem;
@@ -48,7 +53,9 @@ pub use list::ThreadListConfig;
 pub use list::ThreadListLayout;
 pub use list::ThreadSortKey;
 pub use list::ThreadsPage;
+pub use list::classify_archived_thread_rollout;
 pub use list::find_archived_thread_path_by_id_str;
+pub use list::find_rollout_path_by_segment_id;
 pub use list::find_thread_path_by_id_str;
 #[deprecated(note = "use find_thread_path_by_id_str")]
 pub use list::find_thread_path_by_id_str as find_conversation_path_by_id_str;
@@ -58,6 +65,7 @@ pub use list::parse_cursor;
 pub use list::read_head_for_summary;
 pub use list::read_session_meta_line;
 pub use list::read_thread_item_from_rollout;
+pub use list::resolve_rollout_reference_rollout_path;
 pub use list::rollout_date_parts;
 pub use metadata::builder_from_items;
 pub use policy::is_persisted_rollout_item;

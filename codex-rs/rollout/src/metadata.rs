@@ -69,6 +69,7 @@ pub fn builder_from_items(
         RolloutItem::SessionMeta(meta_line) => Some(meta_line),
         RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::EventMsg(_) => None,
@@ -123,6 +124,7 @@ pub async fn extract_metadata_from_rollout(
             RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::EventMsg(_) => None,
@@ -218,11 +220,26 @@ pub(crate) async fn backfill_sessions_with_lease(
         }
         match collect_rollout_paths(&root).await {
             Ok(paths) => {
-                rollout_paths.extend(paths.into_iter().map(|path| BackfillRolloutPath {
-                    watermark: backfill_watermark_for_path(codex_home, &path),
-                    path,
-                    archived,
-                }));
+                for path in paths {
+                    if archived
+                        && matches!(
+                            crate::list::classify_archived_thread_rollout(
+                                codex_home,
+                                path.as_path(),
+                                Some(runtime),
+                            )
+                            .await,
+                            Ok(crate::list::ArchivedThreadRolloutDisposition::LegacyRotatedSegment { .. })
+                        )
+                    {
+                        continue;
+                    }
+                    rollout_paths.push(BackfillRolloutPath {
+                        watermark: backfill_watermark_for_path(codex_home, &path),
+                        path,
+                        archived,
+                    });
+                }
             }
             Err(err) => {
                 warn!(

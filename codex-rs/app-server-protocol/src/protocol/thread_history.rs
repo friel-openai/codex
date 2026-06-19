@@ -394,7 +394,9 @@ impl ThreadHistoryBuilder {
                         communication: communication.clone(),
                     });
             }
-            RolloutItem::TurnContext(_) | RolloutItem::SessionMeta(_) => {}
+            RolloutItem::RolloutReference(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::SessionMeta(_) => {}
         }
     }
 

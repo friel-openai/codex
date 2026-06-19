@@ -224,7 +224,10 @@ async fn find_locates_rollout_file_written_by_recorder() -> std::io::Result<()> 
 async fn find_archived_locates_rollout_file_by_id() {
     let home = TempDir::new().unwrap();
     let id = Uuid::new_v4();
-    let expected = write_minimal_rollout_with_id_in_subdir(home.path(), "archived_sessions", id);
+    let archived_sessions = home.path().join("archived_sessions");
+    std::fs::create_dir_all(&archived_sessions).unwrap();
+    let expected = archived_sessions.join(format!("rollout-2024-01-01T00-00-00-{id}.jsonl"));
+    write_minimal_rollout_with_id_at_path(&expected, id);
 
     let found = find_archived_thread_path_by_id_str(
         home.path(),
