@@ -230,6 +230,7 @@ fn rollout_item_type(item: &RolloutItem) -> String {
         RolloutItem::InterAgentCommunicationMetadata { .. } => {
             "inter_agent_communication_metadata".to_string()
         }
+        RolloutItem::RolloutReference(_) => "rollout_reference".to_string(),
         RolloutItem::Compacted(_) => "compacted".to_string(),
         RolloutItem::TurnContext(_) => "turn_context".to_string(),
         RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) => {

@@ -265,7 +265,9 @@ impl Session {
                     active_segment.counts_as_user_turn = true;
                 }
                 RolloutItem::InterAgentCommunicationMetadata { .. } => {}
-                RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => {}
+                RolloutItem::EventMsg(_)
+                | RolloutItem::RolloutReference(_)
+                | RolloutItem::SessionMeta(_) => {}
             }
 
             if base_replacement_history.is_some()
@@ -350,6 +352,7 @@ impl Session {
                     history.drop_last_n_user_turns(rollback.num_turns);
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::SessionMeta(_) => {}
             }

@@ -395,6 +395,7 @@ impl ThreadHistoryBuilder {
                     });
             }
             RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::SessionMeta(_) => {}
         }
