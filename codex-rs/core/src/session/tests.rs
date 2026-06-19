@@ -2753,6 +2753,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
         RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
         RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -2812,6 +2813,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     let persisted_item_id = resumed.history.iter().find_map(|item| match item {
         RolloutItem::ResponseItem(response_item) => response_item.id(),
         RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
@@ -4078,6 +4080,118 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
         .await
         .expect("load rollout path")
         .expect("thread should have rollout path")
+}
+
+#[tokio::test]
+async fn replace_compacted_history_rolls_over_local_segment_at_stable_path() {
+    let (mut sess, tc, _) = make_session_and_context_with_rx().await;
+    let world_state = Arc::new(build_world_state_from_turn_context(&sess, &tc).await);
+    let expected_world_state = world_state.snapshot();
+    let sess = Arc::get_mut(&mut sess).expect("session should not have additional references");
+    let old_rollout_path = attach_thread_persistence(sess).await;
+    sess.persist_rollout_items(&[
+        RolloutItem::ResponseItem(user_message("before compaction")),
+        RolloutItem::ResponseItem(assistant_message("before compaction answer")),
+    ])
+    .await;
+    sess.flush_rollout()
+        .await
+        .expect("pre-compaction rollout should flush");
+    let (old_items, _, _) = RolloutRecorder::load_rollout_items(old_rollout_path.as_path())
+        .await
+        .expect("load pre-compaction rollout segment");
+    let old_segment_id = old_items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
+        RolloutItem::RolloutReference(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::ResponseItem(_)
+        | RolloutItem::Compacted(_)
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::EventMsg(_) => None,
+    });
+    let old_segment_id = old_segment_id.expect("pre-compaction rollout should have segment id");
+    let replacement_history = vec![user_message("compacted summary")];
+
+    sess.replace_compacted_history(
+        &tc,
+        replacement_history.clone(),
+        Some(tc.to_turn_context_item()),
+        /*world_state_baseline*/ Some(world_state),
+        CompactedItem {
+            message: "compacted summary".to_string(),
+            replacement_history: Some(replacement_history.clone()),
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+        },
+    )
+    .await;
+
+    let new_rollout_path = sess
+        .current_rollout_path()
+        .await
+        .expect("load current rollout path")
+        .expect("rollout path after compaction");
+    assert_eq!(new_rollout_path, old_rollout_path);
+    let config = sess.get_config().await;
+    let rotated_old_rollout_path = config
+        .codex_home
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(sess.thread_id.to_string())
+        .join(old_segment_id.to_string())
+        .join(
+            old_rollout_path
+                .file_name()
+                .expect("old rollout path should have a file name"),
+        );
+    assert!(old_rollout_path.exists());
+    assert!(rotated_old_rollout_path.exists());
+    let old_rollout_timestamp = old_rollout_path
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+        .and_then(|file_name| file_name.strip_prefix("rollout-"))
+        .and_then(|file_name| file_name.strip_suffix(&format!("-{}.jsonl", sess.thread_id)))
+        .expect("old rollout timestamp");
+    let (new_items, new_thread_id, _) =
+        RolloutRecorder::load_rollout_items(new_rollout_path.as_path())
+            .await
+            .expect("load new rollout segment");
+    assert_eq!(new_thread_id, Some(sess.thread_id));
+    assert!(new_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.rollout_path.as_path() == rotated_old_rollout_path.as_path()
+                    && reference.thread_id == Some(sess.thread_id)
+                    && reference.rollout_timestamp.as_deref() == Some(old_rollout_timestamp)
+        )
+    }));
+    assert!(new_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(CompactedItem {
+                replacement_history: Some(history),
+                ..
+            }) if *history == replacement_history
+        )
+    }));
+
+    let replay_items = crate::thread_rollout_truncation::materialize_rollout_items_for_replay(
+        config.codex_home.as_path(),
+        &new_items,
+    )
+    .await;
+    let reconstructed = sess
+        .reconstruct_history_from_rollout(tc.as_ref(), &replay_items)
+        .await;
+    assert_eq!(reconstructed.history, replacement_history);
+    assert_eq!(
+        reconstructed.world_state_baseline,
+        Some(expected_world_state)
+    );
 }
 
 fn text_block(s: &str) -> serde_json::Value {

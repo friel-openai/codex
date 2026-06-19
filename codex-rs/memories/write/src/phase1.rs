@@ -414,6 +414,7 @@ mod job {
                 RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::EventMsg(_) => None,

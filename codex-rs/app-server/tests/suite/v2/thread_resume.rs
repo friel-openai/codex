@@ -56,12 +56,14 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::AgentPath;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::Personality;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::ContextCompactedEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -70,6 +72,7 @@ use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource as RolloutSessionSource;
@@ -79,6 +82,7 @@ use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 use codex_rollout::append_rollout_item_to_path;
@@ -120,6 +124,59 @@ const CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT: &str = "You are Codex, a coding a
 
 fn normalized_existing_path(path: impl AsRef<Path>) -> Result<PathBuf> {
     Ok(AbsolutePathBuf::from_absolute_path(path.as_ref().canonicalize()?)?.into_path_buf())
+}
+
+fn session_meta_rollout_item(
+    thread_id: ThreadId,
+    segment_id: Option<SegmentId>,
+    timestamp: &str,
+) -> RolloutItem {
+    RolloutItem::SessionMeta(SessionMetaLine {
+        meta: SessionMeta {
+            id: thread_id,
+            segment_id,
+            timestamp: timestamp.to_string(),
+            cwd: PathBuf::from("/"),
+            originator: "codex".to_string(),
+            cli_version: "0.0.0".to_string(),
+            source: RolloutSessionSource::Cli,
+            model_provider: Some("mock_provider".to_string()),
+            ..SessionMeta::default()
+        },
+        git: None,
+    })
+}
+
+fn user_message_item(text: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+        message: text.to_string(),
+        ..Default::default()
+    }))
+}
+
+fn user_response_item(text: &str) -> RolloutItem {
+    RolloutItem::ResponseItem(ResponseItem::Message {
+        id: None,
+        role: "user".to_string(),
+        content: vec![ContentItem::InputText {
+            text: text.to_string(),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    })
+}
+
+fn write_rollout_items(path: &Path, timestamp: &str, items: &[RolloutItem]) -> Result<()> {
+    let mut jsonl = String::new();
+    for item in items {
+        jsonl.push_str(&serde_json::to_string(&RolloutLine {
+            timestamp: timestamp.to_string(),
+            item: item.clone(),
+        })?);
+        jsonl.push('\n');
+    }
+    std::fs::write(path, jsonl)?;
+    Ok(())
 }
 
 async fn wait_for_responses_request_count(
@@ -1037,6 +1094,171 @@ fn append_resume_redaction_history(
         &rollout_file_path,
         format!("{persisted_rollout}{appended_rollout}\n"),
     )?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_resume_materializes_rollout_references_for_scrollback() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_assistant_message("msg-1", "Done"),
+            responses::ev_completed("resp-1"),
+        ]),
+    )
+    .await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let thread_id = ThreadId::new();
+    let thread_id_str = thread_id.to_string();
+    let old_ts = "2025-01-05T12-00-00";
+    let current_ts = "2025-01-05T12-05-00";
+    let old_rfc3339 = "2025-01-05T12:00:00Z";
+    let current_rfc3339 = "2025-01-05T12:05:00Z";
+    let active_old_path = rollout_path(codex_home.path(), old_ts, &thread_id_str);
+    let archived_old_path = codex_home
+        .path()
+        .join("archived_sessions")
+        .join(active_old_path.file_name().expect("old rollout file name"));
+    std::fs::create_dir_all(archived_old_path.parent().expect("archived rollout parent"))?;
+    let current_path = rollout_path(codex_home.path(), current_ts, &thread_id_str);
+    std::fs::create_dir_all(current_path.parent().expect("current rollout parent"))?;
+
+    let old_items = vec![
+        session_meta_rollout_item(thread_id, Some(SegmentId::new()), old_rfc3339),
+        user_message_item("before compaction"),
+        user_response_item("before compaction"),
+    ];
+    write_rollout_items(archived_old_path.as_path(), old_rfc3339, &old_items)?;
+
+    let current_items = vec![
+        session_meta_rollout_item(thread_id, Some(SegmentId::new()), current_rfc3339),
+        RolloutItem::RolloutReference(RolloutReferenceItem {
+            rollout_path: active_old_path,
+            thread_id: Some(thread_id),
+            rollout_timestamp: Some(old_ts.to_string()),
+            segment_id: None,
+            max_depth: 2,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        }),
+        RolloutItem::EventMsg(EventMsg::ContextCompacted(ContextCompactedEvent {})),
+        user_message_item("after compaction"),
+        user_response_item("after compaction"),
+    ];
+    write_rollout_items(current_path.as_path(), current_rfc3339, &current_items)?;
+
+    let mut mcp = TestAppServer::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id_str.clone(),
+            ..Default::default()
+        })
+        .await?;
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+
+    let user_messages: Vec<&str> = thread
+        .turns
+        .iter()
+        .flat_map(|turn| turn.items.iter())
+        .filter_map(|item| match item {
+            ThreadItem::UserMessage { content, .. } => {
+                content.iter().find_map(|input| match input {
+                    UserInput::Text { text, .. } => Some(text.as_str()),
+                    UserInput::Image { .. }
+                    | UserInput::LocalImage { .. }
+                    | UserInput::Skill { .. }
+                    | UserInput::Mention { .. } => None,
+                })
+            }
+            ThreadItem::AgentMessage { .. }
+            | ThreadItem::Reasoning { .. }
+            | ThreadItem::CommandExecution { .. }
+            | ThreadItem::FileChange { .. }
+            | ThreadItem::McpToolCall { .. }
+            | ThreadItem::WebSearch { .. }
+            | ThreadItem::ImageView { .. }
+            | ThreadItem::ImageGeneration { .. }
+            | ThreadItem::EnteredReviewMode { .. }
+            | ThreadItem::ExitedReviewMode { .. }
+            | ThreadItem::ContextCompaction { .. }
+            | ThreadItem::HookPrompt { .. }
+            | ThreadItem::CollabAgentToolCall { .. }
+            | ThreadItem::DynamicToolCall { .. }
+            | ThreadItem::Plan { .. }
+            | ThreadItem::SubAgentActivity { .. }
+            | ThreadItem::InterAgentCommunication { .. }
+            | ThreadItem::RawResponseItem { .. }
+            | ThreadItem::Sleep { .. } => None,
+        })
+        .collect();
+    assert_eq!(user_messages, vec!["before compaction", "after compaction"]);
+    assert!(
+        thread.turns.iter().any(|turn| {
+            turn.items
+                .iter()
+                .any(|item| matches!(item, ThreadItem::ContextCompaction { .. }))
+        }),
+        "resume scrollback should include the compaction marker from the current segment"
+    );
+
+    let turn_id = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id,
+            client_user_message_id: None,
+            input: vec![UserInput::Text {
+                text: "continue after compaction".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_id)),
+    )
+    .await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let replayed_user_messages: Vec<String> = response_mock
+        .single_request()
+        .message_input_texts("user")
+        .into_iter()
+        .filter(|text| {
+            [
+                "before compaction",
+                "after compaction",
+                "continue after compaction",
+            ]
+            .contains(&text.as_str())
+        })
+        .collect();
+    assert_eq!(
+        replayed_user_messages,
+        vec![
+            "before compaction".to_string(),
+            "after compaction".to_string(),
+            "continue after compaction".to_string(),
+        ]
+    );
+    assert!(
+        std::fs::read_to_string(current_path)?.contains("continue after compaction"),
+        "the first resumed turn should append to the current segment"
+    );
     Ok(())
 }
 
@@ -2155,6 +2377,7 @@ stream_max_retries = 0
     let session_meta = SessionMeta {
         session_id: conversation_id.into(),
         id: conversation_id,
+        segment_id: None,
         forked_from_id: None,
         parent_thread_id: None,
         timestamp: "2025-01-05T12:00:00Z".to_string(),

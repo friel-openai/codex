@@ -16,6 +16,7 @@ use std::time::Duration;
 use strum_macros::EnumIter;
 
 use crate::AgentPath;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
@@ -2661,6 +2662,7 @@ impl InitialHistory {
             .find_map(|item| match item {
                 RolloutItem::TurnContext(turn_context) => Some(turn_context),
                 RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -2997,6 +2999,7 @@ fn multi_agent_version_from_items(
         items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -3037,6 +3040,8 @@ impl SessionContextWindow {
 pub struct SessionMeta {
     pub session_id: SessionId,
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3090,6 +3095,7 @@ impl Default for SessionMeta {
         SessionMeta {
             session_id: id.into(),
             id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: String::new(),
@@ -3150,10 +3156,35 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
+    #[serde(alias = "fork_reference")]
+    RolloutReference(RolloutReferenceItem),
     ResponseItem(ResponseItem),
     /// Legacy delivery item reconstructed as a model-visible `agent_message`.
     InterAgentCommunication(InterAgentCommunication),
