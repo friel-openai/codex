@@ -4,12 +4,17 @@ use std::collections::HashSet;
 use std::fs;
 use std::fs::File;
 use std::io::Error as IoError;
+use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
+use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
 
 use chrono::SecondsFormat;
+use codex_protocol::SegmentId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -33,6 +38,7 @@ use tracing::warn;
 use super::ARCHIVED_SESSIONS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
+use super::list::ArchivedThreadRolloutDisposition;
 use super::list::Cursor;
 use super::list::SortDirection;
 use super::list::ThreadItem;
@@ -95,6 +101,12 @@ pub enum RolloutRecorderParams {
         selected_capability_roots: Vec<SelectedCapabilityRoot>,
         multi_agent_version: Option<MultiAgentVersion>,
         initial_window_id: Option<String>,
+    },
+    CreateAtPath {
+        path: PathBuf,
+        session_meta: Box<SessionMeta>,
+        base_instructions: BaseInstructions,
+        dynamic_tools: Vec<DynamicToolSpec>,
     },
     Resume {
         path: PathBuf,
@@ -535,6 +547,20 @@ impl RolloutRecorder {
         )
         .await;
         if let Some(db_page) = db_page {
+            if archived {
+                repair_legacy_rotated_archived_rows(
+                    codex_home,
+                    state_db_ctx.as_deref(),
+                    &db_page.items,
+                )
+                .await?;
+                let page = page_from_filesystem_scan(fs_page, sort_direction, page_size, sort_key);
+                return Ok(fill_missing_thread_item_metadata_from_state_db(
+                    state_db_ctx.as_deref(),
+                    page,
+                )
+                .await);
+            }
             if search_term.is_some() && (!db_page.items.is_empty() || cursor.is_some()) {
                 for item in &db_page.items {
                     state_db::reconcile_rollout(
@@ -769,6 +795,7 @@ impl RolloutRecorder {
                 let session_meta = SessionMeta {
                     session_id,
                     id: thread_id,
+                    segment_id: Some(SegmentId::new()),
                     forked_from_id,
                     parent_thread_id,
                     timestamp,
@@ -795,15 +822,33 @@ impl RolloutRecorder {
 
                 (None, Some(log_file_info), path, Some(session_meta))
             }
+            RolloutRecorderParams::CreateAtPath {
+                path,
+                session_meta,
+                base_instructions,
+                dynamic_tools,
+            } => {
+                let mut session_meta = *session_meta;
+                let log_file_info = LogFileInfo {
+                    path: path.clone(),
+                    conversation_id: session_meta.id,
+                    timestamp: OffsetDateTime::now_utc(),
+                };
+                session_meta.segment_id = Some(SegmentId::new());
+                session_meta.cwd = config.cwd().to_path_buf();
+                session_meta.cli_version = env!("CARGO_PKG_VERSION").to_string();
+                session_meta.model_provider = Some(config.model_provider_id().to_string());
+                session_meta.base_instructions = Some(base_instructions);
+                session_meta.dynamic_tools =
+                    (!dynamic_tools.is_empty()).then_some(dynamic_tools);
+                session_meta.memory_mode =
+                    (!config.generate_memories()).then_some("disabled".to_string());
+                (None, Some(log_file_info), path, Some(session_meta))
+            }
             RolloutRecorderParams::Resume { path } => {
                 let path = compression::materialize_rollout_for_append(path.as_path()).await?;
                 (
-                    Some(
-                        tokio::fs::OpenOptions::new()
-                            .append(true)
-                            .open(&path)
-                            .await?,
-                    ),
+                    Some(tokio::fs::File::from_std(open_existing_log_file(&path)?)),
                     None,
                     path,
                     None,
@@ -1270,20 +1315,64 @@ async fn list_threads_from_files_desc_unfiltered(
 ) -> std::io::Result<ThreadsPage> {
     if archived {
         let root = codex_home.join(ARCHIVED_SESSIONS_SUBDIR);
-        get_threads_in_root(
-            root,
-            page_size,
-            cursor,
-            sort_key,
-            ThreadListConfig {
-                allowed_sources,
-                model_providers,
-                cwd_filters,
-                default_provider,
-                layout: ThreadListLayout::Flat,
-            },
-        )
-        .await
+        let mut canonical_items = Vec::with_capacity(page_size);
+        let mut num_scanned_files = 0usize;
+        let mut reached_scan_cap = false;
+        let mut page_cursor = cursor.cloned();
+
+        loop {
+            let page = get_threads_in_root(
+                root.clone(),
+                page_size,
+                page_cursor.as_ref(),
+                sort_key,
+                ThreadListConfig {
+                    allowed_sources,
+                    model_providers,
+                    cwd_filters,
+                    default_provider,
+                    layout: ThreadListLayout::Flat,
+                },
+            )
+            .await?;
+            num_scanned_files = num_scanned_files.saturating_add(page.num_scanned_files);
+            reached_scan_cap |= page.reached_scan_cap;
+            for item in page.items {
+                if matches!(
+                    super::list::classify_archived_thread_rollout(
+                        codex_home,
+                        item.path.as_path(),
+                        /*state_db_ctx*/ None,
+                    )
+                    .await?,
+                    ArchivedThreadRolloutDisposition::CanonicalArchivedThread
+                ) {
+                    canonical_items.push(item);
+                    if canonical_items.len() == page_size {
+                        break;
+                    }
+                }
+            }
+            page_cursor = page.next_cursor;
+            if canonical_items.len() == page_size || page_cursor.is_none() || reached_scan_cap {
+                break;
+            }
+        }
+
+        let more_matches_available = page_cursor.is_some() || reached_scan_cap;
+        let next_cursor = if more_matches_available {
+            canonical_items
+                .last()
+                .and_then(|item| cursor_from_thread_item(item, sort_key))
+        } else {
+            None
+        };
+        Ok(ThreadsPage {
+            items: canonical_items,
+            next_cursor,
+            num_scanned_files,
+            reached_scan_cap,
+        })
     } else {
         get_threads(
             codex_home,
@@ -1387,6 +1476,35 @@ async fn list_threads_from_files_asc(
     })
 }
 
+async fn repair_legacy_rotated_archived_rows(
+    codex_home: &Path,
+    state_db_ctx: Option<&codex_state::StateRuntime>,
+    items: &[codex_state::ThreadMetadata],
+) -> std::io::Result<()> {
+    for item in items {
+        let ArchivedThreadRolloutDisposition::LegacyRotatedSegment { live_rollout_path } =
+            super::list::classify_archived_thread_rollout(
+                codex_home,
+                item.rollout_path.as_path(),
+                state_db_ctx,
+            )
+            .await?
+        else {
+            continue;
+        };
+        if let Some(live_rollout_path) = live_rollout_path {
+            state_db::read_repair_rollout_path(
+                state_db_ctx,
+                Some(item.id),
+                Some(false),
+                live_rollout_path.as_path(),
+            )
+            .await;
+        }
+    }
+    Ok(())
+}
+
 async fn filter_thread_items_by_search_term(
     codex_home: &Path,
     items: &mut Vec<ThreadItem>,
@@ -1465,28 +1583,43 @@ fn precompute_log_file_info(
     // Resolve ~/.codex/sessions/YYYY/MM/DD path.
     let timestamp = OffsetDateTime::now_local()
         .map_err(|e| IoError::other(format!("failed to get local time: {e}")))?;
-    let mut dir = config.codex_home().to_path_buf();
-    dir.push(SESSIONS_SUBDIR);
-    dir.push(timestamp.year().to_string());
-    dir.push(format!("{:02}", u8::from(timestamp.month())));
-    dir.push(format!("{:02}", timestamp.day()));
 
     // Custom format for YYYY-MM-DDThh-mm-ss. Use `-` instead of `:` for
     // compatibility with filesystems that do not allow colons in filenames.
     let format: &[FormatItem] =
         format_description!("[year]-[month]-[day]T[hour]-[minute]-[second]");
-    let date_str = timestamp
-        .format(format)
-        .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
-
-    let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
-
-    let path = dir.join(filename);
+    let mut selected_timestamp = timestamp;
+    let mut path = None;
+    for offset_seconds in 0..60 {
+        let candidate_timestamp = timestamp
+            .checked_add(time::Duration::seconds(offset_seconds))
+            .ok_or_else(|| IoError::other("failed to compute rollout timestamp"))?;
+        let mut dir = config.codex_home().to_path_buf();
+        dir.push(SESSIONS_SUBDIR);
+        dir.push(candidate_timestamp.year().to_string());
+        dir.push(format!("{:02}", u8::from(candidate_timestamp.month())));
+        dir.push(format!("{:02}", candidate_timestamp.day()));
+        let date_str = candidate_timestamp
+            .format(format)
+            .map_err(|e| IoError::other(format!("failed to format timestamp: {e}")))?;
+        let filename = format!("rollout-{date_str}-{conversation_id}.jsonl");
+        let candidate_path = dir.join(filename);
+        if !candidate_path.exists() {
+            selected_timestamp = candidate_timestamp;
+            path = Some(candidate_path);
+            break;
+        }
+    }
+    let path = path.ok_or_else(|| {
+        IoError::other(format!(
+            "failed to find an unused rollout path for thread {conversation_id}"
+        ))
+    })?;
 
     Ok(LogFileInfo {
         path,
         conversation_id,
-        timestamp,
+        timestamp: selected_timestamp,
     })
 }
 
@@ -1499,10 +1632,38 @@ fn open_log_file(path: &Path) -> std::io::Result<File> {
         )));
     };
     fs::create_dir_all(parent)?;
-    std::fs::OpenOptions::new()
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .append(true)
         .create(true)
-        .open(path)
+        .open(path)?;
+    ensure_jsonl_append_boundary(&mut file)?;
+    Ok(file)
+}
+
+fn open_existing_log_file(path: &Path) -> std::io::Result<File> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .append(true)
+        .open(path)?;
+    ensure_jsonl_append_boundary(&mut file)?;
+    Ok(file)
+}
+
+/// Keep a failed partial write on its own invalid line so a retry starts at a JSONL boundary.
+fn ensure_jsonl_append_boundary(file: &mut File) -> std::io::Result<()> {
+    if file.metadata()?.len() == 0 {
+        return Ok(());
+    }
+
+    file.seek(SeekFrom::End(-1))?;
+    let mut last_byte = [0u8; 1];
+    file.read_exact(&mut last_byte)?;
+    if last_byte[0] != b'\n' {
+        file.write_all(b"\n")?;
+        file.flush()?;
+    }
+    Ok(())
 }
 
 /// Mutable state owned by the background rollout writer.
@@ -1752,10 +1913,7 @@ pub async fn append_rollout_item_to_path(
     item: &RolloutItem,
 ) -> std::io::Result<()> {
     let rollout_path = compression::materialize_rollout_for_append(rollout_path).await?;
-    let file = tokio::fs::OpenOptions::new()
-        .append(true)
-        .open(rollout_path)
-        .await?;
+    let file = tokio::fs::File::from_std(open_existing_log_file(&rollout_path)?);
     let mut writer = JsonlWriter { file };
     writer.write_rollout_item(item).await
 }
@@ -1887,6 +2045,7 @@ async fn resume_candidate_matches_cwd(
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(&turn_context.cwd),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

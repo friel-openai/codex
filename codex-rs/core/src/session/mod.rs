@@ -45,6 +45,7 @@ use crate::session::turn_context::TurnEnvironment;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::skills::SkillRenderSideEffects;
 use crate::skills_load_input_from_config;
+use crate::thread_rollout_truncation::materialize_rollout_items_for_replay;
 use crate::turn_metadata::TurnMetadataState;
 use crate::turn_timing::now_unix_timestamp_ms;
 use async_channel::Receiver;
@@ -105,6 +106,7 @@ use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::ActivePermissionProfile;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::SandboxEnforcement;
 use codex_protocol::models::format_allow_prefixes;
@@ -113,6 +115,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AdditionalContextEntry;
+use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -153,6 +156,7 @@ use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::RotateThreadSegmentParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
@@ -275,6 +279,23 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
 
 pub(crate) async fn load_subagent_prompt(codex_home: &Path) -> String {
     load_agent_prompt_fallback(codex_home, SUBAGENT_PROMPT_FALLBACK, "AGENTS.subagent.md").await
+}
+
+fn history_contains_developer_text(
+    history: &crate::context_manager::ContextManager,
+    expected: &str,
+) -> bool {
+    history.raw_items().iter().any(|item| {
+        matches!(
+            item,
+            ResponseItem::Message { role, content, .. }
+                if role == "developer"
+                    && content.iter().any(|content_item| matches!(
+                        content_item,
+                        ContentItem::InputText { text } if text == expected
+                    ))
+        )
+    })
 }
 
 pub(crate) async fn load_agent_role_prompt(
@@ -1360,7 +1381,27 @@ impl Session {
                 .session_source
                 .is_non_root_agent()
         };
-        let has_prior_user_turns = initial_history_has_prior_user_turns(&conversation_history);
+        let codex_home = {
+            let state = self.state.lock().await;
+            state.session_configuration.codex_home().clone()
+        };
+        let replay_rollout_items = if conversation_history
+            .scan_rollout_items(|item| matches!(item, RolloutItem::RolloutReference(_)))
+        {
+            Some(
+                materialize_rollout_items_for_replay(
+                    codex_home.as_path(),
+                    conversation_history.get_rollout_items(),
+                )
+                .await,
+            )
+        } else {
+            None
+        };
+        let has_prior_user_turns = replay_rollout_items.as_ref().map_or_else(
+            || initial_history_has_prior_user_turns(&conversation_history),
+            |items| initial_history_has_prior_user_turns(&InitialHistory::Forked(items.clone())),
+        );
         {
             let mut state = self.state.lock().await;
             state.set_next_turn_is_first(!has_prior_user_turns);
@@ -1374,7 +1415,8 @@ impl Session {
             }
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
-                let rollout_items = resumed_history.history;
+                let rollout_items = replay_rollout_items
+                    .unwrap_or_else(|| resumed_history.history.as_ref().clone());
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
@@ -1421,12 +1463,21 @@ impl Session {
                         }
                     }
                 }
-                self.apply_rollout_reconstruction(&turn_context, &rollout_items)
+                let mut replay_rollout_items =
+                    replay_rollout_items.unwrap_or_else(|| rollout_items.clone());
+                if turn_context.config.features.enabled(Feature::ItemIds) {
+                    for rollout_item in &mut replay_rollout_items {
+                        if let RolloutItem::ResponseItem(response_item) = rollout_item {
+                            Self::assign_missing_response_item_id(response_item);
+                        }
+                    }
+                }
+                self.apply_rollout_reconstruction(&turn_context, &replay_rollout_items)
                     .await;
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&replay_rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
@@ -3059,20 +3110,68 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut rollout_items = vec![RolloutItem::Compacted(compacted_item)];
         // Persist the baseline after the replacement history that established it.
         if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
-                .await;
+            rollout_items.push(RolloutItem::WorldState(world_state_item));
         }
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            rollout_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        if !self
+            .rotate_rollout_segment_after_compaction(rollout_items.clone())
+            .await
+        {
+            self.persist_rollout_items(&rollout_items).await;
         }
         {
             let mut state = self.state.lock().await;
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
+        }
+    }
+
+    async fn rotate_rollout_segment_after_compaction(
+        &self,
+        initial_items: Vec<RolloutItem>,
+    ) -> bool {
+        let Some(live_thread) = self.live_thread() else {
+            return false;
+        };
+        let params = {
+            let state = self.state.lock().await;
+            let session_configuration = &state.session_configuration;
+            RotateThreadSegmentParams {
+                source: session_configuration.session_source.clone(),
+                base_instructions: BaseInstructions {
+                    text: session_configuration.base_instructions.clone(),
+                },
+                dynamic_tools: session_configuration.dynamic_tools.clone(),
+                metadata: ThreadPersistenceMetadata {
+                    cwd: Some(session_configuration.cwd().to_path_buf()),
+                    model_provider: session_configuration
+                        .original_config_do_not_use
+                        .model_provider_id
+                        .clone(),
+                    memory_mode: if session_configuration
+                        .original_config_do_not_use
+                        .memories
+                        .generate_memories
+                    {
+                        ThreadMemoryMode::Enabled
+                    } else {
+                        ThreadMemoryMode::Disabled
+                    },
+                },
+                initial_items,
+                previous_segment_reference_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            }
+        };
+        match live_thread.rotate_local_segment(params).await {
+            Ok(rotated) => rotated,
+            Err(err) => {
+                warn!("failed to rotate rollout segment after compaction: {err:#}");
+                false
+            }
         }
     }
 
@@ -3202,6 +3301,7 @@ impl Session {
             base_instructions,
             session_source,
             auto_compact_window_ids,
+            history,
         ) = {
             let state = self.state.lock().await;
             (
@@ -3211,6 +3311,7 @@ impl Session {
                 state.session_configuration.base_instructions.clone(),
                 state.session_configuration.session_source.clone(),
                 state.auto_compact_window_ids(),
+                state.history.clone(),
             )
         };
         if let Some(model_switch_message) =
@@ -3223,6 +3324,7 @@ impl Session {
         }
         if let Some(role_prompt) =
             load_agent_role_prompt(&turn_context.config, &session_source).await
+            && !history_contains_developer_text(&history, &role_prompt)
         {
             developer_sections.push(role_prompt);
         }

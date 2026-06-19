@@ -1237,6 +1237,7 @@ pub(super) fn extract_memory_mode(items: &[RolloutItem]) -> Option<String> {
         RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
@@ -2148,6 +2149,7 @@ mod tests {
             meta: SessionMeta {
                 session_id: thread_id.into(),
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: metadata.created_at.to_rfc3339(),
@@ -2212,6 +2214,7 @@ mod tests {
             meta: SessionMeta {
                 session_id: thread_id.into(),
                 id: thread_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: created_at,

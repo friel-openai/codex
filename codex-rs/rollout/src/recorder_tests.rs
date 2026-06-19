@@ -87,6 +87,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
@@ -223,6 +224,40 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
         items[1],
         RolloutItem::ResponseItem(ResponseItem::Message { .. })
     ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reopening_rollout_separates_partial_line_from_next_record() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let partial_record = r#"{"timestamp":"2026-06-23T12:00:00Z","type":"response_item""#;
+    fs::write(&rollout_path, partial_record)?;
+
+    let file = open_existing_log_file(&rollout_path)?;
+    let mut writer = JsonlWriter {
+        file: tokio::fs::File::from_std(file),
+    };
+    writer
+        .write_rollout_item(&RolloutItem::EventMsg(EventMsg::AgentMessage(
+            AgentMessageEvent {
+                message: "record-after-reopen".to_string(),
+                phase: None,
+                memory_citation: None,
+            },
+        )))
+        .await?;
+
+    let text = fs::read_to_string(&rollout_path)?;
+    let lines = text.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], partial_record);
+    let appended: RolloutLine = serde_json::from_str(lines[1])?;
+    let RolloutItem::EventMsg(EventMsg::AgentMessage(event)) = appended.item else {
+        panic!("expected appended agent message");
+    };
+    assert_eq!(event.message, "record-after-reopen");
 
     Ok(())
 }
@@ -448,6 +483,10 @@ async fn recorder_materializes_on_flush_with_pending_items() -> std::io::Result<
             .context_window
             .map(|window| window.window_id),
         Some(initial_window_id)
+    );
+    assert!(
+        session_meta.meta.segment_id.is_some(),
+        "new rollout metadata should include a segment_id for durable references"
     );
     let buffered_idx = text
         .find("buffered-event")

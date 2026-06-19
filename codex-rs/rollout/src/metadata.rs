@@ -70,6 +70,7 @@ pub fn builder_from_items(
         RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::Compacted(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
@@ -126,6 +127,7 @@ pub async fn extract_metadata_from_rollout(
             RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
@@ -222,11 +224,26 @@ pub(crate) async fn backfill_sessions_with_lease(
         }
         match collect_rollout_paths(&root).await {
             Ok(paths) => {
-                rollout_paths.extend(paths.into_iter().map(|path| BackfillRolloutPath {
-                    watermark: backfill_watermark_for_path(codex_home, &path),
-                    path,
-                    archived,
-                }));
+                for path in paths {
+                    if archived
+                        && matches!(
+                            crate::list::classify_archived_thread_rollout(
+                                codex_home,
+                                path.as_path(),
+                                Some(runtime),
+                            )
+                            .await,
+                            Ok(crate::list::ArchivedThreadRolloutDisposition::LegacyRotatedSegment { .. })
+                        )
+                    {
+                        continue;
+                    }
+                    rollout_paths.push(BackfillRolloutPath {
+                        watermark: backfill_watermark_for_path(codex_home, &path),
+                        path,
+                        archived,
+                    });
+                }
             }
             Err(err) => {
                 warn!(

@@ -11,6 +11,7 @@ pub fn is_persisted_rollout_item(item: &RolloutItem) -> bool {
         RolloutItem::EventMsg(ev) => should_persist_event_msg(ev),
         // Persist Codex executive markers so we can analyze flows (e.g., compaction, API turns).
         RolloutItem::Compacted(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::TurnContext(_)
         | RolloutItem::WorldState(_)
         | RolloutItem::SessionMeta(_) => true,

@@ -5,6 +5,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_config::types::ApprovalsReviewer;
 use codex_core::compact::SUMMARIZATION_PROMPT;
 use codex_core::config::Constrained;
+use codex_core::materialize_rollout_items_for_replay;
 use codex_exec_server::CopyOptions;
 use codex_exec_server::CreateDirectoryOptions;
 use codex_exec_server::FileSystemSandboxContext;
@@ -962,16 +963,22 @@ async fn deferred_executor_compaction_preserves_then_updates_environment_once() 
     test.codex.flush_rollout().await?;
     let rollout_path = test.codex.rollout_path().context("rollout path")?;
     let rollout = fs::read_to_string(rollout_path)?;
-    let world_state_items = rollout
+    let rollout_items = rollout
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<serde_json::Result<Vec<_>>>()?
         .into_iter()
-        .filter_map(|line| match line.item {
-            RolloutItem::WorldState(item) => Some(item),
-            _ => None,
-        })
+        .map(|line| line.item)
         .collect::<Vec<_>>();
+    let world_state_items =
+        materialize_rollout_items_for_replay(test.config.codex_home.as_path(), &rollout_items)
+            .await
+            .into_iter()
+            .filter_map(|item| match item {
+                RolloutItem::WorldState(item) => Some(item),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
     assert_eq!(
         world_state_items
             .iter()
