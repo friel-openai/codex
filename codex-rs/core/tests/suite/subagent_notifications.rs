@@ -1234,7 +1234,7 @@ async fn spawned_multi_agent_v2_child_inherits_parent_developer_context() -> Res
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plaintext_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
+async fn encrypted_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result<()> {
     let server = start_mock_server().await;
     let encrypted_message = "opaque-encrypted-message";
     let spawn_args = serde_json::to_string(&json!({
@@ -1305,7 +1305,11 @@ async fn plaintext_multi_agent_v2_spawn_sends_agent_message_to_child() -> Result
             "content": [
                 {
                     "type": "input_text",
-                    "text": encrypted_message,
+                    "text": "Message Type: NEW_TASK\nTask name: /root/worker\nSender: /root\nPayload:\n",
+                },
+                {
+                    "type": "encrypted_content",
+                    "encrypted_content": encrypted_message,
                 },
             ],
         })])

@@ -83,7 +83,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        None
+        Some(true)
     );
     assert!(properties.contains_key("fork_turns"));
     assert!(!properties.contains_key("items"));
@@ -267,7 +267,7 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        None
+        Some(true)
     );
     assert!(!properties.contains_key("interrupt"));
     assert!(!properties.contains_key("items"));
@@ -275,9 +275,7 @@ fn send_message_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("target")
             .and_then(|schema| schema.description.as_deref()),
-        Some(
-            "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned agent."
-        )
+        Some("Relative or canonical task name to message (from spawn_agent).")
     );
     assert_eq!(
         parameters.required.as_ref(),
@@ -317,9 +315,15 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
         properties
             .get("message")
             .and_then(|schema| schema.encrypted),
-        None
+        Some(true)
     );
     assert!(!properties.contains_key("items"));
+    assert_eq!(
+        properties
+            .get("target")
+            .and_then(|schema| schema.description.as_deref()),
+        Some("Agent id or canonical task name to send a follow-up task to (from spawn_agent).")
+    );
     assert_eq!(
         parameters.required.as_ref(),
         Some(&vec!["target".to_string(), "message".to_string()])

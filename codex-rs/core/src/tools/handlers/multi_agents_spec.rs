@@ -155,15 +155,15 @@ pub fn create_send_message_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Relative or canonical task name to message (from spawn_agent), or `parent` from a spawned agent."
-                    .to_string(),
+                "Relative or canonical task name to message (from spawn_agent).".to_string(),
             )),
         ),
         (
             "message".to_string(),
             JsonSchema::string(Some(
                 "Message text to queue on the target agent.".to_string(),
-            )),
+            ))
+            .with_encrypted(),
         ),
     ]);
 
@@ -187,7 +187,7 @@ pub fn create_followup_task_tool() -> ToolSpec {
         (
             "target".to_string(),
             JsonSchema::string(Some(
-                "Agent id or canonical task name to send a follow-up task to (from spawn_agent), or `parent` from a supervisor check-in."
+                "Agent id or canonical task name to send a follow-up task to (from spawn_agent)."
                     .to_string(),
             )),
         ),
@@ -195,7 +195,8 @@ pub fn create_followup_task_tool() -> ToolSpec {
             "message".to_string(),
             JsonSchema::string(Some(
                 "Message text to send to the target agent.".to_string(),
-            )),
+            ))
+            .with_encrypted(),
         ),
     ]);
 
@@ -713,7 +714,8 @@ fn spawn_agent_common_properties_v2(agent_type_description: &str) -> BTreeMap<St
             "message".to_string(),
             JsonSchema::string(Some(
                 "Initial plain-text task for the new agent.".to_string(),
-            )),
+            ))
+            .with_encrypted(),
         ),
         (
             "agent_type".to_string(),
