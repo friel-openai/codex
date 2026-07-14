@@ -118,6 +118,8 @@ mod persisted_resume_approval_policy_tests {
             multi_agent_mode: None,
             realtime_active: None,
             effort: None,
+            service_tier: None,
+            model_profile: None,
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
         })
     }

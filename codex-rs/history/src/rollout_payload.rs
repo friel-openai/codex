@@ -11,6 +11,7 @@ use super::SecurityRiskScore;
 use super::SessionMetaLine;
 use super::TurnContextItem;
 use super::WorldStateItem;
+use codex_protocol::protocol::RolloutReferenceItem;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
@@ -21,6 +22,10 @@ use serde::Serialize;
 pub(super) enum RolloutItemWire<'a> {
     SessionMeta {
         payload: Cow<'a, SessionMetaLine>,
+    },
+    #[serde(alias = "fork_reference")]
+    RolloutReference {
+        payload: Cow<'a, RolloutReferenceItem>,
     },
     ResponseItem {
         payload: Cow<'a, ResponseItem>,
@@ -54,6 +59,9 @@ impl<'a> From<&'a RolloutItem> for RolloutItemWire<'a> {
     fn from(item: &'a RolloutItem) -> Self {
         match item {
             RolloutItem::SessionMeta(payload) => Self::SessionMeta {
+                payload: Cow::Borrowed(payload),
+            },
+            RolloutItem::RolloutReference(payload) => Self::RolloutReference {
                 payload: Cow::Borrowed(payload),
             },
             RolloutItem::ResponseItem(envelope) => Self::ResponseItem {
@@ -93,6 +101,9 @@ impl From<RolloutItemWire<'_>> for RolloutItem {
     fn from(item: RolloutItemWire<'_>) -> Self {
         match item {
             RolloutItemWire::SessionMeta { payload } => Self::SessionMeta(payload.into_owned()),
+            RolloutItemWire::RolloutReference { payload } => {
+                Self::RolloutReference(payload.into_owned())
+            }
             RolloutItemWire::ResponseItem { payload, metadata } => {
                 Self::ResponseItem(ResponseItemEnvelope {
                     item: payload.into_owned(),

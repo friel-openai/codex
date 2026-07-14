@@ -20,9 +20,11 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -47,9 +49,13 @@ use super::RolloutMigrationMode;
 use super::RolloutMigrationOptions;
 use super::RolloutMigrationProgress;
 use super::RolloutMigrationStatus;
+use super::compressed_staged_rollout_path;
 #[cfg(unix)]
 use super::decompress_rollout_to_path;
+use super::decompressed_staged_rollout_path;
 use super::migration_journal_path;
+use super::rewritten_staged_rollout_path;
+use super::staged_rollout_path;
 use super::thread_history;
 use super::write_migration_journal;
 use crate::ItemSortKey;
@@ -247,6 +253,67 @@ fn read_rollout(path: &Path) -> Vec<RolloutLine> {
         .collect()
 }
 
+fn set_history_base(path: &Path, history_base: HistoryPosition) {
+    let contents = fs::read_to_string(path).expect("read rollout");
+    let mut lines = contents.lines();
+    let mut head: serde_json::Value =
+        serde_json::from_str(lines.next().expect("session metadata")).expect("parse metadata");
+    head["payload"]["history_base"] =
+        serde_json::to_value(history_base).expect("serialize history base");
+    let mut updated = serde_json::to_string(&head).expect("serialize metadata");
+    for line in lines {
+        updated.push('\n');
+        updated.push_str(line);
+    }
+    updated.push('\n');
+    fs::write(path, updated).expect("write history base");
+}
+
+async fn assert_no_migration_artifacts(home: &Path, path: &Path, thread_id: ThreadId) {
+    assert!(!migration_journal_path(home, thread_id).exists());
+    assert!(!staged_rollout_path(path).expect("staged path").exists());
+    assert!(
+        !rewritten_staged_rollout_path(&staged_rollout_path(path).expect("staged path"))
+            .expect("rewritten path")
+            .exists()
+    );
+    assert!(
+        !compressed_staged_rollout_path(path)
+            .expect("compressed staged path")
+            .exists()
+    );
+    assert!(
+        !decompressed_staged_rollout_path(path)
+            .expect("decompressed path")
+            .exists()
+    );
+}
+
+async fn projection_checkpoint(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> Option<(u64, u64)> {
+    thread_history::projection_state(store, thread_id)
+        .await
+        .expect("read projection checkpoint")
+        .map(|state| (state.next_byte_offset, state.next_ordinal))
+}
+
+async fn history_row_counts(store: &LocalThreadStore, thread_id: ThreadId) -> (i64, i64) {
+    sqlx::query_as::<_, (i64, i64)>(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(store.thread_history_db().await.expect("thread history db"))
+    .await
+    .expect("read thread history row counts")
+}
+
 fn apply_options() -> RolloutMigrationOptions {
     RolloutMigrationOptions {
         mode: RolloutMigrationMode::Apply,
@@ -340,6 +407,306 @@ async fn migration_publishes_canonical_projected_history_and_is_idempotent() {
         RolloutMigrationStatus::AlreadyPaginated
     );
     assert_eq!(fs::read(&path).expect("read idempotent rollout"), bytes);
+}
+
+#[tokio::test]
+async fn migration_skips_non_selected_reverted_rollout_and_projects_selected_rollout_id() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let rollout_id = ThreadId::new();
+    let old_path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            user_message("selected question"),
+            agent_message("selected answer"),
+        ],
+    );
+    let selected_path = old_path.with_file_name(format!(
+        "rollout-2025-01-03T12-00-01-{thread_id}_{rollout_id}.jsonl"
+    ));
+    fs::copy(&old_path, &selected_path).expect("create replacement physical rollout");
+    let old_bytes = fs::read(&old_path).expect("read original rollout");
+    let store = indexed_store(home.path()).await;
+    let state_db = store.state_db.as_ref().expect("state db");
+    let mut metadata = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("read thread metadata")
+        .expect("thread metadata");
+    metadata.rollout_path = selected_path.clone();
+    state_db
+        .upsert_thread(&metadata)
+        .await
+        .expect("select replacement physical rollout");
+
+    let report = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate selected rollout");
+
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(report.outcomes[0].thread_id, Some(thread_id));
+    assert_eq!(report.outcomes[0].rollout_path, selected_path);
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_eq!(
+        fs::read(&old_path).expect("read original rollout"),
+        old_bytes
+    );
+    assert!(matches!(
+        read_rollout(&old_path).first().map(|line| &line.item),
+        Some(RolloutItem::SessionMeta(metadata))
+            if metadata.meta.history_mode == ThreadHistoryMode::Legacy
+    ));
+    assert!(matches!(
+        read_rollout(&selected_path).first().map(|line| &line.item),
+        Some(RolloutItem::SessionMeta(metadata))
+            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+    ));
+    assert!(
+        thread_history::projection_state(&store, thread_id)
+            .await
+            .expect("read stable-id projection")
+            .is_none()
+    );
+    let projection = thread_history::projection_state(&store, rollout_id)
+        .await
+        .expect("read physical rollout projection")
+        .expect("physical rollout projection");
+    assert_eq!(
+        projection.next_byte_offset,
+        fs::metadata(&selected_path)
+            .expect("selected rollout metadata")
+            .len()
+    );
+    let turns = list_active_summary_turns(&store, thread_id).await;
+    assert_eq!(turns.turns.len(), 1);
+    assert_eq!(turns.turns[0].items.len(), 2);
+}
+
+#[tokio::test]
+async fn migration_refuses_segmented_legacy_history_without_mutation() {
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![user_message("segmented question")],
+    );
+    set_history_base(
+        &path,
+        HistoryPosition {
+            thread_id: parent_id,
+            end_ordinal_exclusive: 7,
+            end_byte_offset: 123,
+        },
+    );
+    let original = fs::read(&path).expect("read segmented rollout");
+    let store = indexed_store(home.path()).await;
+    thread_history::apply_projection(
+        &store,
+        thread_id,
+        /*start_offset*/ 0,
+        /*next_offset*/ 0,
+        /*initial_ordinal*/ 0,
+        Vec::new(),
+    )
+    .await
+    .expect("seed projection checkpoint");
+    let projection_before = projection_checkpoint(&store, thread_id).await;
+    let before_mode = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read thread metadata")
+        .expect("thread metadata")
+        .history_mode;
+
+    for options in [RolloutMigrationOptions::default(), apply_options()] {
+        let report = store
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..options
+            })
+            .await
+            .expect("refuse segmented migration");
+        assert_eq!(report.outcomes.len(), 1);
+        assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Failed);
+        assert!(
+            report.outcomes[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("segmented legacy rollout"))
+        );
+    }
+
+    assert_eq!(fs::read(&path).expect("read refused rollout"), original);
+    assert_eq!(
+        projection_checkpoint(&store, thread_id).await,
+        projection_before
+    );
+    assert_eq!(
+        store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read thread metadata")
+            .expect("thread metadata")
+            .history_mode,
+        before_mode
+    );
+    assert_no_migration_artifacts(home.path(), &path, thread_id).await;
+}
+
+#[tokio::test]
+async fn migration_refuses_reference_backed_legacy_history_without_copying_parent() {
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let parent_path = write_rollout(
+        home.path(),
+        parent_id,
+        SessionSource::Cli,
+        vec![user_message("parent question")],
+    );
+    let child_id = ThreadId::new();
+    let child_path = write_rollout(
+        home.path(),
+        child_id,
+        SessionSource::Cli,
+        vec![
+            RolloutItem::RolloutReference(RolloutReferenceItem {
+                rollout_id: Some(parent_id),
+                rollout_path: parent_path.clone(),
+                thread_id: Some(parent_id),
+                rollout_timestamp: None,
+                segment_id: None,
+                max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+                nth_user_message: Some(1),
+                compacted_replacement_history_filter_texts: None,
+            }),
+            user_message("child question"),
+        ],
+    );
+    let parent_original = fs::read(&parent_path).expect("read parent rollout");
+    let child_original = fs::read(&child_path).expect("read child rollout");
+    let store = indexed_store(home.path()).await;
+    thread_history::apply_projection(
+        &store,
+        child_id,
+        /*start_offset*/ 0,
+        /*next_offset*/ 0,
+        /*initial_ordinal*/ 0,
+        Vec::new(),
+    )
+    .await
+    .expect("seed child projection checkpoint");
+    let child_projection_before = projection_checkpoint(&store, child_id).await;
+    let parent_rows_before = history_row_counts(&store, parent_id).await;
+    let child_rows_before = history_row_counts(&store, child_id).await;
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![child_id],
+            ..apply_options()
+        })
+        .await
+        .expect("refuse reference-backed migration");
+
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Failed);
+    assert!(
+        report.outcomes[0]
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("reference-backed legacy rollout"))
+    );
+    assert_eq!(
+        fs::read(&parent_path).expect("read parent rollout"),
+        parent_original
+    );
+    assert_eq!(
+        fs::read(&child_path).expect("read child rollout"),
+        child_original
+    );
+    assert_eq!(
+        projection_checkpoint(&store, child_id).await,
+        child_projection_before
+    );
+    assert_eq!(
+        history_row_counts(&store, parent_id).await,
+        parent_rows_before
+    );
+    assert_eq!(
+        history_row_counts(&store, child_id).await,
+        child_rows_before
+    );
+    assert_eq!(child_rows_before, (0, 0));
+    assert_eq!(
+        store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(child_id)
+            .await
+            .expect("read child metadata")
+            .expect("child metadata")
+            .history_mode,
+        ThreadHistoryMode::Legacy
+    );
+    assert_no_migration_artifacts(home.path(), &child_path, child_id).await;
+}
+
+#[tokio::test]
+async fn migration_refuses_archived_compressed_malformed_reference_without_materialization() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![user_message("archived question")],
+    );
+    let malformed_reference = json!({
+        "timestamp": TIMESTAMP,
+        "type": "rollout_reference",
+        "payload": {"thread_id": thread_id}
+    });
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("open rollout"),
+        "{malformed_reference}"
+    )
+    .expect("append malformed reference");
+    let archived = move_to_archived(home.path(), path);
+    let compressed = compress_rollout(&archived);
+    let original = fs::read(&compressed).expect("read compressed rollout");
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("refuse compressed reference migration");
+
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Failed);
+    assert_eq!(
+        fs::read(&compressed).expect("read refused compressed rollout"),
+        original
+    );
+    assert!(!archived.exists());
+    assert_no_migration_artifacts(home.path(), &compressed, thread_id).await;
 }
 
 #[tokio::test]
