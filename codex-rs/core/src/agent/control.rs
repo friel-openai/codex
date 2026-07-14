@@ -808,7 +808,6 @@ async fn parent_mcp_tool_snapshot_for_source(
 
     let parent_thread = state.get_thread(*parent_thread_id).await.ok()?;
     let list_all_tools = parent_thread
-        .codex
         .session
         .services
         .mcp_connection_manager

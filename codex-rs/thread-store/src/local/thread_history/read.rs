@@ -27,11 +27,11 @@ mod tests;
 
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct HistoryCursor {
-    thread_id: ThreadId,
-    scope: CursorScope,
-    rollout_ordinal: i64,
-    include_anchor: bool,
+pub(super) struct HistoryCursor {
+    pub(super) thread_id: ThreadId,
+    pub(super) scope: CursorScope,
+    pub(super) rollout_ordinal: i64,
+    pub(super) include_anchor: bool,
 }
 
 #[derive(Clone, Deserialize, PartialEq, Eq, Serialize)]
@@ -71,6 +71,15 @@ pub(in crate::local) async fn list_turns(
     .await?;
     let scope = CursorScope::Turns;
     let cursor = parse_cursor(params.cursor.as_deref(), params.thread_id, &scope)?;
+    if let Some(lines) = super::reference_read::logical_lines_if_referenced(
+        store,
+        params.thread_id,
+        params.include_archived,
+    )
+    .await?
+    {
+        return super::reference_read::list_turns(lines, params, scope, cursor);
+    }
     let pool = store.thread_history_db().await?;
     let limit = page_limit(params.page_size)?;
     let mut query = QueryBuilder::<Sqlite>::new(
@@ -150,6 +159,15 @@ pub(in crate::local) async fn list_items(
     .await?;
     let scope = CursorScope::Items;
     let cursor = parse_cursor(params.cursor.as_deref(), params.thread_id, &scope)?;
+    if let Some(lines) = super::reference_read::logical_lines_if_referenced(
+        store,
+        params.thread_id,
+        params.include_archived,
+    )
+    .await?
+    {
+        return super::reference_read::list_items(lines, params, scope, cursor);
+    }
     let pool = store.thread_history_db().await?;
     let limit = page_limit(params.page_size)?;
     let mut query = QueryBuilder::<Sqlite>::new(
@@ -221,7 +239,7 @@ pub(super) async fn validate_thread_for_paginated_reads(
     }
 }
 
-fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {
+pub(super) fn page_limit(page_size: usize) -> ThreadStoreResult<i64> {
     if page_size == 0 {
         return Err(ThreadStoreError::InvalidRequest {
             message: "page size must be positive".to_string(),
@@ -283,7 +301,7 @@ fn push_pagination_clause(
         .push_bind(limit);
 }
 
-fn page_cursors(
+pub(super) fn page_cursors(
     thread_id: ThreadId,
     scope: &CursorScope,
     first_ordinal: Option<i64>,
