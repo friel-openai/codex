@@ -125,10 +125,11 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
     fork_turn_positions
 }
 
-/// Return a prefix of `items` obtained by cutting strictly before the nth user message.
+/// Return a prefix of `items` obtained by cutting before the nth user's persisted turn.
 ///
 /// The boundary index is 0-based from the start of `items` (so `n_from_start = 0` returns
-/// a prefix that excludes the first user message and everything after it).
+/// a prefix that excludes the first user message and everything after it). When a canonical
+/// `TurnStarted` precedes that message, the event is excluded too.
 ///
 /// If `n_from_start` is `usize::MAX`, this returns the full rollout (no truncation).
 /// If fewer than or equal to `n_from_start` user messages exist, this returns the full
@@ -141,7 +142,31 @@ pub(crate) fn truncate_rollout_before_nth_user_message_from_start(
         return items.to_vec();
     }
 
-    let user_positions = user_message_positions_in_rollout(items);
+    let mut user_positions = Vec::new();
+    let mut active_turn_start = None;
+    for (index, item) in items.iter().enumerate() {
+        match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                active_turn_start = Some(index);
+            }
+            RolloutItem::ResponseItem(item @ ResponseItem::Message { .. })
+                if matches!(
+                    event_mapping::parse_turn_item(item),
+                    Some(TurnItem::UserMessage(_))
+                ) =>
+            {
+                user_positions.push(active_turn_start.unwrap_or(index));
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
+                active_turn_start = None;
+            }
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
+                let num_turns = usize::try_from(rollback.num_turns).unwrap_or(usize::MAX);
+                user_positions.truncate(user_positions.len().saturating_sub(num_turns));
+            }
+            _ => {}
+        }
+    }
 
     // If fewer than or equal to n user messages exist, keep the full rollout.
     if user_positions.len() <= n_from_start {
@@ -232,6 +257,27 @@ pub fn truncate_rollout_before_turn_id(
             ))
         })?;
     Ok(items[..cut_index].to_vec())
+}
+
+/// Return the number of canonical user-message boundaries before a persisted turn.
+pub fn user_message_count_before_turn_id(
+    items: &[RolloutItem],
+    before_turn_id: &str,
+) -> CodexResult<usize> {
+    let prefix = truncate_rollout_before_turn_id(items, before_turn_id)?;
+    Ok(user_message_positions_in_rollout(prefix.as_slice()).len())
+}
+
+/// Return the number of canonical user-message boundaries through a terminal turn.
+///
+/// A reference-backed fork records this count in `RolloutReferenceItem::nth_user_message` so the
+/// child can retain a terminal source prefix without copying that prefix into its own rollout.
+pub fn user_message_count_through_turn_id(
+    items: &[RolloutItem],
+    last_turn_id: &str,
+) -> CodexResult<usize> {
+    let prefix = truncate_rollout_after_turn_id(items, last_turn_id)?;
+    Ok(user_message_positions_in_rollout(prefix.as_slice()).len())
 }
 
 /// Return a suffix of `items` that keeps the last `n_from_end` fork turns.

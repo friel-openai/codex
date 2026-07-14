@@ -152,6 +152,64 @@ fn truncates_rollout_before_in_progress_canonical_turn_id() {
 }
 
 #[test]
+fn counts_user_messages_through_terminal_canonical_turn_id() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        RolloutItem::ResponseItem(user_msg("first")),
+        turn_completed("turn-1"),
+        turn_started("turn-2"),
+        RolloutItem::ResponseItem(user_msg("second")),
+        turn_completed("turn-2"),
+        turn_started("turn-3"),
+        RolloutItem::ResponseItem(user_msg("third")),
+        turn_completed("turn-3"),
+    ];
+
+    assert_eq!(
+        user_message_count_through_turn_id(&rollout, "turn-2")
+            .expect("count through terminal turn"),
+        2
+    );
+}
+
+#[test]
+fn counts_user_messages_before_terminal_canonical_turn_id() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        RolloutItem::ResponseItem(user_msg("first")),
+        turn_completed("turn-1"),
+        turn_started("turn-2"),
+        RolloutItem::ResponseItem(user_msg("second")),
+        turn_completed("turn-2"),
+    ];
+
+    assert_eq!(
+        user_message_count_before_turn_id(&rollout, "turn-2").expect("count before terminal turn"),
+        1
+    );
+}
+
+#[test]
+fn truncating_before_user_message_removes_its_turn_started_boundary() {
+    let rollout = vec![
+        turn_started("turn-1"),
+        RolloutItem::ResponseItem(user_msg("first")),
+        turn_completed("turn-1"),
+        turn_started("turn-2"),
+        RolloutItem::ResponseItem(user_msg("second")),
+        turn_completed("turn-2"),
+    ];
+
+    assert_eq!(
+        serde_json::to_value(truncate_rollout_before_nth_user_message_from_start(
+            &rollout, 1,
+        ))
+        .expect("serialize truncated rollout"),
+        serde_json::to_value(&rollout[..3]).expect("serialize expected rollout")
+    );
+}
+
+#[test]
 fn truncate_rollout_after_turn_id_rejects_rolled_back_turn() {
     let rollout = vec![
         turn_started("turn-1"),

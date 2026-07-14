@@ -794,6 +794,8 @@ async fn create_paginated_thread(store: &LocalThreadStore, thread_id: ThreadId) 
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Paginated,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: "window-1".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),

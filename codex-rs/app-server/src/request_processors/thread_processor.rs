@@ -2340,16 +2340,6 @@ impl ThreadRequestProcessor {
         include_turns: bool,
     ) -> Result<Option<Thread>, ThreadReadViewError> {
         let fallback_provider = self.config.model_provider_id.as_str();
-        if include_turns
-            && self
-                .read_stored_thread_for_read(thread_id, /*include_history*/ false)
-                .await?
-                .is_some_and(|thread| matches!(thread.history_mode, ThreadHistoryMode::Paginated))
-        {
-            return Err(ThreadReadViewError::InvalidRequest(
-                "paginated threads do not support thread/read(includeTurns=true)".to_string(),
-            ));
-        }
         let Some(stored_thread) = self
             .read_stored_thread_for_read(thread_id, /*include_history*/ include_turns)
             .await?
@@ -2411,11 +2401,6 @@ impl ThreadRequestProcessor {
         if include_turns && config_snapshot.ephemeral {
             return Err(ThreadReadViewError::InvalidRequest(
                 "ephemeral threads do not support includeTurns".to_string(),
-            ));
-        }
-        if include_turns && matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
-            return Err(ThreadReadViewError::InvalidRequest(
-                "paginated threads do not support thread/read(includeTurns=true)".to_string(),
             ));
         }
         let fallback_thread =
@@ -2500,7 +2485,6 @@ impl ThreadRequestProcessor {
             }
             Err(err) => return Err(internal_error(format!("failed to read thread: {err}"))),
         }
-
         let items = self
             .load_thread_turns_list_history(thread_uuid)
             .await
@@ -3268,11 +3252,6 @@ impl ThreadRequestProcessor {
         };
 
         if let Some((existing_thread_id, existing_thread, mut source_thread)) = running_thread {
-            ensure_paginated_resume_supported(
-                source_thread.history_mode,
-                params.exclude_turns,
-                params.initial_turns_page.is_some(),
-            )?;
             let existing_thread_rollout_path = existing_thread.rollout_path();
             let active_path = existing_thread_rollout_path
                 .as_ref()
@@ -3451,12 +3430,10 @@ impl ThreadRequestProcessor {
         exclude_turns: bool,
         has_initial_turns_page: bool,
     ) -> Result<(InitialHistory, StoredThread), JSONRPCErrorError> {
-        ensure_paginated_resume_supported(
-            stored_thread.history_mode,
-            exclude_turns,
-            has_initial_turns_page,
-        )?;
-        if matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated) {
+        if matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated)
+            && exclude_turns
+            && !has_initial_turns_page
+        {
             let model_context = self
                 .thread_store
                 .load_latest_model_context(StoreLoadThreadHistoryParams {
@@ -3472,7 +3449,6 @@ impl ThreadRequestProcessor {
             });
             return Ok((history, stored_thread));
         }
-
         let thread_id = stored_thread.thread_id.to_string();
         let rollout_path = stored_thread.rollout_path.clone();
         let mut stored_thread = self
@@ -3735,16 +3711,6 @@ impl ThreadRequestProcessor {
                 "`permissions` cannot be combined with `sandbox`",
             ));
         }
-        let source_thread = self
-            .read_stored_thread_for_resume(
-                &thread_id,
-                path.as_ref(),
-                /*include_history*/ false,
-            )
-            .await?;
-        if matches!(source_thread.history_mode, ThreadHistoryMode::Paginated) {
-            return Err(method_not_found("paginated_threads is not supported yet"));
-        }
         if last_turn_id.is_some() && before_turn_id.is_some() {
             return Err(invalid_request(
                 "`beforeTurnId` cannot be combined with `lastTurnId`",
@@ -3772,18 +3738,19 @@ impl ThreadRequestProcessor {
                     "thread {source_thread_id} did not include persisted history"
                 ))
             })?;
-        let history_items = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
-            (Some(last_turn_id), None) => Arc::new(
-                truncate_rollout_after_turn_id(&history_items, last_turn_id)
+        let fork_snapshot = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
+            (Some(last_turn_id), None) => ForkSnapshot::TruncateBeforeNthUserMessage(
+                user_message_count_through_turn_id(&history_items, last_turn_id)
                     .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
             ),
-            (None, Some(before_turn_id)) => Arc::new(
-                truncate_rollout_before_turn_id(&history_items, before_turn_id)
+            (None, Some(before_turn_id)) => ForkSnapshot::TruncateBeforeNthUserMessage(
+                user_message_count_before_turn_id(&history_items, before_turn_id)
                     .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
             ),
-            (None, None) => Arc::new(history_items),
+            (None, None) => ForkSnapshot::Interrupted,
             (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
         };
+        let history_items = Arc::new(history_items);
         let history_cwd = Some(source_thread.cwd.clone());
 
         // Persist Windows sandbox mode.
@@ -3842,7 +3809,7 @@ impl ThreadRequestProcessor {
         } = self
             .thread_manager
             .fork_thread_from_history(
-                ForkSnapshot::Interrupted,
+                fork_snapshot,
                 config,
                 InitialHistory::Resumed(ResumedHistory {
                     conversation_id: source_thread_id,
@@ -4525,27 +4492,6 @@ fn stored_turn_to_api_turn(
         completed_at: turn.completed_at,
         duration_ms: turn.duration_ms,
     })
-}
-
-fn ensure_paginated_resume_supported(
-    history_mode: ThreadHistoryMode,
-    exclude_turns: bool,
-    has_initial_turns_page: bool,
-) -> Result<(), JSONRPCErrorError> {
-    if !matches!(history_mode, ThreadHistoryMode::Paginated) {
-        return Ok(());
-    }
-    if !exclude_turns {
-        return Err(invalid_request(
-            "paginated threads do not support full-history thread/resume; pass excludeTurns=true",
-        ));
-    }
-    if has_initial_turns_page {
-        return Err(invalid_request(
-            "paginated threads do not support initialTurnsPage; use turnsBackwardsCursor and itemsBackwardsCursor",
-        ));
-    }
-    Ok(())
 }
 
 pub(super) fn unsupported_thread_store_operation(operation: &'static str) -> JSONRPCErrorError {
