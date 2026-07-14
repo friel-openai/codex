@@ -24,6 +24,8 @@ use crate::StoredThreadOccurrence;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::local::rollout_lineage::RolloutLineage;
+use crate::local::rollout_lineage::RolloutLineageSegment;
 
 const SNIPPET_CONTEXT_BEFORE_CHARS: usize = 48;
 const SNIPPET_CONTEXT_AFTER_CHARS: usize = 96;
@@ -33,6 +35,8 @@ const SNIPPET_CONTEXT_AFTER_CHARS: usize = 96;
 struct SearchCursor {
     thread_id: ThreadId,
     search_term: String,
+    #[serde(default)]
+    physical_thread_id: Option<ThreadId>,
     next_rollout_ordinal: i64,
     next_occurrence_index: usize,
 }
@@ -71,12 +75,123 @@ pub(in crate::local) async fn search_thread_occurrences(
         params.thread_id,
         &params.search_term,
     )?;
-    let next_rollout_ordinal = cursor
-        .as_ref()
-        .map_or(0, |cursor| cursor.next_rollout_ordinal);
+    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+    let start_segment_index = search_start_segment(
+        &lineage,
+        cursor.as_ref(),
+        params.thread_id,
+        params.cursor.as_deref(),
+    )?;
     let matcher = LiteralMatcher::new(params.search_term.as_str());
     let pool = store.thread_history_db().await?;
-    let mut rows = sqlx::query(
+    let mut items = Vec::with_capacity(params.page_size);
+    for (segment_index, segment) in lineage
+        .segments()
+        .iter()
+        .enumerate()
+        .skip(start_segment_index)
+    {
+        let next_rollout_ordinal = if segment_index == start_segment_index {
+            match cursor.as_ref() {
+                Some(cursor) => search_cursor_rollout_ordinal(cursor, params.cursor.as_deref())?,
+                None => segment.start_ordinal(),
+            }
+            .max(segment.start_ordinal())
+        } else {
+            segment.start_ordinal()
+        };
+        let mut rows = candidate_rows(pool, segment, next_rollout_ordinal)?;
+        while let Some(row) = rows.try_next().await.map_err(thread_history_error)? {
+            let row = candidate_row(row)?;
+            let item =
+                serde_json::from_str::<ThreadItem>(row.item_json.as_str()).map_err(|err| {
+                    ThreadStoreError::Internal {
+                        message: format!("failed to deserialize stored thread item: {err}"),
+                    }
+                })?;
+            if !segment.allows_thread_item(&item) {
+                continue;
+            }
+            let Some(text) = searchable_text(&item) else {
+                continue;
+            };
+            let first_occurrence_index = cursor
+                .as_ref()
+                .filter(|cursor| {
+                    search_cursor_physical_thread_id(cursor, params.thread_id)
+                        == segment.thread_id()
+                        && cursor.next_rollout_ordinal == row.rollout_ordinal
+                })
+                .map_or(0, |cursor| cursor.next_occurrence_index);
+            let remaining = params
+                .page_size
+                .saturating_add(1)
+                .saturating_sub(items.len());
+            let turn_cursor = serialize_cursor(
+                params.thread_id,
+                CursorScope::Turns,
+                PhysicalHistoryPosition {
+                    physical_thread_id: segment.thread_id(),
+                    rollout_ordinal: row.turn_rollout_ordinal,
+                },
+                /*include_anchor*/ true,
+            )?;
+            for (occurrence_index, matched) in matcher
+                .find_ranges(
+                    text.as_ref(),
+                    first_occurrence_index.saturating_add(remaining),
+                )
+                .into_iter()
+                .enumerate()
+                .skip(first_occurrence_index)
+            {
+                if items.len() == params.page_size {
+                    return Ok(ThreadOccurrenceSearchPage {
+                        items,
+                        next_cursor: Some(serialize_cursor_for_search(SearchCursor {
+                            thread_id: params.thread_id,
+                            search_term: params.search_term,
+                            physical_thread_id: Some(segment.thread_id()),
+                            next_rollout_ordinal: row.rollout_ordinal,
+                            next_occurrence_index: occurrence_index,
+                        })?),
+                    });
+                }
+                items.push(occurrence_in_item(
+                    row.turn_id.as_str(),
+                    row.item_id.as_str(),
+                    text.as_ref(),
+                    matched,
+                    turn_cursor.as_str(),
+                ));
+            }
+        }
+    }
+
+    Ok(ThreadOccurrenceSearchPage {
+        items,
+        next_cursor: None,
+    })
+}
+
+fn candidate_rows<'a>(
+    pool: &'a sqlx::SqlitePool,
+    segment: &RolloutLineageSegment,
+    next_rollout_ordinal: u64,
+) -> ThreadStoreResult<futures::stream::BoxStream<'a, Result<sqlx::sqlite::SqliteRow, sqlx::Error>>>
+{
+    let next_rollout_ordinal =
+        i64::try_from(next_rollout_ordinal).map_err(|_| ThreadStoreError::InvalidRequest {
+            message: "rollout ordinal exceeds SQLite integer range".to_string(),
+        })?;
+    let end_rollout_ordinal = segment
+        .end_ordinal()
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| ThreadStoreError::InvalidRequest {
+            message: "rollout ordinal exceeds SQLite integer range".to_string(),
+        })?;
+    Ok(sqlx::query(
         r#"
 SELECT turn_id, item_id, rollout_ordinal, item_json, turn_rollout_ordinal
 FROM (
@@ -93,6 +208,7 @@ FROM (
     WHERE items.thread_id = ?
       AND items.item_type = 'userMessage'
       AND items.rollout_ordinal >= ?
+      AND (? IS NULL OR items.rollout_ordinal < ?)
 
     UNION ALL
 
@@ -110,78 +226,61 @@ FROM (
     WHERE turns.thread_id = ?
       AND turns.final_agent_item_id IS NOT NULL
       AND items.rollout_ordinal >= ?
+      AND (? IS NULL OR items.rollout_ordinal < ?)
 )
 ORDER BY rollout_ordinal ASC
         "#,
     )
-    .bind(params.thread_id.to_string())
+    .bind(segment.thread_id().to_string())
     .bind(next_rollout_ordinal)
-    .bind(params.thread_id.to_string())
+    .bind(end_rollout_ordinal)
+    .bind(end_rollout_ordinal)
+    .bind(segment.thread_id().to_string())
     .bind(next_rollout_ordinal)
-    .fetch(pool);
+    .bind(end_rollout_ordinal)
+    .bind(end_rollout_ordinal)
+    .fetch(pool))
+}
 
-    let mut items = Vec::with_capacity(params.page_size);
-    while let Some(row) = rows.try_next().await.map_err(thread_history_error)? {
-        let row = candidate_row(row)?;
-        let item = serde_json::from_str::<ThreadItem>(row.item_json.as_str()).map_err(|err| {
-            ThreadStoreError::Internal {
-                message: format!("failed to deserialize stored thread item: {err}"),
-            }
-        })?;
-        let Some(text) = searchable_text(&item) else {
-            continue;
-        };
-        let first_occurrence_index = cursor
-            .as_ref()
-            .filter(|cursor| cursor.next_rollout_ordinal == row.rollout_ordinal)
-            .map_or(0, |cursor| cursor.next_occurrence_index);
-        let remaining = params
-            .page_size
-            .saturating_add(1)
-            .saturating_sub(items.len());
-        let turn_cursor = serialize_cursor(
-            params.thread_id,
-            CursorScope::Turns,
-            PhysicalHistoryPosition {
-                physical_thread_id: params.thread_id,
-                rollout_ordinal: row.turn_rollout_ordinal,
-            },
-            /*include_anchor*/ true,
-        )?;
-        for (occurrence_index, matched) in matcher
-            .find_ranges(
-                text.as_ref(),
-                first_occurrence_index.saturating_add(remaining),
-            )
-            .into_iter()
-            .enumerate()
-            .skip(first_occurrence_index)
-        {
-            if items.len() == params.page_size {
-                return Ok(ThreadOccurrenceSearchPage {
-                    items,
-                    next_cursor: Some(serialize_cursor_for_search(SearchCursor {
-                        thread_id: params.thread_id,
-                        search_term: params.search_term,
-                        next_rollout_ordinal: row.rollout_ordinal,
-                        next_occurrence_index: occurrence_index,
-                    })?),
-                });
-            }
-            items.push(occurrence_in_item(
-                row.turn_id.as_str(),
-                row.item_id.as_str(),
-                text.as_ref(),
-                matched,
-                turn_cursor.as_str(),
-            ));
-        }
+fn search_start_segment(
+    lineage: &RolloutLineage,
+    cursor: Option<&SearchCursor>,
+    requested_thread_id: ThreadId,
+    cursor_text: Option<&str>,
+) -> ThreadStoreResult<usize> {
+    let Some(cursor) = cursor else {
+        return Ok(0);
+    };
+    let physical_thread_id = search_cursor_physical_thread_id(cursor, requested_thread_id);
+    let rollout_ordinal = search_cursor_rollout_ordinal(cursor, cursor_text)?;
+    let matching_segments = lineage
+        .segments()
+        .iter()
+        .enumerate()
+        .filter(|(_, segment)| {
+            segment.thread_id() == physical_thread_id && segment.contains_ordinal(rollout_ordinal)
+        })
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    match matching_segments.as_slice() {
+        [index] => Ok(*index),
+        _ => Err(invalid_cursor(cursor_text.unwrap_or_default())),
     }
+}
 
-    Ok(ThreadOccurrenceSearchPage {
-        items,
-        next_cursor: None,
-    })
+fn search_cursor_rollout_ordinal(
+    cursor: &SearchCursor,
+    cursor_text: Option<&str>,
+) -> ThreadStoreResult<u64> {
+    u64::try_from(cursor.next_rollout_ordinal)
+        .map_err(|_| invalid_cursor(cursor_text.unwrap_or_default()))
+}
+
+fn search_cursor_physical_thread_id(
+    cursor: &SearchCursor,
+    requested_thread_id: ThreadId,
+) -> ThreadId {
+    cursor.physical_thread_id.unwrap_or(requested_thread_id)
 }
 
 fn candidate_row(row: sqlx::sqlite::SqliteRow) -> ThreadStoreResult<CandidateRow> {
@@ -420,4 +519,27 @@ fn char_end_after(text: &str, byte_index: usize, chars_after: usize) -> usize {
         .nth(chars_after)
         .map(|(offset, _)| byte_index.saturating_add(offset))
         .unwrap_or(text.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_cursor_without_physical_thread_id_uses_requested_thread() {
+        let thread_id = ThreadId::default();
+        let cursor = format!(
+            r#"{{"threadId":"{thread_id}","searchTerm":"needle","nextRolloutOrdinal":7,"nextOccurrenceIndex":2}}"#
+        );
+
+        let parsed = parse_cursor(Some(cursor.as_str()), thread_id, "needle")
+            .expect("legacy cursor should parse")
+            .expect("cursor should be present");
+
+        assert_eq!(parsed.physical_thread_id, None);
+        assert_eq!(
+            search_cursor_physical_thread_id(&parsed, thread_id),
+            thread_id
+        );
+    }
 }
