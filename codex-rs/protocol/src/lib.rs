@@ -11,6 +11,7 @@ pub use permission_profile_intersection::intersect_effective_permission_profiles
 pub use response_item_id::ResponseItemId;
 pub use session_id::SessionId;
 pub use thread_id::RolloutId;
+pub use thread_id::SegmentId;
 pub use thread_id::ThreadId;
 pub use tool_name::DEFAULT_FUNCTION_NAMESPACE;
 pub use tool_name::ToolName;
