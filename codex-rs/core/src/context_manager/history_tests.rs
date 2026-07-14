@@ -528,6 +528,29 @@ fn annotated_history_apis_preserve_envelopes() {
 }
 
 #[test]
+fn fork_copy_on_write_preserves_harness_metadata() {
+    let inherited = ResponseItemEnvelope {
+        item: assistant_msg("inherited"),
+        metadata: Some(CodexHarnessMetadata {
+            client_authored: true,
+        }),
+    };
+    let mut parent = ContextManager::new();
+    parent.replace_annotated(vec![inherited.clone()]);
+    let shared = parent.shared_annotated_items();
+    let mut child = ContextManager::new();
+    child.replace_shared_annotated(Arc::clone(&shared));
+
+    assert!(Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+    child.append_fork_items([ResponseItemEnvelope::new(assistant_msg("child"))]);
+
+    assert_eq!(parent.annotated_items(), std::slice::from_ref(&inherited));
+    assert_eq!(child.annotated_items()[0], inherited);
+    assert_eq!(child.annotated_items().len(), 2);
+    assert!(!Arc::ptr_eq(&shared, &child.shared_annotated_items()));
+}
+
+#[test]
 fn record_annotated_items_preserves_metadata_while_processing_item() {
     let envelope = ResponseItemEnvelope {
         item: ResponseItem::FunctionCallOutput {
