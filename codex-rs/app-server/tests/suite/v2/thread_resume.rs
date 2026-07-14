@@ -2614,6 +2614,7 @@ async fn thread_resume_prefers_persisted_git_metadata_for_local_threads() -> Res
     let session_meta = SessionMeta {
         session_id: conversation_id.into(),
         id: conversation_id,
+        segment_id: None,
         forked_from_id: None,
         parent_thread_id: None,
         timestamp: "2025-01-05T12:00:00Z".to_string(),

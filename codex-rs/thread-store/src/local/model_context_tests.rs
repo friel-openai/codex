@@ -488,7 +488,7 @@ async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
         .await
         .expect("scan model context")
         .items;
-    let full_items = read_thread::load_history_items(path)
+    let full_items = read_thread::load_history_items(home, path)
         .await
         .expect("load full history");
 
