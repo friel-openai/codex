@@ -174,6 +174,9 @@ ORDER BY rollout_ordinal ASC
                         message: format!("failed to deserialize stored thread item: {err}"),
                     }
                 })?;
+            if !segment.allows_thread_item(&item) {
+                continue;
+            }
             let Some(text) = searchable_text(&item) else {
                 continue;
             };
