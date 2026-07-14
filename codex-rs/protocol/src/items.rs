@@ -20,6 +20,7 @@ use crate::protocol::PatchApplyStatus;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::ReviewTarget;
 use crate::protocol::SubAgentActivityKind;
+use crate::protocol::deserialize_path_uri_or_legacy_absolute_path;
 use crate::user_input::ByteRange;
 use crate::user_input::TextElement;
 use crate::user_input::UserInput;
@@ -211,6 +212,7 @@ pub struct CommandExecutionItem {
     #[ts(optional)]
     pub process_id: Option<String>,
     pub command: Vec<String>,
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     pub source: ExecCommandSource,
@@ -340,6 +342,7 @@ pub struct ImageViewItem {
     ///
     /// This core protocol type is not exposed directly in the app-server API.
     /// App-server converts the path to `LegacyAppPathString` at its boundary.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub path: PathUri,
 }
 
