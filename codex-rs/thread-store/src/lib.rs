@@ -30,7 +30,11 @@ pub use types::CreateThreadParams;
 pub use types::DeleteThreadParams;
 pub use types::DeleteThreadsParams;
 pub use types::ExtraConfig;
-pub use types::ForkBoundary;
+#[cfg(test)]
+pub(crate) use types::ForkBoundary;
+pub use types::ForkSourceReservation;
+pub use types::FreezeRolloutSegmentParams;
+pub use types::FrozenRolloutSegment;
 pub use types::GitInfoPatch;
 pub use types::ItemPage;
 pub use types::ItemSortKey;
@@ -38,8 +42,10 @@ pub use types::ListItemsParams;
 pub use types::ListThreadsParams;
 pub use types::ListTurnsParams;
 pub use types::LoadThreadHistoryParams;
-pub use types::PrepareForkParams;
-pub use types::PreparedFork;
+#[cfg(test)]
+pub(crate) use types::PrepareForkParams;
+#[cfg(test)]
+pub(crate) use types::PreparedFork;
 pub use types::ReadThreadByRolloutPathParams;
 pub use types::ReadThreadParams;
 pub use types::ResumeThreadParams;
@@ -61,6 +67,7 @@ pub use types::ThreadMetadataPatch;
 pub use types::ThreadOccurrenceSearchPage;
 pub use types::ThreadPage;
 pub use types::ThreadPersistenceMetadata;
+pub use types::ThreadPersistenceMode;
 pub use types::ThreadRelationFilter;
 pub use types::ThreadSearchPage;
 pub use types::ThreadSortKey;

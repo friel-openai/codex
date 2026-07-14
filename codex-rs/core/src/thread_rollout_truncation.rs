@@ -1,7 +1,7 @@
 //! Helpers for truncating rollouts based on "user turn" boundaries.
 //!
-//! In core, "user turns" are detected by scanning `ResponseItem::Message` items and
-//! interpreting them via `event_mapping::parse_turn_item(...)`.
+//! Canonical rollouts use user-message events. Older and synthetic turns can use parsed user
+//! `ResponseItem::Message` boundaries in the same history.
 
 use crate::context_manager::is_user_turn_boundary;
 use crate::event_mapping;
@@ -30,33 +30,103 @@ fn rollout_item_is_user_turn_boundary(item: &RolloutItem) -> bool {
 
 /// Return the indices of user message boundaries in a rollout.
 ///
-/// A user message boundary is a `RolloutItem::ResponseItem(ResponseItem::Message { .. })`
-/// whose parsed turn item is `TurnItem::UserMessage`.
+/// Event and response representations are deduplicated per turn. This preserves mixed histories
+/// where older turns have only response items and newer turns have canonical user-message events.
 ///
 /// Rollouts can contain `ThreadRolledBack` markers. Those markers indicate that the
 /// last N user turns were removed from the effective thread history; we apply them here so
 /// indexing uses the post-rollback history rather than the raw stream.
 pub(crate) fn user_message_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize> {
-    let mut user_positions = Vec::new();
+    let mut canonical_user_positions = Vec::new();
+    let mut response_user_positions = Vec::new();
+    let mut active_turn_start = None;
+    let mut active_response_position = None;
+    let mut active_has_canonical_boundary = false;
+    let mut pending_legacy_response_position = None;
+    let mut previous_item_was_unframed_canonical_boundary = false;
+    let mut saw_canonical_user_message = false;
     for (idx, item) in items.iter().enumerate() {
+        let preceding_legacy_response_position = pending_legacy_response_position.take();
+        let response_follows_unframed_canonical_boundary =
+            std::mem::take(&mut previous_item_was_unframed_canonical_boundary);
         match item {
+            RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                active_turn_start = Some(idx);
+                active_response_position = None;
+                active_has_canonical_boundary = false;
+            }
+            RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
+                saw_canonical_user_message = true;
+                let position = active_turn_start
+                    .or(preceding_legacy_response_position)
+                    .unwrap_or(idx);
+                if canonical_user_positions.last() != Some(&position) {
+                    canonical_user_positions.push(position);
+                }
+                active_has_canonical_boundary = active_turn_start.is_some();
+                previous_item_was_unframed_canonical_boundary = active_turn_start.is_none();
+            }
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                if matches!(event.item, TurnItem::UserMessage(_)) =>
+            {
+                saw_canonical_user_message = true;
+                let position = active_turn_start
+                    .or(preceding_legacy_response_position)
+                    .unwrap_or(idx);
+                if canonical_user_positions.last() != Some(&position) {
+                    canonical_user_positions.push(position);
+                }
+                active_has_canonical_boundary = active_turn_start.is_some();
+                previous_item_was_unframed_canonical_boundary = active_turn_start.is_none();
+            }
             RolloutItem::ResponseItem(item @ ResponseItem::Message { .. })
                 if matches!(
                     event_mapping::parse_turn_item(item),
                     Some(TurnItem::UserMessage(_))
                 ) =>
             {
-                user_positions.push(idx);
+                let position = active_turn_start.unwrap_or(idx);
+                if response_user_positions.last() != Some(&position) {
+                    response_user_positions.push(position);
+                }
+                if active_turn_start.is_some() {
+                    active_response_position = Some(position);
+                } else if !response_follows_unframed_canonical_boundary {
+                    pending_legacy_response_position = Some(position);
+                }
+            }
+            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => {
+                if !active_has_canonical_boundary
+                    && let Some(position) = active_response_position
+                    && canonical_user_positions.last() != Some(&position)
+                {
+                    canonical_user_positions.push(position);
+                }
+                active_turn_start = None;
+                active_response_position = None;
+                active_has_canonical_boundary = false;
             }
             RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)) => {
                 let num_turns = usize::try_from(rollback.num_turns).unwrap_or(usize::MAX);
-                let new_len = user_positions.len().saturating_sub(num_turns);
-                user_positions.truncate(new_len);
+                canonical_user_positions
+                    .truncate(canonical_user_positions.len().saturating_sub(num_turns));
+                response_user_positions
+                    .truncate(response_user_positions.len().saturating_sub(num_turns));
             }
             _ => {}
         }
     }
-    user_positions
+    if !active_has_canonical_boundary
+        && let Some(position) = active_response_position
+        && canonical_user_positions.last() != Some(&position)
+    {
+        canonical_user_positions.push(position);
+    }
+    if saw_canonical_user_message {
+        canonical_user_positions
+    } else {
+        response_user_positions
+    }
 }
 
 /// Return the indices of fork-turn boundaries in a rollout.
@@ -125,10 +195,11 @@ pub(crate) fn fork_turn_positions_in_rollout(items: &[RolloutItem]) -> Vec<usize
     fork_turn_positions
 }
 
-/// Return a prefix of `items` obtained by cutting strictly before the nth user message.
+/// Return a prefix of `items` obtained by cutting before the nth user's persisted turn.
 ///
 /// The boundary index is 0-based from the start of `items` (so `n_from_start = 0` returns
-/// a prefix that excludes the first user message and everything after it).
+/// a prefix that excludes the first user message and everything after it). When a canonical
+/// `TurnStarted` precedes that message, the event is excluded too.
 ///
 /// If `n_from_start` is `usize::MAX`, this returns the full rollout (no truncation).
 /// If fewer than or equal to `n_from_start` user messages exist, this returns the full
@@ -232,6 +303,27 @@ pub fn truncate_rollout_before_turn_id(
             ))
         })?;
     Ok(items[..cut_index].to_vec())
+}
+
+/// Return the number of canonical user-message boundaries before a persisted turn.
+pub fn user_message_count_before_turn_id(
+    items: &[RolloutItem],
+    before_turn_id: &str,
+) -> CodexResult<usize> {
+    let prefix = truncate_rollout_before_turn_id(items, before_turn_id)?;
+    Ok(user_message_positions_in_rollout(prefix.as_slice()).len())
+}
+
+/// Return the number of canonical user-message boundaries through a terminal turn.
+///
+/// A reference-backed fork records this count in `RolloutReferenceItem::nth_user_message` so the
+/// child can retain a terminal source prefix without copying that prefix into its own rollout.
+pub fn user_message_count_through_turn_id(
+    items: &[RolloutItem],
+    last_turn_id: &str,
+) -> CodexResult<usize> {
+    let prefix = truncate_rollout_after_turn_id(items, last_turn_id)?;
+    Ok(user_message_positions_in_rollout(prefix.as_slice()).len())
 }
 
 /// Return a suffix of `items` that keeps the last `n_from_end` fork turns.

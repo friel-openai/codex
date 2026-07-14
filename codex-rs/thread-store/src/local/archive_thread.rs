@@ -135,7 +135,7 @@ mod tests {
     use crate::local::test_support::write_session_file_with_history_mode;
 
     #[tokio::test]
-    async fn archive_waits_for_fork_reservation_without_holding_writer_lock() {
+    async fn archive_waits_for_frozen_reference_without_holding_writer_lock() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = Uuid::from_u128(205);
@@ -147,7 +147,10 @@ mod tests {
             ThreadHistoryMode::Paginated,
         )
         .expect("session file");
-        let reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
+        let frozen = store
+            .freeze_thread_segment(thread_id, crate::FreezeRolloutSegmentParams::snapshot())
+            .await
+            .expect("freeze source history");
         let mut archive = Box::pin(store.archive_thread(ArchiveThreadParams { thread_id }));
 
         tokio::select! {
@@ -162,7 +165,7 @@ mod tests {
         .await
         .expect("pending archive should not hold the writer lock");
         drop(writer_guard);
-        drop(reservation);
+        drop(frozen);
 
         archive.await.expect("archive reserved thread");
         assert!(!active_path.exists());

@@ -39,6 +39,7 @@ pub(super) enum CursorScope {
 #[serde(rename_all = "camelCase")]
 pub(super) struct HistoryCursor {
     pub requested_thread_id: ThreadId,
+    pub physical_thread_id: ThreadId,
     pub rollout_ordinal: u64,
     pub include_anchor: bool,
     pub scope: CursorScope,
@@ -225,7 +226,23 @@ ORDER BY rollout_ordinal ASC
     .fetch_all(pool)
     .await
     .map_err(super::thread_history_error)?;
-    rows.into_iter().map(stored_thread_item).collect()
+    let segment = lineage.segment_for_position(
+        turn.position.physical_thread_id,
+        u64::try_from(turn.position.rollout_ordinal)
+            .map_err(|_| invalid_cursor("negative rollout ordinal"))?,
+    )?;
+    let items = rows
+        .into_iter()
+        .map(stored_thread_item)
+        .collect::<ThreadStoreResult<Vec<_>>>()?;
+    items
+        .into_iter()
+        .filter_map(|item| match segment.allows_stored_item(&item) {
+            Ok(true) => Some(Ok(item)),
+            Ok(false) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
 }
 
 pub(super) fn parse_cursor(
@@ -247,13 +264,14 @@ pub(super) fn parse_cursor(
 pub(super) fn serialize_cursor(
     requested_thread_id: ThreadId,
     scope: CursorScope,
-    rollout_ordinal: i64,
+    position: PhysicalHistoryPosition,
     include_anchor: bool,
 ) -> ThreadStoreResult<String> {
-    let rollout_ordinal =
-        u64::try_from(rollout_ordinal).map_err(|_| invalid_cursor("negative rollout ordinal"))?;
+    let rollout_ordinal = u64::try_from(position.rollout_ordinal)
+        .map_err(|_| invalid_cursor("negative rollout ordinal"))?;
     serde_json::to_string(&HistoryCursor {
         requested_thread_id,
+        physical_thread_id: position.physical_thread_id,
         rollout_ordinal,
         include_anchor,
         scope,

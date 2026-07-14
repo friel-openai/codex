@@ -351,8 +351,8 @@ use codex_core::path_utils;
 #[cfg(test)]
 use codex_core::read_head_for_summary;
 use codex_core::sandboxing::SandboxPermissions;
-use codex_core::truncate_rollout_after_turn_id;
-use codex_core::truncate_rollout_before_turn_id;
+use codex_core::user_message_count_before_turn_id;
+use codex_core::user_message_count_through_turn_id;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
 use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
@@ -666,12 +666,98 @@ pub(crate) use self::thread_summary::summary_to_thread;
 pub(crate) use self::thread_summary::thread_settings_from_config_snapshot;
 pub(crate) use self::thread_summary::thread_settings_from_core_snapshot;
 
-pub(crate) fn build_legacy_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+pub(crate) fn build_api_turns_from_rollout_items(
+    items: &[RolloutItem],
+    history_mode: codex_protocol::protocol::ThreadHistoryMode,
+) -> Vec<Turn> {
+    if matches!(
+        history_mode,
+        codex_protocol::protocol::ThreadHistoryMode::Paginated
+    ) {
+        return build_paginated_api_turns_from_rollout_items(items);
+    }
     let mut builder = ThreadHistoryBuilder::new();
     for item in items {
-        if is_persisted_rollout_item(item, codex_protocol::protocol::ThreadHistoryMode::Legacy) {
+        if is_persisted_rollout_item(item, history_mode) {
             builder.handle_rollout_item(item);
         }
     }
     builder.finish()
+}
+
+fn build_paginated_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+    let mut turns = Vec::<Turn>::new();
+    let mut turn_positions = HashMap::<String, usize>::new();
+    let mut pending_items = HashMap::<String, Vec<ThreadItem>>::new();
+
+    for (ordinal, item) in items.iter().enumerate() {
+        let changes = codex_app_server_protocol::project_rollout_line(
+            &codex_protocol::protocol::RolloutLine {
+                timestamp: String::new(),
+                ordinal: Some(u64::try_from(ordinal).unwrap_or(u64::MAX)),
+                item: item.clone(),
+            },
+        );
+
+        for turn_id in changes.removed_turn_ids {
+            turns.retain(|turn| turn.id != turn_id);
+            turn_positions = turns
+                .iter()
+                .enumerate()
+                .map(|(index, turn)| (turn.id.clone(), index))
+                .collect();
+            pending_items.remove(&turn_id);
+        }
+
+        for change in changes.changed_turns {
+            if let Some(index) = turn_positions.get(&change.turn_id).copied() {
+                let turn = &mut turns[index];
+                turn.status = change.status;
+                turn.error = change.error;
+                turn.started_at = change.started_at;
+                turn.completed_at = change.completed_at;
+                turn.duration_ms = change.duration_ms;
+                continue;
+            }
+
+            let turn_id = change.turn_id;
+            let index = turns.len();
+            turns.push(Turn {
+                id: turn_id.clone(),
+                items: pending_items.remove(&turn_id).unwrap_or_default(),
+                items_view: TurnItemsView::Full,
+                error: change.error,
+                status: change.status,
+                started_at: change.started_at,
+                completed_at: change.completed_at,
+                duration_ms: change.duration_ms,
+            });
+            turn_positions.insert(turn_id, index);
+        }
+
+        for change in changes.changed_items {
+            let Some(index) = turn_positions.get(&change.turn_id).copied() else {
+                pending_items
+                    .entry(change.turn_id)
+                    .or_default()
+                    .push(change.item);
+                continue;
+            };
+            let turn_items = &mut turns[index].items;
+            if let Some(index) = turn_items
+                .iter()
+                .position(|item| item.id() == change.item.id())
+            {
+                turn_items[index] = change.item;
+            } else {
+                turn_items.push(change.item);
+            }
+        }
+    }
+
+    turns
+}
+
+pub(crate) fn build_legacy_api_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
+    build_api_turns_from_rollout_items(items, codex_protocol::protocol::ThreadHistoryMode::Legacy)
 }

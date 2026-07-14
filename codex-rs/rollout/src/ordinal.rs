@@ -24,11 +24,14 @@ impl RolloutOrdinalState {
     pub(crate) fn for_new_rollout(
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
+        initial_rollout_ordinal: u64,
     ) -> Self {
         match history_mode {
             ThreadHistoryMode::Legacy => Self::Legacy,
             ThreadHistoryMode::Paginated => Self::Paginated {
-                next: Some(history_base.map_or(0, |base| base.end_ordinal_exclusive)),
+                next: Some(history_base.map_or(initial_rollout_ordinal, |base| {
+                    initial_rollout_ordinal.max(base.end_ordinal_exclusive)
+                })),
             },
         }
     }

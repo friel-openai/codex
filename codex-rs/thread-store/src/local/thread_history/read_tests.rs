@@ -612,6 +612,7 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
 
     let gap_cursor = serde_json::to_string(&HistoryCursor {
         requested_thread_id: child_id,
+        physical_thread_id: child_id,
         rollout_ordinal: 6,
         include_anchor: true,
         scope: CursorScope::Turns,

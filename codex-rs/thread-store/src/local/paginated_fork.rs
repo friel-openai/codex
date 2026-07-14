@@ -129,10 +129,13 @@ pub(super) async fn prepare(
         .ok_or_else(|| ThreadStoreError::Internal {
             message: "fork position is outside the source lineage".to_string(),
         })?;
-    if lineage.segments()[segment_index].end.is_some_and(|end| {
-        position.end_ordinal_exclusive > end.end_ordinal_exclusive
-            || position.end_byte_offset > end.end_byte_offset
-    }) {
+    if lineage.segments()[segment_index]
+        .end_position()
+        .is_some_and(|end| {
+            position.end_ordinal_exclusive > end.end_ordinal_exclusive
+                || position.end_byte_offset > end.end_byte_offset
+        })
+    {
         return Err(ThreadStoreError::InvalidRequest {
             message: "fork boundary exceeds inherited source history".to_string(),
         });
@@ -141,7 +144,7 @@ pub(super) async fn prepare(
         if position.end_ordinal_exclusive == lineage.segments()[segment_index].start_ordinal() {
             segment_index
                 .checked_sub(1)
-                .and_then(|index| lineage.segments()[index].end)
+                .and_then(|index| lineage.segments()[index].end_position())
         } else {
             Some(position)
         };

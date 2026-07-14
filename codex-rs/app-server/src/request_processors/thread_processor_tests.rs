@@ -319,6 +319,7 @@ mod thread_processor_behavior_tests {
             ThreadStatus::Idle,
             /*has_live_running_thread*/ false,
             Some(active_turn.clone()),
+            ThreadHistoryMode::Legacy,
         );
 
         assert_eq!(turns.last(), Some(&active_turn));

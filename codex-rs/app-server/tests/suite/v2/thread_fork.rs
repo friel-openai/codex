@@ -59,8 +59,10 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::RolloutRecorder;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
+use codex_rollout::materialize_rollout_items;
 use codex_rollout::read_session_meta_line;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -203,6 +205,25 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
+    let physical_items = RolloutRecorder::load_rollout_items(thread_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(reference.nth_user_message, None);
+    assert!(
+        !std::fs::read_to_string(thread_path.as_path())?.contains(preview),
+        "forked rollout must not copy inherited source messages"
+    );
     assert!(thread.cwd.as_path().is_absolute());
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
@@ -506,9 +527,6 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
             .all(|turn| turn.status == TurnStatus::Completed)
     );
     assert_eq!(forked_thread.forked_from_id, Some(source_thread_id.clone()));
-    if history_mode == ThreadHistoryMode::Legacy {
-        assert_eq!(forked_thread.preview, "first");
-    }
     assert_eq!(
         std::fs::read_to_string(source_path.as_path())?,
         original_contents,
@@ -516,20 +534,27 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     );
 
     let forked_path = forked_thread.path.clone().expect("forked thread path");
-    let forked_contents = std::fs::read_to_string(forked_path.as_path())?;
-    if history_mode == ThreadHistoryMode::Paginated {
-        assert!(
-            read_session_meta_line(forked_path.as_path())
-                .await?
-                .meta
-                .history_base
-                .is_some()
-        );
-        assert!(!forked_contents.contains(turn_ids[1].as_str()));
-    } else {
-        assert!(forked_contents.contains(turn_ids[1].as_str()));
-    }
-    assert!(!forked_contents.contains(turn_ids[2].as_str()));
+    let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        forked_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(reference.nth_user_message, Some(2));
+    assert_eq!(forked_thread.preview, "first");
+    let forked_logical_items =
+        materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
+    let forked_logical_json = serde_json::to_string(&forked_logical_items)?;
+    assert!(forked_logical_json.contains(turn_ids[1].as_str()));
+    assert!(!forked_logical_json.contains(turn_ids[2].as_str()));
 
     let started = loop {
         let notification = timeout(
@@ -545,10 +570,45 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     };
     assert!(started.thread.turns.is_empty());
 
+    let ephemeral_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id.clone(),
+            last_turn_id: Some(turn_ids[1].clone()),
+            ephemeral: true,
+            exclude_turns: history_mode == ThreadHistoryMode::Paginated,
+            ..Default::default()
+        })
+        .await?;
+    let ephemeral_fork_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(ephemeral_fork_id)),
+    )
+    .await??;
+    let ThreadForkResponse {
+        thread: ephemeral_fork,
+        ..
+    } = to_response::<ThreadForkResponse>(ephemeral_fork_resp)?;
+    assert!(ephemeral_fork.ephemeral);
+    assert_eq!(ephemeral_fork.path, None);
+    if history_mode == ThreadHistoryMode::Paginated {
+        assert!(ephemeral_fork.turns.is_empty());
+    } else {
+        assert_eq!(
+            ephemeral_fork
+                .turns
+                .iter()
+                .map(|turn| turn.id.clone())
+                .collect::<Vec<_>>(),
+            turn_ids[..2],
+            "a bounded ephemeral fork must not expose the excluded source suffix"
+        );
+    }
+    assert_eq!(ephemeral_fork.preview, "first");
+
     if history_mode == ThreadHistoryMode::Paginated {
         let before_fork_id = mcp
             .send_thread_fork_request(ThreadForkParams {
-                thread_id: source_thread_id,
+                thread_id: source_thread_id.clone(),
                 before_turn_id: Some(turn_ids[2].clone()),
                 ..Default::default()
             })
@@ -1278,15 +1338,23 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
     assert_eq!(forked_thread.forked_from_id, Some(conversation_id.clone()));
     assert_eq!(forked_thread.turns.len(), 1);
+    assert_eq!(forked_thread.history_mode, ThreadHistoryMode::Paginated);
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
     assert!(!std::fs::read_to_string(forked_path.as_path())?.contains("Saved user message"));
-    let meta = read_session_meta_line(forked_path.as_path()).await?;
-    let history_base = meta.meta.history_base.expect("history base");
-    assert_eq!(
-        history_base.thread_id,
-        ThreadId::from_string(conversation_id.as_str())?
-    );
+    let physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let logical_items = materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
+    assert!(serde_json::to_string(&logical_items)?.contains("Saved user message"));
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -1331,8 +1399,12 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(exclude_id)).await??;
     assert!(excluded_turns_thread.turns.is_empty());
     let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
-    let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
-    assert_eq!(excluded_turns_meta.meta.history_base, Some(history_base));
+    assert!(
+        !std::fs::read_to_string(excluded_turns_path.as_path())?.contains("Saved user message")
+    );
+    let excluded_logical_items =
+        materialize_rollout_items(codex_home.path(), excluded_turns_path.as_path()).await?;
+    assert!(serde_json::to_string(&excluded_logical_items)?.contains("Saved user message"));
     Ok(())
 }
 
@@ -1358,7 +1430,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             "developer",
             Some(ThreadSource::Subagent),
         ),
-        MultiAgentVersion::V1 => (config, "user", None),
+        MultiAgentVersion::V1 => (config.disable_feature(Feature::MultiAgentV2), "user", None),
         MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
     };
     config.write(codex_home.path())?;
@@ -1477,6 +1549,10 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         child_rollout.as_slice(),
         [
             RolloutLine { item: RolloutItem::SessionMeta(_), .. },
+            RolloutLine {
+                item: RolloutItem::RolloutReference(_),
+                ..
+            },
             RolloutLine {
                 item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
                 ..

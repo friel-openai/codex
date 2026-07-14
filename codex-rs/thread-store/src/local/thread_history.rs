@@ -16,7 +16,9 @@ mod turn_lookup;
 pub(super) use read::list_items;
 pub(super) use read::list_turns;
 pub(super) use search::search_thread_occurrences;
+#[cfg(test)]
 pub(super) use turn_lookup::find_source_turn;
+#[cfg(test)]
 pub(super) use turn_lookup::find_visible_turn;
 
 /// A valid complete rollout line with its absolute byte span in durable JSONL.
@@ -80,6 +82,48 @@ WHERE thread_id = ?
             })
         })
         .transpose()
+}
+
+pub(super) async fn reset_projection_for_replacement(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    next_rollout_ordinal: u64,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    let thread_id = thread_id.to_string();
+    let next_rollout_ordinal = sqlite_integer(next_rollout_ordinal, "rollout ordinal")?;
+    let existing_next_ordinal = sqlx::query_scalar::<_, i64>(
+        "SELECT next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
+    )
+    .bind(thread_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(thread_history_error)?;
+    if existing_next_ordinal.is_some_and(|ordinal| ordinal != next_rollout_ordinal) {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "thread history projection for {thread_id} does not end at ordinal {next_rollout_ordinal}"
+            ),
+        });
+    }
+    sqlx::query(
+        r#"
+INSERT INTO thread_history_projection_state (
+    thread_id,
+    next_rollout_byte_offset,
+    next_rollout_ordinal
+) VALUES (?, 0, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    next_rollout_byte_offset = 0,
+    next_rollout_ordinal = excluded.next_rollout_ordinal
+        "#,
+    )
+    .bind(thread_id)
+    .bind(next_rollout_ordinal)
+    .execute(pool)
+    .await
+    .map_err(thread_history_error)?;
+    Ok(())
 }
 
 pub(super) async fn apply_projection(

@@ -153,17 +153,31 @@ WHERE thread_id =
             query.push(" AND turn_id = ").push_bind(turn_id);
         }
         push_cursor_clause(&mut query, params.sort_direction, segment_cursor)?;
-        push_order_and_limit(&mut query, params.sort_direction, remaining);
-        rows.extend(
-            query
-                .build()
-                .fetch_all(pool)
-                .await
-                .map_err(thread_history_error)?
-                .into_iter()
-                .map(|row| stored_thread_item_row_for_thread(segment.thread_id(), row))
-                .collect::<ThreadStoreResult<Vec<_>>>()?,
+        push_order_and_limit(
+            &mut query,
+            params.sort_direction,
+            if segment.filters_items() {
+                i64::MAX
+            } else {
+                remaining
+            },
         );
+        let segment_rows = query
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(thread_history_error)?
+            .into_iter()
+            .map(|row| stored_thread_item_row_for_thread(segment.thread_id(), row))
+            .collect::<ThreadStoreResult<Vec<_>>>()?;
+        for row in segment_rows {
+            if segment.allows_stored_item(&row.item)? {
+                rows.push(row);
+                if remaining_limit(params.page_size, rows.len())? == 0 {
+                    break;
+                }
+            }
+        }
     }
     finish_page(
         params.thread_id,
@@ -183,6 +197,12 @@ async fn page_updated_item_rows(
         params.thread_id,
         CursorScope::ItemsByUpdatedAtOrdinal,
     )?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.physical_thread_id != params.thread_id)
+    {
+        return Err(invalid_cursor("unknown physical segment"));
+    }
     let mut query = QueryBuilder::<Sqlite>::new(
         r#"
 SELECT turn_id, item_id, updated_at_ordinal AS rollout_ordinal, updated_at_ordinal, created_at_ms, item_json
@@ -243,11 +263,28 @@ fn segments_from_cursor<'a>(
     let segments = lineage.segments();
     let cursor_index = cursor
         .map(|cursor| {
-            lineage
-                .segment_index_for_ordinal(cursor.rollout_ordinal)
-                .ok_or_else(|| invalid_cursor("position outside thread lineage"))
+            let matching_segments = segments
+                .iter()
+                .enumerate()
+                .filter(|(_, segment)| {
+                    segment.thread_id() == cursor.physical_thread_id
+                        && segment.contains_ordinal(cursor.rollout_ordinal)
+                })
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            match matching_segments.as_slice() {
+                [index] => Ok(*index),
+                [] => Err(invalid_cursor("unknown physical segment")),
+                [_, _, ..] => Err(invalid_cursor("ambiguous physical segment")),
+            }
         })
         .transpose()?;
+    if let Some(cursor) = cursor
+        && let Some(index) = cursor_index
+        && !cursor_in_segment(cursor, &segments[index])
+    {
+        return Err(invalid_cursor("position outside physical segment"));
+    }
     let indexes: Vec<usize> = match direction {
         SortDirection::Asc => (cursor_index.unwrap_or(0)..segments.len()).collect(),
         SortDirection::Desc => {
@@ -266,6 +303,14 @@ fn segments_from_cursor<'a>(
             (index, &segments[index], segment_cursor)
         })
         .collect())
+}
+
+fn cursor_in_segment(cursor: &HistoryCursor, segment: &RolloutLineageSegment) -> bool {
+    let ordinal = cursor.rollout_ordinal;
+    ordinal >= segment.start_ordinal()
+        && segment
+            .end_ordinal()
+            .is_none_or(|end_ordinal| ordinal < end_ordinal)
 }
 
 fn push_segment_range(
@@ -338,7 +383,7 @@ fn finish_page<T: HasPosition>(
             serialize_cursor(
                 requested_thread_id,
                 scope.clone(),
-                row.position().rollout_ordinal,
+                row.position(),
                 /*include_anchor*/ true,
             )
         })
@@ -349,7 +394,7 @@ fn finish_page<T: HasPosition>(
                 serialize_cursor(
                     requested_thread_id,
                     scope,
-                    row.position().rollout_ordinal,
+                    row.position(),
                     /*include_anchor*/ false,
                 )
             })
@@ -389,5 +434,78 @@ fn sqlite_integer(value: u64) -> ThreadStoreResult<i64> {
 fn page_size_too_large() -> ThreadStoreError {
     ThreadStoreError::InvalidRequest {
         message: "page size is too large".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn cursor_selects_same_thread_segment_by_ordinal_range() {
+        let thread_id = ThreadId::default();
+        let lineage = RolloutLineage {
+            segments: vec![
+                segment(thread_id, "first", /*start_ordinal*/ 1, Some(10)),
+                segment(thread_id, "second", /*start_ordinal*/ 10, Some(20)),
+            ],
+        };
+        let cursor = HistoryCursor {
+            requested_thread_id: thread_id,
+            physical_thread_id: thread_id,
+            rollout_ordinal: 12,
+            include_anchor: false,
+            scope: CursorScope::ItemsByCreatedAtOrdinal,
+        };
+
+        let segments =
+            segments_from_cursor(&lineage, SortDirection::Asc, Some(&cursor)).expect("segments");
+
+        assert_eq!(segments.len(), 1);
+        assert_eq!(segments[0].1.rollout_path, PathBuf::from("second"));
+        assert!(segments[0].2.is_some());
+    }
+
+    #[test]
+    fn cursor_rejects_overlapping_same_thread_segments() {
+        let thread_id = ThreadId::default();
+        let lineage = RolloutLineage {
+            segments: vec![
+                segment(thread_id, "first", /*start_ordinal*/ 1, Some(20)),
+                segment(thread_id, "second", /*start_ordinal*/ 10, Some(30)),
+            ],
+        };
+        let cursor = HistoryCursor {
+            requested_thread_id: thread_id,
+            physical_thread_id: thread_id,
+            rollout_ordinal: 12,
+            include_anchor: false,
+            scope: CursorScope::ItemsByCreatedAtOrdinal,
+        };
+
+        let error = match segments_from_cursor(&lineage, SortDirection::Asc, Some(&cursor)) {
+            Ok(_) => panic!("overlapping segments must be ambiguous"),
+            Err(error) => error,
+        };
+
+        assert!(error.to_string().contains("ambiguous physical segment"));
+    }
+
+    fn segment(
+        thread_id: ThreadId,
+        path: &str,
+        start_ordinal: u64,
+        end_ordinal_exclusive: Option<u64>,
+    ) -> RolloutLineageSegment {
+        RolloutLineageSegment {
+            thread_id,
+            rollout_path: PathBuf::from(path),
+            start_ordinal,
+            end_ordinal_exclusive,
+            end_byte_offset: None,
+            filter_texts: Vec::new(),
+        }
     }
 }
