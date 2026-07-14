@@ -58,16 +58,11 @@ pub(super) async fn load_latest_model_context(
         });
     }
 
-    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
-        && !path
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .is_some_and(|file_name| file_name.ends_with(".jsonl.zst"))
-    {
+    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated) {
         let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
         scan_model_context_from_lineage(lineage, session_meta).await?
     } else {
-        read_thread::load_history_items(path.as_path()).await?
+        read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path()).await?
     };
 
     Ok(StoredModelContext {
@@ -109,6 +104,15 @@ async fn scan_model_context_from_lineage(
     lineage: RolloutLineage,
     session_meta: SessionMetaLine,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
+    if lineage.segments().iter().any(|segment| {
+        segment
+            .rollout_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".zst"))
+    }) {
+        return scan_loaded_model_context_from_lineage(&lineage, session_meta).await;
+    }
     let scan = tokio::task::spawn_blocking(move || {
         scan_model_context_from_lineage_blocking(&lineage, session_meta)
     })
@@ -131,7 +135,7 @@ fn scan_model_context_from_lineage_blocking(
     let mut scan = ModelContextScan::default();
     'segments: for segment in lineage.segments().iter().rev() {
         let file = File::open(segment.rollout_path.as_path())?;
-        let mut scanner = match segment.end.map(|end| end.end_byte_offset) {
+        let mut scanner = match segment.end_byte_offset {
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
@@ -139,12 +143,26 @@ fn scan_model_context_from_lineage_blocking(
             let ScanOutcome::Parsed(line) = outcome else {
                 continue;
             };
+            if let Some(ordinal) = line.ordinal
+                && (ordinal < segment.start_ordinal
+                    || segment
+                        .end_ordinal_exclusive
+                        .is_some_and(|end| ordinal >= end))
+            {
+                continue;
+            }
             // Each physical segment contributes only its local delta. Its head metadata is
             // replaced with the requested thread's canonical SessionMeta after replay.
-            if matches!(&line.item, RolloutItem::SessionMeta(_)) {
+            let mut item = line.item;
+            if matches!(&item, RolloutItem::SessionMeta(_)) {
                 break;
             }
-            match scan.push(line.item) {
+            if matches!(&item, RolloutItem::RolloutReference(_))
+                || !segment.filter_rollout_item(&mut item)
+            {
+                continue;
+            }
+            match scan.push(item) {
                 ModelContextScanProgress::Continue => {}
                 ModelContextScanProgress::Complete => break 'segments,
             }
@@ -157,4 +175,60 @@ fn scan_model_context_from_lineage_blocking(
         items.insert(0, RolloutItem::SessionMeta(canonical_meta));
     }
     Ok(items)
+}
+
+async fn scan_loaded_model_context_from_lineage(
+    lineage: &RolloutLineage,
+    session_meta: SessionMetaLine,
+) -> ThreadStoreResult<Vec<RolloutItem>> {
+    let mut scan = ModelContextScan::default();
+    'segments: for segment in lineage.segments().iter().rev() {
+        let (lines, _, parse_errors) =
+            codex_rollout::RolloutRecorder::load_rollout_lines(segment.rollout_path.as_path())
+                .await
+                .map_err(thread_store_io_error)?;
+        if parse_errors != 0 {
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to scan paginated model context lineage: {} contains {parse_errors} invalid record(s)",
+                    segment.rollout_path.display()
+                ),
+            });
+        }
+        for line in lines.into_iter().rev() {
+            if let Some(ordinal) = line.ordinal
+                && (ordinal < segment.start_ordinal
+                    || segment
+                        .end_ordinal_exclusive
+                        .is_some_and(|end| ordinal >= end))
+            {
+                continue;
+            }
+            let mut item = line.item;
+            if matches!(&item, RolloutItem::SessionMeta(_)) {
+                break;
+            }
+            if matches!(&item, RolloutItem::RolloutReference(_))
+                || !segment.filter_rollout_item(&mut item)
+            {
+                continue;
+            }
+            match scan.push(item) {
+                ModelContextScanProgress::Continue => {}
+                ModelContextScanProgress::Complete => break 'segments,
+            }
+        }
+    }
+    let canonical_meta = session_meta.clone();
+    let mut items = scan.finish(session_meta);
+    if !matches!(items.first(), Some(RolloutItem::SessionMeta(_))) {
+        items.insert(0, RolloutItem::SessionMeta(canonical_meta));
+    }
+    Ok(items)
+}
+
+fn thread_store_io_error(err: io::Error) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!("failed to scan paginated model context lineage: {err}"),
+    }
 }

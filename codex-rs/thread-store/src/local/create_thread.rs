@@ -43,6 +43,7 @@ pub(super) async fn create_thread(
         .with_history_mode(params.history_mode)
         .with_history_base(params.history_base)
         .with_subagent_history_start_ordinal(params.subagent_history_start_ordinal)
+        .with_initial_rollout_ordinal(params.initial_rollout_ordinal)
         .with_initial_window_id(params.initial_window_id),
     )
     .await
