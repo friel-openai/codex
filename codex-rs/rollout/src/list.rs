@@ -5,7 +5,6 @@ use std::cmp::Reverse;
 use std::ffi::OsStr;
 use std::io;
 use std::num::NonZero;
-use std::ops::ControlFlow;
 use std::path::Path;
 use std::path::PathBuf;
 use time::OffsetDateTime;
@@ -16,6 +15,7 @@ use time::macros::format_description;
 use uuid::Uuid;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
+use super::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
 use crate::protocol::EventMsg;
@@ -98,6 +98,7 @@ pub type ConversationsPage = ThreadsPage;
 #[derive(Default)]
 struct HeadTailSummary {
     saw_session_meta: bool,
+    saw_compacted_user_message: bool,
     thread_id: Option<ThreadId>,
     first_user_message: Option<String>,
     preview: Option<String>,
@@ -118,8 +119,15 @@ struct HeadTailSummary {
 
 /// Hard cap to bound worst‑case work per request.
 const MAX_SCAN_FILES: usize = 10000;
+const MAX_SUMMARY_REFERENCE_DEPTH: usize = 8;
 const HEAD_RECORD_LIMIT: usize = 10;
 const USER_EVENT_SCAN_LIMIT: usize = 200;
+const MAX_SUMMARY_REFERENCE_FILES: usize = 2;
+const LIST_METADATA_READ_CONCURRENCY: usize = 64;
+// Classifying ordinary short records twice costs more than deserializing their payload once.
+const MIN_COMPACTED_SUMMARY_FAST_PATH_BYTES: usize = 64 * 1024;
+const COMPACTED_SUMMARY_RECORD_TYPE_HINT: &str = "\"type\":\"compacted\"";
+const COMPACTED_SUMMARY_RECORD_TYPE_HINT_EDGE_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSortKey {
@@ -206,95 +214,6 @@ impl AnchorState {
         } else {
             true
         }
-    }
-}
-
-/// Visitor interface to customize behavior when visiting each rollout file
-/// in `walk_rollout_files`.
-///
-/// We need to apply different logic if we're ultimately going to be returning
-/// threads ordered by created_at or updated_at.
-trait RolloutFileVisitor {
-    fn visit(
-        &mut self,
-        ts: OffsetDateTime,
-        id: Uuid,
-        path: PathBuf,
-        scanned: usize,
-    ) -> impl std::future::Future<Output = ControlFlow<()>> + Send;
-}
-
-/// Collects thread items during directory traversal in created_at order,
-/// applying pagination and filters inline.
-struct FilesByCreatedAtVisitor<'a> {
-    items: &'a mut Vec<ThreadItem>,
-    page_size: usize,
-    anchor_state: AnchorState,
-    more_matches_available: bool,
-    allowed_sources: &'a [SessionSource],
-    provider_matcher: Option<&'a ProviderMatcher<'a>>,
-    cwd_filters: Option<&'a [PathBuf]>,
-}
-
-impl<'a> RolloutFileVisitor for FilesByCreatedAtVisitor<'a> {
-    async fn visit(
-        &mut self,
-        ts: OffsetDateTime,
-        id: Uuid,
-        path: PathBuf,
-        scanned: usize,
-    ) -> ControlFlow<()> {
-        if scanned >= MAX_SCAN_FILES && self.items.len() >= self.page_size {
-            self.more_matches_available = true;
-            return ControlFlow::Break(());
-        }
-        if self.anchor_state.should_skip(ts, id) {
-            return ControlFlow::Continue(());
-        }
-        if self.items.len() == self.page_size {
-            self.more_matches_available = true;
-            return ControlFlow::Break(());
-        }
-        let updated_at = file_modified_time(&path)
-            .await
-            .unwrap_or(None)
-            .and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            path,
-            self.allowed_sources,
-            self.provider_matcher,
-            self.cwd_filters,
-            updated_at,
-        )
-        .await
-        {
-            self.items.push(item);
-        }
-        ControlFlow::Continue(())
-    }
-}
-
-/// Collects lightweight file candidates (path + id + mtime).
-/// Sorting after mtime happens after all files are collected.
-struct FilesByUpdatedAtVisitor<'a> {
-    candidates: &'a mut Vec<ThreadCandidate>,
-}
-
-impl<'a> RolloutFileVisitor for FilesByUpdatedAtVisitor<'a> {
-    async fn visit(
-        &mut self,
-        _ts: OffsetDateTime,
-        id: Uuid,
-        path: PathBuf,
-        _scanned: usize,
-    ) -> ControlFlow<()> {
-        let updated_at = file_modified_time(&path).await.unwrap_or(None);
-        self.candidates.push(ThreadCandidate {
-            path,
-            id,
-            updated_at,
-        });
-        ControlFlow::Continue(())
     }
 }
 
@@ -430,30 +349,17 @@ async fn traverse_directories_for_paths(
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
-    match sort_key {
-        ThreadSortKey::CreatedAt => {
-            traverse_directories_for_paths_created(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
-        }
-        ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
-            traverse_directories_for_paths_updated(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
-        }
-    }
+    traverse_bounded_thread_candidates(
+        root,
+        ThreadListLayout::NestedByDate,
+        page_size,
+        anchor,
+        sort_key,
+        allowed_sources,
+        provider_matcher,
+        cwd_filters,
+    )
+    .await
 }
 
 async fn traverse_flat_paths(
@@ -465,261 +371,108 @@ async fn traverse_flat_paths(
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
 ) -> io::Result<ThreadsPage> {
-    match sort_key {
-        ThreadSortKey::CreatedAt => {
-            traverse_flat_paths_created(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
-        }
-        ThreadSortKey::UpdatedAt | ThreadSortKey::RecencyAt => {
-            traverse_flat_paths_updated(
-                root,
-                page_size,
-                anchor,
-                allowed_sources,
-                provider_matcher,
-                cwd_filters,
-            )
-            .await
-        }
-    }
-}
-
-/// Walk the rollout directory tree in reverse chronological order and
-/// collect items until the page fills or the scan cap is hit.
-///
-/// Ordering comes from directory/filename sorting, so created_at is derived
-/// from the filename timestamp. Pagination is handled by the anchor cursor
-/// so we resume strictly after the last returned `(ts, id)` pair.
-async fn traverse_directories_for_paths_created(
-    root: PathBuf,
-    page_size: usize,
-    anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
-    provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
-) -> io::Result<ThreadsPage> {
-    let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
-    let mut scanned_files = 0usize;
-    let mut more_matches_available = false;
-    let mut visitor = FilesByCreatedAtVisitor {
-        items: &mut items,
+    traverse_bounded_thread_candidates(
+        root,
+        ThreadListLayout::Flat,
         page_size,
-        anchor_state: AnchorState::new(anchor),
-        more_matches_available,
+        anchor,
+        sort_key,
         allowed_sources,
         provider_matcher,
         cwd_filters,
+    )
+    .await
+}
+
+/// Filter candidate metadata concurrently without changing filesystem pagination order.
+async fn traverse_bounded_thread_candidates(
+    root: PathBuf,
+    layout: ThreadListLayout,
+    page_size: usize,
+    anchor: Option<Cursor>,
+    sort_key: ThreadSortKey,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+) -> io::Result<ThreadsPage> {
+    let sort_by_updated_at = !matches!(sort_key, ThreadSortKey::CreatedAt);
+    let mut candidates =
+        collect_bounded_thread_candidates(root.as_path(), layout, sort_by_updated_at).await?;
+    if sort_by_updated_at {
+        candidates.sort_by_key(|candidate| {
+            (
+                Reverse(candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH)),
+                Reverse(candidate.id),
+            )
+        });
+    } else if matches!(layout, ThreadListLayout::Flat) {
+        candidates.sort_by_key(|candidate| (Reverse(candidate.created_at), Reverse(candidate.id)));
+    }
+
+    let mut items = Vec::with_capacity(page_size);
+    let mut anchor_state = AnchorState::new(anchor);
+    let mut start_index = 0;
+    while let Some(candidate) = candidates.get(start_index) {
+        let timestamp = if sort_by_updated_at {
+            candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH)
+        } else {
+            candidate.created_at
+        };
+        if !anchor_state.should_skip(timestamp, candidate.id) {
+            break;
+        }
+        start_index += 1;
+    }
+
+    let report_all_candidates = sort_by_updated_at || matches!(layout, ThreadListLayout::Flat);
+    let mut scanned_files = if report_all_candidates {
+        candidates.len()
+    } else {
+        start_index
     };
-    walk_rollout_files(&root, &mut scanned_files, &mut visitor).await?;
-    more_matches_available = visitor.more_matches_available;
+    let mut more_matches_available = false;
+
+    'batches: for batch in candidates[start_index..].chunks(LIST_METADATA_READ_CONCURRENCY) {
+        let metadata = read_bounded_candidate_metadata(batch).await?;
+        let summaries = build_bounded_candidate_summaries(
+            batch,
+            metadata,
+            allowed_sources,
+            provider_matcher,
+            cwd_filters,
+            !sort_by_updated_at,
+        )
+        .await?;
+        for item in summaries {
+            if !report_all_candidates {
+                scanned_files += 1;
+            }
+            if items.len() == page_size {
+                more_matches_available = true;
+                break 'batches;
+            }
+            if let Some(item) = item {
+                items.push(item);
+            }
+        }
+    }
 
     let reached_scan_cap = scanned_files >= MAX_SCAN_FILES;
     if reached_scan_cap && !items.is_empty() {
         more_matches_available = true;
     }
 
-    let next = if more_matches_available {
-        build_next_cursor(&items, ThreadSortKey::CreatedAt)
-    } else {
-        None
-    };
-    Ok(ThreadsPage {
-        items,
-        next_cursor: next,
-        num_scanned_files: scanned_files,
-        reached_scan_cap,
-    })
-}
-
-/// Walk the rollout directory tree to collect files by updated_at, then sort by
-/// file mtime (updated_at) and apply pagination/filtering in that order.
-///
-/// Because updated_at is not encoded in filenames, this path must scan all
-/// files up to the scan cap, then sort and filter by the anchor cursor.
-///
-/// NOTE: This can be optimized in the future if we store additional state on disk
-/// to cache updated_at timestamps.
-async fn traverse_directories_for_paths_updated(
-    root: PathBuf,
-    page_size: usize,
-    anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
-    provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
-) -> io::Result<ThreadsPage> {
-    let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
-    let mut scanned_files = 0usize;
-    let mut anchor_state = AnchorState::new(anchor);
-    let mut more_matches_available = false;
-
-    let mut candidates = collect_files_by_updated_at(&root, &mut scanned_files).await?;
-    candidates.sort_by_key(|candidate| {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        (Reverse(ts), Reverse(candidate.id))
+    let next_cursor = more_matches_available.then(|| {
+        let cursor_sort_key = match sort_key {
+            ThreadSortKey::RecencyAt => ThreadSortKey::UpdatedAt,
+            other => other,
+        };
+        build_next_cursor(&items, cursor_sort_key)
     });
 
-    for candidate in candidates.into_iter() {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        if anchor_state.should_skip(ts, candidate.id) {
-            continue;
-        }
-        if items.len() == page_size {
-            more_matches_available = true;
-            break;
-        }
-
-        let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            candidate.path,
-            allowed_sources,
-            provider_matcher,
-            cwd_filters,
-            updated_at_fallback,
-        )
-        .await
-        {
-            items.push(item);
-        }
-    }
-
-    let reached_scan_cap = scanned_files >= MAX_SCAN_FILES;
-    if reached_scan_cap && !items.is_empty() {
-        more_matches_available = true;
-    }
-
-    let next = if more_matches_available {
-        build_next_cursor(&items, ThreadSortKey::UpdatedAt)
-    } else {
-        None
-    };
     Ok(ThreadsPage {
         items,
-        next_cursor: next,
-        num_scanned_files: scanned_files,
-        reached_scan_cap,
-    })
-}
-
-async fn traverse_flat_paths_created(
-    root: PathBuf,
-    page_size: usize,
-    anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
-    provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
-) -> io::Result<ThreadsPage> {
-    let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
-    let mut scanned_files = 0usize;
-    let mut anchor_state = AnchorState::new(anchor);
-    let mut more_matches_available = false;
-
-    let files = collect_flat_rollout_files(&root, &mut scanned_files).await?;
-    for (ts, id, path) in files.into_iter() {
-        if anchor_state.should_skip(ts, id) {
-            continue;
-        }
-        if items.len() == page_size {
-            more_matches_available = true;
-            break;
-        }
-        let updated_at = file_modified_time(&path)
-            .await
-            .unwrap_or(None)
-            .and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            path,
-            allowed_sources,
-            provider_matcher,
-            cwd_filters,
-            updated_at,
-        )
-        .await
-        {
-            items.push(item);
-        }
-    }
-
-    let reached_scan_cap = scanned_files >= MAX_SCAN_FILES;
-    if reached_scan_cap && !items.is_empty() {
-        more_matches_available = true;
-    }
-
-    let next = if more_matches_available {
-        build_next_cursor(&items, ThreadSortKey::CreatedAt)
-    } else {
-        None
-    };
-    Ok(ThreadsPage {
-        items,
-        next_cursor: next,
-        num_scanned_files: scanned_files,
-        reached_scan_cap,
-    })
-}
-
-async fn traverse_flat_paths_updated(
-    root: PathBuf,
-    page_size: usize,
-    anchor: Option<Cursor>,
-    allowed_sources: &[SessionSource],
-    provider_matcher: Option<&ProviderMatcher<'_>>,
-    cwd_filters: Option<&[PathBuf]>,
-) -> io::Result<ThreadsPage> {
-    let mut items: Vec<ThreadItem> = Vec::with_capacity(page_size);
-    let mut scanned_files = 0usize;
-    let mut anchor_state = AnchorState::new(anchor);
-    let mut more_matches_available = false;
-
-    let mut candidates = collect_flat_files_by_updated_at(&root, &mut scanned_files).await?;
-    candidates.sort_by_key(|candidate| {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        (Reverse(ts), Reverse(candidate.id))
-    });
-
-    for candidate in candidates.into_iter() {
-        let ts = candidate.updated_at.unwrap_or(OffsetDateTime::UNIX_EPOCH);
-        if anchor_state.should_skip(ts, candidate.id) {
-            continue;
-        }
-        if items.len() == page_size {
-            more_matches_available = true;
-            break;
-        }
-
-        let updated_at_fallback = candidate.updated_at.and_then(format_rfc3339);
-        if let Some(item) = build_thread_item(
-            candidate.path,
-            allowed_sources,
-            provider_matcher,
-            cwd_filters,
-            updated_at_fallback,
-        )
-        .await
-        {
-            items.push(item);
-        }
-    }
-
-    let reached_scan_cap = scanned_files >= MAX_SCAN_FILES;
-    if reached_scan_cap && !items.is_empty() {
-        more_matches_available = true;
-    }
-
-    let next = if more_matches_available {
-        build_next_cursor(&items, ThreadSortKey::UpdatedAt)
-    } else {
-        None
-    };
-    Ok(ThreadsPage {
-        items,
-        next_cursor: next,
+        next_cursor: next_cursor.flatten(),
         num_scanned_files: scanned_files,
         reached_scan_cap,
     })
@@ -775,10 +528,11 @@ async fn build_thread_item(
     provider_matcher: Option<&ProviderMatcher<'_>>,
     cwd_filters: Option<&[PathBuf]>,
     updated_at: Option<String>,
+    indexed_preview: bool,
 ) -> Option<ThreadItem> {
     // Read head and detect preview-bearing events; goal previews can appear before
     // the first normal user message.
-    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT)
+    let summary = read_head_summary(&path, HEAD_RECORD_LIMIT, indexed_preview)
         .await
         .unwrap_or_default();
     if !allowed_sources.is_empty()
@@ -803,8 +557,10 @@ async fn build_thread_item(
     {
         return None;
     }
-    // Apply filters: must have session meta and a discoverable preview.
-    if summary.saw_session_meta && summary.preview.is_some() {
+    // Compacted replacement history can retain a valid user conversation even when its original
+    // preview is beyond the bounded summary scan.
+    if summary.saw_session_meta && (summary.preview.is_some() || summary.saw_compacted_user_message)
+    {
         let HeadTailSummary {
             thread_id,
             first_user_message,
@@ -864,104 +620,27 @@ pub async fn read_thread_item_from_rollout(path: PathBuf) -> Option<ThreadItem> 
         /*provider_matcher*/ None,
         /*cwd_filters*/ None,
         /*updated_at*/ None,
+        /*indexed_preview*/ false,
     )
     .await
 }
 
-/// Collects immediate subdirectories of `parent`, parses their (string) names with `parse`,
-/// and returns them sorted descending by the parsed key.
-async fn collect_dirs_desc<T, F>(parent: &Path, parse: F) -> io::Result<Vec<(T, PathBuf)>>
-where
-    T: Ord + Copy,
-    F: Fn(&str) -> Option<T>,
-{
-    let mut dir = tokio::fs::read_dir(parent).await?;
-    let mut vec: Vec<(T, PathBuf)> = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_dir())
-            .unwrap_or(false)
-            && let Some(s) = entry.file_name().to_str()
-            && let Some(v) = parse(s)
-        {
-            vec.push((v, entry.path()));
-        }
-    }
-    vec.sort_by_key(|(v, _)| Reverse(*v));
-    Ok(vec)
-}
-
-/// Collects files in a directory and parses them with `parse`.
-async fn collect_files<T, F>(parent: &Path, parse: F) -> io::Result<Vec<T>>
-where
-    F: Fn(&str, &Path) -> Option<T>,
-{
-    let mut dir = tokio::fs::read_dir(parent).await?;
-    let mut collected: Vec<T> = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-            && let Some(s) = entry.file_name().to_str()
-            && let Some(v) = parse(s, &entry.path())
-        {
-            collected.push(v);
-        }
-    }
-    Ok(collected)
-}
-
-async fn collect_flat_rollout_files(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<(OffsetDateTime, Uuid, PathBuf)>> {
-    let mut dir = tokio::fs::read_dir(root).await?;
-    let mut collected = Vec::new();
-    while let Some(entry) = dir.next_entry().await? {
-        if *scanned_files >= MAX_SCAN_FILES {
-            break;
-        }
-        if !entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-        {
-            continue;
-        }
-        let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
-            continue;
-        };
-        let Some((ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-        else {
-            continue;
-        };
-        *scanned_files += 1;
-        if *scanned_files > MAX_SCAN_FILES {
-            break;
-        }
-        collected.push((ts, id, rollout_file.into_path()));
-    }
-    collected.sort_by_key(|(ts, sid, _path)| (Reverse(*ts), Reverse(*sid)));
-    Ok(collected)
-}
-
-async fn collect_rollout_day_files(
-    day_path: &Path,
-) -> io::Result<Vec<(OffsetDateTime, Uuid, PathBuf)>> {
-    let mut day_files = collect_files(day_path, |_name_str, path| {
-        let rollout_file = compression::RolloutFile::from_path(path.to_path_buf())?;
-        parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
-            .map(|(ts, id)| (ts, id, rollout_file.into_path()))
-    })
-    .await?;
-    // Stable ordering within the same second: (timestamp desc, uuid desc)
-    day_files.sort_by_key(|(ts, sid, _path)| (Reverse(*ts), Reverse(*sid)));
-    Ok(day_files)
+/// Reads rollout metadata when SQLite already supplies a nonempty thread preview.
+///
+/// Compacted replacement histories cannot override an indexed preview. Explicit user events
+/// remain authoritative and are still discovered in the rollout and referenced segments.
+pub async fn read_thread_item_from_rollout_with_indexed_preview(
+    path: PathBuf,
+) -> Option<ThreadItem> {
+    build_thread_item(
+        path,
+        &[],
+        /*provider_matcher*/ None,
+        /*cwd_filters*/ None,
+        /*updated_at*/ None,
+        /*indexed_preview*/ true,
+    )
+    .await
 }
 
 pub(crate) fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(OffsetDateTime, Uuid)> {
@@ -982,105 +661,272 @@ pub(crate) fn parse_timestamp_uuid_from_filename(name: &str) -> Option<(OffsetDa
     Some((ts, uuid))
 }
 
-struct ThreadCandidate {
+struct BoundedThreadCandidate {
     path: PathBuf,
     id: Uuid,
+    created_at: OffsetDateTime,
     updated_at: Option<OffsetDateTime>,
 }
 
-async fn collect_files_by_updated_at(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<ThreadCandidate>> {
-    let mut candidates = Vec::new();
-    let mut visitor = FilesByUpdatedAtVisitor {
-        candidates: &mut candidates,
-    };
-    walk_rollout_files(root, scanned_files, &mut visitor).await?;
+/// Read metadata first so excluded sessions never open inherited rollout files.
+async fn read_bounded_candidate_metadata(
+    candidates: &[BoundedThreadCandidate],
+) -> io::Result<Vec<io::Result<SessionMetaLine>>> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let path = candidate.path.clone();
+        tasks.spawn(async move { (index, read_listing_session_meta_line(path.as_path()).await) });
+    }
 
+    let mut results = Vec::with_capacity(candidates.len());
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.map_err(io::Error::other)?);
+    }
+    results.sort_by_key(|(index, _)| *index);
+    Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
+async fn read_listing_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> {
+    let mut lines = compression::open_rollout_line_reader(path).await?;
+    let mut records_scanned = 0;
+    while records_scanned < HEAD_RECORD_LIMIT {
+        let Some(line) = lines.next_line().await? else {
+            break;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        records_scanned += 1;
+        let Ok(rollout_line) = serde_json::from_str::<RolloutLine>(trimmed) else {
+            if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+                crate::recorder::reject_unknown_thread_history_mode(&value)?;
+            }
+            continue;
+        };
+        match rollout_line.item {
+            RolloutItem::SessionMeta(metadata) => return Ok(metadata),
+            RolloutItem::ResponseItem(_) | RolloutItem::InterAgentCommunication(_) => {
+                return Err(io::Error::other(format!(
+                    "rollout at {} does not start with session metadata",
+                    path.display()
+                )));
+            }
+            RolloutItem::RolloutReference(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::Compacted(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::EventMsg(_) => {}
+        }
+    }
+    Err(io::Error::other(format!(
+        "rollout at {} has no session metadata in its first {HEAD_RECORD_LIMIT} records",
+        path.display()
+    )))
+}
+
+async fn build_bounded_candidate_summaries(
+    candidates: &[BoundedThreadCandidate],
+    metadata: Vec<io::Result<SessionMetaLine>>,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+    load_candidate_mtime: bool,
+) -> io::Result<Vec<Option<ThreadItem>>> {
+    let mut tasks = tokio::task::JoinSet::new();
+    for (index, (candidate, metadata)) in candidates.iter().zip(metadata).enumerate() {
+        let path = candidate.path.clone();
+        let candidate_updated_at = candidate.updated_at;
+        let allowed_sources = allowed_sources.to_vec();
+        let provider_filters = provider_matcher.map(|matcher| matcher.filters.to_vec());
+        let matches_default_provider =
+            provider_matcher.is_some_and(|matcher| matcher.matches_default_provider);
+        let cwd_filters = cwd_filters.map(<[PathBuf]>::to_vec);
+        tasks.spawn(async move {
+            let provider_matcher = provider_filters.as_deref().map(|filters| ProviderMatcher {
+                filters,
+                matches_default_provider,
+            });
+            if let Ok(metadata) = metadata
+                && !session_metadata_matches_filters(
+                    &metadata,
+                    allowed_sources.as_slice(),
+                    provider_matcher.as_ref(),
+                    cwd_filters.as_deref(),
+                )
+            {
+                return (index, None);
+            }
+
+            let updated_at = if load_candidate_mtime {
+                file_modified_time(path.as_path()).await.unwrap_or(None)
+            } else {
+                candidate_updated_at
+            }
+            .and_then(format_rfc3339);
+            let item = build_thread_item(
+                path,
+                allowed_sources.as_slice(),
+                provider_matcher.as_ref(),
+                cwd_filters.as_deref(),
+                updated_at,
+                /*indexed_preview*/ false,
+            )
+            .await;
+            (index, item)
+        });
+    }
+
+    let mut results = Vec::with_capacity(candidates.len());
+    while let Some(result) = tasks.join_next().await {
+        results.push(result.map_err(io::Error::other)?);
+    }
+    results.sort_by_key(|(index, _)| *index);
+    Ok(results.into_iter().map(|(_, item)| item).collect())
+}
+
+fn session_metadata_matches_filters(
+    metadata: &SessionMetaLine,
+    allowed_sources: &[SessionSource],
+    provider_matcher: Option<&ProviderMatcher<'_>>,
+    cwd_filters: Option<&[PathBuf]>,
+) -> bool {
+    if !allowed_sources.is_empty() && !allowed_sources.contains(&metadata.meta.source) {
+        return false;
+    }
+    if let Some(matcher) = provider_matcher
+        && !matcher.matches(metadata.meta.model_provider.as_deref())
+    {
+        return false;
+    }
+    if let Some(cwd_filters) = cwd_filters
+        && !cwd_filters
+            .iter()
+            .any(|filter| path_utils::paths_match_after_normalization(&metadata.meta.cwd, filter))
+    {
+        return false;
+    }
+    true
+}
+
+/// Enumerate and stat rollout candidates in one blocking task instead of scheduling per file.
+async fn collect_bounded_thread_candidates(
+    root: &Path,
+    layout: ThreadListLayout,
+    include_updated_at: bool,
+) -> io::Result<Vec<BoundedThreadCandidate>> {
+    let root = root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        collect_bounded_thread_candidates_blocking(root.as_path(), layout, include_updated_at)
+    })
+    .await
+    .map_err(io::Error::other)?
+}
+
+fn collect_bounded_thread_candidates_blocking(
+    root: &Path,
+    layout: ThreadListLayout,
+    include_updated_at: bool,
+) -> io::Result<Vec<BoundedThreadCandidate>> {
+    let mut candidates = Vec::new();
+    match layout {
+        ThreadListLayout::NestedByDate => {
+            let year_dirs = collect_bounded_dirs_desc(root, |value| value.parse::<u16>().ok())?;
+            'outer: for (_, year_path) in year_dirs {
+                let month_dirs = collect_bounded_dirs_desc(year_path.as_path(), |value| {
+                    value.parse::<u8>().ok()
+                })?;
+                for (_, month_path) in month_dirs {
+                    let day_dirs = collect_bounded_dirs_desc(month_path.as_path(), |value| {
+                        value.parse::<u8>().ok()
+                    })?;
+                    for (_, day_path) in day_dirs {
+                        let mut day_candidates = collect_bounded_candidates_in_dir(
+                            day_path.as_path(),
+                            include_updated_at,
+                            /*candidate_limit*/ None,
+                        )?;
+                        day_candidates.sort_by_key(|candidate| {
+                            (Reverse(candidate.created_at), Reverse(candidate.id))
+                        });
+                        for candidate in day_candidates {
+                            if candidates.len() >= MAX_SCAN_FILES {
+                                break 'outer;
+                            }
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+        }
+        ThreadListLayout::Flat => {
+            candidates =
+                collect_bounded_candidates_in_dir(root, include_updated_at, Some(MAX_SCAN_FILES))?;
+        }
+    }
     Ok(candidates)
 }
 
-async fn collect_flat_files_by_updated_at(
-    root: &Path,
-    scanned_files: &mut usize,
-) -> io::Result<Vec<ThreadCandidate>> {
-    let mut candidates = Vec::new();
-    let mut dir = tokio::fs::read_dir(root).await?;
-    while let Some(entry) = dir.next_entry().await? {
-        if *scanned_files >= MAX_SCAN_FILES {
-            break;
+fn collect_bounded_dirs_desc<T, F>(parent: &Path, parse: F) -> io::Result<Vec<(T, PathBuf)>>
+where
+    T: Ord + Copy,
+    F: Fn(&str) -> Option<T>,
+{
+    let mut directories = Vec::new();
+    for entry in std::fs::read_dir(parent)? {
+        let entry = entry?;
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_dir()) {
+            continue;
         }
-        if !entry
-            .file_type()
-            .await
-            .map(|ft| ft.is_file())
-            .unwrap_or(false)
-        {
+        let Some(value) = entry.file_name().to_str().and_then(&parse) else {
+            continue;
+        };
+        directories.push((value, entry.path()));
+    }
+    directories.sort_by_key(|(value, _)| Reverse(*value));
+    Ok(directories)
+}
+
+fn collect_bounded_candidates_in_dir(
+    directory: &Path,
+    include_updated_at: bool,
+    candidate_limit: Option<usize>,
+) -> io::Result<Vec<BoundedThreadCandidate>> {
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(directory)? {
+        let entry = entry?;
+        if !entry.file_type().is_ok_and(|file_type| file_type.is_file()) {
             continue;
         }
         let Some(rollout_file) = compression::RolloutFile::from_path(entry.path()) else {
             continue;
         };
-        let Some((_ts, id)) = parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
+        let Some((created_at, id)) =
+            parse_timestamp_uuid_from_filename(rollout_file.plain_file_name())
         else {
             continue;
         };
-        *scanned_files += 1;
-        if *scanned_files > MAX_SCAN_FILES {
-            break;
-        }
-        let updated_at = file_modified_time(rollout_file.path())
-            .await
-            .unwrap_or(None);
-        candidates.push(ThreadCandidate {
+        let updated_at = if include_updated_at {
+            entry
+                .metadata()
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| truncate_to_millis(OffsetDateTime::from(modified)))
+        } else {
+            None
+        };
+        candidates.push(BoundedThreadCandidate {
             path: rollout_file.into_path(),
             id,
+            created_at,
             updated_at,
         });
-    }
-
-    Ok(candidates)
-}
-
-async fn walk_rollout_files(
-    root: &Path,
-    scanned_files: &mut usize,
-    visitor: &mut impl RolloutFileVisitor,
-) -> io::Result<()> {
-    let year_dirs = collect_dirs_desc(root, |s| s.parse::<u16>().ok()).await?;
-
-    'outer: for (_year, year_path) in year_dirs.iter() {
-        if *scanned_files >= MAX_SCAN_FILES {
+        if candidate_limit.is_some_and(|limit| candidates.len() >= limit) {
             break;
         }
-        let month_dirs = collect_dirs_desc(year_path, |s| s.parse::<u8>().ok()).await?;
-        for (_month, month_path) in month_dirs.iter() {
-            if *scanned_files >= MAX_SCAN_FILES {
-                break 'outer;
-            }
-            let day_dirs = collect_dirs_desc(month_path, |s| s.parse::<u8>().ok()).await?;
-            for (_day, day_path) in day_dirs.iter() {
-                if *scanned_files >= MAX_SCAN_FILES {
-                    break 'outer;
-                }
-                let day_files = collect_rollout_day_files(day_path).await?;
-                for (ts, id, path) in day_files.into_iter() {
-                    *scanned_files += 1;
-                    if *scanned_files > MAX_SCAN_FILES {
-                        break 'outer;
-                    }
-                    if let ControlFlow::Break(()) =
-                        visitor.visit(ts, id, path, *scanned_files).await
-                    {
-                        break 'outer;
-                    }
-                }
-            }
-        }
     }
-
-    Ok(())
+    Ok(candidates)
 }
 
 struct ProviderMatcher<'a> {
@@ -1109,7 +955,36 @@ impl<'a> ProviderMatcher<'a> {
     }
 }
 
-async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
+async fn read_head_summary(
+    path: &Path,
+    head_limit: usize,
+    indexed_preview: bool,
+) -> io::Result<HeadTailSummary> {
+    let mut remaining_reference_files = MAX_SUMMARY_REFERENCE_FILES;
+    read_head_summary_with_references(
+        path,
+        head_limit,
+        /*reference_depth*/ 0,
+        &mut remaining_reference_files,
+        indexed_preview,
+    )
+    .await
+}
+
+/// Deserializes only the rollout item type while still validating the complete JSON record.
+#[derive(serde::Deserialize)]
+struct RolloutSummaryItemType<'a> {
+    #[serde(rename = "type")]
+    item_type: &'a str,
+}
+
+async fn read_head_summary_with_references(
+    path: &Path,
+    head_limit: usize,
+    reference_depth: usize,
+    remaining_reference_files: &mut usize,
+    indexed_preview: bool,
+) -> io::Result<HeadTailSummary> {
     let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
     let mut lines_scanned = 0usize;
@@ -1126,6 +1001,26 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             continue;
         }
         lines_scanned += 1;
+
+        if indexed_preview
+            && trimmed.len() >= MIN_COMPACTED_SUMMARY_FAST_PATH_BYTES
+            // Missing the hint uses ordinary parsing; serde validates every matching record.
+            && {
+                let bytes = trimmed.as_bytes();
+                let hint = COMPACTED_SUMMARY_RECORD_TYPE_HINT.as_bytes();
+                let edge_len = bytes.len().min(COMPACTED_SUMMARY_RECORD_TYPE_HINT_EDGE_BYTES);
+                bytes[..edge_len]
+                    .windows(hint.len())
+                    .any(|window| window == hint)
+                    || bytes[bytes.len() - edge_len..]
+                        .windows(hint.len())
+                        .any(|window| window == hint)
+            }
+            && serde_json::from_str::<RolloutSummaryItemType<'_>>(trimmed)
+                .is_ok_and(|line| line.item_type == "compacted")
+        {
+            continue;
+        }
 
         let parsed: Result<RolloutLine, _> = serde_json::from_str(trimmed);
         let rollout_line = match parsed {
@@ -1176,6 +1071,39 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     .created_at
                     .get_or_insert_with(|| rollout_line.timestamp.clone());
             }
+            RolloutItem::RolloutReference(reference) => {
+                if reference_depth >= MAX_SUMMARY_REFERENCE_DEPTH
+                    || *remaining_reference_files == 0
+                    || reference.nth_user_message == Some(0)
+                {
+                    continue;
+                }
+                let Some(codex_home) = codex_home_from_rollout_path(path) else {
+                    continue;
+                };
+                *remaining_reference_files -= 1;
+                let Ok(resolved_path) =
+                    crate::resolve_rollout_reference_path(codex_home, &reference).await
+                else {
+                    continue;
+                };
+                let referenced = Box::pin(read_head_summary_with_references(
+                    resolved_path.as_path(),
+                    head_limit,
+                    reference_depth + 1,
+                    remaining_reference_files,
+                    indexed_preview,
+                ))
+                .await
+                .unwrap_or_default();
+                if summary.preview.is_none() {
+                    summary.preview = referenced.preview;
+                }
+                if summary.first_user_message.is_none() {
+                    summary.first_user_message = referenced.first_user_message;
+                }
+                summary.saw_compacted_user_message |= referenced.saw_compacted_user_message;
+            }
             RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             RolloutItem::TurnContext(_) => {
                 // Not included in `head`; skip.
@@ -1183,8 +1111,18 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::WorldState(_) => {
                 // Not included in `head`; skip.
             }
-            RolloutItem::Compacted(_) => {
-                // Not included in `head`; skip.
+            RolloutItem::Compacted(compacted) => {
+                if compacted
+                    .replacement_history
+                    .as_deref()
+                    .is_some_and(|history| {
+                        history
+                            .iter()
+                            .any(codex_protocol::models::ResponseItem::is_user_message)
+                    })
+                {
+                    summary.saw_compacted_user_message = true;
+                }
             }
             RolloutItem::EventMsg(ev) => {
                 if let Some(preview) = event_msg_preview(&ev) {
@@ -1218,6 +1156,18 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
     Ok(summary)
 }
 
+fn codex_home_from_rollout_path(path: &Path) -> Option<&Path> {
+    path.ancestors().find_map(|ancestor| {
+        let name = ancestor.file_name()?.to_str()?;
+        matches!(
+            name,
+            SESSIONS_SUBDIR | ARCHIVED_SESSIONS_SUBDIR | ROTATED_ROLLOUT_SEGMENTS_SUBDIR
+        )
+        .then(|| ancestor.parent())
+        .flatten()
+    })
+}
+
 /// Read up to `HEAD_RECORD_LIMIT` records from the start of the rollout file at `path`.
 /// This should be enough to produce a summary including the session meta line.
 pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Value>> {
@@ -1249,7 +1199,8 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                         head.push(value);
                     }
                 }
-                RolloutItem::InterAgentCommunicationMetadata { .. }
+                RolloutItem::RolloutReference(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::WorldState(_)
@@ -1303,6 +1254,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
             }
             RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => {}

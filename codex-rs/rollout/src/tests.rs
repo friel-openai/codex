@@ -165,7 +165,178 @@ async fn read_thread_item_from_rollout_rejects_unknown_canonical_history_mode() 
     )
     .unwrap();
 
-    assert_eq!(crate::list::read_thread_item_from_rollout(path).await, None);
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        None
+    );
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn indexed_preview_summary_skips_compacted_replacement_history() {
+    let temp = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(30_305);
+    let ts = "2025-01-03T12-00-00";
+    write_session_file(temp.path(), ts, uuid, 1, Some(SessionSource::Cli))
+        .expect("write session file");
+    let path = temp
+        .path()
+        .join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
+    let contents = fs::read_to_string(&path).expect("read rollout");
+    let mut lines = contents.lines();
+    let session_meta = lines.next().expect("session metadata");
+    let user_event = lines.next().expect("user event");
+    let compacted = serde_json::json!({
+        "timestamp": ts,
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "compacted user ".repeat(8192)}],
+            }],
+        },
+    });
+    fs::write(&path, format!("{session_meta}\n{compacted}\n"))
+        .expect("write compacted-only rollout");
+
+    assert!(
+        crate::list::read_thread_item_from_rollout(path.clone())
+            .await
+            .is_some(),
+        "ordinary discovery must keep compacted-only conversations"
+    );
+    assert!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone())
+            .await
+            .is_none(),
+        "an existing indexed preview does not need compacted replacement history"
+    );
+
+    let short_compacted = serde_json::json!({
+        "timestamp": ts,
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "short user message"}],
+            }],
+        },
+    });
+    fs::write(&path, format!("{session_meta}\n{short_compacted}\n"))
+        .expect("write short compacted rollout");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "short compaction records should use ordinary deserialization"
+    );
+
+    let spaced_compacted =
+        compacted
+            .to_string()
+            .replacen("\"type\":\"compacted\"", "\"type\" : \"compacted\"", 1);
+    fs::write(&path, format!("{session_meta}\n{spaced_compacted}\n"))
+        .expect("write noncanonical compaction whitespace");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "noncanonical compaction formatting must retain ordinary parsing"
+    );
+
+    let malformed_compacted = format!(
+        r#"{{"timestamp":"{ts}","type":"compacted","payload":{{"message":"{}""#,
+        "invalid ".repeat(10_000)
+    );
+    fs::write(
+        &path,
+        format!("{session_meta}\n{malformed_compacted}\n{user_event}\n"),
+    )
+    .expect("write malformed large compaction");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "malformed large compaction records must retain existing skip behavior"
+    );
+
+    fs::write(
+        &path,
+        format!("{session_meta}\n{compacted}\n{user_event}\n"),
+    )
+    .expect("write canonical rollout user event");
+
+    let ordinary = crate::list::read_thread_item_from_rollout(path.clone())
+        .await
+        .expect("ordinary summary should discover user event");
+    let indexed = crate::list::read_thread_item_from_rollout_with_indexed_preview(path)
+        .await
+        .expect("indexed summary should discover user event");
+    assert_eq!(indexed, ordinary);
+}
+
+#[tokio::test]
+async fn indexed_preview_summary_preserves_large_non_compacted_records() {
+    let temp = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(30_307);
+    let ts = "2025-01-03T12-00-00";
+    write_session_file(temp.path(), ts, uuid, 1, Some(SessionSource::Cli))
+        .expect("write session file");
+    let path = temp
+        .path()
+        .join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
+    let original = fs::read_to_string(&path).expect("read rollout");
+    let mut lines = original.lines();
+    let session_meta = lines.next().expect("session metadata");
+    let user_event = lines.next().expect("user event");
+    let large_text = "u".repeat(100_000);
+    let response_item = serde_json::json!({
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": large_text}],
+        },
+    });
+    let large_user_event = serde_json::json!({
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": large_text,
+            "kind": "plain",
+        },
+    });
+    let mut large_session_meta: serde_json::Value =
+        serde_json::from_str(session_meta).expect("parse session metadata");
+    large_session_meta["payload"]["originator"] = serde_json::json!(large_text);
+
+    for (kind, contents) in [
+        (
+            "session_meta",
+            format!("{large_session_meta}\n{user_event}\n"),
+        ),
+        (
+            "user_message",
+            format!("{session_meta}\n{large_user_event}\n"),
+        ),
+        (
+            "response_item",
+            format!("{session_meta}\n{response_item}\n{user_event}\n"),
+        ),
+    ] {
+        fs::write(&path, contents).expect("write large non-compacted rollout");
+        assert_eq!(
+            crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+            crate::list::read_thread_item_from_rollout(path.clone()).await,
+            "indexed summaries must preserve large {kind} records"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1338,6 +1509,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
             meta: SessionMeta {
                 session_id: conversation_id.into(),
                 id: conversation_id,
+                segment_id: None,
                 forked_from_id: None,
                 parent_thread_id: None,
                 timestamp: ts.to_string(),

@@ -4,7 +4,13 @@ use std::path::Path;
 use std::time::Duration;
 
 use chrono::Utc;
+use codex_app_server_protocol::ThreadHistoryBuilder;
+use codex_app_server_protocol::ThreadHistoryChangeSet;
+use codex_app_server_protocol::ThreadHistoryItemChange;
+use codex_app_server_protocol::ThreadHistoryTurnChange;
 use codex_app_server_protocol::ThreadItem;
+use codex_app_server_protocol::TurnStatus;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -14,8 +20,10 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
@@ -24,6 +32,7 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
@@ -42,6 +51,7 @@ use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
 use crate::ForkBoundary;
+use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::PrepareForkParams;
@@ -279,6 +289,807 @@ async fn split_homes_support_backfill_listing_and_paginated_history() {
             "SQLite database should not be created under Codex home"
         );
     }
+}
+
+#[tokio::test]
+async fn legacy_projection_materializes_visible_messages_without_rollout_ordinals() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n{}\n{}\n",
+            rollout_line(None, turn_started("turn-1")),
+            rollout_line(None, legacy_user_message("first question")),
+            rollout_line(None, legacy_agent_message("first answer")),
+            rollout_line(None, turn_completed("turn-1")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy-visible history");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let items = sqlx::query_as::<_, (String, String, i64)>(
+        "SELECT item_id, turn_id, rollout_ordinal FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read projected legacy items");
+    assert_eq!(
+        items,
+        vec![
+            ("item-1".to_string(), "turn-1".to_string(), 2),
+            ("item-2".to_string(), "turn-1".to_string(), 3),
+        ]
+    );
+    let turn = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT status, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ? AND turn_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read projected legacy turn");
+    assert_eq!(
+        turn,
+        (
+            "completed".to_string(),
+            Some("item-1".to_string()),
+            Some("item-2".to_string()),
+        )
+    );
+    assert!(
+        fs::read_to_string(rollout_path.as_path())
+            .expect("read canonical legacy rollout")
+            .lines()
+            .map(|line| serde_json::from_str::<RolloutLine>(line)
+                .expect("parse canonical legacy line"))
+            .all(|line| line.ordinal.is_none()),
+        "legacy projection must not add ordinals to canonical rollout records"
+    );
+}
+
+#[tokio::test]
+async fn legacy_projection_materializes_inter_agent_communication() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ready for review".to_string(),
+        /*trigger_turn*/ true,
+    );
+    let policy_rejected_item = completed_item(
+        thread_id,
+        "turn-1",
+        TurnItem::UserMessage(UserMessageItem {
+            id: "must-not-project".to_string(),
+            client_id: None,
+            content: Vec::new(),
+        }),
+    );
+    assert!(
+        !codex_rollout::is_persisted_rollout_item(&policy_rejected_item, ThreadHistoryMode::Legacy,),
+        "historical item-completed user messages are excluded from legacy history"
+    );
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n{}\n{}\n{}\n",
+            rollout_line(None, turn_started("turn-1")),
+            rollout_line(None, legacy_user_message("first question")),
+            rollout_line(None, policy_rejected_item),
+            rollout_line(
+                None,
+                RolloutItem::InterAgentCommunication(communication.clone()),
+            ),
+            rollout_line(None, turn_completed("turn-1")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy inter-agent communication");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let projected_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, item_json FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read projected legacy items");
+    assert_eq!(projected_items.len(), 2);
+    assert_eq!(projected_items[0].0, "item-1");
+    assert_eq!(projected_items[1].0, "item-2");
+    let projected_communication = serde_json::from_str::<ThreadItem>(&projected_items[1].1)
+        .expect("decode projected inter-agent communication");
+    assert_eq!(
+        projected_communication,
+        ThreadItem::InterAgentCommunication {
+            id: "item-2".to_string(),
+            communication,
+        }
+    );
+}
+
+#[tokio::test]
+async fn legacy_projection_preserves_item_ids_across_streaming_batches() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+
+    let mut suffix = String::new();
+    for index in 1..=70 {
+        let turn_id = format!("turn-{index}");
+        for item in [
+            turn_started(&turn_id),
+            legacy_user_message(&format!("question {index}")),
+            legacy_agent_message(&format!("answer {index}")),
+            turn_completed(&turn_id),
+        ] {
+            suffix.push_str(&rollout_line(None, item));
+            suffix.push('\n');
+        }
+    }
+    append_suffix(rollout_path.as_path(), &suffix);
+
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy history across streaming batches");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let counts = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?), (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)",
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read legacy projection counts");
+    assert_eq!(counts, (70, 140));
+    let final_items = sqlx::query_as::<_, (String, i64)>(
+        "SELECT item_id, rollout_ordinal FROM thread_items WHERE thread_id = ? AND turn_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-70")
+    .fetch_all(&pool)
+    .await
+    .expect("read final projected legacy turn");
+    assert_eq!(
+        final_items,
+        vec![("item-139".to_string(), 278), ("item-140".to_string(), 279)]
+    );
+    let rollout_len = i64::try_from(
+        fs::metadata(rollout_path.as_path())
+            .expect("legacy rollout metadata")
+            .len(),
+    )
+    .expect("legacy rollout length fits SQLite");
+    assert_eq!(projection_state(&pool, thread_id).await, (rollout_len, 281));
+}
+
+#[tokio::test]
+async fn legacy_projection_materializes_implicit_completed_turn_summary() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n",
+            rollout_line(None, legacy_user_message("implicit question")),
+            rollout_line(None, legacy_agent_message("implicit answer")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+        .await
+        .expect("read canonical session metadata");
+    builder.handle_rollout_item_with_changes(&RolloutItem::SessionMeta(session_meta));
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project implicitly completed legacy turn");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        "SELECT turn_id, status, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read implicitly completed legacy turn");
+    assert_eq!(
+        turn,
+        (
+            "rollout-1".to_string(),
+            "completed".to_string(),
+            Some("item-1".to_string()),
+            Some("item-2".to_string()),
+        )
+    );
+}
+
+#[tokio::test]
+async fn legacy_projection_materializes_implicit_commentary_without_a_final_answer() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n",
+            rollout_line(None, legacy_user_message("implicit question")),
+            rollout_line(
+                None,
+                RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    message: "implicit commentary".to_string(),
+                    phase: Some(MessagePhase::Commentary),
+                    memory_citation: None,
+                })),
+            ),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+        .await
+        .expect("read canonical session metadata");
+    builder.handle_rollout_item_with_changes(&RolloutItem::SessionMeta(session_meta));
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project implicitly completed legacy commentary");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, String, Option<String>, Option<String>)>(
+        "SELECT turn_id, status, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("read implicitly completed commentary turn");
+    assert_eq!(
+        turn,
+        (
+            "rollout-1".to_string(),
+            "completed".to_string(),
+            Some("item-1".to_string()),
+            None,
+        )
+    );
+    let commentary = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, json_extract(item_json, '$.phase') FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_type = 'agentMessage'",
+    )
+    .bind(thread_id.to_string())
+    .bind("rollout-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read implicit legacy commentary");
+    assert_eq!(commentary, ("item-2".to_string(), "commentary".to_string()));
+}
+
+#[tokio::test]
+async fn legacy_projection_does_not_report_commentary_as_a_final_answer() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n{}\n{}\n",
+            rollout_line(None, turn_started("turn-1")),
+            rollout_line(None, legacy_user_message("question")),
+            rollout_line(
+                None,
+                RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    message: "progress update".to_string(),
+                    phase: Some(MessagePhase::Commentary),
+                    memory_citation: None,
+                })),
+            ),
+            rollout_line(None, turn_completed("turn-1")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy commentary");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, Option<String>, Option<String>)>(
+        "SELECT status, first_user_item_id, final_agent_item_id FROM thread_turns WHERE thread_id = ? AND turn_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read projected commentary-only turn");
+    assert_eq!(
+        turn,
+        ("completed".to_string(), Some("item-1".to_string()), None,)
+    );
+    let commentary = sqlx::query_scalar::<_, String>(
+        "SELECT json_extract(item_json, '$.phase') FROM thread_items WHERE thread_id = ? AND item_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("item-2")
+    .fetch_one(&pool)
+    .await
+    .expect("read projected legacy commentary phase");
+    assert_eq!(commentary, "commentary");
+}
+
+#[tokio::test]
+async fn legacy_projection_skips_repeated_segment_metadata() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    let segment_metadata = fs::read_to_string(rollout_path.as_path())
+        .expect("read canonical session metadata")
+        .lines()
+        .next()
+        .expect("session metadata line")
+        .to_string();
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}\n{}\n",
+            rollout_line(None, legacy_user_message("first segment")),
+            segment_metadata,
+            rollout_line(None, legacy_user_message("next segment")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+        .await
+        .expect("read canonical session metadata");
+    builder.handle_rollout_item_with_changes(&RolloutItem::SessionMeta(session_meta));
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy history without replaying segment metadata");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turns = sqlx::query_scalar::<_, String>(
+        "SELECT turn_id FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read legacy synthetic turn ids");
+    assert_eq!(
+        turns,
+        vec!["rollout-1".to_string(), "rollout-2".to_string()]
+    );
+    let items = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, turn_id FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read legacy items across segment metadata");
+    assert_eq!(
+        items,
+        vec![
+            ("item-1".to_string(), "rollout-1".to_string()),
+            ("item-2".to_string(), "rollout-2".to_string()),
+        ]
+    );
+    assert_eq!(projection_state(&pool, thread_id).await.1, 4);
+}
+
+#[tokio::test]
+async fn legacy_projection_waits_for_complete_rollout_lines() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n{}",
+            rollout_line(None, turn_started("turn-1")),
+            rollout_line(None, legacy_user_message("partial message")),
+        ),
+    );
+
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project complete legacy lines");
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let before = projection_state(&pool, thread_id).await;
+    let visible_items =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM thread_items WHERE thread_id = ?")
+            .bind(thread_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("count legacy items before line completion");
+    assert_eq!(visible_items, 0);
+
+    append_suffix(rollout_path.as_path(), "\n");
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project completed legacy line");
+    let visible_items = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, turn_id FROM thread_items WHERE thread_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read completed legacy item");
+    assert_eq!(
+        visible_items,
+        vec![("item-1".to_string(), "turn-1".to_string())]
+    );
+    let after = projection_state(&pool, thread_id).await;
+    assert!(after.0 > before.0);
+    assert_eq!(after.1, before.1 + 1);
+}
+
+#[tokio::test]
+async fn legacy_projection_removes_rolled_back_turns_and_items_transactionally() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_legacy_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist legacy session metadata");
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("legacy rollout path");
+    let mut suffix = String::new();
+    for (turn_id, message) in [("turn-1", "keep"), ("turn-2", "remove")] {
+        for item in [
+            turn_started(turn_id),
+            legacy_user_message(message),
+            legacy_agent_message(message),
+            turn_completed(turn_id),
+        ] {
+            suffix.push_str(&rollout_line(None, item));
+            suffix.push('\n');
+        }
+    }
+    append_suffix(rollout_path.as_path(), &suffix);
+    let mut builder = ThreadHistoryBuilder::new();
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project both legacy turns");
+
+    append_suffix(
+        rollout_path.as_path(),
+        &format!(
+            "{}\n",
+            rollout_line(
+                None,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                    num_turns: 1,
+                })),
+            )
+        ),
+    );
+    super::materialize_legacy_to_sqlite(&store, thread_id, rollout_path.as_path(), &mut builder)
+        .await
+        .expect("project legacy rollback");
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turns = sqlx::query_scalar::<_, String>(
+        "SELECT turn_id FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read remaining legacy turns");
+    assert_eq!(turns, vec!["turn-1".to_string()]);
+    let items = sqlx::query_as::<_, (String, String)>(
+        "SELECT item_id, turn_id FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read remaining legacy items");
+    assert_eq!(
+        items,
+        vec![
+            ("item-1".to_string(), "turn-1".to_string()),
+            ("item-2".to_string(), "turn-1".to_string()),
+        ]
+    );
+    assert_eq!(projection_state(&pool, thread_id).await.1, 10);
+}
+
+#[tokio::test]
+async fn removed_turn_projection_deletes_only_the_requested_thread_turn_and_items() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    let other_thread_id = ThreadId::new();
+
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "retained-user".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                turn_completed("turn-1"),
+                turn_started("turn-2"),
+                completed_item(
+                    thread_id,
+                    "turn-2",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "removed-user".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                turn_completed("turn-2"),
+            ],
+        })
+        .await
+        .expect("project retained and removed turns");
+
+    create_paginated_thread(&store, other_thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: other_thread_id,
+            items: vec![
+                turn_started("turn-2"),
+                completed_item(
+                    other_thread_id,
+                    "turn-2",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "other-user".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+            ],
+        })
+        .await
+        .expect("project another thread with the same turn ID");
+
+    apply_history_changes(
+        &store,
+        thread_id,
+        ThreadHistoryChangeSet {
+            removed_turn_ids: vec!["turn-2".to_string()],
+            ..Default::default()
+        },
+    )
+    .await;
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turns = sqlx::query_as::<_, (String, String)>(
+        "SELECT thread_id, turn_id FROM thread_turns ORDER BY thread_id, turn_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read projected turns after rollback");
+    let mut expected_turns = vec![
+        (thread_id.to_string(), "turn-1".to_string()),
+        (other_thread_id.to_string(), "turn-2".to_string()),
+    ];
+    expected_turns.sort();
+    assert_eq!(turns, expected_turns);
+
+    let items = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT thread_id, turn_id, item_id FROM thread_items ORDER BY thread_id, turn_id, item_id",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("read projected items after rollback");
+    let mut expected_items = vec![
+        (
+            thread_id.to_string(),
+            "turn-1".to_string(),
+            "retained-user".to_string(),
+        ),
+        (
+            other_thread_id.to_string(),
+            "turn-2".to_string(),
+            "other-user".to_string(),
+        ),
+    ];
+    expected_items.sort();
+    assert_eq!(items, expected_items);
+}
+
+#[tokio::test]
+async fn removed_turn_projection_deletes_old_items_before_recreating_the_turn() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "removed-user".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("project original completed turn");
+
+    apply_history_changes(
+        &store,
+        thread_id,
+        ThreadHistoryChangeSet {
+            removed_turn_ids: vec!["turn-1".to_string()],
+            changed_turns: vec![ThreadHistoryTurnChange {
+                turn_id: "turn-1".to_string(),
+                status: TurnStatus::InProgress,
+                error: None,
+                started_at: Some(30),
+                completed_at: None,
+                duration_ms: None,
+            }],
+            changed_items: vec![ThreadHistoryItemChange {
+                turn_id: "turn-1".to_string(),
+                item: ThreadItem::UserMessage {
+                    id: "replacement-user".to_string(),
+                    client_id: None,
+                    content: Vec::new(),
+                },
+                started_at_ms: None,
+                completed_at_ms: None,
+            }],
+        },
+    )
+    .await;
+
+    let pool = codex_state::open_thread_history_db(&store.config.sqlite)
+        .await
+        .expect("open thread history db");
+    let turn = sqlx::query_as::<_, (String, i64, Option<String>)>(
+        "SELECT status, started_at, first_user_item_id FROM thread_turns WHERE thread_id = ? AND turn_id = ?",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_one(&pool)
+    .await
+    .expect("read recreated turn");
+    assert_eq!(
+        turn,
+        (
+            "inProgress".to_string(),
+            30,
+            Some("replacement-user".to_string()),
+        )
+    );
+
+    let items = sqlx::query_scalar::<_, String>(
+        "SELECT item_id FROM thread_items WHERE thread_id = ? AND turn_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .bind("turn-1")
+    .fetch_all(&pool)
+    .await
+    .expect("read recreated turn items");
+    assert_eq!(items, vec!["replacement-user".to_string()]);
 }
 
 #[tokio::test]
@@ -633,10 +1444,13 @@ async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
             })
             .await
             .expect_err("reject an invalid fork boundary");
-        assert!(matches!(
-            error,
-            crate::ThreadStoreError::InvalidRequest { message } if message == expected_error
-        ));
+        assert!(
+            matches!(
+                &error,
+                crate::ThreadStoreError::InvalidRequest { message } if message == expected_error
+            ),
+            "expected {expected_error:?}, got {error:?}"
+        );
     }
 }
 
@@ -834,6 +1648,175 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
 }
 
 #[tokio::test]
+async fn history_projection_requires_visible_items_for_projected_turns() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let runtime = codex_state::StateRuntime::init(
+        config.sqlite.clone(),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("state runtime");
+    let mut metadata = codex_state::ThreadMetadataBuilder::new(
+        thread_id,
+        home.path().join("missing-rollout.jsonl"),
+        Utc::now(),
+        SessionSource::Cli,
+    );
+    metadata.history_mode = ThreadHistoryMode::Paginated;
+    runtime
+        .upsert_thread(&metadata.build(config.default_model_provider_id.as_str()))
+        .await
+        .expect("seed paginated thread metadata");
+    let store = LocalThreadStore::new(config.clone(), Some(runtime));
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist paginated thread");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "user-1".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    agent_message("agent-1", MessagePhase::FinalAnswer),
+                ),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("project complete turn and visible items");
+
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check complete history projection"),
+        "a projected turn with its user and assistant items must remain usable"
+    );
+
+    let pool = codex_state::open_thread_history_db(&config.sqlite)
+        .await
+        .expect("open existing thread history database");
+    sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("remove only projected item rows");
+    let remaining_rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_history_projection_state WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("inspect remaining history projection rows");
+    assert_eq!(remaining_rows, (1, 1, 0));
+    assert!(
+        !store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check incomplete history projection"),
+        "projected turns without their visible items must use canonical rollout history"
+    );
+}
+
+#[tokio::test]
+async fn named_fork_rebuilds_projection_across_same_thread_rotations() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist source metadata");
+
+    for (turn_id, message) in [
+        ("turn-1", "first segment"),
+        ("turn-2", "second segment"),
+        ("turn-3", "third segment"),
+    ] {
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id),
+                    user_message(message),
+                    turn_completed(turn_id),
+                ],
+            })
+            .await
+            .expect("append rotated turn");
+        if turn_id != "turn-3" {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate paginated rollout");
+        }
+    }
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    for statement in [
+        "DELETE FROM thread_items WHERE thread_id = ?",
+        "DELETE FROM thread_turns WHERE thread_id = ?",
+        "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(thread_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("clear projected history");
+    }
+
+    let prepared = tokio::time::timeout(
+        Duration::from_secs(10),
+        store.prepare_fork(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-2".to_string()),
+        }),
+    )
+    .await
+    .expect("same-thread rotation must not deadlock")
+    .expect("prepare named fork across rotations");
+    assert!(contains_user_message(
+        prepared.model_context.as_slice(),
+        "first segment"
+    ));
+    assert!(contains_user_message(
+        prepared.model_context.as_slice(),
+        "second segment"
+    ));
+    assert!(!contains_user_message(
+        prepared.model_context.as_slice(),
+        "third segment"
+    ));
+}
+
+#[tokio::test]
 async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_finishes() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
@@ -970,6 +1953,20 @@ async fn prepared_fork_reserves_source_until_child_reference_is_durable() {
     assert_eq!(prepared.history_base, Some(history_base));
     assert!(!contains_user_message(
         prepared.model_context.as_slice(),
+        "later source message"
+    ));
+    assert!(!contains_user_message(
+        prepared.response_history.as_slice(),
+        "later source message"
+    ));
+    let frozen_items = super::super::read_thread::load_history_items(
+        home.path(),
+        prepared.frozen_segment.reference.rollout_path.as_path(),
+    )
+    .await
+    .expect("materialize the exact prepared reference");
+    assert!(!contains_user_message(
+        frozen_items.as_slice(),
         "later source message"
     ));
 
@@ -1767,6 +2764,82 @@ SELECT
 }
 
 #[tokio::test]
+async fn stateful_legacy_projection_removes_rolled_back_turns_and_items() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    let mut builder = ThreadHistoryBuilder::new();
+    let items = [
+        turn_started("retained-turn"),
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: "retained user".to_string(),
+            ..Default::default()
+        })),
+        turn_completed("retained-turn"),
+        turn_started("removed-turn"),
+        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: "removed user".to_string(),
+            ..Default::default()
+        })),
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+            num_turns: 1,
+        })),
+    ];
+    let projections = items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let ordinal = u64::try_from(index).expect("fixture ordinal");
+            super::super::thread_history::RolloutProjectionStep::Line(
+                super::super::thread_history::ProjectedRolloutLine {
+                    ordinal,
+                    start_byte_offset: ordinal,
+                    end_byte_offset: ordinal + 1,
+                    fallback_created_at_ms: Some(1),
+                    changes: builder.handle_rollout_item_with_changes(item),
+                },
+            )
+        })
+        .collect();
+
+    super::super::thread_history::apply_projection(
+        &store,
+        thread_id,
+        /*start_offset*/ 0,
+        u64::try_from(items.len()).expect("fixture length"),
+        /*initial_ordinal*/ 0,
+        projections,
+    )
+    .await
+    .expect("project stateful legacy events");
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let turns = sqlx::query_as::<_, (String,)>(
+        "SELECT turn_id FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read projected turns");
+    assert_eq!(turns, [("retained-turn".to_string(),)]);
+
+    let items = sqlx::query_as::<_, (String, String)>(
+        "SELECT turn_id, item_json FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read projected legacy items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].0, "retained-turn");
+    assert!(items[0].1.contains("retained user"));
+}
+
+#[tokio::test]
 async fn jsonl_failure_does_not_create_projection_database() {
     let home = TempDir::new().expect("temp dir");
     fs::write(home.path().join("sessions"), "not a directory").expect("block sessions dir");
@@ -2238,6 +3311,37 @@ async fn prepare_paginated_fork(
         .expect("prepare paginated fork")
 }
 
+async fn create_legacy_thread(store: &LocalThreadStore, thread_id: ThreadId) {
+    store
+        .create_thread(CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: SessionSource::Exec,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: ThreadHistoryMode::Legacy,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
+            initial_window_id: "window-1".to_string(),
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(std::env::current_dir().expect("cwd")),
+                model_provider: "test-provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await
+        .expect("create legacy thread");
+}
+
 async fn create_paginated_subagent_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -2261,6 +3365,8 @@ async fn create_paginated_subagent_thread(
             history_mode: ThreadHistoryMode::Paginated,
             history_base,
             subagent_history_start_ordinal,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: "window-1".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
@@ -2316,6 +3422,21 @@ fn contains_user_message(items: &[RolloutItem], expected: &str) -> bool {
                 })
         )
     })
+}
+
+fn legacy_user_message(message: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+        message: message.to_string(),
+        ..Default::default()
+    }))
+}
+
+fn legacy_agent_message(message: &str) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+        message: message.to_string(),
+        phase: Some(MessagePhase::FinalAnswer),
+        memory_citation: None,
+    }))
 }
 
 fn completed_item(thread_id: ThreadId, turn_id: &str, item: TurnItem) -> RolloutItem {
@@ -2383,6 +3504,40 @@ WHERE thread_id = ?
     .fetch_one(pool)
     .await
     .expect("read projection state")
+}
+
+async fn apply_history_changes(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    changes: ThreadHistoryChangeSet,
+) {
+    let state = super::super::thread_history::projection_state(store, thread_id)
+        .await
+        .expect("read existing projection state")
+        .expect("history projection exists");
+    let start_byte_offset = state.next_byte_offset;
+    let ordinal = state.next_ordinal;
+    let end_byte_offset = start_byte_offset
+        .checked_add(1)
+        .expect("advance projection byte offset");
+    super::super::thread_history::apply_projection(
+        store,
+        thread_id,
+        start_byte_offset,
+        end_byte_offset,
+        ordinal,
+        vec![super::super::thread_history::RolloutProjectionStep::Line(
+            super::super::thread_history::ProjectedRolloutLine {
+                ordinal,
+                start_byte_offset,
+                end_byte_offset,
+                fallback_created_at_ms: Some(1),
+                changes,
+            },
+        )],
+    )
+    .await
+    .expect("apply history changes");
 }
 
 fn rollout_line(ordinal: Option<u64>, item: RolloutItem) -> String {
