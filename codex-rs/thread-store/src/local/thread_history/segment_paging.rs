@@ -153,17 +153,31 @@ WHERE thread_id =
             query.push(" AND turn_id = ").push_bind(turn_id);
         }
         push_cursor_clause(&mut query, params.sort_direction, segment_cursor)?;
-        push_order_and_limit(&mut query, params.sort_direction, remaining);
-        rows.extend(
-            query
-                .build()
-                .fetch_all(pool)
-                .await
-                .map_err(thread_history_error)?
-                .into_iter()
-                .map(|row| stored_thread_item_row_for_thread(segment.thread_id(), row))
-                .collect::<ThreadStoreResult<Vec<_>>>()?,
+        push_order_and_limit(
+            &mut query,
+            params.sort_direction,
+            if segment.filters_items() {
+                i64::MAX
+            } else {
+                remaining
+            },
         );
+        let segment_rows = query
+            .build()
+            .fetch_all(pool)
+            .await
+            .map_err(thread_history_error)?
+            .into_iter()
+            .map(|row| stored_thread_item_row_for_thread(segment.thread_id(), row))
+            .collect::<ThreadStoreResult<Vec<_>>>()?;
+        for row in segment_rows {
+            if segment.allows_stored_item(&row.item)? {
+                rows.push(row);
+                if remaining_limit(params.page_size, rows.len())? == 0 {
+                    break;
+                }
+            }
+        }
     }
     finish_page(
         params.thread_id,

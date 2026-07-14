@@ -50,6 +50,12 @@ pub(super) async fn prepare(
             .iter()
             .take(lineage.segments().len().saturating_sub(1))
         {
+            // Rotation preserves the projected rows for immutable predecessors, then moves this
+            // thread's single physical byte cursor to the replacement rollout. Re-projecting an
+            // older same-thread path would apply the replacement file's cursor to the wrong file.
+            if segment.thread_id() == thread_id {
+                continue;
+            }
             let _ancestor_writer_guard = store.live_writer_locks.lock(segment.thread_id()).await;
             super::thread_history_materialization::materialize_to_sqlite(
                 store,
@@ -78,8 +84,8 @@ pub(super) async fn prepare(
         end_byte_offset: latest_projection_state.next_byte_offset,
     };
     let pool = store.thread_history_db().await?;
-    let position = match boundary {
-        ForkBoundary::Latest => latest_position,
+    let (position, segment_ordinal) = match boundary {
+        ForkBoundary::Latest => (latest_position, None),
         ForkBoundary::ThroughTurn(turn_id) => {
             let row = find_visible_turn(pool, &lineage, turn_id.as_str()).await?;
             if row.status == "inProgress" {
@@ -93,15 +99,20 @@ pub(super) async fn prepare(
             let rollout_end_byte_offset = row
                 .rollout_end_byte_offset
                 .ok_or_else(|| missing_turn_position(turn_id.as_str()))?;
-            HistoryPosition {
-                thread_id: row.physical_thread_id,
-                end_ordinal_exclusive: u64::try_from(rollout_end_ordinal)
-                    .map_err(|_| invalid_turn_position(turn_id.as_str()))?
-                    .checked_add(1)
-                    .ok_or_else(|| invalid_turn_position(turn_id.as_str()))?,
-                end_byte_offset: u64::try_from(rollout_end_byte_offset)
-                    .map_err(|_| invalid_turn_position(turn_id.as_str()))?,
-            }
+            let segment_ordinal = u64::try_from(row.rollout_ordinal)
+                .map_err(|_| invalid_turn_position(turn_id.as_str()))?;
+            (
+                HistoryPosition {
+                    thread_id: row.physical_thread_id,
+                    end_ordinal_exclusive: u64::try_from(rollout_end_ordinal)
+                        .map_err(|_| invalid_turn_position(turn_id.as_str()))?
+                        .checked_add(1)
+                        .ok_or_else(|| invalid_turn_position(turn_id.as_str()))?,
+                    end_byte_offset: u64::try_from(rollout_end_byte_offset)
+                        .map_err(|_| invalid_turn_position(turn_id.as_str()))?,
+                },
+                Some(segment_ordinal),
+            )
         }
         ForkBoundary::BeforeTurn(turn_id) => {
             let row = find_source_turn(pool, &lineage, turn_id.as_str()).await?;
@@ -113,38 +124,50 @@ pub(super) async fn prepare(
             let rollout_byte_offset = row
                 .rollout_byte_offset
                 .ok_or_else(|| missing_turn_position(turn_id.as_str()))?;
-            HistoryPosition {
-                thread_id: row.physical_thread_id,
-                end_ordinal_exclusive: u64::try_from(row.rollout_ordinal)
-                    .map_err(|_| invalid_turn_position(turn_id.as_str()))?,
-                end_byte_offset: u64::try_from(rollout_byte_offset)
-                    .map_err(|_| invalid_turn_position(turn_id.as_str()))?,
-            }
+            let segment_ordinal = u64::try_from(row.rollout_ordinal)
+                .map_err(|_| invalid_turn_position(turn_id.as_str()))?;
+            (
+                HistoryPosition {
+                    thread_id: row.physical_thread_id,
+                    end_ordinal_exclusive: segment_ordinal,
+                    end_byte_offset: u64::try_from(rollout_byte_offset)
+                        .map_err(|_| invalid_turn_position(turn_id.as_str()))?,
+                },
+                Some(segment_ordinal),
+            )
         }
     };
-    let segment_index = lineage
-        .segments()
-        .iter()
-        .position(|segment| segment.thread_id() == position.thread_id)
+    let segment_index = segment_ordinal
+        .and_then(|ordinal| {
+            lineage.segments().iter().position(|segment| {
+                segment.thread_id() == position.thread_id && segment.contains_ordinal(ordinal)
+            })
+        })
+        .or_else(|| {
+            lineage.segment_index_for_cutoff(position.thread_id, position.end_ordinal_exclusive)
+        })
         .ok_or_else(|| ThreadStoreError::Internal {
             message: "fork position is outside the source lineage".to_string(),
         })?;
-    if lineage.segments()[segment_index].end.is_some_and(|end| {
-        position.end_ordinal_exclusive > end.end_ordinal_exclusive
-            || position.end_byte_offset > end.end_byte_offset
-    }) {
+    let segment = &lineage.segments()[segment_index];
+    if segment
+        .end_ordinal_exclusive
+        .is_some_and(|end| position.end_ordinal_exclusive > end)
+        || segment
+            .end_byte_offset
+            .is_some_and(|end| position.end_byte_offset > end)
+    {
         return Err(ThreadStoreError::InvalidRequest {
             message: "fork boundary exceeds inherited source history".to_string(),
         });
     }
-    let history_base =
-        if position.end_ordinal_exclusive == lineage.segments()[segment_index].start_ordinal() {
-            segment_index
-                .checked_sub(1)
-                .and_then(|index| lineage.segments()[index].end)
-        } else {
-            Some(position)
-        };
+    let history_base = if position.end_ordinal_exclusive == segment.start_ordinal() {
+        segment_index
+            .checked_sub(1)
+            .and_then(|index| lineage.segments()[index].end_position())
+    } else {
+        Some(position)
+    };
     drop(source_writer_guard);
     let model_context = Arc::new(model_context::load_for_fork(lineage, history_base).await?);
 

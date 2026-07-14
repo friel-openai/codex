@@ -173,7 +173,7 @@ async fn load_summary_items(
     lineage: &RolloutLineage,
     turn: &StoredTurnRow,
 ) -> ThreadStoreResult<Vec<StoredThreadItem>> {
-    let (item_owner, first_user_item_id, final_agent_item_id) =
+    let (item_owner, item_ordinal, first_user_item_id, final_agent_item_id) =
         if matches!(turn.status, StoredTurnStatus::Interrupted)
             && turn.first_user_item_id.is_none()
             && turn.final_agent_item_id.is_none()
@@ -181,23 +181,22 @@ async fn load_summary_items(
             let source = find_source_turn(pool, lineage, turn.turn_id.as_str()).await?;
             (
                 source.physical_thread_id,
+                source.rollout_ordinal,
                 source.first_user_item_id,
                 source.final_agent_item_id,
             )
         } else {
             (
                 turn.position.physical_thread_id,
+                turn.position.rollout_ordinal,
                 turn.first_user_item_id.clone(),
                 turn.final_agent_item_id.clone(),
             )
         };
-    let Some(segment) = lineage
-        .segments()
-        .iter()
-        .find(|segment| segment.thread_id() == item_owner)
-    else {
-        return Ok(Vec::new());
-    };
+    let item_ordinal = u64::try_from(item_ordinal).map_err(|_| ThreadStoreError::Internal {
+        message: format!("invalid stored turn rollout ordinal: {item_ordinal}"),
+    })?;
+    let segment = lineage.segment_for_position(item_owner, item_ordinal)?;
     let start_ordinal = sqlite_integer(segment.start_ordinal(), "rollout ordinal")?;
     let end_ordinal = segment
         .end_ordinal()
@@ -225,7 +224,18 @@ ORDER BY rollout_ordinal ASC
     .fetch_all(pool)
     .await
     .map_err(super::thread_history_error)?;
-    rows.into_iter().map(stored_thread_item).collect()
+    let items = rows
+        .into_iter()
+        .map(stored_thread_item)
+        .collect::<ThreadStoreResult<Vec<_>>>()?;
+    items
+        .into_iter()
+        .filter_map(|item| match segment.allows_stored_item(&item) {
+            Ok(true) => Some(Ok(item)),
+            Ok(false) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
 }
 
 pub(super) fn parse_cursor(
