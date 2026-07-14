@@ -33,6 +33,8 @@ use crate::list::ThreadSortKey;
 use crate::list::ThreadsPage;
 use crate::list::get_threads;
 use crate::list::get_threads_in_root;
+use crate::list::get_threads_in_root_with_state_db;
+use crate::list::get_threads_with_state_db;
 use crate::list::read_head_for_summary;
 use crate::rollout_date_parts;
 use anyhow::Result;
@@ -212,6 +214,249 @@ async fn filesystem_lookup_distinguishes_thread_ids_from_rollout_ids() {
 }
 
 #[tokio::test]
+async fn filesystem_listing_returns_one_selected_physical_rollout_per_thread() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let thread_uuid = Uuid::from_u128(411);
+    let first_rollout_uuid = Uuid::from_u128(412);
+    let second_rollout_uuid = Uuid::from_u128(413);
+    let thread_id = thread_id_from_uuid(thread_uuid);
+
+    write_session_file(
+        home,
+        "2025-01-03T13-00-00",
+        thread_uuid,
+        /*num_records*/ 1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let first_source = home.join(format!(
+        "sessions/2025/01/03/rollout-2025-01-03T13-00-00-{thread_uuid}.jsonl"
+    ));
+    let first_path = first_source.with_file_name(format!(
+        "rollout-2025-01-03T13-00-00-{thread_uuid}_{first_rollout_uuid}.jsonl"
+    ));
+    fs::rename(&first_source, &first_path).unwrap();
+
+    write_session_file(
+        home,
+        "2025-01-04T13-00-00",
+        thread_uuid,
+        /*num_records*/ 1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let second_source = home.join(format!(
+        "sessions/2025/01/04/rollout-2025-01-04T13-00-00-{thread_uuid}.jsonl"
+    ));
+    let second_path = second_source.with_file_name(format!(
+        "rollout-2025-01-04T13-00-00-{thread_uuid}_{second_rollout_uuid}.jsonl"
+    ));
+    fs::rename(&second_source, &second_path).unwrap();
+
+    let page = get_threads(
+        home,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].thread_id, Some(thread_id));
+    assert_eq!(page.items[0].path, second_path);
+
+    let runtime = insert_state_db_thread(
+        home,
+        thread_id,
+        first_path.as_path(),
+        /*archived*/ false,
+    )
+    .await;
+    let selected_page = get_threads_with_state_db(
+        home,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+        Some(runtime.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(selected_page.items.len(), 1);
+    assert_eq!(selected_page.items[0].thread_id, Some(thread_id));
+    assert_eq!(selected_page.items[0].path, first_path);
+
+    runtime.close().await;
+    let fallback_page = get_threads_with_state_db(
+        home,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+        Some(runtime.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(fallback_page.items.len(), 1);
+    assert_eq!(fallback_page.items[0].path, second_path);
+}
+
+#[tokio::test]
+async fn filesystem_listing_omits_stale_singleton_from_unselected_collection() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let thread_uuid = Uuid::from_u128(421);
+    let first_rollout_uuid = Uuid::from_u128(422);
+    let second_rollout_uuid = Uuid::from_u128(423);
+    let thread_id = thread_id_from_uuid(thread_uuid);
+    write_session_file(
+        home,
+        "2025-01-03T13-00-00",
+        thread_uuid,
+        1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let source = home.join(format!(
+        "sessions/2025/01/03/rollout-2025-01-03T13-00-00-{thread_uuid}.jsonl"
+    ));
+    let archived_root = home.join("archived_sessions");
+    fs::create_dir_all(&archived_root).unwrap();
+    let archived_path = archived_root.join(format!(
+        "rollout-2025-01-03T13-00-00-{thread_uuid}_{first_rollout_uuid}.jsonl"
+    ));
+    fs::rename(source, &archived_path).unwrap();
+    write_session_file(
+        home,
+        "2025-01-04T13-00-00",
+        thread_uuid,
+        1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let active_source = home.join(format!(
+        "sessions/2025/01/04/rollout-2025-01-04T13-00-00-{thread_uuid}.jsonl"
+    ));
+    let active_path = active_source.with_file_name(format!(
+        "rollout-2025-01-04T13-00-00-{thread_uuid}_{second_rollout_uuid}.jsonl"
+    ));
+    fs::rename(active_source, &active_path).unwrap();
+    let runtime = insert_state_db_thread(home, thread_id, &archived_path, true).await;
+
+    let active_page = get_threads_with_state_db(
+        home,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+        Some(runtime.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert!(active_page.items.is_empty());
+    let archived_page = get_threads_in_root_with_state_db(
+        archived_root,
+        10,
+        None,
+        ThreadSortKey::CreatedAt,
+        ThreadListConfig {
+            allowed_sources: INTERACTIVE_SESSION_SOURCES.as_slice(),
+            model_providers: None,
+            cwd_filters: None,
+            default_provider: TEST_PROVIDER,
+            layout: ThreadListLayout::Flat,
+        },
+        Some(runtime.as_ref()),
+        Some(true),
+    )
+    .await
+    .unwrap();
+    assert_eq!(archived_page.items.len(), 1);
+    assert_eq!(archived_page.items[0].path, archived_path);
+}
+
+#[tokio::test]
+async fn filesystem_listing_includes_authenticated_selected_noncanonical_rollout() {
+    let temp = TempDir::new().unwrap();
+    let home = temp.path();
+    let thread_uuid = Uuid::from_u128(431);
+    let thread_id = thread_id_from_uuid(thread_uuid);
+    write_session_file(
+        home,
+        "2025-01-03T13-00-00",
+        thread_uuid,
+        1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+    let canonical_path = home.join(format!(
+        "sessions/2025/01/03/rollout-2025-01-03T13-00-00-{thread_uuid}.jsonl"
+    ));
+    let imported_path = canonical_path.with_file_name("rollout-imported.jsonl");
+    fs::rename(canonical_path, &imported_path).unwrap();
+    let runtime = insert_state_db_thread(home, thread_id, &imported_path, false).await;
+    let older_uuid = Uuid::from_u128(432);
+    write_session_file(
+        home,
+        "2025-01-02T13-00-00",
+        older_uuid,
+        1,
+        Some(SessionSource::Cli),
+    )
+    .unwrap();
+
+    let page = get_threads_with_state_db(
+        home,
+        1,
+        None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+        Some(runtime.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].thread_id, Some(thread_id));
+    assert_eq!(page.items[0].path, imported_path.canonicalize().unwrap());
+    let next_cursor = page.next_cursor.expect("noncanonical page cursor");
+    let next_page = get_threads_with_state_db(
+        home,
+        1,
+        Some(&next_cursor),
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        None,
+        None,
+        TEST_PROVIDER,
+        Some(runtime.as_ref()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(next_page.items.len(), 1);
+    assert_eq!(
+        next_page.items[0].thread_id,
+        Some(thread_id_from_uuid(older_uuid))
+    );
+}
+
+#[tokio::test]
 async fn read_thread_item_from_rollout_rejects_unknown_canonical_history_mode() {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -243,7 +488,178 @@ async fn read_thread_item_from_rollout_rejects_unknown_canonical_history_mode() 
     )
     .unwrap();
 
-    assert_eq!(crate::list::read_thread_item_from_rollout(path).await, None);
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        None
+    );
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path).await,
+        None
+    );
+}
+
+#[tokio::test]
+async fn indexed_preview_summary_skips_compacted_replacement_history() {
+    let temp = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(30_305);
+    let ts = "2025-01-03T12-00-00";
+    write_session_file(temp.path(), ts, uuid, 1, Some(SessionSource::Cli))
+        .expect("write session file");
+    let path = temp
+        .path()
+        .join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
+    let contents = fs::read_to_string(&path).expect("read rollout");
+    let mut lines = contents.lines();
+    let session_meta = lines.next().expect("session metadata");
+    let user_event = lines.next().expect("user event");
+    let compacted = serde_json::json!({
+        "timestamp": ts,
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "compacted user ".repeat(8192)}],
+            }],
+        },
+    });
+    fs::write(&path, format!("{session_meta}\n{compacted}\n"))
+        .expect("write compacted-only rollout");
+
+    assert!(
+        crate::list::read_thread_item_from_rollout(path.clone())
+            .await
+            .is_some(),
+        "ordinary discovery must keep compacted-only conversations"
+    );
+    assert!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone())
+            .await
+            .is_none(),
+        "an existing indexed preview does not need compacted replacement history"
+    );
+
+    let short_compacted = serde_json::json!({
+        "timestamp": ts,
+        "type": "compacted",
+        "payload": {
+            "message": "summary",
+            "replacement_history": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "short user message"}],
+            }],
+        },
+    });
+    fs::write(&path, format!("{session_meta}\n{short_compacted}\n"))
+        .expect("write short compacted rollout");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "short compaction records should use ordinary deserialization"
+    );
+
+    let spaced_compacted =
+        compacted
+            .to_string()
+            .replacen("\"type\":\"compacted\"", "\"type\" : \"compacted\"", 1);
+    fs::write(&path, format!("{session_meta}\n{spaced_compacted}\n"))
+        .expect("write noncanonical compaction whitespace");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "noncanonical compaction formatting must retain ordinary parsing"
+    );
+
+    let malformed_compacted = format!(
+        r#"{{"timestamp":"{ts}","type":"compacted","payload":{{"message":"{}""#,
+        "invalid ".repeat(10_000)
+    );
+    fs::write(
+        &path,
+        format!("{session_meta}\n{malformed_compacted}\n{user_event}\n"),
+    )
+    .expect("write malformed large compaction");
+    assert_eq!(
+        crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+        crate::list::read_thread_item_from_rollout(path.clone()).await,
+        "malformed large compaction records must retain existing skip behavior"
+    );
+
+    fs::write(
+        &path,
+        format!("{session_meta}\n{compacted}\n{user_event}\n"),
+    )
+    .expect("write canonical rollout user event");
+
+    let ordinary = crate::list::read_thread_item_from_rollout(path.clone())
+        .await
+        .expect("ordinary summary should discover user event");
+    let indexed = crate::list::read_thread_item_from_rollout_with_indexed_preview(path)
+        .await
+        .expect("indexed summary should discover user event");
+    assert_eq!(indexed, ordinary);
+}
+
+#[tokio::test]
+async fn indexed_preview_summary_preserves_large_non_compacted_records() {
+    let temp = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(30_307);
+    let ts = "2025-01-03T12-00-00";
+    write_session_file(temp.path(), ts, uuid, 1, Some(SessionSource::Cli))
+        .expect("write session file");
+    let path = temp
+        .path()
+        .join(format!("sessions/2025/01/03/rollout-{ts}-{uuid}.jsonl"));
+    let original = fs::read_to_string(&path).expect("read rollout");
+    let mut lines = original.lines();
+    let session_meta = lines.next().expect("session metadata");
+    let user_event = lines.next().expect("user event");
+    let large_text = "u".repeat(100_000);
+    let response_item = serde_json::json!({
+        "timestamp": ts,
+        "type": "response_item",
+        "payload": {
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": large_text}],
+        },
+    });
+    let large_user_event = serde_json::json!({
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "user_message",
+            "message": large_text,
+            "kind": "plain",
+        },
+    });
+    let mut large_session_meta: serde_json::Value =
+        serde_json::from_str(session_meta).expect("parse session metadata");
+    large_session_meta["payload"]["originator"] = serde_json::json!(large_text);
+
+    for (kind, contents) in [
+        (
+            "session_meta",
+            format!("{large_session_meta}\n{user_event}\n"),
+        ),
+        (
+            "user_message",
+            format!("{session_meta}\n{large_user_event}\n"),
+        ),
+        (
+            "response_item",
+            format!("{session_meta}\n{response_item}\n{user_event}\n"),
+        ),
+    ] {
+        fs::write(&path, contents).expect("write large non-compacted rollout");
+        assert_eq!(
+            crate::list::read_thread_item_from_rollout_with_indexed_preview(path.clone()).await,
+            crate::list::read_thread_item_from_rollout(path.clone()).await,
+            "indexed summaries must preserve large {kind} records"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1476,6 +1892,7 @@ async fn test_updated_at_uses_file_mtime() -> Result<()> {
             meta: SessionMeta {
                 session_id: conversation_id.into(),
                 id: conversation_id,
+                segment_id: None,
                 forked_from_id: None,
                 forked_from_ordinal_exclusive: None,
                 parent_thread_id: None,

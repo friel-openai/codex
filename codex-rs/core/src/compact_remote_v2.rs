@@ -366,7 +366,7 @@ async fn run_remote_compact_task_inner_impl(
             compaction_response_id: Some(compaction_response_id),
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(compaction_turn_context).await;
 
     if reporting.defers_lifecycle() {

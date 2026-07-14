@@ -25,10 +25,20 @@ impl RolloutOrdinalState {
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
     ) -> Self {
+        Self::for_new_rollout_at(
+            history_mode,
+            history_base.map_or(0, |base| base.end_ordinal_exclusive),
+        )
+    }
+
+    pub(crate) fn for_new_rollout_at(
+        history_mode: ThreadHistoryMode,
+        initial_rollout_ordinal: u64,
+    ) -> Self {
         match history_mode {
             ThreadHistoryMode::Legacy => Self::Legacy,
             ThreadHistoryMode::Paginated => Self::Paginated {
-                next: Some(history_base.map_or(0, |base| base.end_ordinal_exclusive)),
+                next: Some(initial_rollout_ordinal),
             },
         }
     }
