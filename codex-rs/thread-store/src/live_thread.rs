@@ -13,6 +13,8 @@ use tracing::warn;
 
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
+use crate::FreezeRolloutSegmentParams;
+use crate::FrozenRolloutSegment;
 use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::ReadThreadParams;
@@ -20,6 +22,7 @@ use crate::ResumeThreadParams;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
+use crate::ThreadPersistenceMode;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -37,6 +40,7 @@ pub struct LiveThread {
     history_mode: ThreadHistoryMode,
     thread_store: Arc<dyn ThreadStore>,
     metadata_sync: Arc<Mutex<ThreadMetadataSync>>,
+    persistence_mode: Arc<Mutex<ThreadPersistenceMode>>,
     persistence_telemetry: RolloutPersistenceTelemetry,
 }
 
@@ -96,6 +100,7 @@ impl LiveThread {
     ) -> ThreadStoreResult<Self> {
         let thread_id = params.thread_id;
         let history_mode = params.history_mode;
+        let persistence_mode = params.persistence_mode;
         let metadata_sync = ThreadMetadataSync::for_create(&params).await;
         thread_store.create_thread(params).await?;
         Ok(Self {
@@ -103,6 +108,7 @@ impl LiveThread {
             history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+            persistence_mode: Arc::new(Mutex::new(persistence_mode)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -116,21 +122,29 @@ impl LiveThread {
         mut params: CreateThreadParams,
         inherited_model_context: &[RolloutItem],
     ) -> ThreadStoreResult<Self> {
+        let inherited_model_context = inherited_model_context
+            .iter()
+            .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+            .cloned()
+            .collect::<Vec<_>>();
         let persisted_prefix_item_count =
-            persisted_rollout_items(inherited_model_context, params.history_mode).len();
+            persisted_rollout_items(&inherited_model_context, params.history_mode).len();
+        let persisted_prefix_item_count =
+            u64::try_from(persisted_prefix_item_count).map_err(|_| ThreadStoreError::Internal {
+                message: "inherited model context is too large".to_string(),
+            })?;
         params.subagent_history_start_ordinal = Some(
-            u64::try_from(persisted_prefix_item_count)
-                .map_err(|_| ThreadStoreError::Internal {
-                    message: "inherited model context is too large".to_string(),
-                })?
+            params
+                .initial_rollout_ordinal
                 .checked_add(1)
+                .and_then(|ordinal| ordinal.checked_add(persisted_prefix_item_count))
                 .ok_or_else(|| ThreadStoreError::Internal {
                     message: "inherited model context is too large".to_string(),
                 })?,
         );
         let live_thread = Self::create(thread_store, params).await?;
         if let Err(err) = live_thread
-            .persist_appended_items(inherited_model_context)
+            .persist_appended_items(&inherited_model_context)
             .await
         {
             if let Err(discard_err) = live_thread.discard().await {
@@ -190,6 +204,7 @@ impl LiveThread {
             history_mode,
             thread_store,
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
+            persistence_mode: Arc::new(Mutex::new(ThreadPersistenceMode::Durable)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -199,7 +214,12 @@ impl LiveThread {
         skip_all,
         fields(item_count = raw_items.len())
     )]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "item persistence and metadata publication must observe one persistence mode"
+    )]
     pub async fn append_items(&self, raw_items: &[RolloutItem]) -> ThreadStoreResult<()> {
+        let persistence_mode = self.persistence_mode.lock().await;
         let items = self.persist_appended_items(raw_items).await?;
         if items.is_empty() {
             return Ok(());
@@ -209,6 +229,9 @@ impl LiveThread {
             .lock()
             .await
             .observe_appended_items(items.as_slice());
+        if matches!(*persistence_mode, ThreadPersistenceMode::Deferred) {
+            return Ok(());
+        }
         if let Some(update) = update {
             self.thread_store
                 .update_thread_metadata(UpdateThreadMetadataParams {
@@ -253,20 +276,85 @@ impl LiveThread {
         Ok(items)
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the durable transition must serialize with other persistence-mode operations"
+    )]
     pub async fn persist(&self) -> ThreadStoreResult<()> {
+        let mut persistence_mode = self.persistence_mode.lock().await;
         self.thread_store.persist_thread(self.thread_id).await?;
+        *persistence_mode = ThreadPersistenceMode::Durable;
+        drop(persistence_mode);
         self.flush_pending_metadata_update().await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "flush and metadata publication must observe one persistence mode"
+    )]
     pub async fn flush(&self) -> ThreadStoreResult<()> {
+        let persistence_mode = self.persistence_mode.lock().await;
         self.thread_store.flush_thread(self.thread_id).await?;
+        if matches!(*persistence_mode, ThreadPersistenceMode::Deferred) {
+            return Ok(());
+        }
+        drop(persistence_mode);
         self.flush_pending_metadata_update_for_existing_history()
             .await
     }
 
+    /// Returns whether this thread should remain memory-only until explicitly persisted.
+    pub async fn is_persistence_deferred(&self) -> bool {
+        matches!(
+            *self.persistence_mode.lock().await,
+            ThreadPersistenceMode::Deferred
+        )
+    }
+
+    /// Freezes the current local prefix for compaction or a full-history fork.
+    ///
+    /// Remote stores do not expose local rollout segments and return `Ok(None)`.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "segment freezing must serialize with persistence-mode transitions"
+    )]
+    pub async fn freeze_local_segment(
+        &self,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<Option<FrozenRolloutSegment>> {
+        let mut persistence_mode = self.persistence_mode.lock().await;
+        let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+        else {
+            return Ok(None);
+        };
+        let freeze_result = local_store
+            .freeze_thread_segment(self.thread_id, params)
+            .await;
+        if matches!(
+            local_store.live_persistence_mode(self.thread_id).await,
+            Some(ThreadPersistenceMode::Durable)
+        ) {
+            *persistence_mode = ThreadPersistenceMode::Durable;
+        }
+        let frozen = freeze_result.map(Some)?;
+        drop(persistence_mode);
+        self.flush_pending_metadata_update().await?;
+        Ok(frozen)
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "shutdown must serialize its metadata decision with persistence-mode transitions"
+    )]
     pub async fn shutdown(&self) -> ThreadStoreResult<()> {
-        self.flush_pending_metadata_update_for_existing_history()
-            .await?;
+        let persistence_mode = self.persistence_mode.lock().await;
+        if matches!(*persistence_mode, ThreadPersistenceMode::Durable) {
+            self.flush_pending_metadata_update_for_existing_history()
+                .await?;
+        }
         self.thread_store.shutdown_thread(self.thread_id).await
     }
 
