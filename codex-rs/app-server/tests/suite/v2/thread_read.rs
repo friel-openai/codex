@@ -206,8 +206,7 @@ async fn thread_read_can_include_turns() -> Result<()> {
 }
 
 #[tokio::test]
-async fn paginated_stored_thread_allows_metadata_discovery_and_rejects_legacy_history_paths()
--> Result<()> {
+async fn paginated_stored_thread_supports_metadata_history_and_resume() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
@@ -282,13 +281,14 @@ async fn paginated_stored_thread_allows_metadata_discovery_and_rejects_legacy_hi
             include_turns: true,
         })
         .await?;
-    assert_paginated_threads_unsupported(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
-        )
-        .await??,
-    );
+    let read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(turn_user_texts(&thread.turns), vec!["Saved user message"]);
 
     let turns_list_id = mcp
         .send_thread_turns_list_request(ThreadTurnsListParams {
@@ -299,13 +299,14 @@ async fn paginated_stored_thread_allows_metadata_discovery_and_rejects_legacy_hi
             items_view: None,
         })
         .await?;
-    assert_paginated_threads_unsupported(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(turns_list_id)),
-        )
-        .await??,
-    );
+    let turns_list_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turns_list_id)),
+    )
+    .await??;
+    let ThreadTurnsListResponse { data, .. } =
+        to_response::<ThreadTurnsListResponse>(turns_list_resp)?;
+    assert_eq!(turn_user_texts(&data), vec!["Saved user message"]);
 
     let resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
@@ -313,13 +314,14 @@ async fn paginated_stored_thread_allows_metadata_discovery_and_rejects_legacy_hi
             ..Default::default()
         })
         .await?;
-    assert_paginated_threads_unsupported(
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_error_message(RequestId::Integer(resume_id)),
-        )
-        .await??,
-    );
+    let resume_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
+    )
+    .await??;
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(turn_user_texts(&thread.turns), vec!["Saved user message"]);
 
     Ok(())
 }
@@ -1544,6 +1546,8 @@ async fn seed_pathless_store_thread(
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
@@ -1590,6 +1594,11 @@ fn set_rollout_history_mode(path: &Path, history_mode: ThreadHistoryMode) -> Res
         .map(serde_json::from_str::<Value>)
         .collect::<Result<Vec<_>, _>>()?;
     lines[0]["payload"]["history_mode"] = serde_json::to_value(history_mode)?;
+    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        for (ordinal, line) in lines.iter_mut().enumerate() {
+            line["ordinal"] = serde_json::to_value(ordinal)?;
+        }
+    }
     let contents = lines
         .into_iter()
         .map(|line| line.to_string())
@@ -1597,11 +1606,6 @@ fn set_rollout_history_mode(path: &Path, history_mode: ThreadHistoryMode) -> Res
         .join("\n");
     std::fs::write(path, format!("{contents}\n"))?;
     Ok(())
-}
-
-fn assert_paginated_threads_unsupported(err: JSONRPCError) {
-    assert_eq!(err.error.code, -32601);
-    assert_eq!(err.error.message, "paginated_threads is not supported yet");
 }
 
 fn create_config_toml_with_thread_store(codex_home: &Path, store_id: &str) -> std::io::Result<()> {

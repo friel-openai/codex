@@ -145,7 +145,7 @@ async fn returns_scanned_full_history_for_unsupported_compaction() {
         ],
     );
 
-    assert_reverse_scan_matches_full_history(path.as_path()).await;
+    assert_reverse_scan_matches_full_history(home.path(), path.as_path()).await;
 }
 
 #[tokio::test]
@@ -165,7 +165,7 @@ async fn returns_scanned_full_history_at_bof_without_checkpoint() {
         ],
     );
 
-    assert_reverse_scan_matches_full_history(path.as_path()).await;
+    assert_reverse_scan_matches_full_history(home.path(), path.as_path()).await;
 }
 
 #[tokio::test]
@@ -258,13 +258,13 @@ fn write_paginated_rollout<const N: usize>(
     path
 }
 
-async fn assert_reverse_scan_matches_full_history(path: &Path) {
+async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
     let session_meta = codex_rollout::read_session_meta_line(path)
         .await
         .expect("read session metadata");
     let items =
         scan_model_context_from_end_blocking(path, session_meta).expect("scan model context");
-    let full_items = read_thread::load_history_items(path)
+    let full_items = read_thread::load_history_items(home, path)
         .await
         .expect("load full history");
 

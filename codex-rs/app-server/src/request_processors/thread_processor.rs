@@ -3490,14 +3490,14 @@ impl ThreadRequestProcessor {
                     "thread {source_thread_id} did not include persisted history"
                 ))
             })?;
-        let history_items = if let Some(last_turn_id) = last_turn_id.as_deref() {
-            Arc::new(
-                truncate_rollout_after_turn_id(&history_items, last_turn_id)
-                    .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
-            )
+        let fork_snapshot = if let Some(last_turn_id) = last_turn_id.as_deref() {
+            let nth_user_message = user_message_count_through_turn_id(&history_items, last_turn_id)
+                .map_err(|err| core_thread_write_error("truncate thread for fork", err))?;
+            ForkSnapshot::TruncateBeforeNthUserMessage(nth_user_message)
         } else {
-            Arc::new(history_items)
+            ForkSnapshot::Interrupted
         };
+        let history_items = Arc::new(history_items);
         let history_cwd = Some(source_thread.cwd.clone());
 
         // Persist Windows sandbox mode.
@@ -3555,7 +3555,7 @@ impl ThreadRequestProcessor {
         } = self
             .thread_manager
             .fork_thread_from_history(
-                ForkSnapshot::Interrupted,
+                fork_snapshot,
                 config,
                 InitialHistory::Resumed(ResumedHistory {
                     conversation_id: source_thread_id,

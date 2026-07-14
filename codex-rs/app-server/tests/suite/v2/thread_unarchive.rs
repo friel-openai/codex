@@ -224,6 +224,8 @@ async fn thread_unarchive_preserves_pathless_store_metadata() -> Result<()> {
             selected_capability_roots: Vec::new(),
             multi_agent_version: None,
             history_mode: Default::default(),
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

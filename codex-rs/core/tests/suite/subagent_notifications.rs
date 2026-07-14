@@ -93,6 +93,27 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
         })
 }
 
+fn request_has_user_input_text(req: &wiremock::Request, text: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("message")
+                    && item.get("role").and_then(Value::as_str) == Some("user")
+                    && item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| {
+                            content.iter().any(|span| {
+                                span.get("type").and_then(Value::as_str) == Some("input_text")
+                                    && span.get("text").and_then(Value::as_str) == Some(text)
+                            })
+                        })
+            })
+        })
+}
+
 fn decoded_body(req: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = req
         .headers
@@ -1044,7 +1065,8 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
             .unwrap_or_default()
             .into_iter()
             .find(|request| {
-                body_contains(request, CHILD_PROMPT) && !body_contains(request, SPAWN_CALL_ID)
+                request_has_user_input_text(request, CHILD_PROMPT)
+                    && body_contains(request, SPAWN_CALL_ID)
             })
         {
             break request;
@@ -1055,7 +1077,7 @@ async fn spawned_child_receives_forked_parent_context() -> Result<()> {
         sleep(Duration::from_millis(10)).await;
     };
     assert!(body_contains(&child_request, TURN_0_FORK_PROMPT));
-    assert!(!body_contains(&child_request, SPAWN_CALL_ID));
+    assert!(body_contains(&child_request, SPAWN_CALL_ID));
 
     Ok(())
 }

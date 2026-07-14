@@ -161,6 +161,7 @@ async fn state_db_init_backfills_before_returning() -> anyhow::Result<()> {
         meta: SessionMeta {
             session_id: thread_id.into(),
             id: thread_id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: "2026-01-27T12:34:56Z".to_string(),
@@ -1490,5 +1491,46 @@ async fn resume_candidate_matches_cwd_reads_latest_turn_context() -> std::io::Re
         )
         .await
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn create_at_path_starts_at_explicit_paginated_ordinal() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let rollout_path = home.path().join("replacement.jsonl");
+    let recorder = RolloutRecorder::new(
+        &config,
+        RolloutRecorderParams::CreateAtPath {
+            path: rollout_path.clone(),
+            session_meta: Box::new(SessionMeta {
+                session_id: thread_id.into(),
+                id: thread_id,
+                history_mode: ThreadHistoryMode::Paginated,
+                ..SessionMeta::default()
+            }),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            initial_rollout_ordinal: 41,
+        },
+    )
+    .await?;
+    recorder
+        .record_canonical_items(&[agent_message_item("continued")])
+        .await?;
+    recorder.flush().await?;
+    recorder.shutdown().await?;
+
+    let lines = read_rollout_lines(rollout_path.as_path())?;
+    assert_eq!(
+        lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
+        vec![Some(41), Some(42)]
+    );
+    let RolloutItem::SessionMeta(meta) = &lines[0].item else {
+        panic!("expected session metadata");
+    };
+    assert_eq!(meta.meta.id, thread_id);
+    assert!(meta.meta.segment_id.is_some());
     Ok(())
 }

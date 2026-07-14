@@ -33,8 +33,10 @@ use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_rollout::RolloutRecorder;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
+use codex_rollout::materialize_rollout_items;
 use codex_rollout::read_session_meta_line;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -169,12 +171,31 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     assert_ne!(thread.id, conversation_id);
     assert_eq!(thread.session_id, thread.id);
     assert_eq!(thread.forked_from_id, Some(conversation_id.clone()));
-    assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert_eq!(thread.status, ThreadStatus::Idle);
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
+    let physical_items = RolloutRecorder::load_rollout_items(thread_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(reference.nth_user_message, None);
+    assert_eq!(thread.preview, preview);
+    assert!(
+        !std::fs::read_to_string(thread_path.as_path())?.contains(preview),
+        "forked rollout must not copy inherited source messages"
+    );
     assert!(thread.cwd.as_path().is_absolute());
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
@@ -341,7 +362,6 @@ async fn thread_fork_at_last_turn_id_keeps_only_terminal_prefix() -> Result<()> 
             .all(|turn| turn.status == TurnStatus::Completed)
     );
     assert_eq!(forked_thread.forked_from_id, Some(source_thread_id));
-    assert_eq!(forked_thread.preview, "first");
     assert_eq!(
         std::fs::read_to_string(source_path.as_path())?,
         original_contents,
@@ -349,9 +369,26 @@ async fn thread_fork_at_last_turn_id_keeps_only_terminal_prefix() -> Result<()> 
     );
 
     let forked_path = forked_thread.path.clone().expect("forked thread path");
-    let forked_contents = std::fs::read_to_string(forked_path.as_path())?;
-    assert!(forked_contents.contains(turn_ids[1].as_str()));
-    assert!(!forked_contents.contains(turn_ids[2].as_str()));
+    let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        forked_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_)
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(reference.nth_user_message, Some(2));
+    assert_eq!(forked_thread.preview, "first");
+    let forked_logical_items =
+        materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
+    let forked_logical_json = serde_json::to_string(&forked_logical_items)?;
+    assert!(forked_logical_json.contains(turn_ids[1].as_str()));
+    assert!(!forked_logical_json.contains(turn_ids[2].as_str()));
 
     let started = loop {
         let notification = timeout(

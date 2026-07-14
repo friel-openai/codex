@@ -74,7 +74,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -539,35 +542,53 @@ impl AgentControl {
             parent_thread.flush_rollout().await?;
         }
 
-        let parent_history = state
-            .read_stored_thread(ReadThreadParams {
-                thread_id: parent_thread_id,
-                include_archived: true,
-                include_history: true,
-            })
-            .await?
-            .history
-            .ok_or_else(|| {
-                CodexErr::Fatal(format!(
-                    "parent thread history unavailable for fork: {parent_thread_id}"
-                ))
-            })?;
-
-        let selected_capability_roots = parent_history
-            .items
-            .iter()
-            .find_map(|item| {
-                let RolloutItem::SessionMeta(meta_line) = item else {
-                    return None;
-                };
-                Some(meta_line.meta.selected_capability_roots.clone())
-            })
-            .unwrap_or_default();
-        let mut forked_rollout_items = parent_history.items;
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(&forked_rollout_items, *last_n_turns);
-        }
+        let (selected_capability_roots, mut forked_rollout_items) = match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                let reference_history = state
+                    .reference_backed_full_history(parent_thread_id)
+                    .await?;
+                let selected_capability_roots = reference_history.get_selected_capability_roots();
+                (
+                    selected_capability_roots,
+                    reference_history.get_rollout_items().to_vec(),
+                )
+            }
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                let parent_history = state
+                    .read_stored_thread(ReadThreadParams {
+                        thread_id: parent_thread_id,
+                        include_archived: true,
+                        include_history: true,
+                    })
+                    .await?
+                    .history
+                    .ok_or_else(|| {
+                        CodexErr::Fatal(format!(
+                            "parent thread history unavailable for fork: {parent_thread_id}"
+                        ))
+                    })?;
+                let source_session_meta = parent_history.items.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+                    _ => None,
+                });
+                let selected_capability_roots = parent_history
+                    .items
+                    .iter()
+                    .find_map(|item| {
+                        let RolloutItem::SessionMeta(meta_line) = item else {
+                            return None;
+                        };
+                        Some(meta_line.meta.selected_capability_roots.clone())
+                    })
+                    .unwrap_or_default();
+                let mut forked_rollout_items =
+                    truncate_rollout_to_last_n_fork_turns(&parent_history.items, *last_n_turns);
+                if let Some(source_session_meta) = source_session_meta {
+                    forked_rollout_items.insert(0, RolloutItem::SessionMeta(source_session_meta));
+                }
+                (selected_capability_roots, forked_rollout_items)
+            }
+        };
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if let Some(parent_thread) = parent_thread.as_ref() {
                 if multi_agent_version == MultiAgentVersion::V2 {

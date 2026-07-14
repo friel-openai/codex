@@ -17,6 +17,7 @@ use strum_macros::EnumIter;
 
 use crate::AgentPath;
 use crate::ResponseItemId;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
@@ -2648,6 +2649,7 @@ impl InitialHistory {
             .find_map(|item| match item {
                 RolloutItem::TurnContext(turn_context) => Some(turn_context),
                 RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -2984,6 +2986,7 @@ fn multi_agent_version_from_items(
         items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -3024,6 +3027,8 @@ impl SessionContextWindow {
 pub struct SessionMeta {
     pub session_id: SessionId,
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3077,6 +3082,7 @@ impl Default for SessionMeta {
         SessionMeta {
             session_id: id.into(),
             id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: String::new(),
@@ -3137,10 +3143,36 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+/// A compact pointer to an immutable rollout segment inherited by this thread.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
+    #[serde(alias = "fork_reference")]
+    RolloutReference(RolloutReferenceItem),
     ResponseItem(ResponseItem),
     /// Legacy delivery item reconstructed as a model-visible `agent_message`.
     InterAgentCommunication(InterAgentCommunication),
@@ -5820,6 +5852,37 @@ mod tests {
         let mut unknown = serialized;
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rollout_reference_accepts_legacy_variant_name() -> Result<()> {
+        let item: RolloutItem = serde_json::from_value(json!({
+            "type": "fork_reference",
+            "payload": {
+                "rollout_path": "/tmp/source.jsonl",
+                "thread_id": "00000000-0000-0000-0000-000000000001",
+                "segment_id": "00000000-0000-0000-0000-000000000002"
+            }
+        }))?;
+
+        let RolloutItem::RolloutReference(reference) = item else {
+            panic!("expected rollout reference");
+        };
+        assert_eq!(reference.rollout_path, PathBuf::from("/tmp/source.jsonl"));
+        assert_eq!(reference.max_depth, DEFAULT_ROLLOUT_REFERENCE_DEPTH);
+        assert_eq!(
+            reference.thread_id,
+            Some(ThreadId::from_string(
+                "00000000-0000-0000-0000-000000000001"
+            )?)
+        );
+        assert_eq!(
+            reference.segment_id,
+            Some(SegmentId::from_string(
+                "00000000-0000-0000-0000-000000000002"
+            )?)
+        );
         Ok(())
     }
 
