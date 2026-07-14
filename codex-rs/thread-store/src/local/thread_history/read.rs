@@ -91,7 +91,7 @@ pub(in crate::local) async fn list_turns(
     for turn in page.rows {
         let items = match params.items_view {
             StoredTurnItemsView::NotLoaded => Vec::new(),
-            StoredTurnItemsView::Summary => load_summary_items(pool, &turn).await?,
+            StoredTurnItemsView::Summary => load_summary_items(pool, &lineage, &turn).await?,
         };
         turns.push(StoredTurn {
             turn_id: turn.turn_id,
@@ -176,6 +176,7 @@ pub(super) async fn validate_thread_for_paginated_reads(
 
 async fn load_summary_items(
     pool: &sqlx::SqlitePool,
+    lineage: &super::super::rollout_lineage::RolloutLineage,
     turn: &StoredTurnRow,
 ) -> ThreadStoreResult<Vec<StoredThreadItem>> {
     let rows = sqlx::query(
@@ -195,7 +196,23 @@ ORDER BY rollout_ordinal ASC
     .fetch_all(pool)
     .await
     .map_err(super::thread_history_error)?;
-    rows.into_iter().map(stored_thread_item).collect()
+    let segment = lineage.segment_for_position(
+        turn.position.physical_thread_id,
+        u64::try_from(turn.position.rollout_ordinal)
+            .map_err(|_| invalid_cursor("negative rollout ordinal"))?,
+    )?;
+    let items = rows
+        .into_iter()
+        .map(stored_thread_item)
+        .collect::<ThreadStoreResult<Vec<_>>>()?;
+    items
+        .into_iter()
+        .filter_map(|item| match segment.allows_stored_item(&item) {
+            Ok(true) => Some(Ok(item)),
+            Ok(false) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
 }
 
 pub(super) fn parse_cursor(
