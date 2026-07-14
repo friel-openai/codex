@@ -20,10 +20,15 @@ pub(crate) enum RolloutOrdinalState {
 }
 
 impl RolloutOrdinalState {
-    pub(crate) fn for_new_rollout(history_mode: ThreadHistoryMode) -> Self {
+    pub(crate) fn for_new_rollout_at(
+        history_mode: ThreadHistoryMode,
+        initial_rollout_ordinal: u64,
+    ) -> Self {
         match history_mode {
             ThreadHistoryMode::Legacy => Self::Legacy,
-            ThreadHistoryMode::Paginated => Self::Paginated { next: Some(0) },
+            ThreadHistoryMode::Paginated => Self::Paginated {
+                next: Some(initial_rollout_ordinal),
+            },
         }
     }
 
