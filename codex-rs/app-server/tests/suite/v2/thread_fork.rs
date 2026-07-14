@@ -59,8 +59,10 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::RolloutRecorder;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
+use codex_rollout::materialize_rollout_items;
 use codex_rollout::read_session_meta_line;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -197,12 +199,31 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     assert_ne!(thread.id, conversation_id);
     assert_eq!(thread.session_id, thread.id);
     assert_eq!(thread.forked_from_id, Some(conversation_id.clone()));
-    assert_eq!(thread.preview, preview);
     assert_eq!(thread.model_provider, "mock_provider");
     assert_eq!(thread.status, ThreadStatus::Idle);
     let thread_path = thread.path.clone().expect("thread path");
     assert!(thread_path.as_path().is_absolute());
     assert_ne!(thread_path.as_path(), original_path);
+    let physical_items = RolloutRecorder::load_rollout_items(thread_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(reference.nth_user_message, None);
+    assert_eq!(thread.preview, preview);
+    assert!(
+        !std::fs::read_to_string(thread_path.as_path())?.contains(preview),
+        "forked rollout must not copy inherited source messages"
+    );
     assert!(thread.cwd.as_path().is_absolute());
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
@@ -506,9 +527,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
             .all(|turn| turn.status == TurnStatus::Completed)
     );
     assert_eq!(forked_thread.forked_from_id, Some(source_thread_id.clone()));
-    if history_mode == ThreadHistoryMode::Legacy {
-        assert_eq!(forked_thread.preview, "first");
-    }
+    assert_eq!(forked_thread.preview, "first");
     assert_eq!(
         std::fs::read_to_string(source_path.as_path())?,
         original_contents,
@@ -516,20 +535,38 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     );
 
     let forked_path = forked_thread.path.clone().expect("forked thread path");
-    let forked_contents = std::fs::read_to_string(forked_path.as_path())?;
-    if history_mode == ThreadHistoryMode::Paginated {
-        assert!(
-            read_session_meta_line(forked_path.as_path())
-                .await?
-                .meta
-                .history_base
-                .is_some()
-        );
-        assert!(!forked_contents.contains(turn_ids[1].as_str()));
-    } else {
-        assert!(forked_contents.contains(turn_ids[1].as_str()));
-    }
-    assert!(!forked_contents.contains(turn_ids[2].as_str()));
+    let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        forked_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+        ]
+    ));
+    let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
+        unreachable!("physical fork layout checked above")
+    };
+    assert_eq!(
+        reference.nth_user_message,
+        (history_mode == ThreadHistoryMode::Legacy).then_some(2)
+    );
+    assert_eq!(forked_thread.preview, "first");
+    let forked_logical_items =
+        materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
+    let forked_logical_json = serde_json::to_string(&forked_logical_items)?;
+    assert!(forked_logical_json.contains(turn_ids[1].as_str()));
+    assert!(!forked_logical_json.contains(turn_ids[2].as_str()));
+    assert_eq!(
+        read_session_meta_line(forked_path.as_path())
+            .await?
+            .meta
+            .history_base,
+        None,
+        "new forks persist canonical rollout references rather than history_base"
+    );
 
     let started = loop {
         let notification = timeout(
@@ -548,7 +585,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     if history_mode == ThreadHistoryMode::Paginated {
         let before_fork_id = mcp
             .send_thread_fork_request(ThreadForkParams {
-                thread_id: source_thread_id,
+                thread_id: source_thread_id.clone(),
                 before_turn_id: Some(turn_ids[2].clone()),
                 ..Default::default()
             })
@@ -595,6 +632,41 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
             .await?;
         assert_eq!(ephemeral_fork.preview, "first");
     }
+
+    let ephemeral_fork_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id,
+            last_turn_id: Some(turn_ids[1].clone()),
+            ephemeral: true,
+            exclude_turns: history_mode == ThreadHistoryMode::Paginated,
+            ..Default::default()
+        })
+        .await?;
+    let ephemeral_fork_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(ephemeral_fork_id)),
+    )
+    .await??;
+    let ThreadForkResponse {
+        thread: ephemeral_fork,
+        ..
+    } = to_response::<ThreadForkResponse>(ephemeral_fork_resp)?;
+    assert!(ephemeral_fork.ephemeral);
+    assert_eq!(ephemeral_fork.path, None);
+    if history_mode == ThreadHistoryMode::Paginated {
+        assert!(ephemeral_fork.turns.is_empty());
+    } else {
+        assert_eq!(
+            ephemeral_fork
+                .turns
+                .iter()
+                .map(|turn| turn.id.clone())
+                .collect::<Vec<_>>(),
+            turn_ids[..2],
+            "a bounded ephemeral fork must not expose the excluded source suffix"
+        );
+    }
+    assert_eq!(ephemeral_fork.preview, "first");
 
     Ok(())
 }
@@ -870,7 +942,7 @@ async fn thread_fork_inherits_explicit_source_name_from_session_index() -> Resul
 
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
-            thread_id: conversation_id.clone(),
+            thread_id: conversation_id,
             ..Default::default()
         })
         .await?;
@@ -995,7 +1067,7 @@ async fn thread_fork_can_cut_before_unfinished_stored_turn() -> Result<()> {
 
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
-            thread_id: conversation_id,
+            thread_id: conversation_id.clone(),
             before_turn_id: Some(unfinished_turn_id.to_string()),
             ..Default::default()
         })
@@ -1211,7 +1283,7 @@ async fn thread_fork_rejects_unmaterialized_thread() -> Result<()> {
 }
 
 #[tokio::test]
-async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
+async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
@@ -1271,11 +1343,21 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     let forked_path = forked_thread.path.expect("forked rollout path");
     assert!(!std::fs::read_to_string(forked_path.as_path())?.contains("Saved user message"));
     let meta = read_session_meta_line(forked_path.as_path()).await?;
-    let history_base = meta.meta.history_base.expect("history base");
     assert_eq!(
-        history_base.thread_id,
-        ThreadId::from_string(conversation_id.as_str())?
+        meta.meta.history_base, None,
+        "new paginated forks persist a rollout reference, not history_base"
     );
+    let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        forked_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -1321,7 +1403,19 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     assert!(excluded_turns_thread.turns.is_empty());
     let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
     let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
-    assert_eq!(excluded_turns_meta.meta.history_base, Some(history_base));
+    assert_eq!(excluded_turns_meta.meta.history_base, None);
+    let excluded_physical_items =
+        RolloutRecorder::load_rollout_items(excluded_turns_path.as_path())
+            .await?
+            .0;
+    assert!(matches!(
+        excluded_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
 
     let ThreadForkResponse {
         thread: nested_thread,
@@ -1341,14 +1435,18 @@ async fn thread_fork_creates_reference_backed_paginated_thread() -> Result<()> {
     assert!(nested_thread.turns.is_empty());
     let nested_path = nested_thread.path.expect("nested fork rollout path");
     let nested_meta = read_session_meta_line(nested_path.as_path()).await?;
-    assert_eq!(
-        nested_meta
-            .meta
-            .history_base
-            .expect("nested fork history base")
-            .thread_id,
-        ThreadId::from_string(forked_thread_id.as_str())?
-    );
+    assert_eq!(nested_meta.meta.history_base, None);
+    let nested_physical_items = RolloutRecorder::load_rollout_items(nested_path.as_path())
+        .await?
+        .0;
+    assert!(matches!(
+        nested_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
     Ok(())
 }
 
@@ -1374,7 +1472,7 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
             "developer",
             Some(ThreadSource::Subagent),
         ),
-        MultiAgentVersion::V1 => (config, "user", None),
+        MultiAgentVersion::V1 => (config.disable_feature(Feature::MultiAgentV2), "user", None),
         MultiAgentVersion::Disabled => unreachable!("interruption markers require agent support"),
     };
     config.write(codex_home.path())?;
@@ -1491,26 +1589,27 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
     assert!(matches!(
-        child_rollout.as_slice(),
-        [
-            RolloutLine { item: RolloutItem::SessionMeta(_), .. },
-            RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
-                ..
-            },
-            RolloutLine {
-                item: RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::Message {
-                    role,
-                    ..
-                }),
-                ..
-            },
-            RolloutLine {
-                item: RolloutItem::EventMsg(EventMsg::TurnAborted(aborted)),
-                ..
-            },
-        ] if role == expected_marker_role && aborted.turn_id.as_deref() == Some("active-turn")
+        child_rollout.first(),
+        Some(RolloutLine {
+            item: RolloutItem::SessionMeta(_),
+            ..
+        })
     ));
+    assert!(
+        child_rollout
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+    );
+    assert!(child_rollout.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::ResponseItem(codex_protocol::models::ResponseItem::Message { role, .. })
+            if role == expected_marker_role
+    )));
+    assert!(child_rollout.iter().any(|line| matches!(
+        &line.item,
+        RolloutItem::EventMsg(EventMsg::TurnAborted(aborted))
+            if aborted.turn_id.as_deref() == Some("active-turn")
+    )));
 
     append_rollout_item_to_path(source_path.as_path(), &user_response_item("after-fork")).await?;
     append_rollout_item_to_path(
@@ -1732,7 +1831,6 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
     assert!(serialized_input.contains("before-fork model input"));
     assert!(!serialized_input.contains("after-fork model input"));
     assert!(serialized_input.contains("Continue after cold resume"));
-
     Ok(())
 }
 
@@ -1960,7 +2058,7 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
         assert_eq!(thread.turns.len(), 1, "expected copied fork history");
 
         let turn = &thread.turns[0];
-        assert_eq!(turn.status, TurnStatus::Completed);
+        assert_eq!(turn.status, TurnStatus::Interrupted);
         assert_eq!(turn.items.len(), 1, "expected user message item");
         match &turn.items[0] {
             ThreadItem::UserMessage { content, .. } => {
@@ -2070,6 +2168,103 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 
     let ThreadListResponse { data, .. } = list_threads(&mut mcp).await?;
     assert!(data.iter().all(|thread| thread.id != fork_thread_id));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materialization() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let source_thread_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .with_env_overrides(&[("CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS", Some("1"))])
+        .build_initialized()
+        .await?;
+
+    let request_id = mcp
+        .send_thread_fork_request(ThreadForkParams {
+            thread_id: source_thread_id.clone(),
+            ephemeral: true,
+            thread_source: Some(ThreadSource::Feature("system".to_string())),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadForkResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(request_id)).await??;
+
+    assert!(thread.ephemeral);
+    assert_eq!(thread.path, None);
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "Generate a task title".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    assert_eq!(
+        state_db
+            .get_thread(ThreadId::from_string(&thread.id)?)
+            .await?,
+        None,
+        "a system ephemeral fork must not create a persisted thread"
+    );
+
+    for archived in [false, true] {
+        let list_id = mcp
+            .send_thread_list_request(ThreadListParams {
+                cursor: None,
+                limit: Some(50),
+                sort_key: None,
+                sort_direction: None,
+                model_providers: None,
+                source_kinds: None,
+                archived: Some(archived),
+                is_pinned: None,
+                cwd: None,
+                use_state_db_only: false,
+                search_term: None,
+                parent_thread_id: None,
+                ancestor_thread_id: None,
+            })
+            .await?;
+        let ThreadListResponse { data, .. } =
+            timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(list_id)).await??;
+        assert!(
+            data.iter().all(|candidate| candidate.id != thread.id),
+            "a system ephemeral fork must not appear in the archived={archived} list"
+        );
+        if !archived {
+            assert!(
+                data.iter()
+                    .any(|candidate| candidate.id == source_thread_id),
+                "the persistent source thread must remain listed"
+            );
+        }
+    }
 
     Ok(())
 }

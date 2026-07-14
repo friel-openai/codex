@@ -2232,8 +2232,34 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         .committed_fork_rollout_items_for_test()
         .await
         .expect("committed guardian fork snapshot");
-    assert_eq!(
+    assert!(matches!(
+        committed_rollout_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let codex_home = session.get_config().await.codex_home.clone();
+    let materialized_rollout_items = codex_rollout::materialize_rollout_lines_from(
+        codex_home.as_path(),
         committed_rollout_items
+            .iter()
+            .cloned()
+            .map(|item| codex_protocol::protocol::RolloutLine {
+                timestamp: String::new(),
+                ordinal: None,
+                item,
+            })
+            .collect(),
+    )
+    .await
+    .expect("materialize committed guardian fork snapshot")
+    .into_iter()
+    .map(|line| line.item)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        materialized_rollout_items
             .iter()
             .filter(|item| rollout_item_contains_message_text(
                 item,
