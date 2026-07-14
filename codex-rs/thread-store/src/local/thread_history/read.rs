@@ -209,13 +209,11 @@ async fn load_inherited_summary_items(
     turn: &StoredTurnRow,
 ) -> ThreadStoreResult<Vec<StoredThreadItem>> {
     let source = find_source_turn(pool, lineage, turn.turn_id.as_str()).await?;
-    let Some(segment) = lineage
-        .segments()
-        .iter()
-        .find(|segment| segment.thread_id() == source.physical_thread_id)
-    else {
-        return Ok(Vec::new());
-    };
+    let segment = lineage.segment_for_position(
+        source.physical_thread_id,
+        u64::try_from(source.rollout_ordinal)
+            .map_err(|_| invalid_cursor("negative rollout ordinal"))?,
+    )?;
     let start_ordinal = sqlite_integer(segment.start_ordinal(), "rollout ordinal")?;
     let end_ordinal = segment
         .end_ordinal()
@@ -243,7 +241,18 @@ ORDER BY rollout_ordinal ASC
     .fetch_all(pool)
     .await
     .map_err(super::thread_history_error)?;
-    rows.into_iter().map(stored_thread_item).collect()
+    let items = rows
+        .into_iter()
+        .map(stored_thread_item)
+        .collect::<ThreadStoreResult<Vec<_>>>()?;
+    items
+        .into_iter()
+        .filter_map(|item| match segment.allows_stored_item(&item) {
+            Ok(true) => Some(Ok(item)),
+            Ok(false) => None,
+            Err(err) => Some(Err(err)),
+        })
+        .collect()
 }
 
 pub(super) fn parse_cursor(

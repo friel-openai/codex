@@ -111,7 +111,6 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AdditionalContextEntry;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::HasLegacyEvent;
-use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::ItemStartedEvent;
@@ -119,6 +118,7 @@ use codex_protocol::protocol::MULTI_AGENT_MODE_OPEN_TAG;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -138,6 +138,9 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rollout::RolloutRecorder;
+use codex_rollout::materialize_recent_rollout_lines_from;
+use codex_rollout::resolve_rollout_reference_path;
 use codex_rollout::state_db;
 use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
@@ -146,12 +149,14 @@ use codex_sandboxing::policy_transforms::intersect_permission_profiles;
 use codex_shell_command::parse_command::parse_command;
 use codex_terminal_detection::user_agent;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::LiveThread;
 use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
+use codex_thread_store::ThreadPersistenceMode;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
@@ -458,15 +463,6 @@ pub(crate) enum GitEnrichmentPolicy {
     Skip,
 }
 
-/// Controls which fork history belongs in the newly created thread's own rollout.
-pub(crate) enum ForkPersistence {
-    Copied,
-    Referenced {
-        history_base: Option<HistoryPosition>,
-        inherited_item_count: usize,
-    },
-}
-
 pub(crate) struct SessionSpawnArgs {
     pub(crate) config: Config,
     pub(crate) allow_provider_model_fallback: bool,
@@ -482,7 +478,6 @@ pub(crate) struct SessionSpawnArgs {
     pub(crate) extensions: Arc<codex_extension_api::ExtensionRegistry<crate::config::Config>>,
     pub(crate) conversation_history: InitialHistory,
     pub(crate) requested_history_mode: Option<ThreadHistoryMode>,
-    pub(crate) fork_persistence: ForkPersistence,
     pub(crate) session_source: SessionSource,
     pub(crate) forked_from_thread_id: Option<ThreadId>,
     pub(crate) parent_thread_id: Option<ThreadId>,
@@ -529,6 +524,73 @@ pub(crate) fn resolve_multi_agent_version(
             InitialHistory::New | InitialHistory::Cleared => None,
             // Threads created before runtime metadata existed keep the legacy V1 tool surface.
             InitialHistory::Resumed(_) | InitialHistory::Forked(_) => Some(MultiAgentVersion::V1),
+        })
+}
+
+async fn initial_rollout_ordinal(
+    history: &InitialHistory,
+    history_mode: ThreadHistoryMode,
+    codex_home: &Path,
+) -> CodexResult<u64> {
+    if !matches!(history_mode, ThreadHistoryMode::Paginated) {
+        return Ok(0);
+    }
+    let InitialHistory::Forked(items) = history else {
+        return Ok(0);
+    };
+    if !items
+        .iter()
+        .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+    {
+        return Ok(0);
+    }
+    let lines = items
+        .iter()
+        .cloned()
+        .map(|item| RolloutLine {
+            timestamp: String::new(),
+            ordinal: None,
+            item,
+        })
+        .collect();
+    let materialized_next = materialize_recent_rollout_lines_from(codex_home, lines)
+        .await?
+        .into_iter()
+        .filter_map(|line| line.ordinal)
+        .max()
+        .map(|ordinal| {
+            ordinal
+                .checked_add(1)
+                .ok_or_else(|| CodexErr::Fatal("rollout ordinal overflow after fork".to_string()))
+        })
+        .transpose()?;
+    if let Some(materialized_next) = materialized_next {
+        return Ok(materialized_next);
+    }
+
+    let Some(reference) = items.iter().find_map(|item| match item {
+        RolloutItem::RolloutReference(reference) => Some(reference),
+        _ => None,
+    }) else {
+        return Ok(0);
+    };
+    let reference_path = resolve_rollout_reference_path(codex_home, reference).await?;
+    let (physical_lines, _, parse_errors) =
+        RolloutRecorder::load_rollout_lines(reference_path.as_path()).await?;
+    if parse_errors != 0 {
+        return Err(CodexErr::Fatal(format!(
+            "referenced rollout {} contains {parse_errors} invalid record(s)",
+            reference_path.display()
+        )));
+    }
+    physical_lines
+        .into_iter()
+        .filter_map(|line| line.ordinal)
+        .max()
+        .map_or(Ok(0), |ordinal| {
+            ordinal.checked_add(1).ok_or_else(|| {
+                CodexErr::Fatal("rollout ordinal overflow after empty fork".to_string())
+            })
         })
 }
 
@@ -579,7 +641,6 @@ impl Session {
             extensions,
             conversation_history,
             requested_history_mode,
-            fork_persistence,
             session_source,
             forked_from_thread_id,
             parent_thread_id,
@@ -779,7 +840,6 @@ impl Session {
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
-            fork_persistence,
             session_source_clone,
             skills_service,
             plugins_manager,
@@ -1242,6 +1302,9 @@ impl Session {
     }
 
     pub(crate) async fn ensure_rollout_materialized(&self) {
+        if self.thread_config_snapshot().await.ephemeral {
+            return;
+        }
         if let Err(e) = self.try_ensure_rollout_materialized().await {
             warn!("failed to materialize thread persistence: {e}");
         }
@@ -1348,7 +1411,10 @@ impl Session {
         state.clear_connector_selection();
     }
 
-    async fn record_initial_history(&self, conversation_history: InitialHistory) {
+    async fn record_initial_history(
+        &self,
+        conversation_history: InitialHistory,
+    ) -> CodexResult<()> {
         let (is_subagent, is_paginated_subagent) = {
             let state = self.state.lock().await;
             let session_configuration = &state.session_configuration;
@@ -1378,8 +1444,14 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let turn_context = self.new_default_turn().await;
                 let rollout_items = resumed_history.history;
+                let logical_rollout_items = self.materialize_forked_history(&rollout_items).await?;
+                self.state.lock().await.set_next_turn_is_first(
+                    !initial_history_has_prior_user_turns(&InitialHistory::Forked(
+                        logical_rollout_items.clone(),
+                    )),
+                );
                 let previous_turn_settings = self
-                    .apply_rollout_reconstruction(&turn_context, &rollout_items)
+                    .apply_rollout_reconstruction(&turn_context, &logical_rollout_items)
                     .await;
 
                 // If resuming, warn when the last recorded model differs from the current one.
@@ -1404,7 +1476,7 @@ impl Session {
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
@@ -1417,45 +1489,55 @@ impl Session {
             }
             InitialHistory::Forked(mut rollout_items) => {
                 let turn_context = self.new_default_turn().await;
+                let has_rollout_reference = rollout_items
+                    .iter()
+                    .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
-                self.apply_rollout_reconstruction(&turn_context, &rollout_items)
+                let mut persisted_rollout_items = rollout_items
+                    .iter()
+                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let mut logical_rollout_items =
+                    self.materialize_forked_history(&rollout_items).await?;
+                Self::assign_missing_rollout_response_item_ids(&mut logical_rollout_items);
+                self.state.lock().await.set_next_turn_is_first(
+                    !initial_history_has_prior_user_turns(&InitialHistory::Forked(
+                        logical_rollout_items.clone(),
+                    )),
+                );
+                self.apply_rollout_reconstruction(&turn_context, &logical_rollout_items)
                     .await;
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&rollout_items) {
+                if let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items) {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
 
                 let thread_settings_applied =
                     RolloutItem::EventMsg(handlers::thread_settings_applied_event(self).await);
-                match &self.fork_persistence {
-                    ForkPersistence::Referenced {
-                        inherited_item_count,
-                        ..
-                    } => {
-                        // Ancestor records remain behind history_base; only effective child
-                        // settings and boundaries synthesized by snapshot processing are local.
-                        rollout_items.drain(..*inherited_item_count);
-                        rollout_items.insert(0, thread_settings_applied);
-                    }
-                    ForkPersistence::Copied if is_paginated_subagent => {
-                        // Paginated subagents already persist inherited context when their live
-                        // thread is created.
-                        rollout_items.clear();
-                        rollout_items.push(thread_settings_applied);
-                    }
-                    ForkPersistence::Copied => {
-                        // Keep the copied prefix and effective child settings in one append so a
-                        // cold resume cannot observe inherited settings as the latest value.
-                        rollout_items.push(thread_settings_applied);
-                    }
+                if is_paginated_subagent && !has_rollout_reference {
+                    // Paginated subagents persist inherited model context while creating the live
+                    // thread so the copied prefix is not observed as child-owned metadata.
+                    self.persist_rollout_items(&[thread_settings_applied]).await;
+                } else {
+                    // Keep the compact inherited reference and the child's effective settings in
+                    // one append so a cold resume cannot observe inherited settings as the
+                    // child's latest value.
+                    persisted_rollout_items.push(thread_settings_applied);
+                    self.persist_rollout_items(&persisted_rollout_items).await;
                 }
-                self.persist_rollout_items(&rollout_items).await;
 
-                // Forked threads should remain file-backed immediately after startup.
-                self.ensure_rollout_materialized().await;
+                // Durable forks should remain file-backed immediately after startup. Ephemeral
+                // forks keep their compact reference in the deferred recorder until a later
+                // operation explicitly materializes them.
+                if let Some(live_thread) = self.live_thread()
+                    && !live_thread.is_persistence_deferred().await
+                {
+                    self.ensure_rollout_materialized().await;
+                }
 
                 // Flush after seeding history and any persisted rollout copy.
                 if !is_subagent {
@@ -1463,6 +1545,39 @@ impl Session {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn materialize_forked_history(
+        &self,
+        rollout_items: &[RolloutItem],
+    ) -> CodexResult<Vec<RolloutItem>> {
+        if !rollout_items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+        {
+            return Ok(rollout_items.to_vec());
+        }
+        let codex_home = {
+            let state = self.state.lock().await;
+            state.session_configuration.codex_home().to_path_buf()
+        };
+        let lines = rollout_items
+            .iter()
+            .cloned()
+            .map(|item| RolloutLine {
+                timestamp: String::new(),
+                ordinal: None,
+                item,
+            })
+            .collect();
+        Ok(
+            materialize_recent_rollout_lines_from(codex_home.as_path(), lines)
+                .await?
+                .into_iter()
+                .map(|line| line.item)
+                .collect(),
+        )
     }
 
     #[instrument(
@@ -3308,16 +3423,33 @@ impl Session {
             }
         }
 
-        self.persist_rollout_items(&[RolloutItem::Compacted(compacted_item)])
-            .await;
+        let mut replacement_items = vec![RolloutItem::Compacted(compacted_item)];
         // Persist the baseline after the replacement history that established it.
         if let Some(world_state_item) = world_state_item {
-            self.persist_rollout_items(&[RolloutItem::WorldState(world_state_item)])
-                .await;
+            replacement_items.push(RolloutItem::WorldState(world_state_item));
         }
         if let Some(turn_context_item) = reference_context_item {
-            self.persist_rollout_items(&[RolloutItem::TurnContext(turn_context_item)])
-                .await;
+            replacement_items.push(RolloutItem::TurnContext(turn_context_item));
+        }
+        let rotated = if let Some(live_thread) = self.live_thread() {
+            match live_thread
+                .freeze_local_segment(FreezeRolloutSegmentParams::rotate(
+                    replacement_items.clone(),
+                ))
+                .await
+            {
+                Ok(Some(_)) => true,
+                Ok(None) => false,
+                Err(err) => {
+                    warn!("failed to rotate rollout segment after compaction: {err}");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+        if !rotated {
+            self.persist_rollout_items(&replacement_items).await;
         }
         {
             let mut state = self.state.lock().await;
@@ -4119,6 +4251,11 @@ impl Session {
     }
 
     pub(crate) async fn hook_transcript_path(&self) -> Option<PathBuf> {
+        if let Some(live_thread) = self.live_thread()
+            && live_thread.is_persistence_deferred().await
+        {
+            return None;
+        }
         let rollout_path = match self.current_rollout_path().await {
             Ok(Some(path)) => path,
             Ok(None) => return None,
