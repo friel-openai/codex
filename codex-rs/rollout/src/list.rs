@@ -16,6 +16,7 @@ use time::macros::format_description;
 use uuid::Uuid;
 
 use super::ARCHIVED_SESSIONS_SUBDIR;
+use super::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use super::SESSIONS_SUBDIR;
 use super::compression;
 use crate::protocol::EventMsg;
@@ -98,6 +99,7 @@ pub type ConversationsPage = ThreadsPage;
 #[derive(Default)]
 struct HeadTailSummary {
     saw_session_meta: bool,
+    saw_compacted_user_message: bool,
     thread_id: Option<ThreadId>,
     first_user_message: Option<String>,
     preview: Option<String>,
@@ -118,8 +120,10 @@ struct HeadTailSummary {
 
 /// Hard cap to bound worst‑case work per request.
 const MAX_SCAN_FILES: usize = 10000;
+const MAX_SUMMARY_REFERENCE_DEPTH: usize = 8;
 const HEAD_RECORD_LIMIT: usize = 10;
 const USER_EVENT_SCAN_LIMIT: usize = 200;
+const MAX_SUMMARY_REFERENCE_FILES: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreadSortKey {
@@ -803,8 +807,10 @@ async fn build_thread_item(
     {
         return None;
     }
-    // Apply filters: must have session meta and a discoverable preview.
-    if summary.saw_session_meta && summary.preview.is_some() {
+    // Compacted replacement history can retain a valid user conversation even when its original
+    // preview is beyond the bounded summary scan.
+    if summary.saw_session_meta && (summary.preview.is_some() || summary.saw_compacted_user_message)
+    {
         let HeadTailSummary {
             thread_id,
             first_user_message,
@@ -1110,6 +1116,22 @@ impl<'a> ProviderMatcher<'a> {
 }
 
 async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTailSummary> {
+    let mut remaining_reference_files = MAX_SUMMARY_REFERENCE_FILES;
+    read_head_summary_with_references(
+        path,
+        head_limit,
+        /*reference_depth*/ 0,
+        &mut remaining_reference_files,
+    )
+    .await
+}
+
+async fn read_head_summary_with_references(
+    path: &Path,
+    head_limit: usize,
+    reference_depth: usize,
+    remaining_reference_files: &mut usize,
+) -> io::Result<HeadTailSummary> {
     let mut lines = compression::open_rollout_line_reader(path).await?;
     let mut summary = HeadTailSummary::default();
     let mut lines_scanned = 0usize;
@@ -1176,6 +1198,38 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
                     .created_at
                     .get_or_insert_with(|| rollout_line.timestamp.clone());
             }
+            RolloutItem::RolloutReference(reference) => {
+                if reference_depth >= MAX_SUMMARY_REFERENCE_DEPTH
+                    || *remaining_reference_files == 0
+                    || reference.nth_user_message == Some(0)
+                {
+                    continue;
+                }
+                let Some(codex_home) = codex_home_from_rollout_path(path) else {
+                    continue;
+                };
+                *remaining_reference_files -= 1;
+                let Ok(resolved_path) =
+                    crate::resolve_rollout_reference_path(codex_home, &reference).await
+                else {
+                    continue;
+                };
+                let referenced = Box::pin(read_head_summary_with_references(
+                    resolved_path.as_path(),
+                    head_limit,
+                    reference_depth + 1,
+                    remaining_reference_files,
+                ))
+                .await
+                .unwrap_or_default();
+                if summary.preview.is_none() {
+                    summary.preview = referenced.preview;
+                }
+                if summary.first_user_message.is_none() {
+                    summary.first_user_message = referenced.first_user_message;
+                }
+                summary.saw_compacted_user_message |= referenced.saw_compacted_user_message;
+            }
             RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             RolloutItem::TurnContext(_) => {
                 // Not included in `head`; skip.
@@ -1183,8 +1237,18 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
             RolloutItem::WorldState(_) => {
                 // Not included in `head`; skip.
             }
-            RolloutItem::Compacted(_) => {
-                // Not included in `head`; skip.
+            RolloutItem::Compacted(compacted) => {
+                if compacted
+                    .replacement_history
+                    .as_deref()
+                    .is_some_and(|history| {
+                        history
+                            .iter()
+                            .any(codex_protocol::models::ResponseItem::is_user_message)
+                    })
+                {
+                    summary.saw_compacted_user_message = true;
+                }
             }
             RolloutItem::EventMsg(ev) => {
                 if let Some(preview) = event_msg_preview(&ev) {
@@ -1218,6 +1282,18 @@ async fn read_head_summary(path: &Path, head_limit: usize) -> io::Result<HeadTai
     Ok(summary)
 }
 
+fn codex_home_from_rollout_path(path: &Path) -> Option<&Path> {
+    path.ancestors().find_map(|ancestor| {
+        let name = ancestor.file_name()?.to_str()?;
+        matches!(
+            name,
+            SESSIONS_SUBDIR | ARCHIVED_SESSIONS_SUBDIR | ROTATED_ROLLOUT_SEGMENTS_SUBDIR
+        )
+        .then(|| ancestor.parent())
+        .flatten()
+    })
+}
+
 /// Read up to `HEAD_RECORD_LIMIT` records from the start of the rollout file at `path`.
 /// This should be enough to produce a summary including the session meta line.
 pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Value>> {
@@ -1249,7 +1325,8 @@ pub async fn read_head_for_summary(path: &Path) -> io::Result<Vec<serde_json::Va
                         head.push(value);
                     }
                 }
-                RolloutItem::InterAgentCommunicationMetadata { .. }
+                RolloutItem::RolloutReference(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::WorldState(_)
@@ -1303,6 +1380,7 @@ pub async fn read_session_meta_line(path: &Path) -> io::Result<SessionMetaLine> 
             }
             RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::EventMsg(_) => {}
