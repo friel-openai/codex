@@ -58,15 +58,18 @@ pub(super) async fn load_latest_model_context(
         });
     }
 
-    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
+    let has_references = read_thread::rollout_starts_with_reference(path.as_path()).await?;
+    let items = if has_references {
+        read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path()).await?
+    } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
         && !path
             .file_name()
             .and_then(|file_name| file_name.to_str())
             .is_some_and(|file_name| file_name.ends_with(".jsonl.zst"))
     {
-        scan_model_context_from_end(path, session_meta).await?
+        scan_model_context_from_end(path, session_meta, store.config.codex_home.clone()).await?
     } else {
-        read_thread::load_history_items(path.as_path()).await?
+        read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path()).await?
     };
 
     Ok(StoredModelContext {
@@ -78,6 +81,7 @@ pub(super) async fn load_latest_model_context(
 async fn scan_model_context_from_end(
     path: PathBuf,
     session_meta: SessionMetaLine,
+    codex_home: PathBuf,
 ) -> ThreadStoreResult<Vec<RolloutItem>> {
     let path_for_scan = path.clone();
     let scan = tokio::task::spawn_blocking(move || {
@@ -93,7 +97,7 @@ async fn scan_model_context_from_end(
             // Compression can replace the resolved plain rollout with its compressed sibling
             // before the blocking reverse scanner opens it. The forward loader re-resolves that
             // representation transition and already supports compressed rollouts.
-            read_thread::load_history_items(path.as_path()).await
+            read_thread::load_history_items(codex_home.as_path(), path.as_path()).await
         }
         Err(err) => Err(ThreadStoreError::Internal {
             message: format!("failed to scan model context {}: {err}", path.display()),

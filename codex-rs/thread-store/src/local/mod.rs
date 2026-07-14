@@ -7,6 +7,7 @@ mod live_writer;
 mod model_context;
 mod read_thread;
 mod search_threads;
+mod segment;
 mod thread_history;
 mod thread_history_materialization;
 mod unarchive_thread;
@@ -31,6 +32,8 @@ use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::FreezeRolloutSegmentParams;
+use crate::FrozenRolloutSegment;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListThreadsParams;
@@ -44,6 +47,7 @@ use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadPage;
+use crate::ThreadPersistenceMode;
 use crate::ThreadSearchPage;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
@@ -74,12 +78,15 @@ pub struct LocalThreadStore {
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
 }
 
+#[derive(Clone)]
 struct LiveRecorderEntry {
     recorder: RolloutRecorder,
     // Local rollout files are materialized lazily, but metadata updates can arrive before the
     // canonical SessionMeta is durable. Retain the mode captured when live persistence was opened
     // so missing SQLite rows can still be seeded.
     history_mode: ThreadHistoryMode,
+    /// Whether the recorder may materialize its canonical in-memory queue.
+    persistence_mode: ThreadPersistenceMode,
 }
 
 #[derive(Default)]
@@ -181,6 +188,26 @@ impl LocalThreadStore {
         live_writer::rollout_path(self, thread_id).await
     }
 
+    /// Freezes the thread's current prefix and installs a reference-backed continuation.
+    pub async fn freeze_thread_segment(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<FrozenRolloutSegment> {
+        segment::freeze_thread_segment(self, thread_id, params).await
+    }
+
+    pub(crate) async fn live_persistence_mode(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<ThreadPersistenceMode> {
+        self.live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|entry| entry.persistence_mode)
+    }
+
     pub(super) async fn ensure_live_recorder_absent(
         &self,
         thread_id: ThreadId,
@@ -198,6 +225,7 @@ impl LocalThreadStore {
         thread_id: ThreadId,
         recorder: RolloutRecorder,
         history_mode: ThreadHistoryMode,
+        persistence_mode: ThreadPersistenceMode,
     ) -> ThreadStoreResult<()> {
         match self.live_recorders.lock().await.entry(thread_id) {
             Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
@@ -207,6 +235,7 @@ impl LocalThreadStore {
                 entry.insert(LiveRecorderEntry {
                     recorder,
                     history_mode,
+                    persistence_mode,
                 });
                 Ok(())
             }
@@ -392,6 +421,7 @@ mod tests {
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
@@ -605,6 +635,62 @@ mod tests {
             .expect("sqlite metadata");
         assert_eq!(child_metadata.model.as_deref(), Some("child-model"));
         assert_eq!(child_metadata.approval_mode, "on-request");
+    }
+
+    #[tokio::test]
+    async fn inherited_model_context_boundary_uses_absolute_rollout_ordinals() {
+        let home = TempDir::new().expect("temp dir");
+        let store = Arc::new(LocalThreadStore::new(
+            test_config(home.path()),
+            /*state_db*/ None,
+        ));
+        let thread_id = ThreadId::default();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = ThreadHistoryMode::Paginated;
+        params.initial_rollout_ordinal = 41;
+        let message = |text: &str| {
+            RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+        };
+
+        let live_thread = LiveThread::create_with_inherited_model_context(
+            store.clone(),
+            params,
+            &[message("inherited")],
+        )
+        .await
+        .expect("create live thread with inherited context");
+        live_thread
+            .append_items(&[message("child")])
+            .await
+            .expect("append child context");
+        live_thread.flush().await.expect("flush thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+        let (lines, _, _) = RolloutRecorder::load_rollout_lines(&rollout_path)
+            .await
+            .expect("load rollout lines");
+
+        let RolloutItem::SessionMeta(meta_line) = &lines[0].item else {
+            panic!("rollout should start with session metadata");
+        };
+        assert_eq!(meta_line.meta.subagent_history_start_ordinal, Some(43));
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.ordinal.expect("line should have an ordinal"))
+                .collect::<Vec<_>>(),
+            vec![41, 42, 43]
+        );
     }
 
     #[tokio::test]
@@ -1320,7 +1406,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_threads_allow_metadata_reads_and_resume_but_reject_legacy_history_paths() {
+    async fn paginated_threads_allow_history_reads_and_resume() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = uuid::Uuid::from_u128(408);
@@ -1355,35 +1441,37 @@ mod tests {
         assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
         assert!(thread.history.is_none());
 
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread(ReadThreadParams {
-                    thread_id,
-                    include_archived: false,
-                    include_history: true,
-                })
-                .await
-                .expect_err("full history read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread_by_rollout_path(
-                    rollout_path.clone(),
-                    /*include_archived*/ true,
-                    /*include_history*/ true,
-                )
-                .await
-                .expect_err("full history path read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .load_history(LoadThreadHistoryParams {
-                    thread_id,
-                    include_archived: false,
-                })
-                .await
-                .expect_err("history load should fail"),
-        );
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("full history read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let thread = store
+            .read_thread_by_rollout_path(
+                rollout_path.clone(),
+                /*include_archived*/ true,
+                /*include_history*/ true,
+            )
+            .await
+            .expect("full history path read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("history load");
+        assert_eq!(history.thread_id, thread_id);
+
         store
             .resume_thread(ResumeThreadParams {
                 thread_id,
@@ -1448,6 +1536,20 @@ mod tests {
                     if event.message == "legacy event should not persist"
             )
         }));
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown paginated thread");
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume paginated thread");
     }
 
     fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
@@ -1466,18 +1568,11 @@ mod tests {
             multi_agent_version: None,
             history_mode: ThreadHistoryMode::Legacy,
             subagent_history_start_ordinal: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: thread_metadata(),
         }
-    }
-
-    fn assert_paginated_threads_unsupported(err: ThreadStoreError) {
-        assert!(matches!(
-            err,
-            ThreadStoreError::Unsupported {
-                operation: "paginated_threads"
-            }
-        ));
     }
 
     fn thread_metadata() -> ThreadPersistenceMetadata {

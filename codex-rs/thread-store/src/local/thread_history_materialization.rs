@@ -19,7 +19,20 @@ pub(super) async fn materialize_to_sqlite(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<()> {
-    let start_offset = super::thread_history::next_rollout_byte_offset(store, thread_id).await?;
+    let (mut start_offset, next_rollout_ordinal) =
+        super::thread_history::projection_state(store, thread_id).await?;
+    if start_offset != 0 && first_rollout_ordinal(rollout_path).await? == Some(next_rollout_ordinal)
+    {
+        // The stable rollout was replaced after its immutable prefix was projected. Recover the
+        // physical cursor without changing the lineage ordinal or deleting the existing rows.
+        super::thread_history::reset_projection_for_replacement(
+            store,
+            thread_id,
+            next_rollout_ordinal,
+        )
+        .await?;
+        start_offset = 0;
+    }
     let (lines, next_offset) = read_complete_rollout_lines(rollout_path, start_offset).await?;
     if lines.is_empty() && start_offset == next_offset {
         return Ok(());
@@ -54,6 +67,21 @@ pub(super) async fn materialize_to_sqlite(
         projections,
     )
     .await
+}
+
+async fn first_rollout_ordinal(rollout_path: &Path) -> ThreadStoreResult<Option<u64>> {
+    let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    while let Some(line) = reader.next_line().await.map_err(thread_store_io_error)? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line =
+            serde_json::from_str::<RolloutLine>(line.as_str()).map_err(thread_history_error)?;
+        return Ok(line.ordinal);
+    }
+    Ok(None)
 }
 
 async fn read_complete_rollout_lines(
