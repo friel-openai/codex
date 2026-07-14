@@ -21,11 +21,7 @@ use core_test_support::load_default_config_for_test;
 use core_test_support::wait_for_event;
 use tempfile::TempDir;
 
-fn resume_history(
-    config: &codex_core::config::Config,
-    previous_model: &str,
-    rollout_path: &std::path::Path,
-) -> InitialHistory {
+fn resume_history(config: &codex_core::config::Config, previous_model: &str) -> InitialHistory {
     let turn_id = "resume-warning-seed-turn".to_string();
     let turn_ctx = TurnContextItem {
         turn_id: Some(turn_id.clone()),
@@ -81,7 +77,7 @@ fn resume_history(
                 time_to_first_token_ms: None,
             })),
         ]),
-        rollout_path: Some(rollout_path.to_path_buf()),
+        rollout_path: None,
     })
 }
 
@@ -91,13 +87,11 @@ async fn emits_warning_when_resumed_model_differs() {
     let home = TempDir::new().expect("tempdir");
     let mut config = load_default_config_for_test(&home).await;
     config.model = Some("current-model".to_string());
+    config.ephemeral = true;
     // Ensure cwd is absolute (the helper sets it to the temp dir already).
     assert!(config.cwd.is_absolute());
 
-    let rollout_path = home.path().join("rollout.jsonl");
-    std::fs::write(&rollout_path, "").expect("create rollout placeholder");
-
-    let initial_history = resume_history(&config, "previous-model", &rollout_path);
+    let initial_history = resume_history(&config, "previous-model");
 
     let thread_manager = codex_core::test_support::thread_manager_with_models_provider(
         CodexAuth::from_api_key("test"),
