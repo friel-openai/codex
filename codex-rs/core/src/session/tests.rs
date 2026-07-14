@@ -140,10 +140,13 @@ use codex_protocol::protocol::RealtimeVoice;
 use codex_protocol::protocol::RealtimeVoicesList;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::Submission;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::TokenCountEvent;
@@ -2088,7 +2091,8 @@ async fn record_initial_history_reconstructs_resumed_transcript() {
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.state.lock().await.clone_history();
     assert_eq!(expected, history.raw_items());
@@ -2252,7 +2256,8 @@ async fn record_inter_agent_communication_sets_turn_id_in_rollout_and_resume() {
     let (resumed_session, _resumed_turn_context) = make_session_and_context().await;
     resumed_session
         .record_initial_history(InitialHistory::Resumed(resumed))
-        .await;
+        .await
+        .expect("record initial history");
     assert_eq!(
         strip_response_item_ids(resumed_session.clone_history().await.raw_items()),
         strip_response_item_ids(std::slice::from_ref(&expected_item))
@@ -2316,7 +2321,8 @@ async fn record_inter_agent_communication_preserves_item_id_in_rollout_and_resum
         .await;
     resumed_session
         .record_initial_history(InitialHistory::Resumed(resumed))
-        .await;
+        .await
+        .expect("record initial history");
     let resumed_history = resumed_session.clone_history().await;
     let [resumed_item] = resumed_history.raw_items() else {
         panic!("expected exactly one resumed history item");
@@ -2422,7 +2428,8 @@ async fn prepares_resumed_history_before_installing_it() {
             history: Arc::new(vec![RolloutItem::ResponseItem(resumed_item)]),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     assert_eq!(
         session.state.lock().await.clone_history().raw_items(),
@@ -2514,10 +2521,64 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
 }
 
 #[tokio::test]
+async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
+    let codex_home = tempfile::tempdir().expect("create Codex home");
+    let source_thread_id = ThreadId::default();
+    let source_path = codex_home.path().join(format!(
+        "rollout-2025-01-01T00-00-00-{source_thread_id}.jsonl"
+    ));
+    let source_meta = SessionMetaLine {
+        meta: SessionMeta {
+            session_id: source_thread_id.into(),
+            id: source_thread_id,
+            history_mode: ThreadHistoryMode::Paginated,
+            ..SessionMeta::default()
+        },
+        git: None,
+    };
+    let physical_line = RolloutLine {
+        timestamp: "2025-01-01T00:00:00Z".to_string(),
+        ordinal: Some(7),
+        item: RolloutItem::SessionMeta(source_meta.clone()),
+    };
+    tokio::fs::write(
+        source_path.as_path(),
+        format!(
+            "{}\n",
+            serde_json::to_string(&physical_line).expect("serialize source metadata")
+        ),
+    )
+    .await
+    .expect("write metadata-only source");
+    let history = InitialHistory::Forked(vec![
+        RolloutItem::SessionMeta(source_meta),
+        RolloutItem::RolloutReference(RolloutReferenceItem {
+            rollout_path: source_path,
+            thread_id: Some(source_thread_id),
+            rollout_timestamp: None,
+            segment_id: None,
+            max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: Some(0),
+            compacted_replacement_history_filter_texts: None,
+        }),
+    ]);
+
+    assert_eq!(
+        initial_rollout_ordinal(&history, ThreadHistoryMode::Paginated, codex_home.path())
+            .await
+            .expect("derive continuation ordinal"),
+        8
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_new_defers_initial_context_until_first_turn() {
     let (session, _turn_context) = make_session_and_context().await;
 
-    session.record_initial_history(InitialHistory::New).await;
+    session
+        .record_initial_history(InitialHistory::New)
+        .await
+        .expect("record initial history");
 
     let history = session.clone_history().await;
     assert_eq!(history.raw_items().to_vec(), Vec::<ResponseItem>::new());
@@ -2552,7 +2613,8 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, history_before_seed.raw_items());
@@ -2654,7 +2716,8 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
             history: Arc::new(rollout_items),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record initial history");
 
     let actual = session.state.lock().await.token_info();
     assert_eq!(actual, Some(info2));
@@ -3170,7 +3233,8 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 
     session
         .record_initial_history(InitialHistory::Forked(rollout_items))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.state.lock().await.clone_history();
     assert_eq!(
@@ -3218,6 +3282,7 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
     let persisted_replacement_history = resumed.history.iter().rev().find_map(|item| match item {
         RolloutItem::Compacted(compacted) => compacted.replacement_history.as_ref(),
         RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::ResponseItem(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -3251,7 +3316,8 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
         .record_initial_history(InitialHistory::Forked(vec![RolloutItem::ResponseItem(
             response_item,
         )]))
-        .await;
+        .await
+        .expect("record initial history");
 
     let live_history = session.clone_history().await;
     let [live_item] = live_history.raw_items() else {
@@ -3275,6 +3341,7 @@ async fn record_initial_history_assigns_and_persists_id_for_forked_response_item
     let persisted_item_id = resumed.history.iter().find_map(|item| match item {
         RolloutItem::ResponseItem(response_item) => response_item.id(),
         RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
         | RolloutItem::InterAgentCommunication(_)
         | RolloutItem::InterAgentCommunicationMetadata { .. }
         | RolloutItem::Compacted(_)
@@ -3497,7 +3564,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
 
     session
         .record_initial_history(InitialHistory::Forked(rollout_items))
-        .await;
+        .await
+        .expect("record initial history");
 
     let history = session.clone_history().await;
     assert_eq!(
@@ -4485,6 +4553,13 @@ async fn wait_for_thread_rollback_failed(rx: &async_channel::Receiver<Event>) ->
 }
 
 async fn open_thread_persistence(session: &mut Session) -> PathBuf {
+    open_thread_persistence_with_mode(session, ThreadPersistenceMode::Durable).await
+}
+
+async fn open_thread_persistence_with_mode(
+    session: &mut Session,
+    persistence_mode: ThreadPersistenceMode,
+) -> PathBuf {
     let config = session.get_config().await;
     let live_thread = LiveThread::create(
         Arc::clone(&session.services.thread_store),
@@ -4504,6 +4579,8 @@ async fn open_thread_persistence(session: &mut Session) -> PathBuf {
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
+            persistence_mode,
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -4534,6 +4611,109 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
         .await
         .expect("attached rollout should flush");
     rollout_path
+}
+
+#[tokio::test]
+async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
+    let (mut session, turn_context, _) = make_session_and_context_with_rx().await;
+    let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
+    let expected_world_state = world_state.snapshot();
+    let session = Arc::get_mut(&mut session).expect("session should have one owner");
+    let stable_path = attach_thread_persistence(session).await;
+    session
+        .persist_rollout_items(&[
+            RolloutItem::ResponseItem(user_message("before compaction")),
+            RolloutItem::ResponseItem(assistant_message("before compaction answer")),
+        ])
+        .await;
+    session
+        .flush_rollout()
+        .await
+        .expect("flush pre-compaction rollout");
+    let (old_items, _, _) = RolloutRecorder::load_rollout_items(stable_path.as_path())
+        .await
+        .expect("load pre-compaction rollout");
+    let old_segment_id = old_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => meta.meta.segment_id,
+            _ => None,
+        })
+        .expect("pre-compaction segment id");
+    let replacement_history = vec![user_message("compacted summary")];
+    let (window_number, window_ids) = {
+        let mut state = session.state.lock().await;
+        state.start_new_context_window()
+    };
+
+    session
+        .replace_compacted_history(
+            replacement_history.clone(),
+            Some(turn_context.to_turn_context_item()),
+            Some(world_state),
+            CompactedHistoryMetadata {
+                message: "compacted summary".to_string(),
+                window_number,
+                window_ids,
+            },
+        )
+        .await;
+
+    let current_path = session
+        .current_rollout_path()
+        .await
+        .expect("load current rollout path")
+        .expect("current rollout path");
+    assert_eq!(current_path, stable_path);
+    let codex_home = session.get_config().await.codex_home.clone();
+    let immutable_path = codex_home
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(session.thread_id.to_string())
+        .join(old_segment_id.to_string())
+        .join(stable_path.file_name().expect("stable rollout file name"));
+    assert!(immutable_path.exists());
+
+    let (replacement_items, replacement_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(current_path.as_path())
+            .await
+            .expect("load replacement rollout");
+    assert_eq!(replacement_thread_id, Some(session.thread_id));
+    assert_eq!(parse_errors, 0);
+    assert!(replacement_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::RolloutReference(reference)
+                if reference.rollout_path.as_path() == immutable_path.as_path()
+                    && reference.thread_id == Some(session.thread_id)
+                    && reference.segment_id == Some(old_segment_id)
+        )
+    }));
+    assert!(replacement_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(CompactedItem {
+                replacement_history: Some(history),
+                ..
+            }) if strip_response_item_ids(history)
+                == strip_response_item_ids(&replacement_history)
+        )
+    }));
+
+    let materialized =
+        codex_rollout::materialize_rollout_items(codex_home.as_path(), current_path.as_path())
+            .await
+            .expect("materialize segmented rollout");
+    let reconstructed = session
+        .reconstruct_history_from_rollout(turn_context.as_ref(), &materialized)
+        .await;
+    assert_eq!(
+        strip_response_item_ids(&reconstructed.history),
+        strip_response_item_ids(&replacement_history)
+    );
+    assert_eq!(
+        reconstructed.world_state_baseline,
+        Some(expected_world_state)
+    );
 }
 
 fn text_block(s: &str) -> serde_json::Value {
@@ -5552,7 +5732,6 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         tx_event,
         agent_status_tx,
         InitialHistory::New,
-        ForkPersistence::Copied,
         SessionSource::Exec,
         skills_service,
         plugins_manager,
@@ -5848,7 +6027,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
-        fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
     };
 
@@ -5952,7 +6130,6 @@ async fn make_session_with_config_and_rx(
         tx_event,
         agent_status_tx,
         InitialHistory::New,
-        ForkPersistence::Copied,
         SessionSource::Exec,
         skills_service,
         plugins_manager,
@@ -6063,7 +6240,6 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         tx_event,
         agent_status_tx,
         initial_history,
-        ForkPersistence::Copied,
         session_source,
         skills_service,
         plugins_manager,
@@ -7339,6 +7515,8 @@ async fn shutdown_complete_does_not_append_to_thread_store_after_shutdown() {
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -7418,6 +7596,8 @@ async fn submission_loop_channel_close_runs_full_thread_teardown() {
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -8034,7 +8214,6 @@ where
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
-        fork_persistence: ForkPersistence::Copied,
         next_internal_sub_id: AtomicU64::new(0),
     });
 
@@ -9884,6 +10063,8 @@ async fn attach_in_memory_thread_store(
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(config.cwd.to_path_buf()),
@@ -9936,6 +10117,27 @@ async fn hook_transcript_path_materializes_lazy_local_thread() {
         items.as_slice(),
         [RolloutItem::SessionMeta(meta)] if meta.meta.id == session.thread_id
     ));
+}
+
+#[tokio::test]
+async fn hook_transcript_path_omits_deferred_thread() {
+    let (mut session, _) = make_session_and_context().await;
+    let rollout_path =
+        open_thread_persistence_with_mode(&mut session, ThreadPersistenceMode::Deferred).await;
+    assert!(!rollout_path.exists());
+
+    assert_eq!(session.hook_transcript_path().await, None);
+    assert!(
+        !rollout_path.exists(),
+        "hook path lookup must not materialize deferred persistence"
+    );
+    assert!(
+        session
+            .live_thread()
+            .expect("thread persistence")
+            .is_persistence_deferred()
+            .await
+    );
 }
 
 async fn wait_for_flush_count(

@@ -6,12 +6,19 @@ use codex_app_server_protocol::SelectedCapabilityRoot;
 use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionListParams;
 use codex_app_server_protocol::ThreadSectionListResponse;
+use codex_core::truncate_rollout_after_turn_id;
+use codex_core::truncate_rollout_before_turn_id;
 use codex_extension_api::ExtensionDataInit;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::ReverseJsonlScanner;
+use codex_rollout::ScanOutcome;
+use std::fs::File;
 
 const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -2373,26 +2380,32 @@ impl ThreadRequestProcessor {
         include_turns: bool,
     ) -> Result<Option<Thread>, ThreadReadViewError> {
         let fallback_provider = self.config.model_provider_id.as_str();
-        if include_turns
-            && self
-                .read_stored_thread_for_read(thread_id, /*include_history*/ false)
-                .await?
-                .is_some_and(|thread| matches!(thread.history_mode, ThreadHistoryMode::Paginated))
-        {
-            return Err(ThreadReadViewError::InvalidRequest(
-                "paginated threads do not support thread/read(includeTurns=true)".to_string(),
-            ));
-        }
-        let Some(stored_thread) = self
-            .read_stored_thread_for_read(thread_id, /*include_history*/ include_turns)
+        let Some(mut stored_thread) = self
+            .read_stored_thread_for_read(thread_id, /*include_history*/ false)
             .await?
         else {
             return Ok(None);
         };
+        let paginated = matches!(stored_thread.history_mode, ThreadHistoryMode::Paginated);
+        if include_turns
+            && !paginated
+            && let Some(stored_thread_with_history) = self
+                .read_stored_thread_for_read(thread_id, /*include_history*/ true)
+                .await?
+        {
+            stored_thread = stored_thread_with_history;
+        }
         let (mut thread, history) =
             thread_from_stored_thread(stored_thread, fallback_provider, &self.config.cwd);
-        if include_turns && let Some(history) = history {
-            thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+        if include_turns {
+            if paginated {
+                thread.turns = self
+                    .paginated_thread_full_turns(thread_id)
+                    .await
+                    .map_err(|err| ThreadReadViewError::Internal(err.message))?;
+            } else if let Some(history) = history {
+                thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+            }
         }
         Ok(Some(thread))
     }
@@ -2446,11 +2459,6 @@ impl ThreadRequestProcessor {
                 "ephemeral threads do not support includeTurns".to_string(),
             ));
         }
-        if include_turns && matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
-            return Err(ThreadReadViewError::InvalidRequest(
-                "paginated threads do not support thread/read(includeTurns=true)".to_string(),
-            ));
-        }
         let fallback_thread =
             build_thread_from_loaded_snapshot(thread_id, &config_snapshot, loaded_thread);
         let mut thread = if let Some(mut thread) = persisted_thread {
@@ -2479,11 +2487,19 @@ impl ThreadRequestProcessor {
         self.attach_thread_name(thread_id, thread).await;
 
         if include_turns {
-            let history = loaded_thread
-                .load_history(/*include_archived*/ true)
-                .await
-                .map_err(|err| thread_read_history_load_error(thread_id, err))?;
-            thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+            let config_snapshot = loaded_thread.config_snapshot().await;
+            if matches!(config_snapshot.history_mode, ThreadHistoryMode::Paginated) {
+                thread.turns = self
+                    .paginated_thread_full_turns(thread_id)
+                    .await
+                    .map_err(|err| ThreadReadViewError::Internal(err.message))?;
+            } else {
+                let history = loaded_thread
+                    .load_history(/*include_archived*/ true)
+                    .await
+                    .map_err(|err| thread_read_history_load_error(thread_id, err))?;
+                thread.turns = build_legacy_api_turns_from_rollout_items(&history.items);
+            }
         }
 
         Ok(())
@@ -2502,7 +2518,7 @@ impl ThreadRequestProcessor {
         } = params;
         let thread_uuid = ThreadId::from_string(&thread_id)
             .map_err(|err| invalid_request(format!("invalid thread id: {err}")))?;
-        match self
+        let legacy_rollout_path = match self
             .thread_store
             .read_thread(StoreReadThreadParams {
                 thread_id: thread_uuid,
@@ -2522,10 +2538,13 @@ impl ThreadRequestProcessor {
                     )
                     .await;
             }
-            Ok(_) => {}
+            Ok(thread) => thread.rollout_path,
             Err(ThreadStoreError::InvalidRequest { message })
-                if message == format!("no rollout found for thread id {thread_uuid}") => {}
-            Err(ThreadStoreError::ThreadNotFound { thread_id }) if thread_id == thread_uuid => {}
+                if message == format!("no rollout found for thread id {thread_uuid}") =>
+            {
+                None
+            }
+            Err(ThreadStoreError::ThreadNotFound { thread_id }) if thread_id == thread_uuid => None,
             Err(ThreadStoreError::InvalidRequest { message }) => {
                 return Err(invalid_request(message));
             }
@@ -2533,17 +2552,25 @@ impl ThreadRequestProcessor {
                 return Err(unsupported_thread_store_operation(operation));
             }
             Err(err) => return Err(internal_error(format!("failed to read thread: {err}"))),
-        }
-
-        let items = self
-            .load_thread_turns_list_history(thread_uuid)
+        };
+        let sort_direction = sort_direction.unwrap_or(SortDirection::Desc);
+        let parsed_cursor = cursor
+            .as_deref()
+            .map(parse_thread_turns_cursor)
+            .transpose()?;
+        let history_window = self
+            .load_thread_turns_list_history(
+                thread_uuid,
+                legacy_rollout_path.as_deref(),
+                parsed_cursor.as_ref(),
+                limit,
+                sort_direction,
+            )
             .await
             .map_err(thread_read_view_error)?;
-        // This API optimizes network transfer by letting clients page through a
-        // thread's turns incrementally, but it still replays the entire rollout on
-        // every request. Rollback and compaction events can change earlier turns, so
-        // the server has to rebuild the full turn list until turn metadata is indexed
-        // separately.
+        // Reference-backed legacy history expands only until this page has coherent turns.
+        // Other legacy history still replays the complete rollout on each request because
+        // rollback and compaction events can change earlier turns.
         let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
         let has_live_running_thread = match loaded_thread.as_ref() {
             Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
@@ -2560,7 +2587,7 @@ impl ThreadRequestProcessor {
             None
         };
         build_thread_turns_page_response(
-            &items,
+            &history_window.items,
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread_uuid.to_string())
                 .await,
@@ -2569,8 +2596,9 @@ impl ThreadRequestProcessor {
             ThreadTurnsPageOptions {
                 cursor: cursor.as_deref(),
                 limit,
-                sort_direction: sort_direction.unwrap_or(SortDirection::Desc),
+                sort_direction,
                 items_view: items_view.unwrap_or(TurnItemsView::Summary),
+                has_older_reference: history_window.has_older_reference,
             },
         )
     }
@@ -2644,10 +2672,24 @@ impl ThreadRequestProcessor {
     ) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
         let items_view = items_view.unwrap_or(TurnItemsView::Summary);
         let page_size = thread_turns_page_size(limit);
-        let sort_direction = match sort_direction.unwrap_or(SortDirection::Desc) {
+        let api_sort_direction = sort_direction.unwrap_or(SortDirection::Desc);
+        let sort_direction = match api_sort_direction {
             SortDirection::Asc => StoreSortDirection::Asc,
             SortDirection::Desc => StoreSortDirection::Desc,
         };
+        if !self.has_paginated_history_projection(thread_id).await?
+            && let Some(response) = self
+                .unprojected_paginated_thread_turns_list_response(
+                    thread_id,
+                    cursor.as_deref(),
+                    limit,
+                    api_sort_direction,
+                    items_view,
+                )
+                .await?
+        {
+            return Ok(response);
+        }
         // `Full` is only a temporary compatibility path. Keep it out of ThreadStore's API:
         // load turn shells here, then hydrate their items below.
         let stored_items_view = match items_view {
@@ -2660,7 +2702,7 @@ impl ThreadRequestProcessor {
             .list_turns(StoreListTurnsParams {
                 thread_id,
                 include_archived: true,
-                cursor,
+                cursor: cursor.clone(),
                 page_size,
                 sort_direction,
                 items_view: stored_items_view,
@@ -2703,6 +2745,240 @@ impl ThreadRequestProcessor {
             next_cursor: page.next_cursor,
             backwards_cursor: page.backwards_cursor,
         })
+    }
+
+    async fn has_paginated_history_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> Result<bool, JSONRPCErrorError> {
+        let Some(store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+        else {
+            return Ok(true);
+        };
+        store
+            .has_history_projection(thread_id)
+            .await
+            .map_err(|err| {
+                internal_error(format!("failed to read thread history projection: {err}"))
+            })
+    }
+
+    async fn unprojected_paginated_thread_turns_list_response(
+        &self,
+        thread_id: ThreadId,
+        cursor: Option<&str>,
+        limit: Option<u32>,
+        sort_direction: SortDirection,
+        items_view: TurnItemsView,
+    ) -> Result<Option<ThreadTurnsListResponse>, JSONRPCErrorError> {
+        if !self
+            .thread_store
+            .as_any()
+            .is::<codex_thread_store::LocalThreadStore>()
+        {
+            return Ok(None);
+        }
+        let Some(stored_thread) = self
+            .read_stored_thread_for_read(thread_id, /*include_history*/ false)
+            .await
+            .map_err(thread_read_view_error)?
+        else {
+            return Ok(None);
+        };
+        if stored_thread.history_mode != ThreadHistoryMode::Paginated {
+            return Ok(None);
+        }
+        let Some(rollout_path) = stored_thread.rollout_path else {
+            return Ok(None);
+        };
+        let parsed_cursor = cursor.map(parse_thread_turns_cursor).transpose()?;
+        let history_window =
+            if parsed_cursor.is_none() && matches!(sort_direction, SortDirection::Desc) {
+                match self
+                    .load_recent_paginated_turn_window(rollout_path.as_path(), limit)
+                    .await
+                    .map_err(|err| {
+                        thread_read_view_error(ThreadReadViewError::Internal(format!(
+                            "failed to reverse scan thread history {}: {err}",
+                            rollout_path.display()
+                        )))
+                    })? {
+                    Some(window) => window,
+                    None => self
+                        .load_thread_turns_list_history(
+                            thread_id,
+                            Some(rollout_path.as_path()),
+                            parsed_cursor.as_ref(),
+                            limit,
+                            sort_direction,
+                        )
+                        .await
+                        .map_err(thread_read_view_error)?,
+                }
+            } else {
+                self.load_thread_turns_list_history(
+                    thread_id,
+                    Some(rollout_path.as_path()),
+                    parsed_cursor.as_ref(),
+                    limit,
+                    sort_direction,
+                )
+                .await
+                .map_err(thread_read_view_error)?
+            };
+        let loaded_thread = self.thread_manager.get_thread(thread_id).await.ok();
+        let has_live_running_thread = match loaded_thread.as_ref() {
+            Some(thread) => matches!(thread.agent_status().await, AgentStatus::Running),
+            None => false,
+        };
+        let active_turn = if loaded_thread.is_some() {
+            let thread_state = self.thread_state_manager.thread_state(thread_id).await;
+            let state = thread_state.lock().await;
+            state.active_turn_snapshot()
+        } else {
+            None
+        };
+        build_thread_turns_page_response_for_history_mode(
+            &history_window.items,
+            self.thread_watch_manager
+                .loaded_status_for_thread(&thread_id.to_string())
+                .await,
+            has_live_running_thread,
+            active_turn,
+            ThreadTurnsPageOptions {
+                cursor,
+                limit,
+                sort_direction,
+                items_view,
+                has_older_reference: history_window.has_older_reference,
+            },
+            ThreadHistoryMode::Paginated,
+        )
+        .map(Some)
+    }
+
+    async fn unprojected_paginated_thread_items_list_response(
+        &self,
+        thread_id: ThreadId,
+        turn_id: Option<&str>,
+        cursor: Option<&str>,
+        page_size: usize,
+        sort_direction: SortDirection,
+    ) -> Result<Option<ThreadItemsListResponse>, JSONRPCErrorError> {
+        let item_cursor = cursor.map(parse_thread_items_cursor).transpose()?;
+        let mut turn_cursor = None;
+        let mut descending_items = Vec::new();
+        let mut has_older_turns;
+
+        loop {
+            let Some(page) = self
+                .unprojected_paginated_thread_turns_list_response(
+                    thread_id,
+                    turn_cursor.as_deref(),
+                    Some(if turn_id.is_some() {
+                        1
+                    } else {
+                        page_size.min(THREAD_TURNS_MAX_LIMIT) as u32
+                    }),
+                    SortDirection::Desc,
+                    TurnItemsView::Full,
+                )
+                .await?
+            else {
+                return Ok(None);
+            };
+
+            let next_turn_cursor = page.next_cursor;
+            has_older_turns = next_turn_cursor.is_some();
+            for turn in page.data {
+                if turn_id.is_some_and(|requested_turn_id| turn.id != requested_turn_id) {
+                    continue;
+                }
+                descending_items.extend(turn.items.into_iter().rev().map(|item| ThreadItemEntry {
+                    turn_id: turn.id.clone(),
+                    item,
+                }));
+            }
+
+            if turn_id.is_some() && !descending_items.is_empty() {
+                break;
+            }
+            if matches!(sort_direction, SortDirection::Desc) {
+                let available_items = match item_cursor.as_ref() {
+                    Some(anchor) => descending_items
+                        .iter()
+                        .position(|entry| {
+                            entry.turn_id == anchor.turn_id && entry.item.id() == anchor.item_id
+                        })
+                        .map(|position| {
+                            descending_items
+                                .len()
+                                .saturating_sub(position + usize::from(!anchor.include_anchor))
+                        })
+                        .unwrap_or(0),
+                    None => descending_items.len(),
+                };
+                if available_items > page_size {
+                    break;
+                }
+            }
+            let Some(next_turn_cursor) = next_turn_cursor else {
+                break;
+            };
+            if turn_cursor.as_ref() == Some(&next_turn_cursor) {
+                return Err(internal_error(
+                    "failed to load thread items: rollout returned a repeated turn cursor",
+                ));
+            }
+            turn_cursor = Some(next_turn_cursor);
+        }
+
+        if matches!(sort_direction, SortDirection::Asc) {
+            descending_items.reverse();
+        }
+        let start = match item_cursor {
+            Some(anchor) => {
+                let position = descending_items
+                    .iter()
+                    .position(|entry| {
+                        entry.turn_id == anchor.turn_id && entry.item.id() == anchor.item_id
+                    })
+                    .ok_or_else(|| {
+                        invalid_request("invalid cursor: anchor item is no longer present")
+                    })?;
+                position + usize::from(!anchor.include_anchor)
+            }
+            None => 0,
+        };
+        let has_more_items = descending_items.len().saturating_sub(start) > page_size
+            || (turn_id.is_none()
+                && matches!(sort_direction, SortDirection::Desc)
+                && has_older_turns);
+        let data = descending_items
+            .into_iter()
+            .skip(start)
+            .take(page_size)
+            .collect::<Vec<_>>();
+        let backwards_cursor = data
+            .first()
+            .map(|entry| serialize_thread_items_cursor(entry, /*include_anchor*/ true))
+            .transpose()?;
+        let next_cursor = if has_more_items {
+            data.last()
+                .map(|entry| serialize_thread_items_cursor(entry, /*include_anchor*/ false))
+                .transpose()?
+        } else {
+            None
+        };
+
+        Ok(Some(ThreadItemsListResponse {
+            data,
+            next_cursor,
+            backwards_cursor,
+        }))
     }
 
     // Older clients still request `itemsView: "full"` from turn pages. Keep this
@@ -2865,6 +3141,20 @@ impl ThreadRequestProcessor {
             .map(|value| value as usize)
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
             .clamp(1, THREAD_ITEMS_MAX_LIMIT);
+        let sort_direction = sort_direction.unwrap_or(SortDirection::Asc);
+        if !self.has_paginated_history_projection(thread_id).await?
+            && let Some(response) = self
+                .unprojected_paginated_thread_items_list_response(
+                    thread_id,
+                    turn_id.as_deref(),
+                    cursor.as_deref(),
+                    page_size,
+                    sort_direction,
+                )
+                .await?
+        {
+            return Ok(response);
+        }
         let page = self
             .thread_store
             .list_items(StoreListItemsParams {
@@ -2873,7 +3163,7 @@ impl ThreadRequestProcessor {
                 include_archived: true,
                 cursor,
                 page_size,
-                sort_direction: match sort_direction.unwrap_or(SortDirection::Asc) {
+                sort_direction: match sort_direction {
                     SortDirection::Asc => StoreSortDirection::Asc,
                     SortDirection::Desc => StoreSortDirection::Desc,
                 },
@@ -2911,7 +3201,31 @@ impl ThreadRequestProcessor {
     async fn load_thread_turns_list_history(
         &self,
         thread_id: ThreadId,
-    ) -> Result<Vec<RolloutItem>, ThreadReadViewError> {
+        rollout_path: Option<&Path>,
+        cursor: Option<&ThreadTurnsCursor>,
+        limit: Option<u32>,
+        sort_direction: SortDirection,
+    ) -> Result<LegacyHistoryWindow, ThreadReadViewError> {
+        if self
+            .thread_store
+            .as_any()
+            .is::<codex_thread_store::LocalThreadStore>()
+            && let Some(rollout_path) = rollout_path
+        {
+            match self
+                .load_reference_backed_turn_window(rollout_path, cursor, limit, sort_direction)
+                .await
+            {
+                Ok(window) => return Ok(window),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+                Err(err) => {
+                    return Err(ThreadReadViewError::Internal(format!(
+                        "failed to load thread history {}: {err}",
+                        rollout_path.display()
+                    )));
+                }
+            }
+        }
         match self
             .thread_store
             .read_thread(StoreReadThreadParams {
@@ -2927,7 +3241,10 @@ impl ThreadRequestProcessor {
                         "thread store did not return history for thread {thread_id}"
                     ))
                 })?;
-                return Ok(history.items);
+                return Ok(LegacyHistoryWindow {
+                    items: history.items,
+                    has_older_reference: false,
+                });
             }
             Err(ThreadStoreError::InvalidRequest { message })
                 if message == format!("no rollout found for thread id {thread_id}") => {}
@@ -2964,8 +3281,152 @@ impl ThreadRequestProcessor {
         thread
             .load_history(/*include_archived*/ true)
             .await
-            .map(|history| history.items)
+            .map(|history| LegacyHistoryWindow {
+                items: history.items,
+                has_older_reference: false,
+            })
             .map_err(|err| thread_turns_list_history_load_error(thread_id, err))
+    }
+
+    async fn load_recent_paginated_turn_window(
+        &self,
+        rollout_path: &Path,
+        limit: Option<u32>,
+    ) -> std::io::Result<Option<LegacyHistoryWindow>> {
+        if rollout_path
+            .extension()
+            .is_some_and(|extension| extension == "zst")
+        {
+            return Ok(None);
+        }
+
+        let session_meta = codex_rollout::read_session_meta_line(rollout_path).await?;
+        if session_meta.meta.history_mode != ThreadHistoryMode::Paginated {
+            return Ok(None);
+        }
+        let rollout_path = rollout_path.to_path_buf();
+        let page_size = thread_turns_page_size(limit);
+
+        tokio::task::spawn_blocking(move || {
+            let mut scanner = ReverseJsonlScanner::new(File::open(rollout_path)?)?;
+            let mut reversed_items = Vec::new();
+            let mut started_turns = 0;
+
+            while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+                let line = match outcome {
+                    ScanOutcome::Parsed(line) => line,
+                    ScanOutcome::Rejected(_) => return Ok(None),
+                };
+                match &line.item {
+                    RolloutItem::SessionMeta(_) => {
+                        reversed_items.reverse();
+                        let mut items = vec![RolloutItem::SessionMeta(session_meta)];
+                        items.extend(reversed_items);
+                        return Ok(Some(LegacyHistoryWindow {
+                            items,
+                            has_older_reference: false,
+                        }));
+                    }
+                    RolloutItem::RolloutReference(_) => return Ok(None),
+                    RolloutItem::EventMsg(EventMsg::TurnStarted(_)) => {
+                        started_turns += 1;
+                    }
+                    _ => {}
+                }
+                reversed_items.push(line.item);
+
+                if started_turns >= page_size {
+                    let has_older_reference = match scanner.scan_next::<RolloutLine>()? {
+                        Some(ScanOutcome::Parsed(line)) => {
+                            !matches!(line.item, RolloutItem::SessionMeta(_))
+                        }
+                        Some(ScanOutcome::Rejected(_)) => return Ok(None),
+                        None => false,
+                    };
+                    reversed_items.reverse();
+                    let mut items = Vec::with_capacity(reversed_items.len() + 1);
+                    items.push(RolloutItem::SessionMeta(session_meta));
+                    items.extend(reversed_items);
+                    return Ok(Some(LegacyHistoryWindow {
+                        items,
+                        has_older_reference,
+                    }));
+                }
+            }
+
+            Ok(None)
+        })
+        .await
+        .map_err(std::io::Error::other)?
+    }
+
+    async fn load_reference_backed_turn_window(
+        &self,
+        rollout_path: &Path,
+        cursor: Option<&ThreadTurnsCursor>,
+        limit: Option<u32>,
+        sort_direction: SortDirection,
+    ) -> std::io::Result<LegacyHistoryWindow> {
+        if matches!(sort_direction, SortDirection::Asc) && cursor.is_none() {
+            return Ok(LegacyHistoryWindow {
+                items: codex_rollout::materialize_rollout_items(
+                    self.config.codex_home.as_path(),
+                    rollout_path,
+                )
+                .await?,
+                has_older_reference: false,
+            });
+        }
+
+        let page_size = limit
+            .map(|value| value as usize)
+            .unwrap_or(THREAD_TURNS_DEFAULT_LIMIT)
+            .clamp(1, THREAD_TURNS_MAX_LIMIT);
+        let mut ordinary_reference_limit = DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+        loop {
+            let materialized = codex_rollout::materialize_bounded_rollout_lines(
+                self.config.codex_home.as_path(),
+                rollout_path,
+                ordinary_reference_limit,
+            )
+            .await?;
+            let items = materialized
+                .lines
+                .into_iter()
+                .map(|line| line.item)
+                .collect::<Vec<_>>();
+            let turns = build_legacy_api_turns_from_rollout_items(&items);
+            if legacy_turn_window_is_coherent(
+                turns.as_slice(),
+                cursor,
+                page_size,
+                sort_direction,
+                materialized.has_older_reference,
+            ) {
+                return Ok(LegacyHistoryWindow {
+                    items,
+                    has_older_reference: materialized.has_older_reference
+                        && matches!(sort_direction, SortDirection::Desc),
+                });
+            }
+            if !materialized.has_older_reference {
+                return Ok(LegacyHistoryWindow {
+                    items,
+                    has_older_reference: false,
+                });
+            }
+
+            let next_limit = ordinary_reference_limit
+                .saturating_mul(2)
+                .min(codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH);
+            if next_limit == ordinary_reference_limit {
+                return Err(std::io::Error::other(format!(
+                    "rollout reference graph exceeds maximum depth of {}",
+                    codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH
+                )));
+            }
+            ordinary_reference_limit = next_limit;
+        }
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
@@ -3154,8 +3615,30 @@ impl ThreadRequestProcessor {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
         });
         let paginated_resume = paginated_thread_id.is_some();
-        let needs_paginated_projection =
-            paginated_resume && (include_turns || initial_turns_page.is_some());
+        let needs_paginated_projection = paginated_resume && include_turns;
+        let mut unprojected_initial_turns_page = if let (Some(thread_id), Some(params)) =
+            (paginated_thread_id, initial_turns_page.as_ref())
+        {
+            match self.has_paginated_history_projection(thread_id).await {
+                Ok(true) => None,
+                Ok(false) => match self
+                    .paginated_resume_initial_turns_page(thread_id, params)
+                    .await
+                {
+                    Ok(page) => Some(page),
+                    Err(error) => {
+                        self.outgoing.send_error(request_id, error).await;
+                        return Ok(());
+                    }
+                },
+                Err(error) => {
+                    self.outgoing.send_error(request_id, error).await;
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
 
         let history_cwd = thread_history.session_cwd();
         let runtime_workspace_roots = runtime_workspace_roots.map(resolve_runtime_workspace_roots);
@@ -3345,8 +3828,13 @@ impl ThreadRequestProcessor {
                 });
                 let mut initial_turns_page = if let Some(params) = initial_turns_page.as_ref() {
                     let initial_turns_page_result = if paginated_resume {
-                        self.paginated_resume_initial_turns_page(thread_id, params)
-                            .await
+                        match unprojected_initial_turns_page.take() {
+                            Some(page) => Ok(page),
+                            None => {
+                                self.paginated_resume_initial_turns_page(thread_id, params)
+                                    .await
+                            }
+                        }
                     } else {
                         build_thread_resume_initial_turns_page(
                             response_history.get_rollout_items(),
@@ -3749,7 +4237,6 @@ impl ThreadRequestProcessor {
             });
             return Ok((history, stored_thread));
         }
-
         let thread_id = stored_thread.thread_id.to_string();
         let rollout_path = stored_thread.rollout_path.clone();
         let mut stored_thread = self
@@ -4082,9 +4569,9 @@ impl ThreadRequestProcessor {
             None
         };
         let source_history_items = if let Some(prepared_fork) = prepared_fork.as_ref() {
-            Arc::clone(&prepared_fork.model_context)
+            Arc::clone(&prepared_fork.response_history)
         } else {
-            let mut source_thread = self
+            let mut source_thread_with_history = self
                 .read_stored_thread_for_resume(
                     &thread_id,
                     path.as_ref(),
@@ -4092,7 +4579,7 @@ impl ThreadRequestProcessor {
                 )
                 .await?;
             Arc::new(
-                source_thread
+                source_thread_with_history
                     .history
                     .take()
                     .map(|history| history.items)
@@ -4102,6 +4589,41 @@ impl ThreadRequestProcessor {
                         ))
                     })?,
             )
+        };
+        let fork_snapshot = if prepared_fork.is_some() {
+            // `prepare_fork` has already selected and frozen the exact physical boundary. Reusing
+            // the legacy user-message count here would reinterpret that boundary against a
+            // bounded/materialized context and can cut an inherited segment at the wrong turn.
+            ForkSnapshot::Interrupted
+        } else {
+            match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
+                (Some(last_turn_id), None) => ForkSnapshot::TruncateBeforeNthUserMessage(
+                    user_message_count_through_turn_id(&source_history_items, last_turn_id)
+                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
+                ),
+                (None, Some(before_turn_id)) => ForkSnapshot::TruncateBeforeNthUserMessage(
+                    user_message_count_before_turn_id(&source_history_items, before_turn_id)
+                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
+                ),
+                (None, None) => ForkSnapshot::Interrupted,
+                (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
+            }
+        };
+        let mut response_history_items = if let Some(prepared_fork) = prepared_fork.as_ref() {
+            Arc::clone(&prepared_fork.response_history)
+        } else {
+            match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
+                (Some(last_turn_id), None) => Arc::new(
+                    truncate_rollout_after_turn_id(&source_history_items, last_turn_id)
+                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
+                ),
+                (None, Some(before_turn_id)) => Arc::new(
+                    truncate_rollout_before_turn_id(&source_history_items, before_turn_id)
+                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
+                ),
+                (None, None) => Arc::clone(&source_history_items),
+                (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
+            }
         };
         let history_cwd = Some(source_thread.cwd.clone());
 
@@ -4149,12 +4671,14 @@ impl ThreadRequestProcessor {
                 .as_ref()
                 .is_some_and(|overrides| overrides.contains_key("approvals_reviewer"))
         {
-            if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
+            if let Some(prepared_fork) = prepared_fork.as_ref() {
+                Some(Arc::clone(&prepared_fork.latest_model_context))
+            } else if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
                 typesafe_overrides.approvals_reviewer =
                     Some(parent.config_snapshot().await.approvals_reviewer);
                 None
             } else if last_turn_id.is_some() || before_turn_id.is_some() {
-                Some(
+                Some(Arc::new(
                     self.thread_store
                         .load_latest_model_context(StoreLoadThreadHistoryParams {
                             thread_id: source_thread_id,
@@ -4163,7 +4687,7 @@ impl ThreadRequestProcessor {
                         .await
                         .map_err(thread_store_resume_read_error)?
                         .items,
-                )
+                ))
             } else {
                 None
             }
@@ -4189,9 +4713,8 @@ impl ThreadRequestProcessor {
         let parent_trace = self.request_trace_context(&request_id).await;
         let thread_source = thread_source.map(Into::into);
 
-        let (history_items, new_thread) = if let Some(prepared_fork) = prepared_fork {
-            let history_items = Arc::clone(&prepared_fork.model_context);
-            let new_thread = self
+        let new_thread = if let Some(prepared_fork) = prepared_fork {
+            match self
                 .thread_manager
                 .fork_prepared_thread(
                     config,
@@ -4200,37 +4723,37 @@ impl ThreadRequestProcessor {
                     parent_trace,
                     supports_openai_form_elicitation,
                 )
-                .await;
-            (history_items, new_thread)
+                .await
+            {
+                Ok((new_thread, prepared_response_history)) => {
+                    response_history_items = prepared_response_history;
+                    Ok(new_thread)
+                }
+                Err(err) => Err(err),
+            }
         } else {
-            let history_items = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
-                (Some(last_turn_id), None) => Arc::new(
-                    truncate_rollout_after_turn_id(&source_history_items, last_turn_id)
-                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
-                ),
-                (None, Some(before_turn_id)) => Arc::new(
-                    truncate_rollout_before_turn_id(&source_history_items, before_turn_id)
-                        .map_err(|err| core_thread_write_error("truncate thread for fork", err))?,
-                ),
-                (None, None) => Arc::clone(&source_history_items),
-                (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
-            };
-            let new_thread = self
+            match self
                 .thread_manager
-                .fork_thread_from_history(
-                    ForkSnapshot::Interrupted,
+                .fork_thread_from_history_with_response(
+                    fork_snapshot,
                     config,
                     InitialHistory::Resumed(ResumedHistory {
                         conversation_id: source_thread_id,
-                        history: Arc::clone(&history_items),
+                        history: Arc::clone(&source_history_items),
                         rollout_path: source_thread.rollout_path.clone(),
                     }),
                     thread_source,
                     parent_trace,
                     supports_openai_form_elicitation,
                 )
-                .await;
-            (history_items, new_thread)
+                .await
+            {
+                Ok((new_thread, frozen_response_history)) => {
+                    response_history_items = frozen_response_history;
+                    Ok(new_thread)
+                }
+                Err(err) => Err(err),
+            }
         };
         let NewThread {
             thread_id,
@@ -4251,20 +4774,33 @@ impl ThreadRequestProcessor {
             app_server_client_version,
         )
         .await?;
-        if session_configured.rollout_path.is_some()
-            && let Some(name) = source_thread_name.clone()
-        {
-            self.thread_manager
-                .update_thread_metadata(
-                    thread_id,
-                    StoreThreadMetadataPatch {
-                        name: Some(Some(name)),
-                        ..Default::default()
-                    },
-                    /*include_archived*/ true,
-                )
-                .await
-                .map_err(|err| core_thread_write_error("inherit source thread name", err))?;
+        if session_configured.rollout_path.is_some() {
+            let preview = if paginated_source && last_turn_id.is_none() && before_turn_id.is_none()
+            {
+                source_thread.preview.clone()
+            } else {
+                preview_from_rollout_items(&response_history_items)
+            };
+            let mut metadata_patch = StoreThreadMetadataPatch {
+                name: source_thread_name.clone().map(Some),
+                ..Default::default()
+            };
+            if !preview.is_empty() {
+                metadata_patch.preview = Some(preview.clone());
+                metadata_patch.first_user_message = Some(preview);
+            }
+            if !metadata_patch.is_empty() {
+                self.thread_manager
+                    .update_thread_metadata(
+                        thread_id,
+                        metadata_patch,
+                        /*include_archived*/ true,
+                    )
+                    .await
+                    .map_err(|err| {
+                        core_thread_write_error("inherit source thread metadata", err)
+                    })?;
+            }
         }
         let inherited_goal = if defer_goal_continuation
             && session_configured.rollout_path.is_some()
@@ -4312,7 +4848,8 @@ impl ThreadRequestProcessor {
         let config_snapshot = forked_thread.config_snapshot().await;
 
         // Persistent forks materialize their own rollout immediately. Ephemeral forks stay
-        // pathless, so they rebuild their visible history from the copied source history instead.
+        // pathless, so they rebuild their visible history from the requested logical source
+        // prefix instead.
         let mut thread = if session_configured.rollout_path.is_some() {
             let stored_thread = self
                 .read_stored_thread_for_new_fork(thread_id, include_turns && !paginated_source)
@@ -4334,20 +4871,28 @@ impl ThreadRequestProcessor {
                 if paginated_source && last_turn_id.is_none() && before_turn_id.is_none() {
                     source_thread.preview.clone()
                 } else {
-                    preview_from_rollout_items(&history_items)
+                    preview_from_rollout_items(&response_history_items)
                 };
             thread.forked_from_id = Some(source_thread_id.to_string());
             if include_turns {
                 populate_thread_turns_from_history(
                     &mut thread,
-                    &history_items,
+                    &response_history_items,
                     /*active_turn*/ None,
                 );
             }
             thread
         };
         if paginated_source && include_turns {
-            thread.turns = self.paginated_thread_full_turns(thread_id).await?;
+            if session_configured.rollout_path.is_none() {
+                populate_thread_turns_from_history(
+                    &mut thread,
+                    &response_history_items,
+                    /*active_turn*/ None,
+                );
+            } else {
+                thread.turns = self.paginated_thread_full_turns(thread_id).await?;
+            }
         }
         if let Some(name) = source_thread_name {
             set_thread_name_from_title(&mut thread, name);
@@ -4392,8 +4937,8 @@ impl ThreadRequestProcessor {
 
         let notif = thread_started_notification(thread);
         let connection_id = request_id.connection_id;
-        let token_usage_turn_id =
-            include_turns.then(|| restored_token_usage_turn_id(&history_items, &response.thread));
+        let token_usage_turn_id = include_turns
+            .then(|| restored_token_usage_turn_id(&response_history_items, &response.thread));
         self.outgoing
             .send_response_with_thread_originator(request_id, response, thread_originator)
             .await;
@@ -4630,6 +5175,12 @@ struct ThreadTurnsPage {
     pub(super) backwards_cursor: Option<String>,
 }
 
+/// A materialized legacy rollout prefix and whether older referenced segments remain.
+struct LegacyHistoryWindow {
+    items: Vec<RolloutItem>,
+    has_older_reference: bool,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ThreadTurnsCursor {
@@ -4637,11 +5188,82 @@ struct ThreadTurnsCursor {
     include_anchor: bool,
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ThreadItemsCursor {
+    turn_id: String,
+    item_id: String,
+    include_anchor: bool,
+}
+
+fn serialize_thread_items_cursor(
+    entry: &ThreadItemEntry,
+    include_anchor: bool,
+) -> Result<String, JSONRPCErrorError> {
+    serde_json::to_string(&ThreadItemsCursor {
+        turn_id: entry.turn_id.clone(),
+        item_id: entry.item.id().to_string(),
+        include_anchor,
+    })
+    .map_err(|err| internal_error(format!("failed to serialize item cursor: {err}")))
+}
+
+fn parse_thread_items_cursor(cursor: &str) -> Result<ThreadItemsCursor, JSONRPCErrorError> {
+    serde_json::from_str(cursor)
+        .map_err(|_| invalid_request(format!("invalid item cursor: {cursor}")))
+}
+
+fn legacy_turn_window_is_coherent(
+    turns: &[Turn],
+    cursor: Option<&ThreadTurnsCursor>,
+    page_size: usize,
+    sort_direction: SortDirection,
+    has_older_reference: bool,
+) -> bool {
+    if turns.is_empty() {
+        return !has_older_reference;
+    }
+
+    let anchor_index = match cursor {
+        Some(cursor) => {
+            let Some(index) = turns.iter().position(|turn| turn.id == cursor.turn_id) else {
+                return !has_older_reference;
+            };
+            index
+        }
+        None => turns.len(),
+    };
+    if matches!(sort_direction, SortDirection::Asc) {
+        return true;
+    }
+    let end = match cursor {
+        Some(cursor) if cursor.include_anchor => anchor_index.saturating_add(1),
+        Some(_) => anchor_index,
+        None => turns.len(),
+    };
+    let start = end.saturating_sub(page_size);
+    let page = &turns[start..end];
+    if page.is_empty() {
+        return !has_older_reference;
+    }
+    if page.len() < page_size && has_older_reference {
+        return false;
+    }
+
+    if has_older_reference && page.iter().any(|turn| turn.id.starts_with("rollout-")) {
+        // Synthetic IDs depend on the replay prefix. Reach the beginning before returning one so
+        // a later page expansion cannot change a cursor anchor that the client already received.
+        return false;
+    }
+    true
+}
+
 fn paginate_thread_turns(
     turns: Vec<Turn>,
     cursor: Option<&str>,
     limit: Option<u32>,
     sort_direction: SortDirection,
+    has_older_reference: bool,
 ) -> Result<ThreadTurnsPage, JSONRPCErrorError> {
     if turns.is_empty() {
         return Ok(ThreadTurnsPage {
@@ -4693,7 +5315,8 @@ fn paginate_thread_turns(
         }
     }
 
-    let more_turns_available = keyed_turns.len() > page_size;
+    let more_turns_available = keyed_turns.len() > page_size
+        || (has_older_reference && matches!(sort_direction, SortDirection::Desc));
     keyed_turns.truncate(page_size);
     let backwards_cursor = keyed_turns
         .first()
@@ -4736,6 +5359,7 @@ struct ThreadTurnsPageOptions<'a> {
     limit: Option<u32>,
     sort_direction: SortDirection,
     items_view: TurnItemsView,
+    has_older_reference: bool,
 }
 
 fn build_thread_turns_page_response(
@@ -4745,14 +5369,77 @@ fn build_thread_turns_page_response(
     active_turn: Option<Turn>,
     options: ThreadTurnsPageOptions<'_>,
 ) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
-    let mut turns = reconstruct_thread_turns_for_turns_list(
+    build_thread_turns_page_response_for_history_mode(
         items,
         loaded_status,
         has_live_running_thread,
         active_turn,
-    );
+        options,
+        ThreadHistoryMode::Legacy,
+    )
+}
+
+fn build_thread_turns_page_response_for_history_mode(
+    items: &[RolloutItem],
+    loaded_status: ThreadStatus,
+    has_live_running_thread: bool,
+    active_turn: Option<Turn>,
+    options: ThreadTurnsPageOptions<'_>,
+    history_mode: ThreadHistoryMode,
+) -> Result<ThreadTurnsListResponse, JSONRPCErrorError> {
+    let mut turns = match history_mode {
+        ThreadHistoryMode::Legacy => reconstruct_thread_turns_for_turns_list(
+            items,
+            loaded_status,
+            has_live_running_thread,
+            active_turn,
+        ),
+        ThreadHistoryMode::Paginated => {
+            let mut builder = ThreadHistoryBuilder::new();
+            let mut projected_items: HashMap<String, Vec<ThreadItem>> = HashMap::new();
+            for item in items {
+                builder.handle_rollout_item(item);
+                if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = item {
+                    let materialized_item = ThreadItem::from(event.item.clone());
+                    let turn_items = projected_items.entry(event.turn_id.clone()).or_default();
+                    if let Some(existing_item) = turn_items
+                        .iter_mut()
+                        .find(|item| item.id() == materialized_item.id())
+                    {
+                        *existing_item = materialized_item;
+                    } else {
+                        turn_items.push(materialized_item);
+                    }
+                }
+            }
+            let mut turns = builder.finish();
+            if turns.iter().any(|turn| !turn.id.starts_with("rollout-")) {
+                turns.retain(|turn| !turn.id.starts_with("rollout-"));
+            }
+            for turn in &mut turns {
+                if let Some(items) = projected_items.remove(&turn.id) {
+                    turn.items = items;
+                }
+            }
+            let has_live_in_progress_turn = has_live_running_thread
+                || active_turn
+                    .as_ref()
+                    .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
+            normalize_thread_turns_status(&mut turns, loaded_status, has_live_in_progress_turn);
+            if let Some(active_turn) = active_turn {
+                merge_turn_history_with_active_turn(&mut turns, active_turn);
+            }
+            turns
+        }
+    };
     apply_thread_turns_items_view(&mut turns, options.items_view);
-    let page = paginate_thread_turns(turns, options.cursor, options.limit, options.sort_direction)?;
+    let page = paginate_thread_turns(
+        turns,
+        options.cursor,
+        options.limit,
+        options.sort_direction,
+        options.has_older_reference,
+    )?;
     Ok(ThreadTurnsListResponse {
         data: page.turns,
         next_cursor: page.next_cursor,
@@ -4777,6 +5464,7 @@ pub(super) fn build_thread_resume_initial_turns_page(
             limit: params.limit,
             sort_direction: params.sort_direction.unwrap_or(SortDirection::Desc),
             items_view: params.items_view.unwrap_or(TurnItemsView::Summary),
+            has_older_reference: false,
         },
     )
     .map(Into::into)
