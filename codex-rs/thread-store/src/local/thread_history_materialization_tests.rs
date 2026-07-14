@@ -39,6 +39,7 @@ use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
 use crate::ForkBoundary;
+use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::PrepareForkParams;
@@ -496,6 +497,98 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
 }
 
 #[tokio::test]
+async fn paginated_fork_boundaries_survive_same_thread_rotation() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("before-rotation"),
+                user_message("before rotation"),
+                turn_completed("before-rotation"),
+                turn_started("spanning-rotation"),
+                user_message("spanning rotation"),
+            ],
+        })
+        .await
+        .expect("append turn before rotation");
+    store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .await
+        .expect("rotate paginated source");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_completed("spanning-rotation"),
+                turn_started("after-rotation"),
+                user_message("after rotation"),
+                turn_completed("after-rotation"),
+            ],
+        })
+        .await
+        .expect("append turn after rotation");
+
+    let latest = prepare_paginated_fork(&store, thread_id, ForkBoundary::Latest).await;
+    assert!(contains_user_message(
+        &latest.model_context,
+        "before rotation"
+    ));
+    assert!(contains_user_message(
+        &latest.model_context,
+        "after rotation"
+    ));
+
+    let through_rotation = prepare_paginated_fork(
+        &store,
+        thread_id,
+        ForkBoundary::ThroughTurn("spanning-rotation".to_string()),
+    )
+    .await;
+    assert!(contains_user_message(
+        &through_rotation.model_context,
+        "spanning rotation"
+    ));
+    assert!(!contains_user_message(
+        &through_rotation.model_context,
+        "after rotation"
+    ));
+
+    let through_predecessor = prepare_paginated_fork(
+        &store,
+        thread_id,
+        ForkBoundary::ThroughTurn("before-rotation".to_string()),
+    )
+    .await;
+    assert!(contains_user_message(
+        &through_predecessor.model_context,
+        "before rotation"
+    ));
+    assert!(!contains_user_message(
+        &through_predecessor.model_context,
+        "after rotation"
+    ));
+
+    let before_replacement = prepare_paginated_fork(
+        &store,
+        thread_id,
+        ForkBoundary::BeforeTurn("after-rotation".to_string()),
+    )
+    .await;
+    assert!(contains_user_message(
+        &before_replacement.model_context,
+        "before rotation"
+    ));
+    assert!(!contains_user_message(
+        &before_replacement.model_context,
+        "after rotation"
+    ));
+}
+
+#[tokio::test]
 async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
     let home = TempDir::new().expect("temp dir");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -591,10 +684,10 @@ async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
             })
             .await
             .expect_err("reject an invalid fork boundary");
-        assert!(matches!(
-            error,
-            crate::ThreadStoreError::InvalidRequest { message } if message == expected_error
-        ));
+        let crate::ThreadStoreError::InvalidRequest { message } = error else {
+            panic!("expected invalid request error, got {error:?}");
+        };
+        assert_eq!(message, expected_error);
     }
 }
 
@@ -1323,6 +1416,93 @@ async fn summary_items_use_final_answers_and_ignore_commentary() {
 }
 
 #[tokio::test]
+async fn summary_items_span_rollout_rotation() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::default();
+    let runtime = codex_state::StateRuntime::init(
+        config.sqlite.clone(),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("state runtime");
+    let mut builder = codex_state::ThreadMetadataBuilder::new(
+        thread_id,
+        home.path().join("missing-rollout.jsonl"),
+        Utc::now(),
+        SessionSource::Cli,
+    );
+    builder.history_mode = ThreadHistoryMode::Paginated;
+    runtime
+        .upsert_thread(&builder.build(config.default_model_provider_id.as_str()))
+        .await
+        .expect("seed thread metadata");
+    let store = LocalThreadStore::new(config, Some(runtime));
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist session metadata");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "user-1".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+            ],
+        })
+        .await
+        .expect("append turn prefix");
+
+    store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .await
+        .expect("rotate rollout");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    agent_message("final-1", MessagePhase::FinalAnswer),
+                ),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("append turn suffix");
+
+    let summary = store
+        .list_turns(ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 1,
+            sort_direction: SortDirection::Asc,
+            items_view: StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("list turn summaries");
+    assert_eq!(
+        summary.turns[0]
+            .items
+            .iter()
+            .map(|item| item.item_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["user-1", "final-1"]
+    );
+}
+
+#[tokio::test]
 async fn next_write_catches_up_unprojected_durable_suffix() {
     let home = TempDir::new().expect("temp dir");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -1861,6 +2041,8 @@ async fn create_paginated_subagent_thread(
             history_mode: ThreadHistoryMode::Paginated,
             history_base,
             subagent_history_start_ordinal,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: "window-1".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),

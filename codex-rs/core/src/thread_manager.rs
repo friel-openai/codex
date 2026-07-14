@@ -49,6 +49,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::Result as CodexResult;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
@@ -57,6 +58,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -66,12 +68,14 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_rollout::materialize_recent_rollout_lines_from;
 use codex_rollout::state_db::StateDbHandle;
+use codex_thread_store::FreezeRolloutSegmentParams;
+use codex_thread_store::FrozenRolloutSegment;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
-use codex_thread_store::PreparedFork;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::StoredModelContext;
@@ -167,6 +171,14 @@ struct ForkHistory {
     snapshot: ForkSnapshot,
     initial_history: InitialHistory,
     persistence: ForkPersistence,
+}
+
+/// Builds the one physical representation used by every exact full-history fork.
+pub(crate) fn full_history_from_frozen_segment(frozen: FrozenRolloutSegment) -> InitialHistory {
+    InitialHistory::Forked(vec![
+        RolloutItem::SessionMeta(frozen.source_session_meta),
+        RolloutItem::RolloutReference(frozen.reference),
+    ])
 }
 
 /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
@@ -813,31 +825,22 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
-        // Persist queued rollout updates before reading the fork snapshot.
-        fork_source.ensure_rollout_materialized().await;
-        fork_source.flush_rollout().await?;
-        let stored_thread = fork_source
-            .read_thread(
-                /*include_archived*/ true, /*include_history*/ true,
-            )
-            .await
-            .map_err(|err| {
-                CodexErr::Fatal(format!(
-                    "failed to read subagent fork source {forked_from_thread_id}: {err}"
-                ))
-            })?;
-        let history = stored_thread_to_initial_history(stored_thread, fork_source.rollout_path())?;
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
-        options.initial_history = fork_history_from_snapshot(
-            ForkSnapshot::Interrupted,
-            history,
-            InterruptedTurnHistoryMarker::from_config_and_version(
-                &options.config,
-                inherited_multi_agent_version,
-            ),
-        );
+        options.initial_history = self
+            .state
+            .reference_backed_snapshot_history(
+                forked_from_thread_id,
+                options.config.codex_home.as_path(),
+                ForkSnapshot::Interrupted,
+                InterruptedTurnHistoryMarker::from_config_and_version(
+                    &options.config,
+                    inherited_multi_agent_version,
+                ),
+                /*expected_source_items*/ None,
+            )
+            .await?;
         self.start_thread_inner(options, Some(forked_from_thread_id))
             .await
     }
@@ -1120,41 +1123,6 @@ impl ThreadManager {
         .await
     }
 
-    /// Fork prepared reference-backed history using the same snapshot semantics as copied forks.
-    pub async fn fork_prepared_thread(
-        &self,
-        config: Config,
-        prepared: PreparedFork,
-        thread_source: Option<ThreadSource>,
-        parent_trace: Option<W3cTraceContext>,
-        supports_openai_form_elicitation: bool,
-    ) -> CodexResult<NewThread> {
-        let history = InitialHistory::Resumed(ResumedHistory {
-            conversation_id: prepared.source_thread_id,
-            history: Arc::clone(&prepared.model_context),
-            rollout_path: None,
-        });
-        let fork_persistence = ForkPersistence::Referenced {
-            history_base: prepared.history_base,
-            inherited_item_count: prepared.model_context.len(),
-        };
-        let result = self
-            .fork_thread_with_initial_history(
-                config,
-                ForkHistory {
-                    snapshot: ForkSnapshot::Interrupted,
-                    initial_history: history,
-                    persistence: fork_persistence,
-                },
-                thread_source,
-                parent_trace,
-                supports_openai_form_elicitation,
-            )
-            .await;
-        drop(prepared);
-        result
-    }
-
     async fn fork_thread_with_initial_history(
         &self,
         config: Config,
@@ -1187,7 +1155,37 @@ impl ThreadManager {
             .await;
         let interrupted_marker =
             InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
-        let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        let history = if let Some(source_thread_id) = source_thread_id {
+            let expected_source_items = match snapshot {
+                ForkSnapshot::Interrupted => None,
+                ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
+                    Some(history.get_rollout_items().to_vec())
+                }
+            };
+            self.state
+                .reference_backed_snapshot_history(
+                    source_thread_id,
+                    config.codex_home.as_path(),
+                    snapshot,
+                    interrupted_marker,
+                    expected_source_items,
+                )
+                .await?
+        } else {
+            match &history {
+                InitialHistory::New | InitialHistory::Cleared => {
+                    fork_history_from_snapshot(snapshot, history, interrupted_marker)
+                }
+                InitialHistory::Forked(items) if items.is_empty() => {
+                    fork_history_from_snapshot(snapshot, history, interrupted_marker)
+                }
+                InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
+                    return Err(CodexErr::InvalidRequest(
+                        "full-history fork requires source session metadata".to_string(),
+                    ));
+                }
+            }
+        };
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -1233,6 +1231,109 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) async fn snapshot_rollout_segment(
+        &self,
+        thread_id: ThreadId,
+    ) -> CodexResult<FrozenRolloutSegment> {
+        let local_store = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest(
+                    "reference-backed history requires a local thread store".to_string(),
+                )
+            })?;
+        local_store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to freeze rollout segment for {thread_id}: {err}"
+                ))
+            })
+    }
+
+    pub(crate) async fn reference_backed_full_history(
+        &self,
+        source_thread_id: ThreadId,
+    ) -> CodexResult<InitialHistory> {
+        let frozen = self.snapshot_rollout_segment(source_thread_id).await?;
+        Ok(full_history_from_frozen_segment(frozen))
+    }
+
+    async fn reference_backed_snapshot_history(
+        &self,
+        source_thread_id: ThreadId,
+        codex_home: &std::path::Path,
+        snapshot: ForkSnapshot,
+        interrupted_marker: InterruptedTurnHistoryMarker,
+        expected_source_items: Option<Vec<RolloutItem>>,
+    ) -> CodexResult<InitialHistory> {
+        let frozen = self.snapshot_rollout_segment(source_thread_id).await?;
+        let source_items = materialize_recent_rollout_lines_from(
+            codex_home,
+            full_history_from_frozen_segment(frozen.clone())
+                .get_rollout_items()
+                .iter()
+                .cloned()
+                .map(|item| RolloutLine {
+                    timestamp: String::new(),
+                    ordinal: None,
+                    item,
+                })
+                .collect(),
+        )
+        .await?
+        .into_iter()
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+        if let Some(expected_source_items) = expected_source_items {
+            let without_session_meta = |items: &[RolloutItem]| {
+                items
+                    .iter()
+                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            if serde_json::to_value(without_session_meta(&source_items))?
+                != serde_json::to_value(without_session_meta(&expected_source_items))?
+            {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "fork source {source_thread_id} changed before its snapshot was frozen"
+                )));
+            }
+        }
+        let source_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::new(source_items.clone()),
+            rollout_path: Some(frozen.reference.rollout_path.clone()),
+        });
+        let expected_history =
+            fork_history_from_snapshot(snapshot, source_history, interrupted_marker);
+        let expected_items = expected_history.get_rollout_items().to_vec();
+        let nth_user_message = truncation::user_message_positions_in_rollout(&expected_items).len();
+
+        let mut reference = frozen.reference;
+        reference.nth_user_message = match snapshot {
+            ForkSnapshot::TruncateBeforeNthUserMessage(_) => Some(nth_user_message),
+            ForkSnapshot::Interrupted => reference.nth_user_message,
+        };
+        let mut history = source_items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
+                _ => None,
+            })
+            .into_iter()
+            .chain(std::iter::once(RolloutItem::RolloutReference(reference)))
+            .collect::<Vec<_>>();
+        if expected_items.len() > source_items.len() {
+            history.extend_from_slice(&expected_items[source_items.len()..]);
+        }
+        Ok(InitialHistory::Forked(history))
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
     }
@@ -2056,12 +2157,15 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     // without explicit turn lifecycle events. If the persisted snapshot has no
     // terminating boundary after its last user message, treat it as mid-turn.
     SnapshotTurnState {
-        ends_mid_turn: !rollout_items[last_user_position + 1..].iter().any(|item| {
-            matches!(
-                item,
-                RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
-            )
-        }),
+        ends_mid_turn: !rollout_items[last_user_position + 1..]
+            .iter()
+            .any(|item| match item {
+                RolloutItem::EventMsg(EventMsg::AgentMessage(message)) => {
+                    matches!(message.phase, None | Some(MessagePhase::FinalAnswer))
+                }
+                RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => true,
+                _ => false,
+            }),
         active_turn_id: None,
         active_turn_started_at: None,
         active_turn_start_index: None,

@@ -9,7 +9,6 @@ use super::super::rollout_lineage::RolloutLineage;
 use super::segment_paging::page_item_rows;
 use super::segment_paging::page_turn_rows;
 use super::segment_paging::validate_page_size;
-use super::sqlite_integer;
 use super::turn_lookup::find_source_turn;
 use crate::ItemPage;
 use crate::ListItemsParams;
@@ -191,41 +190,46 @@ async fn load_summary_items(
                 turn.final_agent_item_id.clone(),
             )
         };
-    let Some(segment) = lineage
-        .segments()
-        .iter()
-        .find(|segment| segment.thread_id() == item_owner)
-    else {
-        return Ok(Vec::new());
-    };
-    let start_ordinal = sqlite_integer(segment.start_ordinal(), "rollout ordinal")?;
-    let end_ordinal = segment
-        .end_ordinal()
-        .map(|ordinal| sqlite_integer(ordinal, "rollout ordinal"))
-        .transpose()?;
     let rows = sqlx::query(
         r#"
-SELECT turn_id, item_id, updated_at_ordinal, created_at_ms, item_json
+SELECT turn_id, item_id, rollout_ordinal, updated_at_ordinal, created_at_ms, item_json
 FROM thread_items
 WHERE thread_id = ?
   AND turn_id = ?
-  AND rollout_ordinal >= ?
-  AND (? IS NULL OR rollout_ordinal < ?)
   AND (item_id = ? OR item_id = ?)
 ORDER BY rollout_ordinal ASC
         "#,
     )
     .bind(item_owner.to_string())
     .bind(turn.turn_id.as_str())
-    .bind(start_ordinal)
-    .bind(end_ordinal)
-    .bind(end_ordinal)
     .bind(first_user_item_id.as_deref())
     .bind(final_agent_item_id.as_deref())
     .fetch_all(pool)
     .await
     .map_err(super::thread_history_error)?;
-    rows.into_iter().map(stored_thread_item).collect()
+    let mut items = Vec::new();
+    for row in rows {
+        let row = stored_thread_item_row_for_thread(item_owner, row)?;
+        let ordinal = u64::try_from(row.position.rollout_ordinal).map_err(|_| {
+            ThreadStoreError::Internal {
+                message: format!(
+                    "invalid stored item rollout ordinal: {}",
+                    row.position.rollout_ordinal
+                ),
+            }
+        })?;
+        let Some(segment) = lineage
+            .segments()
+            .iter()
+            .find(|segment| segment.thread_id() == item_owner && segment.contains_ordinal(ordinal))
+        else {
+            continue;
+        };
+        if segment.allows_stored_item(&row.item)? {
+            items.push(row.item);
+        }
+    }
+    Ok(items)
 }
 
 pub(super) fn parse_cursor(
