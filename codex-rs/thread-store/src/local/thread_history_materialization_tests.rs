@@ -42,6 +42,7 @@ use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
 use crate::ForkBoundary;
+use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::ListTurnsParams;
 use crate::PrepareForkParams;
@@ -633,10 +634,13 @@ async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
             })
             .await
             .expect_err("reject an invalid fork boundary");
-        assert!(matches!(
-            error,
-            crate::ThreadStoreError::InvalidRequest { message } if message == expected_error
-        ));
+        assert!(
+            matches!(
+                &error,
+                crate::ThreadStoreError::InvalidRequest { message } if message == expected_error
+            ),
+            "expected {expected_error:?}, got {error:?}"
+        );
     }
 }
 
@@ -834,6 +838,175 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
 }
 
 #[tokio::test]
+async fn history_projection_requires_visible_items_for_projected_turns() {
+    let home = TempDir::new().expect("temp dir");
+    let config = test_config(home.path());
+    let thread_id = ThreadId::new();
+    let runtime = codex_state::StateRuntime::init(
+        config.sqlite.clone(),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("state runtime");
+    let mut metadata = codex_state::ThreadMetadataBuilder::new(
+        thread_id,
+        home.path().join("missing-rollout.jsonl"),
+        Utc::now(),
+        SessionSource::Cli,
+    );
+    metadata.history_mode = ThreadHistoryMode::Paginated;
+    runtime
+        .upsert_thread(&metadata.build(config.default_model_provider_id.as_str()))
+        .await
+        .expect("seed paginated thread metadata");
+    let store = LocalThreadStore::new(config.clone(), Some(runtime));
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist paginated thread");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("turn-1"),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    TurnItem::UserMessage(UserMessageItem {
+                        id: "user-1".to_string(),
+                        client_id: None,
+                        content: Vec::new(),
+                    }),
+                ),
+                completed_item(
+                    thread_id,
+                    "turn-1",
+                    agent_message("agent-1", MessagePhase::FinalAnswer),
+                ),
+                turn_completed("turn-1"),
+            ],
+        })
+        .await
+        .expect("project complete turn and visible items");
+
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check complete history projection"),
+        "a projected turn with its user and assistant items must remain usable"
+    );
+
+    let pool = codex_state::open_thread_history_db(&config.sqlite)
+        .await
+        .expect("open existing thread history database");
+    sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("remove only projected item rows");
+    let remaining_rows = sqlx::query_as::<_, (i64, i64, i64)>(
+        r#"
+SELECT
+    (SELECT COUNT(*) FROM thread_history_projection_state WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_turns WHERE thread_id = ?),
+    (SELECT COUNT(*) FROM thread_items WHERE thread_id = ?)
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("inspect remaining history projection rows");
+    assert_eq!(remaining_rows, (1, 1, 0));
+    assert!(
+        !store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check incomplete history projection"),
+        "projected turns without their visible items must use canonical rollout history"
+    );
+}
+
+#[tokio::test]
+async fn named_fork_rebuilds_projection_across_same_thread_rotations() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist source metadata");
+
+    for (turn_id, message) in [
+        ("turn-1", "first segment"),
+        ("turn-2", "second segment"),
+        ("turn-3", "third segment"),
+    ] {
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id),
+                    user_message(message),
+                    turn_completed(turn_id),
+                ],
+            })
+            .await
+            .expect("append rotated turn");
+        if turn_id != "turn-3" {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate paginated rollout");
+        }
+    }
+
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    for statement in [
+        "DELETE FROM thread_items WHERE thread_id = ?",
+        "DELETE FROM thread_turns WHERE thread_id = ?",
+        "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(thread_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("clear projected history");
+    }
+
+    let prepared = tokio::time::timeout(
+        Duration::from_secs(10),
+        store.prepare_fork(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-2".to_string()),
+        }),
+    )
+    .await
+    .expect("same-thread rotation must not deadlock")
+    .expect("prepare named fork across rotations");
+    assert!(contains_user_message(
+        prepared.model_context.as_slice(),
+        "first segment"
+    ));
+    assert!(contains_user_message(
+        prepared.model_context.as_slice(),
+        "second segment"
+    ));
+    assert!(!contains_user_message(
+        prepared.model_context.as_slice(),
+        "third segment"
+    ));
+}
+
+#[tokio::test]
 async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_finishes() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
@@ -970,6 +1143,20 @@ async fn prepared_fork_reserves_source_until_child_reference_is_durable() {
     assert_eq!(prepared.history_base, Some(history_base));
     assert!(!contains_user_message(
         prepared.model_context.as_slice(),
+        "later source message"
+    ));
+    assert!(!contains_user_message(
+        prepared.response_history.as_slice(),
+        "later source message"
+    ));
+    let frozen_items = super::super::read_thread::load_history_items(
+        home.path(),
+        prepared.frozen_segment.reference.rollout_path.as_path(),
+    )
+    .await
+    .expect("materialize the exact prepared reference");
+    assert!(!contains_user_message(
+        frozen_items.as_slice(),
         "later source message"
     ));
 
@@ -2054,6 +2241,8 @@ async fn create_paginated_subagent_thread(
             history_mode: ThreadHistoryMode::Paginated,
             history_base,
             subagent_history_start_ordinal,
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: "window-1".to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(std::env::current_dir().expect("cwd")),
