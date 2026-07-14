@@ -15,6 +15,7 @@ use std::sync::Mutex;
 
 use chrono::SecondsFormat;
 use codex_protocol::RolloutId;
+use codex_protocol::SegmentId;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::capabilities::SelectedCapabilityRoot;
@@ -115,7 +116,17 @@ pub enum RolloutRecorderParams {
         history_mode: ThreadHistoryMode,
         history_base: Option<HistoryPosition>,
         subagent_history_start_ordinal: Option<u64>,
+        /// First lineage-relative ordinal written to this rollout.
+        initial_rollout_ordinal: u64,
         initial_window_id: Option<String>,
+    },
+    /// Creates a replacement or fork rollout at a specific path without resetting its ordinal.
+    CreateAtPath {
+        path: PathBuf,
+        session_meta: Box<SessionMeta>,
+        base_instructions: BaseInstructions,
+        dynamic_tools: Vec<DynamicToolSpec>,
+        initial_rollout_ordinal: u64,
     },
     Resume {
         path: PathBuf,
@@ -211,6 +222,7 @@ impl RolloutRecorderParams {
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            initial_rollout_ordinal: 0,
             initial_window_id: None,
         }
     }
@@ -305,6 +317,18 @@ impl RolloutRecorderParams {
         } = &mut self
         {
             *window_id = Some(initial_window_id);
+        }
+        self
+    }
+
+    /// Sets the first lineage-relative ordinal for a newly created paginated rollout.
+    pub fn with_initial_rollout_ordinal(mut self, initial_rollout_ordinal: u64) -> Self {
+        if let Self::Create {
+            initial_rollout_ordinal: ordinal,
+            ..
+        } = &mut self
+        {
+            *ordinal = initial_rollout_ordinal;
         }
         self
     }
@@ -837,10 +861,13 @@ impl RolloutRecorder {
                 history_mode,
                 history_base,
                 subagent_history_start_ordinal,
+                initial_rollout_ordinal,
                 initial_window_id,
             } => {
+                let initial_rollout_ordinal =
+                    history_base.map_or(initial_rollout_ordinal, |base| base.end_ordinal_exclusive);
                 let ordinal_state =
-                    RolloutOrdinalState::for_new_rollout(history_mode, history_base);
+                    RolloutOrdinalState::for_new_rollout_at(history_mode, initial_rollout_ordinal);
                 let (path, started_at) =
                     precompute_new_rollout_path(config, conversation_id, rollout_id_override)?;
 
@@ -855,6 +882,7 @@ impl RolloutRecorder {
                 let session_meta = SessionMeta {
                     session_id,
                     id: conversation_id,
+                    segment_id: Some(SegmentId::new()),
                     forked_from_id,
                     parent_thread_id,
                     timestamp,
@@ -881,6 +909,38 @@ impl RolloutRecorder {
                     multi_agent_version,
                     context_window: initial_window_id.map(SessionContextWindow::new),
                 };
+
+                RolloutWriterState {
+                    writer: None,
+                    deferred_creation: true,
+                    pending_items: Vec::new(),
+                    meta: Some(session_meta),
+                    cwd: cwd.clone(),
+                    rollout_path: path,
+                    ordinal_state,
+                    last_logged_error: None,
+                }
+            }
+            RolloutRecorderParams::CreateAtPath {
+                path,
+                session_meta,
+                base_instructions,
+                dynamic_tools,
+                initial_rollout_ordinal,
+            } => {
+                let mut session_meta = *session_meta;
+                let ordinal_state = RolloutOrdinalState::for_new_rollout_at(
+                    session_meta.history_mode,
+                    initial_rollout_ordinal,
+                );
+                session_meta.segment_id = Some(SegmentId::new());
+                session_meta.cwd = cwd.clone();
+                session_meta.cli_version = env!("CARGO_PKG_VERSION").to_string();
+                session_meta.model_provider = Some(config.model_provider_id().to_string());
+                session_meta.base_instructions = Some(base_instructions);
+                session_meta.dynamic_tools = (!dynamic_tools.is_empty()).then_some(dynamic_tools);
+                session_meta.memory_mode =
+                    (!config.generate_memories()).then_some("disabled".to_string());
 
                 RolloutWriterState {
                     writer: None,
@@ -1005,8 +1065,20 @@ impl RolloutRecorder {
     pub async fn load_rollout_items(
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
+        let (lines, thread_id, parse_errors) = Self::load_rollout_lines(path).await?;
+        Ok((
+            lines.into_iter().map(|line| line.item).collect(),
+            thread_id,
+            parse_errors,
+        ))
+    }
+
+    /// Loads physical rollout records without discarding their lineage ordinals.
+    pub async fn load_rollout_lines(
+        path: &Path,
+    ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
-        let mut items: Vec<RolloutItem> = Vec::new();
+        let mut lines: Vec<RolloutLine> = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
         let mut reader = compression::open_rollout_line_reader(path).await?;
@@ -1028,6 +1100,9 @@ impl RolloutRecorder {
                 trace!("skipping legacy ghost_snapshot rollout line");
                 continue;
             }
+            if normalize_legacy_sleep_item_completed_rollout_line(&mut value) {
+                trace!("normalized legacy item_completed Sleep rollout line");
+            }
             if thread_id.is_none() {
                 // The first SessionMeta belongs to this rollout. Later SessionMeta lines
                 // can be copied from fork history, so only validate unknown history modes
@@ -1035,24 +1110,33 @@ impl RolloutRecorder {
                 reject_unknown_thread_history_mode(&value)?;
             }
 
+            let is_rollout_reference = matches!(
+                value.get("type").and_then(Value::as_str),
+                Some("rollout_reference" | "fork_reference")
+            );
             let rollout_line = match serde_json::from_value::<RolloutLine>(value) {
                 Ok(rollout_line) => rollout_line,
                 Err(e) => {
+                    if is_rollout_reference {
+                        return Err(IoError::new(
+                            std::io::ErrorKind::InvalidData,
+                            "invalid rollout reference record",
+                        ));
+                    }
                     trace!("failed to parse rollout line: {e}");
                     parse_errors = parse_errors.saturating_add(1);
                     continue;
                 }
             };
 
-            let item = rollout_line.item;
             // Use the FIRST SessionMeta encountered in the file as the canonical
             // thread id and main session information. Keep all items intact.
             if thread_id.is_none()
-                && let RolloutItem::SessionMeta(session_meta_line) = &item
+                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
             {
                 thread_id = Some(session_meta_line.meta.id);
             }
-            items.push(item);
+            lines.push(rollout_line);
         }
         if !saw_non_empty_line {
             return Err(IoError::other("empty session file"));
@@ -1060,11 +1144,11 @@ impl RolloutRecorder {
 
         tracing::debug!(
             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
-            items.len(),
+            lines.len(),
             thread_id,
             parse_errors,
         );
-        Ok((items, thread_id, parse_errors))
+        Ok((lines, thread_id, parse_errors))
     }
 
     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
@@ -1188,6 +1272,33 @@ fn retain_entries_not_marked(entries: &mut Vec<Value>, remove: &[bool]) {
 
 fn is_legacy_ghost_snapshot_response_item(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("ghost_snapshot")
+}
+
+fn normalize_legacy_sleep_item_completed_rollout_line(value: &mut Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return false;
+    }
+    let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("Sleep")
+        || !item.contains_key("duration_ms")
+    {
+        return false;
+    }
+
+    item.insert("type".to_string(), Value::String("Extension".to_string()));
+    item.insert("kind".to_string(), Value::String("clock.sleep".to_string()));
+    if let Some(duration_ms) = item.remove("duration_ms") {
+        item.insert("durationMs".to_string(), duration_ms);
+    }
+    true
 }
 
 fn truncate_fs_page(
@@ -2062,6 +2173,7 @@ async fn resume_candidate_matches_cwd(
         && let Some(latest_turn_context_cwd) = items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => Some(&turn_context.cwd),
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }

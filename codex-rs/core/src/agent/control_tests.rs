@@ -275,6 +275,7 @@ async fn persisted_originator(thread: &CodexThread) -> String {
         .find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.originator.clone()),
             RolloutItem::ResponseItem(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::EventMsg(_)

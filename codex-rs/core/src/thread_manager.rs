@@ -10,7 +10,8 @@ use crate::environment_selection::default_thread_environment_selections;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::mcp::McpManager;
 use crate::rollout::truncation;
-use crate::session::ForkPersistence;
+use crate::session::ForkModelState;
+use crate::session::ForkStartupItems;
 use crate::session::GitEnrichmentPolicy;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::SessionIo;
@@ -47,6 +48,7 @@ use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::OPENAI_PROVIDER_ID;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_models_manager::manager::SharedModelsManager;
+use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::error::CodexErr;
@@ -67,8 +69,12 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_rollout::RolloutLine;
+use codex_rollout::materialize_recent_rollout_lines_from;
 use codex_rollout::state_db::StateDbHandle;
 use codex_skills_extension::HostSkillsService;
+use codex_thread_store::FreezeRolloutSegmentParams;
+use codex_thread_store::FrozenRolloutSegment;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
@@ -79,6 +85,7 @@ use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::StoredModelContext;
 use codex_thread_store::StoredThread;
+use codex_thread_store::ThreadLifecycleReservation;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
@@ -186,9 +193,19 @@ pub enum ForkSnapshot {
 }
 
 struct ForkHistory {
-    snapshot: ForkSnapshot,
+    snapshot: Option<ForkSnapshot>,
     initial_history: InitialHistory,
-    persistence: ForkPersistence,
+    model_history_override: Option<Vec<RolloutItem>>,
+    shared_model_response_items: Option<Arc<Vec<codex_history::ResponseItemEnvelope>>>,
+    shared_model_state: Option<ForkModelState>,
+}
+
+/// Builds the canonical physical history used by a reference-backed full-history fork.
+pub(crate) fn full_history_from_frozen_segment(frozen: FrozenRolloutSegment) -> InitialHistory {
+    InitialHistory::Forked(vec![
+        RolloutItem::SessionMeta(frozen.source_session_meta),
+        RolloutItem::RolloutReference(frozen.reference),
+    ])
 }
 
 /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
@@ -259,7 +276,7 @@ struct ThreadSpawnRequest {
     agent_control: AgentControl,
     parent_thread_id: Option<ThreadId>,
     forked_from_thread_id: Option<ThreadId>,
-    fork_persistence: ForkPersistence,
+    fork_startup_items: ForkStartupItems,
     inherited_environments: Option<TurnEnvironmentSnapshot>,
     inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
     inherited_thread_state: InheritedThreadState,
@@ -278,7 +295,7 @@ impl ThreadSpawnRequest {
             agent_control,
             parent_thread_id: None,
             forked_from_thread_id: None,
-            fork_persistence: ForkPersistence::Copied,
+            fork_startup_items: ForkStartupItems::default(),
             inherited_environments: None,
             inherited_exec_policy: None,
             inherited_thread_state: InheritedThreadState::default(),
@@ -910,33 +927,32 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
-        // Persist queued rollout updates before reading the fork snapshot.
-        fork_source.ensure_rollout_materialized().await;
-        fork_source.flush_rollout().await?;
-        let stored_thread = fork_source
-            .read_thread(
-                /*include_archived*/ true, /*include_history*/ true,
-            )
-            .await
-            .map_err(|err| {
-                CodexErr::Fatal(format!(
-                    "failed to read subagent fork source {forked_from_thread_id}: {err}"
-                ))
-            })?;
-        let history = stored_thread_to_initial_history(stored_thread, fork_source.rollout_path())?;
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
-        options.initial_history = fork_history_from_snapshot(
-            ForkSnapshot::Interrupted,
-            history,
-            InterruptedTurnHistoryMarker::from_config_and_version(
-                &options.config,
-                inherited_multi_agent_version,
-            ),
-        );
-        self.start_thread_inner(options, Some(forked_from_thread_id))
-            .await
+        let (initial_history, _response_history, source_reservation) = self
+            .state
+            .reference_backed_snapshot_history(
+                forked_from_thread_id,
+                options.config.codex_home.as_path(),
+                ForkSnapshot::Interrupted,
+                InterruptedTurnHistoryMarker::from_config_and_version(
+                    &options.config,
+                    inherited_multi_agent_version,
+                ),
+                /*expected_source_items*/ None,
+                /*expected_source_rollout_id*/ None,
+            )
+            .await?;
+        options.initial_history = initial_history;
+        let result = self
+            .start_thread_inner(options, Some(forked_from_thread_id))
+            .await;
+        if let Ok(new_thread) = &result {
+            new_thread.thread.flush_rollout().await?;
+        }
+        drop(source_reservation);
+        result
     }
 
     pub async fn resume_thread_from_rollout(
@@ -1154,12 +1170,39 @@ impl ThreadManager {
     where
         S: Into<ForkSnapshot>,
     {
+        self.fork_thread_from_history_with_response(
+            snapshot,
+            config,
+            history,
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+        .map(|(new_thread, _)| new_thread)
+    }
+
+    /// Fork an existing thread and return the exact logical history selected at the source freeze.
+    pub async fn fork_thread_from_history_with_response<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)>
+    where
+        S: Into<ForkSnapshot>,
+    {
         self.fork_thread_with_initial_history(
             config,
             ForkHistory {
-                snapshot: snapshot.into(),
+                snapshot: Some(snapshot.into()),
                 initial_history: history,
-                persistence: ForkPersistence::Copied,
+                model_history_override: None,
+                shared_model_response_items: None,
+                shared_model_state: None,
             },
             thread_source,
             parent_trace,
@@ -1168,7 +1211,7 @@ impl ThreadManager {
         .await
     }
 
-    /// Fork prepared reference-backed history using the same snapshot semantics as copied forks.
+    /// Fork a prepared source through the canonical rollout-reference representation.
     pub async fn fork_prepared_thread(
         &self,
         config: Config,
@@ -1176,23 +1219,97 @@ impl ThreadManager {
         thread_source: Option<ThreadSource>,
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
-    ) -> CodexResult<NewThread> {
-        let history = InitialHistory::Resumed(ResumedHistory {
-            conversation_id: prepared.source_thread_id,
-            history: Arc::clone(&prepared.model_context),
-            rollout_path: None,
-        });
-        let fork_persistence = ForkPersistence::Referenced {
-            history_base: prepared.history_base,
-            inherited_item_count: prepared.model_context.len(),
+    ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)> {
+        let source_thread_id = prepared.source_thread_id;
+        let prepared_context =
+            InitialHistory::Forked(Arc::unwrap_or_clone(Arc::clone(&prepared.model_context)));
+        let multi_agent_version = self
+            .state
+            .effective_multi_agent_version_for_spawn(
+                &prepared_context,
+                /*session_source*/ None,
+                /*parent_thread_id*/ None,
+                Some(source_thread_id),
+                &config,
+            )
+            .await;
+        let interrupted_marker =
+            InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
+        let prepared_response_history =
+            Arc::unwrap_or_clone(Arc::clone(&prepared.response_history));
+        let prepared_items = prepared_response_history.len();
+        let snapshot_response_history = if prepared.interrupt_if_open {
+            fork_history_from_snapshot(
+                ForkSnapshot::Interrupted,
+                InitialHistory::Forked(prepared_response_history),
+                interrupted_marker,
+            )
+        } else {
+            InitialHistory::Forked(prepared_response_history)
+        };
+        let mut history = full_history_from_frozen_segment(prepared.frozen_segment.clone());
+        let synthesized_suffix = &snapshot_response_history.get_rollout_items()[prepared_items..];
+        if !synthesized_suffix.is_empty()
+            && let InitialHistory::Forked(history_items) = &mut history
+        {
+            history_items.extend_from_slice(synthesized_suffix);
+        }
+        let mut response_history =
+            snapshot_response_history.get_rollout_items()[..prepared_items].to_vec();
+        response_history.extend_from_slice(synthesized_suffix);
+        let InitialHistory::Forked(mut model_history_override) = prepared_context else {
+            unreachable!("prepared model context is forked history");
+        };
+        model_history_override.extend_from_slice(synthesized_suffix);
+        let shared_model_response_items = prepared.shared_model_response_items.clone();
+        let mut shared_model_state = if let Some(items) = &shared_model_response_items {
+            if let Ok(source) = self.state.get_thread(source_thread_id).await {
+                Some(
+                    source
+                        .session
+                        .capture_fork_model_state(items)
+                        .await
+                        .ok_or_else(|| {
+                            CodexErr::InvalidRequest(format!(
+                                "fork source {source_thread_id} changed before its model context was frozen"
+                            ))
+                        })?,
+                )
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        let synthesized_response_items = synthesized_suffix
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::ResponseItem(item) => Some(item.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let shared_model_response_items = if synthesized_response_items.is_empty() {
+            shared_model_response_items
+        } else {
+            match &mut shared_model_state {
+                Some(source_model_state) => {
+                    Some(source_model_state.append_fork_response_items(synthesized_response_items))
+                }
+                None => shared_model_response_items.map(|mut items| {
+                    Arc::make_mut(&mut items).extend(synthesized_response_items);
+                    items
+                }),
+            }
         };
         let result = self
             .fork_thread_with_initial_history(
                 config,
                 ForkHistory {
-                    snapshot: ForkSnapshot::Interrupted,
+                    snapshot: None,
                     initial_history: history,
-                    persistence: fork_persistence,
+                    model_history_override: Some(model_history_override),
+                    shared_model_response_items,
+                    shared_model_state,
                 },
                 thread_source,
                 parent_trace,
@@ -1200,7 +1317,7 @@ impl ThreadManager {
             )
             .await;
         drop(prepared);
-        result
+        result.map(|(new_thread, _)| (new_thread, Arc::new(response_history)))
     }
 
     async fn fork_thread_with_initial_history(
@@ -1210,12 +1327,21 @@ impl ThreadManager {
         thread_source: Option<ThreadSource>,
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
-    ) -> CodexResult<NewThread> {
+    ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)> {
         let ForkHistory {
             snapshot,
             initial_history: history,
-            persistence: fork_persistence,
+            model_history_override,
+            shared_model_response_items,
+            shared_model_state,
         } = fork_history;
+        let expected_source_rollout_id = match &history {
+            InitialHistory::Resumed(resumed) => resumed
+                .rollout_path
+                .as_deref()
+                .and_then(codex_rollout::rollout_id_from_path),
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+        };
         // `forked_from_id()` describes this history's existing lineage. When
         // forking a resumed thread, the child copies the resumed thread itself.
         let source_thread_id = match &history {
@@ -1235,7 +1361,47 @@ impl ThreadManager {
             .await;
         let interrupted_marker =
             InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
-        let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        let (history, response_history, source_reservation) = if let Some(snapshot) = snapshot {
+            if let Some(source_thread_id) = source_thread_id {
+                let expected_source_items = match snapshot {
+                    ForkSnapshot::Interrupted => None,
+                    ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
+                        Some(history.get_rollout_items().to_vec())
+                    }
+                };
+                let (history, response_history, reservation) = self
+                    .state
+                    .reference_backed_snapshot_history(
+                        source_thread_id,
+                        config.codex_home.as_path(),
+                        snapshot,
+                        interrupted_marker,
+                        expected_source_items,
+                        expected_source_rollout_id,
+                    )
+                    .await?;
+                (history, response_history, Some(reservation))
+            } else {
+                let history = match &history {
+                    InitialHistory::New | InitialHistory::Cleared => {
+                        fork_history_from_snapshot(snapshot, history, interrupted_marker)
+                    }
+                    InitialHistory::Forked(items) if items.is_empty() => {
+                        fork_history_from_snapshot(snapshot, history, interrupted_marker)
+                    }
+                    InitialHistory::Resumed(_) | InitialHistory::Forked(_) => {
+                        return Err(CodexErr::InvalidRequest(
+                            "full-history fork requires source session metadata".to_string(),
+                        ));
+                    }
+                };
+                let response_history = Arc::new(history.get_rollout_items().to_vec());
+                (history, response_history, None)
+            }
+        } else {
+            let response_history = Arc::new(history.get_rollout_items().to_vec());
+            (history, response_history, None)
+        };
         let agent_control = self.agent_control_for_config(&config);
         let options = StartThreadOptions {
             initial_history: history,
@@ -1247,8 +1413,19 @@ impl ThreadManager {
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
         request.forked_from_thread_id = source_thread_id;
-        request.fork_persistence = fork_persistence;
-        Box::pin(self.state.spawn_thread(request)).await
+        if let Some(model_history_override) = model_history_override {
+            request.fork_startup_items = ForkStartupItems::with_model_history_override(
+                model_history_override,
+                shared_model_response_items,
+                shared_model_state,
+            );
+        }
+        let result = Box::pin(self.state.spawn_thread(request)).await;
+        if let Ok(new_thread) = &result {
+            new_thread.thread.flush_rollout().await?;
+        }
+        drop(source_reservation);
+        result.map(|new_thread| (new_thread, response_history))
     }
 
     pub(crate) fn agent_control(&self) -> AgentControl {
@@ -1329,6 +1506,137 @@ impl ThreadManagerState {
             Some(thread) if !thread.session_source.is_internal() => Ok(thread.clone()),
             Some(_) | None => Err(CodexErr::ThreadNotFound(thread_id)),
         }
+    }
+
+    pub(crate) async fn snapshot_rollout_segment(
+        &self,
+        thread_id: ThreadId,
+        expected_rollout_id: Option<RolloutId>,
+    ) -> CodexResult<(FrozenRolloutSegment, ThreadLifecycleReservation)> {
+        let local_store = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+            .ok_or_else(|| {
+                CodexErr::InvalidRequest(
+                    "reference-backed history requires a local thread store".to_string(),
+                )
+            })?;
+        let reservation = local_store.reserve_thread_lifecycle(thread_id).await;
+        if let Some(expected_rollout_id) = expected_rollout_id {
+            let selected_rollout_id = local_store
+                .current_rollout_id(thread_id)
+                .await
+                .map_err(|error| CodexErr::Fatal(error.to_string()))?
+                .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+            if selected_rollout_id != expected_rollout_id {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "rollout path does not select the current rollout for thread {thread_id}"
+                )));
+            }
+        }
+        let frozen = local_store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+            .await
+            .map_err(|err| {
+                CodexErr::Fatal(format!(
+                    "failed to freeze rollout segment for {thread_id}: {err}"
+                ))
+            })?;
+        Ok((frozen, reservation))
+    }
+
+    pub(crate) async fn reference_backed_full_history(
+        &self,
+        source_thread_id: ThreadId,
+    ) -> CodexResult<(InitialHistory, ThreadLifecycleReservation)> {
+        let (frozen, reservation) = self
+            .snapshot_rollout_segment(source_thread_id, /*expected_rollout_id*/ None)
+            .await?;
+        Ok((full_history_from_frozen_segment(frozen), reservation))
+    }
+
+    async fn reference_backed_snapshot_history(
+        &self,
+        source_thread_id: ThreadId,
+        codex_home: &std::path::Path,
+        snapshot: ForkSnapshot,
+        interrupted_marker: InterruptedTurnHistoryMarker,
+        expected_source_items: Option<Vec<RolloutItem>>,
+        expected_source_rollout_id: Option<RolloutId>,
+    ) -> CodexResult<(
+        InitialHistory,
+        Arc<Vec<RolloutItem>>,
+        ThreadLifecycleReservation,
+    )> {
+        let (frozen, reservation) = self
+            .snapshot_rollout_segment(source_thread_id, expected_source_rollout_id)
+            .await?;
+        let source_items = materialize_recent_rollout_lines_from(
+            codex_home,
+            full_history_from_frozen_segment(frozen.clone())
+                .get_rollout_items()
+                .iter()
+                .cloned()
+                .map(|item| RolloutLine {
+                    timestamp: String::new(),
+                    ordinal: None,
+                    item,
+                })
+                .collect(),
+        )
+        .await?
+        .into_iter()
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+        if let Some(expected_source_items) = expected_source_items {
+            let without_session_meta = |items: &[RolloutItem]| {
+                items
+                    .iter()
+                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            if serde_json::to_value(without_session_meta(&source_items))?
+                != serde_json::to_value(without_session_meta(&expected_source_items))?
+            {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "fork source {source_thread_id} changed before its snapshot was frozen"
+                )));
+            }
+        }
+        let source_history = InitialHistory::Resumed(ResumedHistory {
+            conversation_id: source_thread_id,
+            history: Arc::new(source_items.clone()),
+            rollout_path: Some(frozen.reference.rollout_path.clone()),
+        });
+        let expected_history =
+            fork_history_from_snapshot(snapshot, source_history, interrupted_marker);
+        let expected_items = expected_history.get_rollout_items().to_vec();
+        let nth_user_message = truncation::user_message_positions_in_rollout(&expected_items).len();
+
+        let mut reference = frozen.reference;
+        reference.nth_user_message = match snapshot {
+            ForkSnapshot::TruncateBeforeNthUserMessage(_) => Some(nth_user_message),
+            ForkSnapshot::Interrupted => reference.nth_user_message,
+        };
+        let mut history = source_items
+            .iter()
+            .find_map(|item| match item {
+                RolloutItem::SessionMeta(meta) => Some(RolloutItem::SessionMeta(meta.clone())),
+                _ => None,
+            })
+            .into_iter()
+            .chain(std::iter::once(RolloutItem::RolloutReference(reference)))
+            .collect::<Vec<_>>();
+        if expected_items.len() > source_items.len() {
+            history.extend_from_slice(&expected_items[source_items.len()..]);
+        }
+        Ok((
+            InitialHistory::Forked(history),
+            Arc::new(expected_items),
+            reservation,
+        ))
     }
 
     pub(crate) async fn read_stored_thread(
@@ -1712,7 +2020,7 @@ impl ThreadManagerState {
             agent_control,
             parent_thread_id,
             forked_from_thread_id,
-            fork_persistence,
+            fork_startup_items,
             inherited_environments,
             inherited_exec_policy,
             inherited_thread_state,
@@ -1741,6 +2049,11 @@ impl ThreadManagerState {
             )
         });
         let is_resumed_thread = matches!(&initial_history, InitialHistory::Resumed(_));
+        let model_history_complete = match &initial_history {
+            InitialHistory::New | InitialHistory::Cleared => true,
+            InitialHistory::Forked(_) => fork_startup_items.has_model_history_override(),
+            InitialHistory::Resumed(_) => false,
+        };
         if let InitialHistory::Resumed(resumed) = &initial_history {
             let mut threads = self.threads.write().await;
             if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
@@ -1809,8 +2122,8 @@ impl ThreadManagerState {
             code_mode_session_provider: Arc::clone(&self.code_mode_session_provider),
             extensions: Arc::clone(&self.extensions),
             conversation_history: initial_history,
+            fork_startup_items,
             requested_history_mode: history_mode,
-            fork_persistence,
             session_source,
             forked_from_thread_id,
             parent_thread_id,
@@ -1850,7 +2163,7 @@ impl ThreadManagerState {
             session.services.mcp_runtime.enable_full_access_form_input();
         }
         let new_thread = self
-            .finalize_thread_spawn(session, io, tracked_session_source)
+            .finalize_thread_spawn(session, io, tracked_session_source, model_history_complete)
             .await?;
         if source_changed_during_startup.load(Ordering::Acquire) {
             new_thread.thread.session.request_mcp_runtime_refresh();
@@ -1866,6 +2179,7 @@ impl ThreadManagerState {
         session: Arc<Session>,
         io: SessionIo,
         session_source: SessionSource,
+        model_history_complete: bool,
     ) -> CodexResult<NewThread> {
         let thread_id = session.thread_id();
         let event = io.next_event().await?;
@@ -1888,6 +2202,7 @@ impl ThreadManagerState {
                     session_configured.clone(),
                     session_configured.rollout_path.clone(),
                     session_source,
+                    model_history_complete,
                 ));
                 e.insert(thread.clone());
                 return Ok(NewThread {

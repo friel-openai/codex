@@ -723,7 +723,7 @@ async fn remote_legacy_history_start_negotiates_once_for_resume_and_fork() -> Re
     )
     .await
     .map_err(|error| color_eyre::eyre::eyre!(error))?;
-    assert_eq!(exported[0].raw_lines()[0].to_string(), "visible");
+    assert_eq!(exported[0].raw_lines()[0].to_string(), "paginated history");
     assert!(
         recorded_params(&requests, "thread/read")[initial_read_count..]
             .iter()

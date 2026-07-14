@@ -281,6 +281,7 @@ impl Session {
                     active_segment.counts_as_user_turn = true;
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::SessionMeta(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. } => {}
             }
@@ -369,6 +370,7 @@ impl Session {
                     history.drop_last_n_user_turns(rollback.num_turns);
                 }
                 RolloutItem::EventMsg(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SessionMeta(_) => {}
@@ -405,6 +407,7 @@ impl Session {
                     baseline.apply_merge_patch(&world_state.state);
                 }
                 RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::ResponseItem(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
