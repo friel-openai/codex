@@ -198,6 +198,8 @@ pub struct CodexThread {
     pub(crate) session: Arc<Session>,
     pub(crate) io: SessionIo,
     pub(crate) session_source: SessionSource,
+    /// Resumed Paginated sessions may contain only recent segments and cannot seed exact forks.
+    model_history_complete: bool,
     session_configured: SessionConfiguredEvent,
     rollout_path: Option<PathBuf>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
@@ -227,11 +229,13 @@ impl CodexThread {
         session_configured: SessionConfiguredEvent,
         rollout_path: Option<PathBuf>,
         session_source: SessionSource,
+        model_history_complete: bool,
     ) -> Self {
         Self {
             session,
             io,
             session_source,
+            model_history_complete,
             session_configured,
             rollout_path,
             out_of_band_elicitations: Mutex::new(OutOfBandElicitations::default()),
@@ -241,6 +245,31 @@ impl CodexThread {
 
     pub async fn submit(&self, op: Op) -> CodexResult<String> {
         self.io.submit(op).await
+    }
+
+    /// Returns complete model history only while an authoritative source thread is idle.
+    ///
+    /// Paginated resume can load only recent rollout segments, so its in-memory model history
+    /// must not be used as the complete parent history for an indexed fork.
+    pub async fn model_history_snapshot(&self) -> Option<Arc<Vec<ResponseItem>>> {
+        if !self.model_history_complete {
+            return None;
+        }
+
+        if self.session.active_turn.lock().await.is_some() {
+            return None;
+        }
+        if self.session.current_auto_compact_window_number().await != 0 {
+            return None;
+        }
+        let history = self.session.clone_history().await.shared_items();
+        if self.session.active_turn.lock().await.is_some()
+            || self.session.current_auto_compact_window_number().await != 0
+            || !Arc::ptr_eq(&history, &self.session.clone_history().await.shared_items())
+        {
+            return None;
+        }
+        Some(history)
     }
 
     /// Returns the session telemetry handle for thread-scoped production instrumentation.

@@ -32,8 +32,11 @@ use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
+use codex_protocol::models::ReasoningItemContent;
+use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CompactedItem;
@@ -52,6 +55,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::RolloutRecorder;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -252,7 +256,8 @@ async fn persisted_originator(thread: &CodexThread) -> String {
         .iter()
         .find_map(|item| match item {
             RolloutItem::SessionMeta(meta_line) => Some(meta_line.meta.originator.clone()),
-            RolloutItem::ResponseItem(_)
+            RolloutItem::RolloutReference(_)
+            | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::EventMsg(_)
@@ -1026,7 +1031,7 @@ async fn ephemeral_spawn_does_not_persist_agent_graph_edge() {
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+async fn spawn_agent_fork_from_paginated_parent_persists_reference_backed_model_context() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     parent_thread
@@ -1107,12 +1112,23 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
         .get_thread(child_thread_id)
         .await
         .expect("child thread should be registered");
+    let child_model_history = child_thread
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
     assert!(
-        history_contains_text(
-            child_thread.session.clone_history().await.raw_items(),
-            "paginated parent context",
-        ),
+        history_contains_text(&child_model_history, "paginated parent context"),
         "bounded parent context should remain model-visible to the child"
+    );
+    assert!(
+        child_model_history.iter().any(|item| {
+            serde_json::to_string(item)
+                .expect("serialize response item")
+                .contains("id-less inherited context")
+        }),
+        "model history should contain inherited response item"
     );
     child_thread.ensure_rollout_materialized().await;
     child_thread
@@ -1133,32 +1149,80 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
     assert_eq!(meta_line.meta.history_mode, ThreadHistoryMode::Paginated);
     assert_eq!(meta_line.meta.parent_thread_id, Some(parent_thread_id));
     assert_eq!(meta_line.meta.forked_from_id, Some(parent_thread_id));
-    let prefix_end = usize::try_from(
-        meta_line
-            .meta
-            .subagent_history_start_ordinal
-            .expect("paginated child should mark its local history boundary"),
+    let prefix_end = meta_line
+        .meta
+        .subagent_history_start_ordinal
+        .expect("paginated child should mark its local history boundary");
+    let copied_prefix = lines
+        .iter()
+        .skip(1)
+        .filter(|line| line.ordinal.is_some_and(|ordinal| ordinal < prefix_end))
+        .collect::<Vec<_>>();
+    let reference_ordinal = copied_prefix
+        .iter()
+        .find_map(|line| {
+            matches!(line.item, RolloutItem::RolloutReference(_)).then_some(line.ordinal)
+        })
+        .flatten()
+        .expect("inherited prefix should contain an ordinaled rollout reference");
+    assert_eq!(
+        prefix_end,
+        reference_ordinal + 1,
+        "the first child-local ordinal should immediately follow the inherited reference"
+    );
+    assert_eq!(
+        copied_prefix
+            .iter()
+            .filter(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .count(),
+        1,
+        "the inherited model context should remain reference-backed"
+    );
+    assert!(
+        !copied_prefix
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::SessionMeta(_))),
+        "the source session metadata should not be copied into the child rollout"
+    );
+    assert!(
+        !copied_prefix.iter().any(|line| {
+            let serialized = serde_json::to_string(&line.item).expect("serialize rollout item");
+            serialized.contains("paginated parent context")
+                || serialized.contains("id-less inherited context")
+        }),
+        "the inherited response payload should not be duplicated in the child rollout"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| { line.ordinal.is_some_and(|ordinal| ordinal >= prefix_end) }),
+        "child-local history should start at the recorded boundary"
+    );
+    let logical_lines = codex_rollout::materialize_recent_rollout_lines_from(
+        harness.config.codex_home.as_path(),
+        lines.clone(),
     )
-    .expect("history boundary should fit in usize");
-    let copied_prefix = &lines[1..prefix_end];
-    let copied_idless_context = copied_prefix
+    .await
+    .expect("materialize child rollout");
+    let inherited_idless_context = logical_lines
         .iter()
         .find_map(|line| match &line.item {
-            RolloutItem::ResponseItem(response_item)
-                if serde_json::to_string(response_item)
+            RolloutItem::ResponseItem(item)
+                if serde_json::to_string(item)
                     .expect("serialize response item")
                     .contains("id-less inherited context") =>
             {
-                Some(response_item)
+                Some(item)
             }
             _ => None,
         })
-        .expect("copied prefix should contain inherited response item");
-    assert!(
-        copied_idless_context.id().is_some_and(|id| !id.is_empty()),
-        "copied model context should receive response item ids before persistence"
+        .expect("materialized rollout should contain inherited response item");
+    assert_eq!(
+        inherited_idless_context.id(),
+        None,
+        "reference materialization should preserve the parent's response item"
     );
-    let copied_parent_context_count = lines
+    let inherited_parent_context_count = logical_lines
         .iter()
         .filter(|line| {
             serde_json::to_string(&line.item)
@@ -1167,8 +1231,8 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
         })
         .count();
     assert_eq!(
-        copied_parent_context_count, 1,
-        "copied model context should be persisted once"
+        inherited_parent_context_count, 1,
+        "the referenced parent context should materialize once"
     );
     assert!(
         !copied_prefix.iter().any(|line| {
@@ -1322,7 +1386,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
 }
 
 #[tokio::test]
-async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+async fn spawn_agent_full_history_fork_preserves_parent_prefix() {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -1350,14 +1414,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     parent_thread
         .inject_user_message_without_turn("parent seed context".to_string())
         .await;
-    let expected_parent_seed = parent_thread
-        .session
-        .clone_history()
-        .await
-        .raw_items()
-        .first()
-        .cloned()
-        .expect("parent seed should be recorded");
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-history".to_string();
     let trigger_message = InterAgentCommunication::new(
@@ -1410,9 +1466,27 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
                 assistant_message("parent unknown phase", /*phase*/ None),
                 ResponseItem::Reasoning {
                     id: Some(ResponseItemId::with_suffix("rs", "parent-reasoning")),
-                    summary: Vec::new(),
-                    content: None,
-                    encrypted_content: None,
+                    summary: vec![ReasoningItemReasoningSummary::SummaryText {
+                        text: "parent reasoning summary".to_string(),
+                    }],
+                    content: Some(vec![ReasoningItemContent::ReasoningText {
+                        text: "parent reasoning content".to_string(),
+                    }]),
+                    encrypted_content: Some("parent encrypted reasoning".to_string()),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCall {
+                    id: Some(ResponseItemId::with_suffix("fc", "parent-tool-call")),
+                    name: "parent_tool".to_string(),
+                    namespace: None,
+                    arguments: r#"{"value":1}"#.to_string(),
+                    call_id: "parent-tool-call".to_string(),
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                ResponseItem::FunctionCallOutput {
+                    id: Some(ResponseItemId::with_suffix("fco", "parent-tool-output")),
+                    call_id: "parent-tool-call".to_string(),
+                    output: FunctionCallOutputPayload::from_text("parent tool output".to_string()),
                     internal_chat_message_metadata_passthrough: None,
                 },
                 trigger_message.to_response_input_item().into(),
@@ -1433,6 +1507,12 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .flush_rollout()
         .await
         .expect("parent rollout should flush");
+    let parent_history = parent_thread
+        .session
+        .clone_history()
+        .await
+        .raw_items()
+        .to_vec();
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
@@ -1460,6 +1540,34 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .get_thread(child_thread_id)
         .await
         .expect("child thread should be registered");
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush");
+    let child_rollout_path = child_thread.rollout_path().expect("child rollout path");
+    let child_physical_items = RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
+        .await
+        .expect("read child physical rollout")
+        .0;
+    assert!(matches!(
+        child_physical_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
+    let parent_response_items = parent_history
+        .iter()
+        .map(|item| serde_json::to_value(item).expect("serialize parent response item"))
+        .collect::<Vec<_>>();
+    assert!(child_physical_items.iter().all(|item| {
+        let RolloutItem::ResponseItem(item) = item else {
+            return true;
+        };
+        !parent_response_items
+            .contains(&serde_json::to_value(item).expect("serialize child physical response item"))
+    }));
     assert_ne!(child_thread_id, parent_thread_id);
     assert_eq!(
         child_thread.config_snapshot().await.history_mode,
@@ -1524,8 +1632,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     ];
     assert_eq!(
         strip_response_item_ids(history.raw_items()),
-        strip_response_item_ids(&expected_history),
-        "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
+        strip_response_item_ids(expected_history.as_slice()),
+        "full-history forked child history should preserve the exact parent prefix before adding the child subagent hint"
     );
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
@@ -4490,7 +4598,7 @@ while True:
 }
 
 #[tokio::test]
-async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
+async fn spawn_agent_full_history_fork_preserves_compacted_parent_prefix() {
     let harness = AgentControlHarness::new().await;
     let mut parent_config = harness.config.clone();
     let _ = parent_config.features.enable(Feature::MultiAgentV2);
@@ -4601,7 +4709,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
             },
         )
         .await
-        .expect("forked spawn should sanitize compacted usage hints")
+        .expect("full-history fork should preserve compacted history")
         .thread_id;
 
     let child_thread = harness
@@ -4615,15 +4723,8 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
         "forked child history should retain compacted non-hint content"
     );
     assert!(
-        !history
-            .raw_items()
-            .iter()
-            .any(|item| matches!(item, ResponseItem::AgentMessage { .. })),
-        "forked child history should not inherit compacted parent agent messages"
-    );
-    assert!(
-        !history_contains_text(history.raw_items(), "Parent root guidance."),
-        "forked child history should strip stale parent hints from compacted replacement history"
+        history_contains_text(history.raw_items(), "Parent root guidance."),
+        "full-history forked child history should preserve the compacted parent prefix"
     );
     assert!(
         !history_contains_text(history.raw_items(), "Parent developer instructions."),
@@ -4645,7 +4746,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history() {
     );
     assert!(
         history_contains_text(history.raw_items(), "Child subagent guidance."),
-        "full-history forked child should add the child subagent hint after compacted-history sanitization"
+        "full-history forked child should add the child subagent hint after the inherited prefix"
     );
 
     let _ = harness
@@ -5020,8 +5121,9 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
+    let old_parent_context = format!("old parent context {}", "x".repeat(128 * 1_024));
     parent_thread
-        .inject_user_message_without_turn("old parent context".to_string())
+        .inject_user_message_without_turn(old_parent_context.clone())
         .await;
     let queued_communication = InterAgentCommunication::new(
         AgentPath::root(),
@@ -5106,6 +5208,21 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
         .get_thread(child_thread_id)
         .await
         .expect("child thread should be registered");
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("bounded child rollout should flush");
+    let child_rollout_bytes = tokio::fs::read(
+        child_thread
+            .rollout_path()
+            .expect("bounded child rollout path"),
+    )
+    .await
+    .expect("read bounded child rollout");
+    assert!(
+        child_rollout_bytes.len() < old_parent_context.len(),
+        "bounded child storage must not include the large excluded parent prefix"
+    );
     let history = child_thread.session.clone_history().await;
 
     assert!(

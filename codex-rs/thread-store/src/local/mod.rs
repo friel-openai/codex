@@ -13,6 +13,7 @@ mod rollout_migration;
 #[allow(dead_code)]
 mod rollout_lineage;
 mod search_threads;
+mod segment;
 mod thread_history;
 mod thread_history_materialization;
 mod thread_sections;
@@ -23,7 +24,10 @@ mod writer_lock;
 #[cfg(test)]
 mod test_support;
 
+use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_protocol::ThreadId;
+use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
@@ -47,6 +51,8 @@ use crate::CreateThreadSectionParams;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
 use crate::DeleteThreadsParams;
+use crate::FreezeRolloutSegmentParams;
+use crate::FrozenRolloutSegment;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListThreadSectionsParams;
@@ -62,13 +68,16 @@ use crate::RenameThreadSectionParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::SortDirection;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::StoredTurnItemsView;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
+use crate::ThreadPersistenceMode;
 use crate::ThreadSearchPage;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
@@ -116,6 +125,18 @@ struct LiveRecorderEntry {
     // so missing SQLite rows can still be seeded.
     history_mode: ThreadHistoryMode,
     writer_lock: WriterLockGuard,
+    /// Whether the recorder may materialize its canonical in-memory queue.
+    persistence_mode: ThreadPersistenceMode,
+    // Legacy rollout records do not contain canonical projected items or ordinals.
+    // Keep the reducer across appends and physical rotation so indexed visible
+    // history retains the same generated item and turn identities as JSONL replay.
+    legacy_history_builder: Arc<Mutex<ThreadHistoryBuilder>>,
+    // Resuming a recorder does not restore the legacy reducer. Do not extend an
+    // existing projection with generated item identities from a fresh reducer.
+    legacy_history_projection_enabled: bool,
+    // A resumed legacy writer rebuilds reducer state from complete canonical
+    // lineage before its first append, not from bounded model context.
+    legacy_history_builder_needs_rebuild: bool,
 }
 
 #[derive(Default)]
@@ -223,6 +244,48 @@ impl LocalThreadStore {
         self.state_db.clone()
     }
 
+    /// Returns whether the projected visible history can satisfy paginated reads.
+    pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
+        if thread_history::projection_state(self, thread_id)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        let newest_turn = thread_history::list_turns(
+            self,
+            ListTurnsParams {
+                thread_id,
+                include_archived: true,
+                cursor: None,
+                page_size: 1,
+                sort_direction: SortDirection::Desc,
+                items_view: StoredTurnItemsView::Summary,
+            },
+        )
+        .await?;
+
+        Ok(newest_turn
+            .turns
+            .first()
+            .is_none_or(|turn| !turn.items.is_empty()))
+    }
+
+    /// Returns the exact durable ordinal and byte offset of a projected thread.
+    pub async fn projected_history_position(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<HistoryPosition>> {
+        Ok(thread_history::projection_state(self, thread_id)
+            .await?
+            .map(|state| HistoryPosition {
+                thread_id,
+                end_ordinal_exclusive: state.next_ordinal,
+                end_byte_offset: state.next_byte_offset,
+            }))
+    }
+
     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
         if self.state_db.is_none() {
             return Err(ThreadStoreError::Unsupported {
@@ -260,6 +323,79 @@ impl LocalThreadStore {
         live_writer::rollout_path(self, thread_id).await
     }
 
+    /// Freezes the thread's current prefix and installs a reference-backed continuation.
+    pub async fn freeze_thread_segment(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<FrozenRolloutSegment> {
+        segment::freeze_thread_segment(self, thread_id, params).await
+    }
+
+    /// Freezes a paginated fork without reading history excluded from its response.
+    pub async fn prepare_fork_without_response_history(
+        &self,
+        params: PrepareForkParams,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history(self, params).await
+    }
+
+    /// Prepares a latest fork using a verified complete, in-memory source model context.
+    pub async fn prepare_fork_with_model_context(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItem>>,
+        expected_position: HistoryPosition,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_with_model_context(self, params, model_context, expected_position)
+            .await
+    }
+
+    /// Prepares a latest side fork without materializing projected response turns.
+    pub async fn prepare_fork_without_response_history_with_model_context(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItem>>,
+        expected_position: HistoryPosition,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_with_model_context(
+            self,
+            params,
+            model_context,
+            expected_position,
+        )
+        .await
+    }
+
+    /// Discard a derived legacy projection without modifying canonical rollout history.
+    pub async fn discard_segmented_legacy_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        thread_history::delete_thread(self, thread_id).await
+    }
+
+    /// Prevents deletion, archive, and unarchive while a new child reference is initialized.
+    pub async fn reserve_thread_lifecycle(
+        &self,
+        thread_id: ThreadId,
+    ) -> crate::ThreadLifecycleReservation {
+        crate::ThreadLifecycleReservation::new(
+            self.live_writer_locks.reserve_lifecycle(thread_id).await,
+        )
+    }
+
+    pub(crate) async fn live_persistence_mode(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<ThreadPersistenceMode> {
+        self.live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|entry| entry.persistence_mode)
+    }
+
     pub(super) async fn ensure_live_recorder_absent(
         &self,
         thread_id: ThreadId,
@@ -292,6 +428,7 @@ impl LocalThreadStore {
         recorder: RolloutRecorder,
         history_mode: ThreadHistoryMode,
         writer_lock: WriterLockGuard,
+        persistence_mode: ThreadPersistenceMode,
     ) -> ThreadStoreResult<()> {
         match self.live_recorders.lock().await.entry(thread_id) {
             Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
@@ -302,6 +439,10 @@ impl LocalThreadStore {
                     recorder,
                     history_mode,
                     writer_lock,
+                    persistence_mode,
+                    legacy_history_builder: Arc::new(Mutex::new(ThreadHistoryBuilder::new())),
+                    legacy_history_projection_enabled: true,
+                    legacy_history_builder_needs_rebuild: false,
                 });
                 Ok(())
             }
@@ -369,9 +510,41 @@ impl LocalThreadStore {
         thread_history::list_turns(self, params).await
     }
 
+    /// Read indexed segmented legacy turns without changing the legacy cursor.
+    pub async fn list_segmented_legacy_turns(
+        &self,
+        params: ListTurnsParams,
+    ) -> ThreadStoreResult<Option<TurnPage>> {
+        thread_history::list_segmented_legacy_turns(self, params).await
+    }
+
+    /// Read an existing legacy index without backfilling history during initial navigation.
+    pub async fn list_existing_segmented_legacy_turns(
+        &self,
+        params: ListTurnsParams,
+    ) -> ThreadStoreResult<Option<TurnPage>> {
+        thread_history::list_existing_segmented_legacy_turns(self, params).await
+    }
+
+    /// Reports whether a complete legacy index exists without triggering a history backfill.
+    pub async fn has_complete_segmented_legacy_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<bool> {
+        thread_history::has_complete_segmented_legacy_projection(self, thread_id).await
+    }
+
     /// Lists projection-backed items without enabling app-server routing yet.
     pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
         thread_history::list_items(self, params).await
+    }
+
+    /// Hydrate indexed segmented legacy items without exposing paginated history.
+    pub async fn list_segmented_legacy_items(
+        &self,
+        params: ListItemsParams,
+    ) -> ThreadStoreResult<Option<ItemPage>> {
+        thread_history::list_segmented_legacy_items(self, params).await
     }
 
     /// Searches projection-backed visible messages within one paginated thread.
@@ -566,6 +739,7 @@ mod tests {
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
@@ -864,6 +1038,62 @@ mod tests {
             .expect("sqlite metadata");
         assert_eq!(child_metadata.model.as_deref(), Some("child-model"));
         assert_eq!(child_metadata.approval_mode, "on-request");
+    }
+
+    #[tokio::test]
+    async fn inherited_model_context_boundary_uses_absolute_rollout_ordinals() {
+        let home = TempDir::new().expect("temp dir");
+        let store = Arc::new(LocalThreadStore::new(
+            test_config(home.path()),
+            /*state_db*/ None,
+        ));
+        let thread_id = ThreadId::default();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = ThreadHistoryMode::Paginated;
+        params.initial_rollout_ordinal = 41;
+        let message = |text: &str| {
+            RolloutItem::ResponseItem(ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+        };
+
+        let live_thread = LiveThread::create_with_inherited_model_context(
+            store.clone(),
+            params,
+            &[message("inherited")],
+        )
+        .await
+        .expect("create live thread with inherited context");
+        live_thread
+            .append_items(&[message("child")])
+            .await
+            .expect("append child context");
+        live_thread.flush().await.expect("flush thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+        let (lines, _, _) = RolloutRecorder::load_rollout_lines(&rollout_path)
+            .await
+            .expect("load rollout lines");
+
+        let RolloutItem::SessionMeta(meta_line) = &lines[0].item else {
+            panic!("rollout should start with session metadata");
+        };
+        assert_eq!(meta_line.meta.subagent_history_start_ordinal, Some(43));
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.ordinal.expect("line should have an ordinal"))
+                .collect::<Vec<_>>(),
+            vec![41, 42, 43]
+        );
     }
 
     #[tokio::test]
@@ -1323,6 +1553,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_thread_uses_supplied_history_mode_before_rollout_metadata() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(410);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let legacy_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-00-00",
+            uuid,
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("legacy session file");
+        let paginated_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-01-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("paginated session file");
+        let history = Arc::new(
+            RolloutRecorder::load_rollout_items(legacy_path.as_path())
+                .await
+                .expect("legacy supplied history")
+                .0,
+        );
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(paginated_path.clone()),
+                history: Some(history),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume from supplied legacy history");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("supplied legacy history mode")],
+            })
+            .await
+            .expect("append legacy item");
+        store.flush_thread(thread_id).await.expect("flush thread");
+
+        assert_rollout_contains_message(paginated_path.as_path(), "supplied legacy history mode")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn resume_thread_supplied_history_does_not_mask_malformed_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(411);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let legacy_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-02-00",
+            uuid,
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("legacy session file");
+        let history = Arc::new(
+            RolloutRecorder::load_rollout_items(legacy_path.as_path())
+                .await
+                .expect("legacy supplied history")
+                .0,
+        );
+        let malformed_path = home.path().join("malformed-rollout.jsonl");
+        std::fs::write(&malformed_path, "not a rollout line\n").expect("malformed rollout");
+
+        let error = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(malformed_path),
+                history: Some(history),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect_err("malformed nonempty rollout should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to resume local thread recorder")
+        );
+    }
+
+    #[tokio::test]
     async fn live_writers_reject_cross_process_create_and_resume() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
@@ -1681,7 +2001,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_threads_allow_metadata_reads_and_resume_but_reject_legacy_history_paths() {
+    async fn paginated_threads_allow_history_reads_and_resume() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = uuid::Uuid::from_u128(408);
@@ -1716,35 +2036,37 @@ mod tests {
         assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
         assert!(thread.history.is_none());
 
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread(ReadThreadParams {
-                    thread_id,
-                    include_archived: false,
-                    include_history: true,
-                })
-                .await
-                .expect_err("full history read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread_by_rollout_path(
-                    rollout_path.clone(),
-                    /*include_archived*/ true,
-                    /*include_history*/ true,
-                )
-                .await
-                .expect_err("full history path read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .load_history(LoadThreadHistoryParams {
-                    thread_id,
-                    include_archived: false,
-                })
-                .await
-                .expect_err("history load should fail"),
-        );
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("full history read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let thread = store
+            .read_thread_by_rollout_path(
+                rollout_path.clone(),
+                /*include_archived*/ true,
+                /*include_history*/ true,
+            )
+            .await
+            .expect("full history path read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("history load");
+        assert_eq!(history.thread_id, thread_id);
+
         store
             .resume_thread(ResumeThreadParams {
                 thread_id,
@@ -1810,6 +2132,20 @@ mod tests {
                     if event.message == "legacy event should not persist"
             )
         }));
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown paginated thread");
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume paginated thread");
     }
 
     fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
@@ -1829,18 +2165,11 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: thread_metadata(),
         }
-    }
-
-    fn assert_paginated_threads_unsupported(err: ThreadStoreError) {
-        assert!(matches!(
-            err,
-            ThreadStoreError::Unsupported {
-                operation: "paginated_threads"
-            }
-        ));
     }
 
     fn thread_metadata() -> ThreadPersistenceMetadata {

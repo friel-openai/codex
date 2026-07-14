@@ -14,6 +14,7 @@ mod ordinal;
 mod persistence_metrics;
 pub(crate) mod policy;
 pub(crate) mod recorder;
+mod reference;
 mod reverse_jsonl_scanner;
 mod rollout_reference_index;
 pub(crate) mod search;
@@ -25,6 +26,7 @@ pub(crate) use codex_protocol::protocol;
 
 pub const SESSIONS_SUBDIR: &str = "sessions";
 pub const ARCHIVED_SESSIONS_SUBDIR: &str = "archived_sessions";
+pub const ROTATED_ROLLOUT_SEGMENTS_SUBDIR: &str = "rotated_rollout_segments";
 pub static INTERACTIVE_SESSION_SOURCES: LazyLock<Vec<SessionSource>> = LazyLock::new(|| {
     vec![
         SessionSource::Cli,
@@ -67,6 +69,7 @@ pub use list::parse_cursor;
 pub use list::read_head_for_summary;
 pub use list::read_session_meta_line;
 pub use list::read_thread_item_from_rollout;
+pub use list::read_thread_item_from_rollout_with_indexed_preview;
 pub use list::rollout_date_parts;
 pub use maintenance::RolloutMaintenanceGuard;
 pub use maintenance::try_acquire_rollout_maintenance_lock;
@@ -82,6 +85,18 @@ pub use policy::should_persist_response_item_for_memories;
 pub use recorder::RolloutRecorder;
 pub use recorder::RolloutRecorderParams;
 pub use recorder::append_rollout_item_to_path;
+pub use reference::BoundedRolloutLines;
+pub use reference::BoundedRolloutMaterializer;
+pub use reference::MAX_ROLLOUT_REFERENCE_DEPTH;
+pub use reference::materialize_bounded_rollout_lines;
+pub use reference::materialize_model_context_rollout_items_from;
+pub use reference::materialize_recent_rollout_items;
+pub use reference::materialize_recent_rollout_lines;
+pub use reference::materialize_recent_rollout_lines_from;
+pub use reference::materialize_rollout_items;
+pub use reference::materialize_rollout_lines;
+pub use reference::materialize_rollout_lines_from;
+pub use reference::resolve_rollout_reference_path;
 pub use reverse_jsonl_scanner::ReverseJsonlScanner;
 pub use reverse_jsonl_scanner::ScanOutcome;
 pub use rollout_reference_index::RolloutReferenceIndex;

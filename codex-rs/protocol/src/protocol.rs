@@ -17,6 +17,7 @@ use strum_macros::EnumIter;
 
 use crate::AgentPath;
 use crate::ResponseItemId;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
@@ -57,6 +58,7 @@ use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -3034,6 +3036,7 @@ fn multi_agent_version_from_items(
         items.iter().rev().find_map(|item| match item {
             RolloutItem::TurnContext(turn_context) => turn_context.multi_agent_version,
             RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
             | RolloutItem::ResponseItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
@@ -3084,6 +3087,8 @@ pub struct HistoryPosition {
 pub struct SessionMeta {
     pub session_id: SessionId,
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3146,6 +3151,7 @@ impl Default for SessionMeta {
         SessionMeta {
             session_id: id.into(),
             id,
+            segment_id: None,
             forked_from_id: None,
             parent_thread_id: None,
             timestamp: String::new(),
@@ -3208,10 +3214,36 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+/// A compact pointer to an immutable rollout segment inherited by this thread.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum RolloutItem {
     SessionMeta(SessionMetaLine),
+    #[serde(alias = "fork_reference")]
+    RolloutReference(RolloutReferenceItem),
     ResponseItem(ResponseItem),
     /// Legacy delivery item reconstructed as a model-visible `agent_message`.
     InterAgentCommunication(InterAgentCommunication),
@@ -3290,6 +3322,7 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_turn_context_cwd")]
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -3338,6 +3371,27 @@ pub struct TurnContextItem {
     // read by context reconstruction and should be removed in a future schema
     // cleanup.
     pub summary: ReasoningSummaryConfig,
+}
+
+/// `TurnContextItem` briefly persisted cwd values as `PathUri`. Accept those
+/// rollout items without changing the current absolute-path serialization.
+fn deserialize_turn_context_cwd<'de, D>(deserializer: D) -> Result<AbsolutePathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let serialized = String::deserialize(deserializer)?;
+    if serialized.starts_with("file:") {
+        let cwd = PathUri::parse(&serialized).map_err(D::Error::custom)?;
+        return cwd.to_abs_path().map_err(D::Error::custom);
+    }
+
+    let path = PathBuf::from(serialized);
+    if !path.is_absolute() {
+        return Err(D::Error::custom(
+            "AbsolutePathBuf deserialized without a base path",
+        ));
+    }
+    AbsolutePathBuf::from_absolute_path(path).map_err(D::Error::custom)
 }
 
 impl TurnContextItem {
@@ -3563,6 +3617,7 @@ pub struct ExecCommandBeginEvent {
     /// The command to be executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3597,6 +3652,7 @@ pub struct ExecCommandEndEvent {
     /// The command that was executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3625,6 +3681,21 @@ pub struct ExecCommandEndEvent {
     pub status: ExecCommandStatus,
 }
 
+/// Older persisted events and turn items stored native absolute paths instead of file URIs.
+/// Keep current serialization while accepting those persisted records during resume.
+pub(crate) fn deserialize_path_uri_or_legacy_absolute_path<'de, D>(
+    deserializer: D,
+) -> Result<PathUri, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = LegacyAppPathString::deserialize(deserializer)?;
+    if let Ok(path_uri) = PathUri::parse(path.as_str()) {
+        return Ok(path_uri);
+    }
+    path.try_into().map_err(D::Error::custom)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ViewImageToolCallEvent {
     /// Identifier for the originating tool call.
@@ -3633,6 +3704,7 @@ pub struct ViewImageToolCallEvent {
     ///
     /// This core event is not exposed directly in the app-server API. App-server
     /// converts the path to `LegacyAppPathString` when building its public item.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub path: PathUri,
 }
 
@@ -4528,6 +4600,26 @@ mod tests {
         assert_eq!(serde_json::to_value(&decision)?, value);
         assert_eq!(serde_json::from_value::<ReviewDecision>(value)?, decision);
         Ok(())
+    }
+
+    #[test]
+    fn command_event_cwd_accepts_only_uri_or_legacy_absolute_path() {
+        for (serialized, expected) in [
+            (r#""file:///workspace""#, "file:///workspace"),
+            (r#""/legacy/workspace""#, "file:///legacy/workspace"),
+            (r#""C:\\legacy\\workspace""#, "file:///C:/legacy/workspace"),
+        ] {
+            let mut deserializer = serde_json::Deserializer::from_str(serialized);
+            let cwd = deserialize_path_uri_or_legacy_absolute_path(&mut deserializer)
+                .expect("URI or absolute path should deserialize");
+            assert_eq!(cwd.to_string(), expected);
+        }
+
+        for serialized in [r#""relative/workspace""#, r#""artifact://workspace""#] {
+            let mut deserializer = serde_json::Deserializer::from_str(serialized);
+            deserialize_path_uri_or_legacy_absolute_path(&mut deserializer)
+                .expect_err("relative paths and unsupported URI schemes must remain invalid");
+        }
     }
 
     #[test]
@@ -6011,6 +6103,37 @@ mod tests {
         let mut unknown = serialized;
         unknown["history_mode"] = json!("future");
         assert!(serde_json::from_value::<SessionMeta>(unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn rollout_reference_accepts_legacy_variant_name() -> Result<()> {
+        let item: RolloutItem = serde_json::from_value(json!({
+            "type": "fork_reference",
+            "payload": {
+                "rollout_path": "/tmp/source.jsonl",
+                "thread_id": "00000000-0000-0000-0000-000000000001",
+                "segment_id": "00000000-0000-0000-0000-000000000002"
+            }
+        }))?;
+
+        let RolloutItem::RolloutReference(reference) = item else {
+            panic!("expected rollout reference");
+        };
+        assert_eq!(reference.rollout_path, PathBuf::from("/tmp/source.jsonl"));
+        assert_eq!(reference.max_depth, DEFAULT_ROLLOUT_REFERENCE_DEPTH);
+        assert_eq!(
+            reference.thread_id,
+            Some(ThreadId::from_string(
+                "00000000-0000-0000-0000-000000000001"
+            )?)
+        );
+        assert_eq!(
+            reference.segment_id,
+            Some(SegmentId::from_string(
+                "00000000-0000-0000-0000-000000000002"
+            )?)
+        );
         Ok(())
     }
 

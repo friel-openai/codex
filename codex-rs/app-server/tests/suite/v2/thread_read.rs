@@ -54,28 +54,50 @@ use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_core::config::ConfigBuilder;
 use codex_exec_server::EnvironmentManager;
 use codex_feedback::CodexFeedback;
+use codex_protocol::AgentPath;
+use codex_protocol::SegmentId;
+use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::PlanItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AgentStatus as CoreAgentStatus;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource as ProtocolSessionSource;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
+use codex_rollout::RolloutRecorder;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
+use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::InMemoryThreadStore;
+use codex_thread_store::ListTurnsParams as StoreListTurnsParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
+use codex_thread_store::ReadThreadParams as StoreReadThreadParams;
+use codex_thread_store::SortDirection as StoreSortDirection;
+use codex_thread_store::StoredTurnItemsView;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
@@ -85,6 +107,7 @@ use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -213,7 +236,7 @@ async fn thread_read_can_include_turns() -> Result<()> {
 }
 
 #[tokio::test]
-async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
+async fn paginated_stored_thread_reads_unprojected_turns_through_read_apis() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
@@ -269,6 +292,17 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
         .expect("thread/list should include paginated thread");
     assert_eq!(listed.history_mode, ThreadHistoryMode::Paginated);
 
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: conversation_id.clone(),
+            include_turns: true,
+        })
+        .await?;
+    let ThreadReadResponse { thread } =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(read_id)).await??;
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(turn_user_texts(&thread.turns), vec!["Saved user message"]);
+
     let turns_list_id = mcp
         .send_thread_turns_list_request(ThreadTurnsListParams {
             thread_id: conversation_id.clone(),
@@ -283,14 +317,247 @@ async fn paginated_stored_thread_routes_projected_turns() -> Result<()> {
         mcp.read_stream_until_response_message(RequestId::Integer(turns_list_id)),
     )
     .await??;
-    assert_eq!(
-        to_response::<ThreadTurnsListResponse>(turns_list_resp)?,
-        ThreadTurnsListResponse {
-            data: Vec::new(),
-            next_cursor: None,
-            backwards_cursor: None,
-        }
+    let turns = to_response::<ThreadTurnsListResponse>(turns_list_resp)?;
+    assert_eq!(turn_user_texts(&turns.data), vec!["Saved user message"]);
+    assert_eq!(turns.next_cursor, None);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_segmented_history_without_index_returns_latest_five_turns() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let thread_id = codex_protocol::ThreadId::new();
+    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
+    let state_db =
+        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    let history_db_path = sqlite.thread_history_db_path();
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: codex_home.path().to_path_buf(),
+            sqlite,
+            default_model_provider_id: "mock_provider".to_string(),
+        },
+        Some(state_db),
     );
+    store
+        .create_thread(CreateThreadParams {
+            session_id: thread_id.into(),
+            thread_id,
+            extra_config: None,
+            forked_from_id: None,
+            parent_thread_id: None,
+            source: ProtocolSessionSource::Cli,
+            thread_source: None,
+            originator: "test_originator".to_string(),
+            base_instructions: BaseInstructions::default(),
+            dynamic_tools: Vec::new(),
+            selected_capability_roots: Vec::new(),
+            multi_agent_version: None,
+            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+            history_base: None,
+            subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
+            initial_window_id: Uuid::now_v7().to_string(),
+            metadata: ThreadPersistenceMetadata {
+                cwd: Some(codex_home.path().to_path_buf()),
+                model_provider: "mock_provider".to_string(),
+                memory_mode: ThreadMemoryMode::Enabled,
+            },
+        })
+        .await?;
+    store.persist_thread(thread_id).await?;
+
+    for index in 0..8 {
+        let turn_id = format!("turn-{index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    paginated_turn_started(&turn_id),
+                    paginated_completed_item(
+                        thread_id,
+                        &turn_id,
+                        CoreTurnItem::UserMessage(UserMessageItem {
+                            id: format!("user-{index}"),
+                            client_id: None,
+                            content: vec![codex_protocol::user_input::UserInput::Text {
+                                text: format!("user {index}"),
+                                text_elements: Vec::new(),
+                            }],
+                        }),
+                    ),
+                    paginated_completed_item(
+                        thread_id,
+                        &turn_id,
+                        CoreTurnItem::AgentMessage(AgentMessageItem {
+                            id: format!("agent-{index}"),
+                            content: vec![AgentMessageContent::Text {
+                                text: format!("answer {index}"),
+                            }],
+                            phase: None,
+                            memory_citation: None,
+                        }),
+                    ),
+                    paginated_turn_completed(&turn_id),
+                ],
+            })
+            .await?;
+        if index < 7 {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await?;
+        }
+    }
+    store.shutdown_thread(thread_id).await?;
+    drop(store);
+
+    let history_db_name = history_db_path
+        .file_name()
+        .expect("thread history database filename")
+        .to_string_lossy();
+    for path in [
+        history_db_path.clone(),
+        history_db_path.with_file_name(format!("{history_db_name}-wal")),
+        history_db_path.with_file_name(format!("{history_db_name}-shm")),
+    ] {
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+    }
+    assert!(!history_db_path.exists());
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let first_page = read_turns_page(
+        &mut mcp,
+        thread_id,
+        /*cursor*/ None,
+        Some(5),
+        SortDirection::Desc,
+        Some(TurnItemsView::Full),
+    )
+    .await?;
+    assert_eq!(
+        first_page
+            .data
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn-7", "turn-6", "turn-5", "turn-4", "turn-3"]
+    );
+    assert_eq!(
+        turn_user_texts(&first_page.data),
+        vec!["user 7", "user 6", "user 5", "user 4", "user 3"]
+    );
+    assert_eq!(
+        turn_agent_texts(&first_page.data),
+        vec!["answer 7", "answer 6", "answer 5", "answer 4", "answer 3"]
+    );
+
+    let first_items_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-7"),
+        /*cursor*/ None,
+        Some(1),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(first_items_page.data.len(), 1);
+    assert_eq!(first_items_page.data[0].turn_id, "turn-7");
+    assert_eq!(first_items_page.data[0].item.id(), "user-7");
+    let next_item_cursor = first_items_page
+        .next_cursor
+        .expect("user item should have an assistant item after it");
+
+    let second_items_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        Some("turn-7"),
+        Some(next_item_cursor),
+        Some(1),
+        SortDirection::Asc,
+    )
+    .await?;
+    assert_eq!(second_items_page.data.len(), 1);
+    assert_eq!(second_items_page.data[0].turn_id, "turn-7");
+    assert_eq!(second_items_page.data[0].item.id(), "agent-7");
+    assert!(second_items_page.next_cursor.is_none());
+
+    let latest_items_page = read_items_page(
+        &mut mcp,
+        thread_id,
+        /*turn_id*/ None,
+        /*cursor*/ None,
+        Some(8),
+        SortDirection::Desc,
+    )
+    .await?;
+    assert_eq!(
+        latest_items_page
+            .data
+            .iter()
+            .map(|entry| (entry.turn_id.as_str(), entry.item.id()))
+            .collect::<Vec<_>>(),
+        vec![
+            ("turn-7", "agent-7"),
+            ("turn-7", "user-7"),
+            ("turn-6", "agent-6"),
+            ("turn-6", "user-6"),
+            ("turn-5", "agent-5"),
+            ("turn-5", "user-5"),
+            ("turn-4", "agent-4"),
+            ("turn-4", "user-4"),
+        ]
+    );
+    assert!(latest_items_page.next_cursor.is_some());
+
+    let second_page = read_turns_page(
+        &mut mcp,
+        thread_id,
+        first_page.next_cursor.clone(),
+        Some(5),
+        SortDirection::Desc,
+        Some(TurnItemsView::Full),
+    )
+    .await?;
+    assert_eq!(
+        second_page
+            .data
+            .iter()
+            .map(|turn| turn.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["turn-2", "turn-1", "turn-0"]
+    );
+    assert!(second_page.next_cursor.is_none());
+
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread_id.to_string(),
+            exclude_turns: true,
+            initial_turns_page: Some(ThreadResumeInitialTurnsPageParams {
+                limit: Some(5),
+                sort_direction: Some(SortDirection::Desc),
+                items_view: Some(TurnItemsView::Full),
+            }),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadResumeResponse {
+        thread,
+        initial_turns_page,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(resume_id)).await??;
+    assert!(thread.turns.is_empty());
+    let resumed_page = initial_turns_page.expect("resume should return the latest five turns");
+    assert_eq!(resumed_page.data, first_page.data);
 
     Ok(())
 }
@@ -1821,6 +2088,8 @@ async fn thread_search_occurrences_reads_paginated_projection() -> Result<()> {
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -2869,6 +3138,8 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -3009,6 +3280,22 @@ async fn paginated_history_lists_and_legacy_reads_use_projected_turns_and_items(
         ..
     } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(legacy_resume_id)).await??;
     assert_eq!(legacy_thread.turns, expected_full_turns);
+
+    let loaded_read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread_id.to_string(),
+            include_turns: true,
+        })
+        .await?;
+    let loaded_read_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(loaded_read_id)),
+    )
+    .await??;
+    let ThreadReadResponse {
+        thread: loaded_read_thread,
+    } = to_response::<ThreadReadResponse>(loaded_read_resp)?;
+    assert_eq!(loaded_read_thread.turns, expected_full_turns);
 
     let initial_page_resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
@@ -3585,6 +3872,8 @@ async fn seed_pathless_store_thread(
             history_mode: Default::default(),
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,

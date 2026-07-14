@@ -102,6 +102,27 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
         })
 }
 
+fn request_has_user_input_text(req: &wiremock::Request, text: &str) -> bool {
+    decoded_body(req)
+        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("type").and_then(Value::as_str) == Some("message")
+                    && item.get("role").and_then(Value::as_str) == Some("user")
+                    && item
+                        .get("content")
+                        .and_then(Value::as_array)
+                        .is_some_and(|content| {
+                            content.iter().any(|span| {
+                                span.get("type").and_then(Value::as_str) == Some("input_text")
+                                    && span.get("text").and_then(Value::as_str) == Some(text)
+                            })
+                        })
+            })
+        })
+}
+
 fn decoded_body(req: &wiremock::Request) -> Option<Vec<u8>> {
     let is_zstd = req
         .headers
@@ -1362,7 +1383,6 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             json!(expected_reasoning_effort.to_string()),
         )
     );
-
     Ok(())
 }
 

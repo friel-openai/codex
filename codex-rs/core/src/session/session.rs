@@ -72,7 +72,6 @@ pub(crate) struct Session {
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
-    pub(super) fork_persistence: ForkPersistence,
     pub(super) next_internal_sub_id: AtomicU64,
 }
 
@@ -595,7 +594,6 @@ impl Session {
         tx_event: Sender<Event>,
         agent_status: watch::Sender<AgentStatus>,
         mut initial_history: InitialHistory,
-        fork_persistence: ForkPersistence,
         session_source: SessionSource,
         skills_service: Arc<HostSkillsService>,
         plugins_manager: Arc<PluginsManager>,
@@ -735,93 +733,132 @@ impl Session {
             thread_id.to_string(),
             thread_extension_init,
         );
+        let initial_rollout_ordinal = super::initial_rollout_ordinal(
+            &initial_history,
+            session_configuration.history_mode,
+            config.codex_home.as_path(),
+        )
+        .await?;
         // Kick off independent async setup tasks in parallel to reduce startup latency.
         //
         // - initialize thread persistence with new or resumed session info
         // - perform default shell discovery
         // - load history metadata (skipped for subagents)
-        let materialize_ephemeral_rollout = materialize_ephemeral_rollouts_for_debug();
+        let system_ephemeral = config.ephemeral
+            && matches!(
+                session_configuration.thread_source.as_ref(),
+                Some(ThreadSource::Feature(feature)) if feature == "system"
+            );
+        let materialize_ephemeral_rollout =
+            materialize_ephemeral_rollouts_for_debug() && !system_ephemeral;
+        let defer_ephemeral_rollout = config.ephemeral && !materialize_ephemeral_rollout;
         let thread_persistence_fut = async {
-            if config.ephemeral && !materialize_ephemeral_rollout {
-                Ok::<_, anyhow::Error>(None)
-            } else {
-                let live_thread = match &initial_history {
-                    InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => {
-                        let params = CreateThreadParams {
-                            session_id,
-                            thread_id,
-                            extra_config: config.extra_config.clone(),
-                            forked_from_id,
-                            parent_thread_id,
-                            source: session_source,
-                            thread_source: session_configuration.thread_source.clone(),
-                            originator: session_configuration.originator.clone(),
-                            base_instructions: BaseInstructions {
-                                text: session_configuration.base_instructions.clone(),
-                                provenance: base_instructions_provenance.clone(),
-                            },
-                            dynamic_tools: session_configuration.dynamic_tools.clone(),
-                            selected_capability_roots: selected_capability_roots.clone(),
-                            multi_agent_version: initial_multi_agent_version,
-                            history_mode: session_configuration.history_mode,
-                            history_base: match &fork_persistence {
-                                ForkPersistence::Copied => None,
-                                ForkPersistence::Referenced { history_base, .. } => *history_base,
-                            },
-                            subagent_history_start_ordinal: None,
-                            initial_window_id: initial_auto_compact_window_ids
-                                .window_id
-                                .to_string(),
-                            metadata: ThreadPersistenceMetadata {
-                                cwd: Some(config.cwd.to_path_buf()),
-                                model_provider: config.model_provider_id.clone(),
-                                memory_mode: if config.memories.generate_memories {
-                                    ThreadMemoryMode::Enabled
-                                } else {
-                                    ThreadMemoryMode::Disabled
+            let live_thread = match &initial_history {
+                _ if system_ephemeral => None,
+                InitialHistory::Resumed(_) if defer_ephemeral_rollout => None,
+                _ => {
+                    let live_thread = match &initial_history {
+                        InitialHistory::New
+                        | InitialHistory::Cleared
+                        | InitialHistory::Forked(_) => {
+                            let reference_backed_subagent = is_paginated_subagent
+                                && matches!(
+                                    &initial_history,
+                                    InitialHistory::Forked(items)
+                                        if items.iter().any(|item| matches!(
+                                            item,
+                                            RolloutItem::RolloutReference(_)
+                                        ))
+                                );
+                            let subagent_history_start_ordinal = if reference_backed_subagent {
+                                Some(initial_rollout_ordinal.checked_add(2).ok_or_else(|| {
+                                    anyhow::anyhow!("reference-backed subagent ordinal overflow")
+                                })?)
+                            } else {
+                                None
+                            };
+                            let params = CreateThreadParams {
+                                session_id,
+                                thread_id,
+                                extra_config: config.extra_config.clone(),
+                                forked_from_id,
+                                parent_thread_id,
+                                source: session_source,
+                                thread_source: session_configuration.thread_source.clone(),
+                                originator: session_configuration.originator.clone(),
+                                base_instructions: BaseInstructions {
+                                    text: session_configuration.base_instructions.clone(),
+                                    provenance: base_instructions_provenance.clone(),
                                 },
-                            },
-                        };
-                        if is_paginated_subagent
-                            && matches!(&fork_persistence, ForkPersistence::Copied)
-                            && let InitialHistory::Forked(items) = &initial_history
-                        {
-                            LiveThread::create_with_inherited_model_context(
+                                dynamic_tools: session_configuration.dynamic_tools.clone(),
+                                selected_capability_roots: selected_capability_roots.clone(),
+                                multi_agent_version: initial_multi_agent_version,
+                                history_mode: session_configuration.history_mode,
+                                history_base: None,
+                                subagent_history_start_ordinal,
+                                persistence_mode: if defer_ephemeral_rollout {
+                                    ThreadPersistenceMode::Deferred
+                                } else {
+                                    ThreadPersistenceMode::Durable
+                                },
+                                initial_rollout_ordinal,
+                                initial_window_id: initial_auto_compact_window_ids
+                                    .window_id
+                                    .to_string(),
+                                metadata: ThreadPersistenceMetadata {
+                                    cwd: Some(config.cwd.to_path_buf()),
+                                    model_provider: config.model_provider_id.clone(),
+                                    memory_mode: if config.memories.generate_memories {
+                                        ThreadMemoryMode::Enabled
+                                    } else {
+                                        ThreadMemoryMode::Disabled
+                                    },
+                                },
+                            };
+                            if is_paginated_subagent
+                                && let InitialHistory::Forked(items) = &initial_history
+                                && !items
+                                    .iter()
+                                    .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+                            {
+                                LiveThread::create_with_inherited_model_context(
+                                    Arc::clone(&thread_store),
+                                    params,
+                                    items,
+                                )
+                                .await?
+                            } else {
+                                LiveThread::create(Arc::clone(&thread_store), params).await?
+                            }
+                        }
+                        InitialHistory::Resumed(resumed_history) => {
+                            let params = ResumeThreadParams {
+                                thread_id: resumed_history.conversation_id,
+                                rollout_path: resumed_history.rollout_path.clone(),
+                                history: Some(resumed_history.history.clone()),
+                                include_archived: true,
+                                metadata: ThreadPersistenceMetadata {
+                                    cwd: Some(config.cwd.to_path_buf()),
+                                    model_provider: config.model_provider_id.clone(),
+                                    memory_mode: if config.memories.generate_memories {
+                                        ThreadMemoryMode::Enabled
+                                    } else {
+                                        ThreadMemoryMode::Disabled
+                                    },
+                                },
+                            };
+                            LiveThread::resume(
                                 Arc::clone(&thread_store),
+                                session_configuration.history_mode,
                                 params,
-                                items,
                             )
                             .await?
-                        } else {
-                            LiveThread::create(Arc::clone(&thread_store), params).await?
                         }
-                    }
-                    InitialHistory::Resumed(resumed_history) => {
-                        let params = ResumeThreadParams {
-                            thread_id: resumed_history.conversation_id,
-                            rollout_path: resumed_history.rollout_path.clone(),
-                            history: Some(resumed_history.history.clone()),
-                            include_archived: true,
-                            metadata: ThreadPersistenceMetadata {
-                                cwd: Some(config.cwd.to_path_buf()),
-                                model_provider: config.model_provider_id.clone(),
-                                memory_mode: if config.memories.generate_memories {
-                                    ThreadMemoryMode::Enabled
-                                } else {
-                                    ThreadMemoryMode::Disabled
-                                },
-                            },
-                        };
-                        LiveThread::resume(
-                            Arc::clone(&thread_store),
-                            session_configuration.history_mode,
-                            params,
-                        )
-                        .await?
-                    }
-                };
-                Ok(Some(live_thread))
-            }
+                    };
+                    Some(live_thread)
+                }
+            };
+            Ok::<_, anyhow::Error>(live_thread)
         }
         .instrument(info_span!(
             "session_init.thread_persistence",
@@ -892,7 +929,9 @@ impl Session {
                 e
             })?);
         let session_result: anyhow::Result<Arc<Self>> = async {
-            let rollout_path = if let Some(live_thread) = live_thread_init.as_ref() {
+            let rollout_path = if defer_ephemeral_rollout {
+                None
+            } else if let Some(live_thread) = live_thread_init.as_ref() {
                 live_thread.local_rollout_path().await?
             } else {
                 None
@@ -1345,7 +1384,6 @@ impl Session {
                 guardian_review_session: GuardianReviewSessionManager::default(),
                 services,
                 git_enrichment_policy,
-                fork_persistence,
                 next_internal_sub_id: AtomicU64::new(0),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
@@ -1438,16 +1476,12 @@ impl Session {
             };
 
             // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
-            Box::pin(sess.record_initial_history(initial_history)).await;
+            Box::pin(sess.record_initial_history(initial_history)).await?;
             if restore_child_window {
                 sess.state.lock().await.restore_auto_compact_window(
                     /*window_number*/ 0,
                     initial_auto_compact_window_ids,
                 );
-            }
-            if matches!(&sess.fork_persistence, ForkPersistence::Referenced { .. }) {
-                // Keep the source reserved until the child's history reference is durable.
-                sess.try_ensure_rollout_materialized().await?;
             }
             {
                 let mut state = sess.state.lock().await;

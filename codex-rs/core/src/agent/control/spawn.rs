@@ -76,7 +76,10 @@ fn keep_forked_rollout_item(item: &RolloutItem, preserve_reference_context_item:
         // from the parent's durable baseline. Truncated forks drop part of that prompt,
         // so they must rebuild context on their first child turn.
         RolloutItem::TurnContext(_) | RolloutItem::WorldState(_) => preserve_reference_context_item,
-        RolloutItem::Compacted(_) | RolloutItem::EventMsg(_) | RolloutItem::SessionMeta(_) => true,
+        RolloutItem::Compacted(_)
+        | RolloutItem::EventMsg(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::SessionMeta(_) => true,
     }
 }
 
@@ -656,28 +659,52 @@ impl AgentControl {
 
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
-        let mut forked_rollout_items =
-            load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                .await?
-                .ok_or_else(|| {
-                    CodexErr::Fatal(format!(
-                        "parent thread history unavailable for fork: {parent_thread_id}"
-                    ))
-                })?;
 
-        let selected_capability_roots = forked_rollout_items
-            .iter()
-            .find_map(|item| {
-                let RolloutItem::SessionMeta(meta_line) = item else {
-                    return None;
-                };
-                Some(meta_line.meta.selected_capability_roots.clone())
-            })
-            .unwrap_or_default();
-        if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-            forked_rollout_items =
-                truncate_rollout_to_last_n_fork_turns(forked_rollout_items, *last_n_turns);
-        }
+        let (selected_capability_roots, mut forked_rollout_items, source_reservation) =
+            match fork_mode {
+                SpawnAgentForkMode::FullHistory => {
+                    let (reference_history, source_reservation) = state
+                        .reference_backed_full_history(parent_thread_id)
+                        .await?;
+                    let selected_capability_roots =
+                        reference_history.get_selected_capability_roots();
+                    (
+                        selected_capability_roots,
+                        reference_history.get_rollout_items().to_vec(),
+                        Some(source_reservation),
+                    )
+                }
+                SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                    let parent_history =
+                        load_agent_model_context(&state, parent_thread_id, parent_history_mode)
+                            .await?
+                            .ok_or_else(|| {
+                                CodexErr::Fatal(format!(
+                                    "parent thread history unavailable for fork: {parent_thread_id}"
+                                ))
+                            })?;
+                    let source_session_meta = parent_history.iter().find_map(|item| match item {
+                        RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+                        _ => None,
+                    });
+                    let selected_capability_roots = parent_history
+                        .iter()
+                        .find_map(|item| {
+                            let RolloutItem::SessionMeta(meta_line) = item else {
+                                return None;
+                            };
+                            Some(meta_line.meta.selected_capability_roots.clone())
+                        })
+                        .unwrap_or_default();
+                    let mut forked_rollout_items =
+                        truncate_rollout_to_last_n_fork_turns(&parent_history, *last_n_turns);
+                    if let Some(source_session_meta) = source_session_meta {
+                        forked_rollout_items
+                            .insert(0, RolloutItem::SessionMeta(source_session_meta));
+                    }
+                    (selected_capability_roots, forked_rollout_items, None)
+                }
+            };
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
@@ -794,6 +821,7 @@ impl AgentControl {
                 | RolloutItem::TurnContext(_)
                 | RolloutItem::InterAgentCommunication(_)
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::RolloutReference(_)
                 | RolloutItem::WorldState(_) => true,
             }
         });
@@ -842,7 +870,7 @@ impl AgentControl {
             )
             .build();
 
-        state
+        let result = state
             .fork_thread_with_source(
                 config.clone(),
                 InitialHistory::Forked(forked_rollout_items),
@@ -858,7 +886,12 @@ impl AgentControl {
                 inherited_thread_state,
                 thread_extension_init,
             )
-            .await
+            .await;
+        if let Ok(new_thread) = &result {
+            new_thread.thread.flush_rollout().await?;
+        }
+        drop(source_reservation);
+        result
     }
 
     /// Resume an existing agent thread from a recorded rollout file.

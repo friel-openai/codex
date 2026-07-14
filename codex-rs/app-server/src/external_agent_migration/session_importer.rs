@@ -38,6 +38,7 @@ use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPersistenceMetadata;
+use codex_thread_store::ThreadPersistenceMode;
 use codex_thread_store::ThreadStore;
 use codex_thread_store::UpdateThreadMetadataParams;
 use futures::StreamExt;
@@ -485,6 +486,8 @@ impl ExternalAgentSessionImporter {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(cwd.clone()),

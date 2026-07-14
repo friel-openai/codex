@@ -23,6 +23,7 @@ use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use serde::Serialize;
+use serde_json::Value;
 use tokio::fs::File;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
@@ -411,6 +412,14 @@ impl LocalThreadStore {
         }
 
         if options.mode == RolloutMigrationMode::DryRun {
+            if let Some(message) = legacy_reference_migration_blocker(&path, &metadata).await? {
+                return Ok(Some(migration_outcome(
+                    thread_id,
+                    path,
+                    Err(migration_error(message)),
+                    /*bytes_processed*/ 0,
+                )));
+            }
             return Ok(Some(migration_outcome(
                 thread_id,
                 path,
@@ -436,6 +445,29 @@ impl LocalThreadStore {
                 )));
             }
         };
+        let locked_metadata = codex_rollout::read_session_meta_line(&path)
+            .await
+            .map_err(migration_error)?;
+        if locked_metadata.meta.id != thread_id
+            || locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
+        {
+            return Ok(Some(migration_outcome(
+                thread_id,
+                path,
+                Err(migration_error(
+                    "rollout metadata changed while waiting for the writer lock",
+                )),
+                /*bytes_processed*/ 0,
+            )));
+        }
+        if let Some(message) = legacy_reference_migration_blocker(&path, &locked_metadata).await? {
+            return Ok(Some(migration_outcome(
+                thread_id,
+                path,
+                Err(migration_error(message)),
+                /*bytes_processed*/ 0,
+            )));
+        }
         let bytes_before = limiter.bytes_processed;
         let result = match self
             .migrate_one_rollout(thread_id, &path, &journal_path, kind, limiter)
@@ -960,6 +992,36 @@ impl LocalThreadStore {
         }
         Ok(())
     }
+}
+
+async fn legacy_reference_migration_blocker(
+    rollout_path: &Path,
+    metadata: &codex_protocol::protocol::SessionMetaLine,
+) -> ThreadStoreResult<Option<String>> {
+    if metadata.meta.history_base.is_some() {
+        return Ok(Some(
+            "segmented legacy rollout migration requires an atomic lineage conversion".to_string(),
+        ));
+    }
+
+    let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+        .await
+        .map_err(migration_error)?;
+    while let Some(line) = reader.next_line().await.map_err(migration_error)? {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("rollout_reference" | "fork_reference")
+        ) {
+            return Ok(Some(
+                "reference-backed legacy rollout migration requires an atomic lineage conversion"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 async fn read_rollout_record(
