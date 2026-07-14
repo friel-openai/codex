@@ -20,24 +20,35 @@ pub(super) async fn prepare(
         thread_id,
         boundary,
     } = params;
+    let interrupt_if_open = matches!(&boundary, ForkBoundary::Latest);
     let source_reservation = store.live_writer_locks.reserve_lifecycle(thread_id).await;
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();
-    let (lineage, source_reservation) = tokio::spawn(async move {
-        match live_writer::persist_thread(&lineage_store, thread_id).await {
-            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
-            Err(err) => return Err(err),
-        }
-        let lineage = lineage_store
-            .resolve_rollout_lineage_for_reference(thread_id)
-            .await?;
-        Ok::<_, ThreadStoreError>((lineage, source_reservation))
-    })
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to resolve fork lineage: {err}"),
-    })??;
+    let (lineage, source_writer_guard, source_reservation, source_projection_was_missing) =
+        tokio::spawn(async move {
+            let source_projection_was_missing =
+                super::thread_history::projection_state(&lineage_store, thread_id)
+                    .await?
+                    .is_none();
+            match live_writer::persist_thread(&lineage_store, thread_id).await {
+                Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                Err(err) => return Err(err),
+            }
+            let (lineage, source_writer_guard) = lineage_store
+                .resolve_rollout_lineage_for_reference(thread_id)
+                .await?;
+            Ok::<_, ThreadStoreError>((
+                lineage,
+                source_writer_guard,
+                source_reservation,
+                source_projection_was_missing,
+            ))
+        })
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to resolve fork lineage: {err}"),
+        })??;
     let source_segment = lineage
         .segments()
         .last()
@@ -50,12 +61,29 @@ pub(super) async fn prepare(
         });
     }
     if !matches!(boundary, ForkBoundary::Latest) {
+        if source_projection_was_missing {
+            super::thread_history::clear_projection_cursor(store, thread_id).await?;
+        }
         for segment in lineage
             .segments()
             .iter()
             .take(lineage.segments().len().saturating_sub(1))
         {
-            let _ancestor_writer_guard = store.live_writer_locks.lock(segment.thread_id()).await;
+            if super::thread_history::projection_state(store, segment.thread_id())
+                .await?
+                .is_some_and(|state| {
+                    segment
+                        .end_ordinal()
+                        .is_some_and(|end| state.next_ordinal >= end)
+                })
+            {
+                continue;
+            }
+            let _ancestor_writer_guard = if segment.thread_id() == thread_id {
+                None
+            } else {
+                Some(store.live_writer_locks.lock(segment.thread_id()).await)
+            };
             super::thread_history_materialization::materialize_to_sqlite(
                 store,
                 segment.thread_id(),
@@ -64,7 +92,6 @@ pub(super) async fn prepare(
             .await?;
         }
     }
-    let source_writer_guard = store.live_writer_locks.lock(thread_id).await;
     super::thread_history_materialization::materialize_to_sqlite(
         store,
         thread_id,
@@ -127,36 +154,92 @@ pub(super) async fn prepare(
             }
         }
     };
-    let segment_index = lineage
-        .segments()
-        .iter()
-        .position(|segment| segment.thread_id() == position.thread_id)
-        .ok_or_else(|| ThreadStoreError::Internal {
-            message: "fork position is outside the source lineage".to_string(),
-        })?;
-    if lineage.segments()[segment_index].end.is_some_and(|end| {
-        position.end_ordinal_exclusive > end.end_ordinal_exclusive
-            || position.end_byte_offset > end.end_byte_offset
-    }) {
+    let segment_index = lineage.segments().iter().position(|segment| {
+        segment.thread_id() == position.thread_id
+            && position.end_ordinal_exclusive >= segment.start_ordinal()
+            && segment
+                .end_ordinal()
+                .is_none_or(|end| position.end_ordinal_exclusive <= end)
+    });
+    let Some(segment_index) = segment_index else {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: "fork boundary exceeds inherited source history".to_string(),
+        });
+    };
+    let segment = &lineage.segments()[segment_index];
+    if segment
+        .end_ordinal()
+        .is_some_and(|end| position.end_ordinal_exclusive > end)
+        || segment
+            .end_byte_offset
+            .is_some_and(|end| position.end_byte_offset > end)
+    {
         return Err(ThreadStoreError::InvalidRequest {
             message: "fork boundary exceeds inherited source history".to_string(),
         });
     }
-    let history_base =
-        if position.end_ordinal_exclusive == lineage.segments()[segment_index].start_ordinal() {
-            segment_index
-                .checked_sub(1)
-                .and_then(|index| lineage.segments()[index].end)
-        } else {
-            Some(position)
-        };
+    let history_base = if position.end_ordinal_exclusive == segment.start_ordinal() {
+        segment_index.checked_sub(1).and_then(|index| {
+            let previous = &lineage.segments()[index];
+            Some(HistoryPosition {
+                thread_id: previous.thread_id(),
+                end_ordinal_exclusive: previous.end_ordinal()?,
+                end_byte_offset: previous.end_byte_offset?,
+            })
+        })
+    } else {
+        Some(position)
+    };
+    let source_rollout_path = source_segment.rollout_path.clone();
+    let prefix_end = history_base.unwrap_or(position);
+    let prefix_lineage = lineage.clone().truncate_at(prefix_end).await?;
+    let prefix_segment =
+        prefix_lineage
+            .segments()
+            .last()
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: "normalized fork prefix is outside the source lineage".to_string(),
+            })?;
+    let prefix_thread_id = prefix_segment.thread_id();
+    let prefix_rollout_path = prefix_segment.rollout_path.clone();
+    let end_byte_offset =
+        prefix_segment
+            .end_byte_offset
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: "prepared fork prefix is missing its byte boundary".to_string(),
+            })?;
+    let prefix_writer_guard = if prefix_thread_id == thread_id {
+        None
+    } else {
+        Some(store.live_writer_locks.lock(prefix_thread_id).await)
+    };
+    let frozen_segment = super::segment::freeze_paginated_prefix_locked(
+        store,
+        thread_id,
+        source_rollout_path.as_path(),
+        prefix_thread_id,
+        prefix_rollout_path.as_path(),
+        prefix_end.end_ordinal_exclusive,
+        end_byte_offset,
+    )
+    .await?;
+    drop(prefix_writer_guard);
+    let latest_model_context =
+        Arc::new(model_context::load_for_fork(lineage.clone(), Some(latest_position)).await?);
+    let model_context =
+        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?);
+    let response_history =
+        Arc::new(model_context::load_full_for_fork(lineage, history_base).await?);
     drop(source_writer_guard);
-    let model_context = Arc::new(model_context::load_for_fork(lineage, history_base).await?);
 
     Ok(PreparedFork::new(
         thread_id,
         history_base,
+        frozen_segment,
         model_context,
+        latest_model_context,
+        response_history,
+        interrupt_if_open,
         source_reservation,
     ))
 }
