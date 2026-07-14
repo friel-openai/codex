@@ -1275,7 +1275,7 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
 }
 
 #[tokio::test]
-async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
+async fn rollout_path_resume_reads_history_through_thread_store() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -1358,31 +1358,14 @@ async fn rollout_path_resume_and_fork_read_history_through_thread_store() {
         .expect("resume from rollout path");
     assert_eq!(resumed_from_path.thread_id, resumed.thread_id);
 
-    let forked = manager
-        .fork_thread(
-            ForkSnapshot::Interrupted,
-            config,
-            rollout_path,
-            /*thread_source*/ None,
-            /*parent_trace*/ None,
-        )
-        .await
-        .expect("fork from rollout path");
-    assert_ne!(forked.thread_id, resumed.thread_id);
-
     let calls = in_memory_store.calls().await;
-    assert_eq!(calls.read_thread_by_rollout_path, 2);
+    assert_eq!(calls.read_thread_by_rollout_path, 1);
 
     resumed_from_path
         .thread
         .shutdown_and_wait()
         .await
         .expect("shutdown path-resumed thread");
-    forked
-        .thread
-        .shutdown_and_wait()
-        .await
-        .expect("shutdown forked thread");
 }
 
 #[tokio::test]
@@ -2006,11 +1989,13 @@ async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_
         .thread
         .rollout_path()
         .expect("re-forked rollout path should exist");
-    let reforked_history = RolloutRecorder::get_rollout_history(&reforked_path)
-        .await
-        .expect("read re-forked rollout history");
-    let reforked_rollout_items: Vec<_> = reforked_history
-        .get_rollout_items()
+    let reforked_rollout_items = codex_rollout::materialize_rollout_items(
+        config.codex_home.as_path(),
+        reforked_path.as_path(),
+    )
+    .await
+    .expect("materialize re-forked rollout history");
+    let reforked_rollout_items: Vec<_> = reforked_rollout_items
         .iter()
         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
         .collect();

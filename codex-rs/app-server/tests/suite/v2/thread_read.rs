@@ -218,8 +218,7 @@ async fn thread_read_can_include_turns() -> Result<()> {
 }
 
 #[tokio::test]
-async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_history_paths()
--> Result<()> {
+async fn paginated_stored_thread_supports_metadata_history_and_resume() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri())?;
@@ -289,39 +288,29 @@ async fn paginated_stored_thread_routes_projected_turns_and_rejects_legacy_histo
             include_turns: true,
         })
         .await?;
-    let read_err: JSONRPCError = timeout(
+    let read_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+        mcp.read_stream_until_response_message(RequestId::Integer(read_id)),
     )
     .await??;
-    assert_eq!(read_err.error.code, -32600);
-    assert_eq!(
-        read_err.error.message,
-        "paginated threads do not support thread/read(includeTurns=true)"
-    );
+    let ThreadReadResponse { thread } = to_response::<ThreadReadResponse>(read_resp)?;
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(turn_user_texts(&thread.turns), vec!["Saved user message"]);
 
-    let turns_list_id = mcp
-        .send_thread_turns_list_request(ThreadTurnsListParams {
-            thread_id: conversation_id.clone(),
-            cursor: None,
-            limit: None,
-            sort_direction: None,
-            items_view: None,
+    let resume_id = mcp
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: conversation_id,
+            ..Default::default()
         })
         .await?;
-    let turns_list_resp: JSONRPCResponse = timeout(
+    let resume_resp: JSONRPCResponse = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(turns_list_id)),
+        mcp.read_stream_until_response_message(RequestId::Integer(resume_id)),
     )
     .await??;
-    assert_eq!(
-        to_response::<ThreadTurnsListResponse>(turns_list_resp)?,
-        ThreadTurnsListResponse {
-            data: Vec::new(),
-            next_cursor: None,
-            backwards_cursor: None,
-        }
-    );
+    let ThreadResumeResponse { thread, .. } = to_response::<ThreadResumeResponse>(resume_resp)?;
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(turn_user_texts(&thread.turns), vec!["Saved user message"]);
 
     Ok(())
 }
@@ -1340,6 +1329,8 @@ async fn paginated_history_lists_use_projected_turns_and_items() -> Result<()> {
             multi_agent_version: None,
             history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: Some(codex_home.path().to_path_buf()),
@@ -1939,6 +1930,8 @@ async fn seed_pathless_store_thread(
             multi_agent_version: None,
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
+            persistence_mode: Default::default(),
+            initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
                 cwd: None,
