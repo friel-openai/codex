@@ -29,9 +29,24 @@ pub(super) async fn materialize_to_sqlite(
     if store.state_db.is_none() {
         return Ok(());
     }
-    let start_offset = super::thread_history::projection_state(store, thread_id)
-        .await?
+    let projection_state = super::thread_history::projection_state(store, thread_id).await?;
+    let mut start_offset = projection_state
+        .as_ref()
         .map_or(0, |state| state.next_byte_offset);
+    if let Some(state) = projection_state
+        && start_offset != 0
+        && first_rollout_ordinal(rollout_path).await? == Some(state.next_ordinal)
+    {
+        // The stable rollout was replaced after its immutable prefix was projected. Recover the
+        // physical cursor without changing the lineage ordinal or deleting the existing rows.
+        super::thread_history::reset_projection_for_replacement(
+            store,
+            thread_id,
+            state.next_ordinal,
+        )
+        .await?;
+        start_offset = 0;
+    }
     let (lines, next_offset) = read_complete_rollout_lines(rollout_path, start_offset).await?;
     // Empty valid records can still consume bytes through blank or rejected complete lines.
     if lines.is_empty() && start_offset == next_offset {
@@ -41,9 +56,10 @@ pub(super) async fn materialize_to_sqlite(
         .await
         .map_err(thread_store_io_error)?
         .meta;
-    let initial_ordinal = session_meta
-        .history_base
-        .map_or(0, |base| base.end_ordinal_exclusive);
+    let initial_ordinal = match session_meta.history_base {
+        Some(base) => base.end_ordinal_exclusive,
+        None => first_rollout_ordinal(rollout_path).await?.unwrap_or(0),
+    };
     let subagent_history_start_ordinal = session_meta.subagent_history_start_ordinal;
 
     let projections = lines
@@ -79,6 +95,21 @@ pub(super) async fn materialize_to_sqlite(
         projections,
     )
     .await
+}
+
+async fn first_rollout_ordinal(rollout_path: &Path) -> ThreadStoreResult<Option<u64>> {
+    let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    while let Some(line) = reader.next_line().await.map_err(thread_store_io_error)? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line =
+            serde_json::from_str::<RolloutLine>(line.as_str()).map_err(thread_history_error)?;
+        return Ok(line.ordinal);
+    }
+    Ok(None)
 }
 
 async fn read_complete_rollout_lines(

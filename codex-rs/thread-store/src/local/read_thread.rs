@@ -27,7 +27,6 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
-use crate::error::reject_paginated_history_mode;
 
 pub(super) async fn read_thread(
     store: &LocalThreadStore,
@@ -51,10 +50,7 @@ pub(super) async fn read_thread(
     {
         let metadata_sandbox_policy = metadata.sandbox_policy.clone();
         let mut thread = stored_thread_from_sqlite_metadata(store, metadata).await?;
-        // Paginated history may contain only a suffix, so its display metadata lives in SQLite.
-        // Legacy display metadata remains rollout-derived.
-        if thread.history_mode == ThreadHistoryMode::Legacy
-            && !params.include_history
+        if (!params.include_history || thread.preview.is_empty())
             && let Some(rollout_path) = thread.rollout_path.clone()
             && let Ok(mut rollout_thread) = read_thread_from_rollout_path(store, rollout_path).await
             && rollout_thread.thread_id == thread_id
@@ -73,8 +69,7 @@ pub(super) async fn read_thread(
             );
             thread = rollout_thread;
         }
-        reject_paginated_history(&thread, params.include_history)?;
-        attach_history_if_requested(&mut thread, params.include_history).await?;
+        attach_history_if_requested(store, &mut thread, params.include_history).await?;
         return Ok(thread);
     }
 
@@ -90,8 +85,7 @@ pub(super) async fn read_thread(
             message: format!("thread {} is archived", thread.thread_id),
         });
     }
-    reject_paginated_history(&thread, params.include_history)?;
-    attach_history_if_requested(&mut thread, params.include_history).await?;
+    attach_history_if_requested(store, &mut thread, params.include_history).await?;
     Ok(thread)
 }
 
@@ -149,16 +143,8 @@ pub(super) async fn read_thread_by_rollout_path(
             );
         }
     }
-    reject_paginated_history(&thread, include_history)?;
-    attach_history_if_requested(&mut thread, include_history).await?;
+    attach_history_if_requested(store, &mut thread, include_history).await?;
     Ok(thread)
-}
-
-fn reject_paginated_history(thread: &StoredThread, include_history: bool) -> ThreadStoreResult<()> {
-    if include_history {
-        reject_paginated_history_mode(thread.history_mode)?;
-    }
-    Ok(())
 }
 
 async fn resolve_requested_rollout_path(
@@ -203,6 +189,7 @@ async fn resolve_requested_rollout_path(
 }
 
 async fn attach_history_if_requested(
+    store: &LocalThreadStore,
     thread: &mut StoredThread,
     include_history: bool,
 ) -> ThreadStoreResult<()> {
@@ -215,7 +202,7 @@ async fn attach_history_if_requested(
             message: format!("failed to load thread history for thread {thread_id}"),
         });
     };
-    let items = load_history_items(&path).await?;
+    let items = load_history_items(store.config.codex_home.as_path(), &path).await?;
     thread.history = Some(StoredThreadHistory { thread_id, items });
     Ok(())
 }
@@ -308,14 +295,39 @@ async fn read_thread_from_rollout_path(
 }
 
 pub(super) async fn load_history_items(
+    codex_home: &std::path::Path,
     path: &std::path::Path,
 ) -> ThreadStoreResult<Vec<codex_protocol::protocol::RolloutItem>> {
-    let (items, _, _) = RolloutRecorder::load_rollout_items(path)
-        .await
-        .map_err(|err| ThreadStoreError::Internal {
-            message: format!("failed to load thread history {}: {err}", path.display()),
-        })?;
-    Ok(items)
+    let (lines, _, parse_errors) =
+        RolloutRecorder::load_rollout_lines(path)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!("failed to load thread history {}: {err}", path.display()),
+            })?;
+    if lines.iter().any(|line| {
+        matches!(
+            line.item,
+            codex_protocol::protocol::RolloutItem::RolloutReference(_)
+        )
+    }) {
+        return codex_rollout::materialize_recent_rollout_items(codex_home, path)
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to materialize thread history {}: {err}",
+                    path.display()
+                ),
+            });
+    }
+    if parse_errors != 0 {
+        return Err(ThreadStoreError::Internal {
+            message: format!(
+                "failed to load thread history {}: {parse_errors} invalid record(s)",
+                path.display()
+            ),
+        });
+    }
+    Ok(lines.into_iter().map(|line| line.item).collect())
 }
 
 async fn read_sqlite_metadata(
