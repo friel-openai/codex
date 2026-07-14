@@ -13,7 +13,11 @@ mod search;
 mod segment_paging;
 mod turn_lookup;
 
+pub(super) use read::has_complete_segmented_legacy_projection;
+pub(super) use read::list_existing_segmented_legacy_turns;
 pub(super) use read::list_items;
+pub(super) use read::list_segmented_legacy_items;
+pub(super) use read::list_segmented_legacy_turns;
 pub(super) use read::list_turns;
 pub(super) use search::search_thread_occurrences;
 pub(super) use turn_lookup::find_source_turn;
@@ -46,6 +50,12 @@ pub(super) struct RolloutProjectionState {
     pub next_byte_offset: u64,
     pub next_ordinal: u64,
 }
+
+/// An existing SQLite offset reserved until every legacy predecessor has been indexed.
+///
+/// A crash during a predecessor transaction must not make an incomplete projection appear current
+/// merely because that predecessor has the same byte length as the active rollout.
+pub(super) const INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET: i64 = i64::MAX;
 
 pub(super) async fn projection_state(
     store: &LocalThreadStore,
@@ -96,6 +106,86 @@ WHERE thread_id = ?
         .transpose()
 }
 
+pub(super) async fn reset_projection_for_replacement(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    next_rollout_ordinal: u64,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    let thread_id = thread_id.to_string();
+    let next_rollout_ordinal = sqlite_integer(next_rollout_ordinal, "rollout ordinal")?;
+    let existing_next_ordinal = sqlx::query_scalar::<_, i64>(
+        "SELECT next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
+    )
+    .bind(thread_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(thread_history_error)?;
+    if existing_next_ordinal.is_some_and(|ordinal| ordinal != next_rollout_ordinal) {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "thread history projection for {thread_id} does not end at ordinal {next_rollout_ordinal}"
+            ),
+        });
+    }
+    sqlx::query(
+        r#"
+INSERT INTO thread_history_projection_state (
+    thread_id,
+    next_rollout_byte_offset,
+    next_rollout_ordinal
+) VALUES (?, 0, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    next_rollout_byte_offset = 0,
+    next_rollout_ordinal = excluded.next_rollout_ordinal
+        "#,
+    )
+    .bind(thread_id)
+    .bind(next_rollout_ordinal)
+    .execute(pool)
+    .await
+    .map_err(thread_history_error)?;
+    Ok(())
+}
+
+pub(super) async fn clear_projection_cursor(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
+        .bind(thread_id.to_string())
+        .execute(pool)
+        .await
+        .map_err(thread_history_error)?;
+    Ok(())
+}
+
+pub(super) async fn begin_legacy_projection_backfill(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    sqlx::query(
+        r#"
+INSERT INTO thread_history_projection_state (
+    thread_id,
+    next_rollout_byte_offset,
+    next_rollout_ordinal
+) VALUES (?, ?, 0)
+ON CONFLICT(thread_id) DO UPDATE SET
+    next_rollout_byte_offset = excluded.next_rollout_byte_offset,
+    next_rollout_ordinal = 0
+        "#,
+    )
+    .bind(thread_id.to_string())
+    .bind(INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET)
+    .execute(pool)
+    .await
+    .map_err(thread_history_error)?;
+    Ok(())
+}
+
 pub(super) async fn apply_projection(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -103,6 +193,48 @@ pub(super) async fn apply_projection(
     next_offset: u64,
     initial_ordinal: u64,
     projections: Vec<RolloutProjectionStep>,
+) -> ThreadStoreResult<()> {
+    apply_projection_inner(
+        store,
+        thread_id,
+        start_offset,
+        next_offset,
+        initial_ordinal,
+        projections,
+        None,
+    )
+    .await
+}
+
+pub(super) async fn apply_legacy_projection(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    start_offset: u64,
+    next_offset: u64,
+    initial_ordinal: u64,
+    projections: Vec<RolloutProjectionStep>,
+    complete: bool,
+) -> ThreadStoreResult<()> {
+    apply_projection_inner(
+        store,
+        thread_id,
+        start_offset,
+        next_offset,
+        initial_ordinal,
+        projections,
+        Some(complete),
+    )
+    .await
+}
+
+async fn apply_projection_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    start_offset: u64,
+    next_offset: u64,
+    initial_ordinal: u64,
+    projections: Vec<RolloutProjectionStep>,
+    legacy_backfill_complete: Option<bool>,
 ) -> ThreadStoreResult<()> {
     let pool = store.thread_history_db().await?;
     // Write the projected rows and advance the JSONL offset and ordinal in one transaction. If
@@ -127,7 +259,10 @@ WHERE thread_id = ?
     let (expected_offset, mut next_ordinal) =
         projection_state.unwrap_or((0, sqlite_integer(initial_ordinal, "rollout ordinal")?));
     let start_offset = sqlite_integer(start_offset, "rollout byte offset")?;
-    if expected_offset != start_offset {
+    if expected_offset != start_offset
+        && !(legacy_backfill_complete.is_some()
+            && expected_offset == INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET)
+    {
         return Err(ThreadStoreError::Internal {
             message: format!("thread history projection for {thread_id} is behind durable rollout"),
         });
@@ -200,7 +335,10 @@ ON CONFLICT(thread_id) DO UPDATE SET
         "#,
     )
     .bind(thread_id.as_str())
-    .bind(sqlite_integer(next_offset, "rollout byte offset")?)
+    .bind(match legacy_backfill_complete {
+        Some(false) => INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET,
+        _ => sqlite_integer(next_offset, "rollout byte offset")?,
+    })
     .bind(next_ordinal)
     .execute(&mut *transaction)
     .await
@@ -256,7 +394,28 @@ async fn apply_change_set(
     fallback_created_at_ms: Option<i64>,
     changes: ThreadHistoryChangeSet,
 ) -> ThreadStoreResult<()> {
-    for turn in changes.changed_turns {
+    let ThreadHistoryChangeSet {
+        changed_turns,
+        changed_items,
+        removed_turn_ids,
+    } = changes;
+
+    for turn_id in removed_turn_ids {
+        sqlx::query("DELETE FROM thread_items WHERE thread_id = ? AND turn_id = ?")
+            .bind(thread_id)
+            .bind(turn_id.as_str())
+            .execute(&mut **transaction)
+            .await
+            .map_err(thread_history_error)?;
+        sqlx::query("DELETE FROM thread_turns WHERE thread_id = ? AND turn_id = ?")
+            .bind(thread_id)
+            .bind(turn_id.as_str())
+            .execute(&mut **transaction)
+            .await
+            .map_err(thread_history_error)?;
+    }
+
+    for turn in changed_turns {
         let turn_id = turn.turn_id;
         let error_json = turn
             .error
@@ -380,7 +539,7 @@ WHERE thread_id = ?
         .map_err(thread_history_error)?;
     }
 
-    for item in changes.changed_items {
+    for item in changed_items {
         let created_at_ms =
             item.started_at_ms
                 .or(fallback_created_at_ms)
@@ -434,8 +593,10 @@ UPDATE thread_turns
 SET first_user_item_id = COALESCE(first_user_item_id, ?)
 WHERE thread_id = ?
   AND turn_id = ?
-  AND rollout_end_ordinal IS NULL
-  AND status = 'inProgress'
+  AND (
+    (rollout_end_ordinal IS NULL AND status = 'inProgress')
+    OR (rollout_end_ordinal = rollout_ordinal AND status = 'completed')
+  )
                     "#,
                 )
                 .bind(item_id.as_str())
@@ -455,8 +616,10 @@ UPDATE thread_turns
 SET final_agent_item_id = ?
 WHERE thread_id = ?
   AND turn_id = ?
-  AND rollout_end_ordinal IS NULL
-  AND status = 'inProgress'
+  AND (
+    (rollout_end_ordinal IS NULL AND status = 'inProgress')
+    OR (rollout_end_ordinal = rollout_ordinal AND status = 'completed')
+  )
                     "#,
                 )
                 .bind(item_id.as_str())
