@@ -28,30 +28,76 @@ pub(super) struct ProjectedRolloutLine {
     pub changes: ThreadHistoryChangeSet,
 }
 
-pub(super) async fn next_rollout_byte_offset(
+pub(super) async fn projection_state(
     store: &LocalThreadStore,
     thread_id: ThreadId,
-) -> ThreadStoreResult<u64> {
+) -> ThreadStoreResult<(u64, u64)> {
     let db_path = codex_state::thread_history_db_path(store.config.sqlite_home.as_path());
     if !tokio::fs::try_exists(db_path.as_path())
         .await
         .map_err(thread_history_error)?
     {
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     let pool = store.thread_history_db().await?;
-    let offset = sqlx::query_scalar::<_, i64>(
-        "SELECT next_rollout_byte_offset FROM thread_history_projection_state WHERE thread_id = ?",
+    let (offset, ordinal) = sqlx::query_as::<_, (i64, i64)>(
+        "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
     )
     .bind(thread_id.to_string())
     .fetch_optional(pool)
     .await
     .map_err(thread_history_error)?
-    .unwrap_or(0);
-    u64::try_from(offset).map_err(|_| ThreadStoreError::Internal {
+    .unwrap_or((0, 0));
+    let offset = u64::try_from(offset).map_err(|_| ThreadStoreError::Internal {
         message: format!("thread history projection for {thread_id} has a negative byte offset"),
-    })
+    })?;
+    let ordinal = u64::try_from(ordinal).map_err(|_| ThreadStoreError::Internal {
+        message: format!("thread history projection for {thread_id} has a negative ordinal"),
+    })?;
+    Ok((offset, ordinal))
+}
+
+pub(super) async fn reset_projection_for_replacement(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    next_rollout_ordinal: u64,
+) -> ThreadStoreResult<()> {
+    let pool = store.thread_history_db().await?;
+    let thread_id = thread_id.to_string();
+    let next_rollout_ordinal = sqlite_integer(next_rollout_ordinal, "rollout ordinal")?;
+    let existing_next_ordinal = sqlx::query_scalar::<_, i64>(
+        "SELECT next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
+    )
+    .bind(thread_id.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(thread_history_error)?;
+    if existing_next_ordinal.is_some_and(|ordinal| ordinal != next_rollout_ordinal) {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "thread history projection for {thread_id} does not end at ordinal {next_rollout_ordinal}"
+            ),
+        });
+    }
+    sqlx::query(
+        r#"
+INSERT INTO thread_history_projection_state (
+    thread_id,
+    next_rollout_byte_offset,
+    next_rollout_ordinal
+) VALUES (?, 0, ?)
+ON CONFLICT(thread_id) DO UPDATE SET
+    next_rollout_byte_offset = 0,
+    next_rollout_ordinal = excluded.next_rollout_ordinal
+        "#,
+    )
+    .bind(thread_id)
+    .bind(next_rollout_ordinal)
+    .execute(pool)
+    .await
+    .map_err(thread_history_error)?;
+    Ok(())
 }
 
 pub(super) async fn apply_projection(
@@ -81,7 +127,15 @@ WHERE thread_id = ?
     .fetch_optional(&mut *transaction)
     .await
     .map_err(thread_history_error)?;
-    let (expected_offset, mut next_ordinal) = projection_state.unwrap_or((0, 0));
+    let first_projection_ordinal = projections.first().map(|projection| projection.ordinal);
+    let (expected_offset, mut next_ordinal) = projection_state.unwrap_or_else(|| {
+        (
+            0,
+            first_projection_ordinal
+                .and_then(|ordinal| i64::try_from(ordinal).ok())
+                .unwrap_or(0),
+        )
+    });
     let start_offset = sqlite_integer(start_offset, "rollout byte offset")?;
     if expected_offset != start_offset {
         return Err(ThreadStoreError::Internal {
