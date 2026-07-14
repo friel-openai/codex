@@ -25,9 +25,23 @@ pub(super) async fn materialize_to_sqlite(
         return Ok(());
     }
     let projection_state = super::thread_history::projection_state(store, thread_id).await?;
-    let start_offset = projection_state
+    let mut start_offset = projection_state
         .as_ref()
         .map_or(0, |state| state.next_byte_offset);
+    if let Some(state) = projection_state.as_ref()
+        && start_offset != 0
+        && first_rollout_ordinal(rollout_path).await? == Some(state.next_ordinal)
+    {
+        // The stable rollout was replaced after its immutable prefix was projected. Recover the
+        // physical cursor without changing the lineage ordinal or deleting the existing rows.
+        super::thread_history::reset_projection_for_replacement(
+            store,
+            thread_id,
+            state.next_ordinal,
+        )
+        .await?;
+        start_offset = 0;
+    }
     if projection_state.is_none()
         && !tokio::fs::try_exists(rollout_path)
             .await
@@ -39,9 +53,10 @@ pub(super) async fn materialize_to_sqlite(
         .await
         .map_err(thread_store_io_error)?
         .meta;
-    let initial_ordinal = session_meta
-        .history_base
-        .map_or(0, |base| base.end_ordinal_exclusive);
+    let initial_ordinal = match session_meta.history_base {
+        Some(base) => base.end_ordinal_exclusive,
+        None => first_rollout_ordinal(rollout_path).await?.unwrap_or(0),
+    };
     let subagent_history_start_ordinal = session_meta.subagent_history_start_ordinal;
     let expected_ordinal = projection_state
         .as_ref()
@@ -67,6 +82,21 @@ pub(super) async fn materialize_to_sqlite(
         projections,
     )
     .await
+}
+
+async fn first_rollout_ordinal(rollout_path: &Path) -> ThreadStoreResult<Option<u64>> {
+    let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    while let Some(line) = reader.next_line().await.map_err(thread_store_io_error)? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line =
+            serde_json::from_str::<RolloutLine>(line.as_str()).map_err(thread_history_error)?;
+        return Ok(line.ordinal);
+    }
+    Ok(None)
 }
 
 async fn read_projection_steps(
@@ -272,6 +302,12 @@ async fn read_projection_steps(
         line_start_offset = line_end_offset;
     }
     Ok((projections, next_offset))
+}
+
+fn thread_history_error(err: impl std::fmt::Display) -> ThreadStoreError {
+    ThreadStoreError::Internal {
+        message: format!("failed to project thread history: {err}"),
+    }
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
