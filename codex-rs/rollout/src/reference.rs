@@ -24,7 +24,10 @@ use crate::compression;
 use crate::recorder::RolloutRecorder;
 
 /// The global graph-depth bound used by correctness-critical rollout readers.
-pub const MAX_ROLLOUT_REFERENCE_DEPTH: usize = 64;
+///
+/// The observed long-lived thread contains 116 linear segments. A limit of 256
+/// provides more than twice that capacity while still bounding recursive polling.
+pub const MAX_ROLLOUT_REFERENCE_DEPTH: usize = 256;
 
 /// The immutable identity recorded by a rollout reference.
 ///

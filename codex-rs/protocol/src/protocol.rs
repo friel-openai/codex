@@ -3251,6 +3251,7 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_turn_context_cwd")]
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -3291,6 +3292,27 @@ pub struct TurnContextItem {
     // read by context reconstruction and should be removed in a future schema
     // cleanup.
     pub summary: ReasoningSummaryConfig,
+}
+
+/// `TurnContextItem` briefly persisted cwd values as `PathUri`. Accept those
+/// rollout items without changing the current absolute-path serialization.
+fn deserialize_turn_context_cwd<'de, D>(deserializer: D) -> Result<AbsolutePathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let serialized = String::deserialize(deserializer)?;
+    if serialized.starts_with("file:") {
+        let cwd = PathUri::parse(&serialized).map_err(D::Error::custom)?;
+        return cwd.to_abs_path().map_err(D::Error::custom);
+    }
+
+    let path = PathBuf::from(serialized);
+    if !path.is_absolute() {
+        return Err(D::Error::custom(
+            "AbsolutePathBuf deserialized without a base path",
+        ));
+    }
+    AbsolutePathBuf::from_absolute_path(path).map_err(D::Error::custom)
 }
 
 impl TurnContextItem {

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -19,9 +20,11 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use pretty_assertions::assert_eq;
+use serde_json::json;
 use tempfile::TempDir;
 
 use super::MAX_ROLLOUT_REFERENCE_DEPTH;
+use super::expand_lines;
 use super::materialize_rollout_lines;
 use super::resolve_rollout_reference_path;
 use crate::ARCHIVED_SESSIONS_SUBDIR;
@@ -366,6 +369,62 @@ async fn thread_summary_uses_inherited_reference_preview() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn materialization_accepts_legacy_turn_context_file_uri_cwd() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let source_thread = ThreadId::new();
+    let source_segment = SegmentId::new();
+    let source_path = home.path().join("source.jsonl");
+    let source_meta = serde_json::to_string(&meta_line(source_thread, source_segment, 0))?;
+    let (legacy_cwd, expected_cwd) = if cfg!(windows) {
+        ("file:///C:/tmp", Path::new(r"C:\tmp"))
+    } else {
+        ("file:///tmp", Path::new("/tmp"))
+    };
+    let legacy_turn_context = json!({
+        "timestamp": "2026-07-13T00:00:01Z",
+        "ordinal": 1,
+        "type": "turn_context",
+        "payload": {
+            "cwd": legacy_cwd,
+            "approval_policy": "never",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "gpt-5",
+            "summary": "auto"
+        }
+    });
+    fs::write(
+        source_path.as_path(),
+        format!("{source_meta}\n{legacy_turn_context}\n"),
+    )?;
+
+    let root_thread = ThreadId::new();
+    let root_segment = SegmentId::new();
+    let root_path = home.path().join("root.jsonl");
+    write_rollout(
+        root_path.as_path(),
+        &[
+            meta_line(root_thread, root_segment, 2),
+            reference_line(source_path, source_thread, source_segment, 3),
+        ],
+    )?;
+
+    let lines = materialize_rollout_lines(home.path(), root_path.as_path()).await?;
+    let turn_context = lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::TurnContext(turn_context) => Some(turn_context),
+            _ => None,
+        })
+        .expect("legacy turn context should be preserved");
+    assert_eq!(turn_context.cwd.as_path(), expected_cwd);
+    assert_eq!(
+        serde_json::to_value(turn_context)?["cwd"],
+        json!(expected_cwd)
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolver_rejects_missing_and_mismatched_segments() -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
@@ -656,7 +715,33 @@ async fn materialization_rejects_legacy_reference_cycles() -> io::Result<()> {
 #[tokio::test]
 async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
     let home = TempDir::new()?;
-    let identities = (0..=MAX_ROLLOUT_REFERENCE_DEPTH + 1)
+    let referenced_thread = ThreadId::new();
+    let referenced_segment = SegmentId::new();
+    let error = expand_lines(
+        home.path(),
+        vec![reference_line(
+            home.path().join("unresolved.jsonl"),
+            referenced_thread,
+            referenced_segment,
+            0,
+        )],
+        &mut HashSet::new(),
+        MAX_ROLLOUT_REFERENCE_DEPTH,
+        /*inherited_filter_texts*/ None,
+    )
+    .await
+    .err()
+    .expect("depth exhaustion should fail before resolving the reference");
+    assert!(error.to_string().contains("maximum depth"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn materialization_accepts_reference_chain_longer_than_legacy_limit() -> io::Result<()> {
+    const LEGACY_MAX_ROLLOUT_REFERENCE_DEPTH: usize = 64;
+
+    let home = TempDir::new()?;
+    let identities = (0..=LEGACY_MAX_ROLLOUT_REFERENCE_DEPTH + 1)
         .map(|_| (ThreadId::new(), SegmentId::new()))
         .collect::<Vec<_>>();
     let paths = identities
@@ -678,10 +763,7 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
         write_rollout(paths[index].as_path(), &lines)?;
     }
 
-    let error = materialize_rollout_lines(home.path(), paths[0].as_path())
-        .await
-        .err()
-        .expect("depth exhaustion should fail");
-    assert!(error.to_string().contains("maximum depth"));
+    let lines = materialize_rollout_lines(home.path(), paths[0].as_path()).await?;
+    assert_eq!(lines.len(), 1);
     Ok(())
 }
