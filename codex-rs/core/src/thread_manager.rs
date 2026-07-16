@@ -740,9 +740,11 @@ impl ThreadManager {
     }
 
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
+        let agent_control = self.agent_control_for_config(&options.config);
         Box::pin(self.start_thread_inner(
             options,
             /*forked_from_thread_id*/ None,
+            agent_control,
             ForkPersistence::Copied,
         ))
         .await
@@ -752,6 +754,7 @@ impl ThreadManager {
         &self,
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+        agent_control: AgentControl,
         fork_persistence: ForkPersistence,
     ) -> CodexResult<NewThread> {
         let environments = options.environments.unwrap_or_else(|| {
@@ -761,7 +764,6 @@ impl ThreadManager {
                 &options.config.workspace_roots,
             )
         });
-        let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
             .get_resumed_session_sources()
@@ -802,6 +804,7 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
+        let agent_control = fork_source.session.services.agent_control.clone();
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
@@ -822,6 +825,7 @@ impl ThreadManager {
         self.start_thread_inner(
             options,
             Some(forked_from_thread_id),
+            agent_control,
             ForkPersistence::ReferenceBacked {
                 source_reservation: Arc::new(tokio::sync::Mutex::new(Some(
                     reference_backed_history.source_reservation,
