@@ -83,6 +83,8 @@ impl AppsRequestProcessor {
                             .then(|| Arc::clone(&self.auth_manager));
                     let connection_manager = McpConnectionManager::new(
                         &mcp_servers,
+                        &codex_mcp::McpConnectionPool::default(),
+                        codex_mcp::McpConnectionPoolMode::Reuse,
                         config.mcp_oauth_credentials_store_mode,
                         config.auth_keyring_backend_kind(),
                         &config.permissions.approval_policy,
