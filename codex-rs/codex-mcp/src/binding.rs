@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
-use crate::rmcp_client::ManagedClient;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 
@@ -184,7 +184,7 @@ impl fmt::Debug for McpBinding {
 #[derive(Clone)]
 pub struct PreparedMcpCall {
     connections: Arc<McpConnectionSet>,
-    client: Arc<ManagedClient>,
+    client: McpPooledBindingClient,
     config: Arc<McpConfig>,
     catalog_revision: u64,
     catalog_revision_source: Arc<RwLock<u64>>,
@@ -202,7 +202,7 @@ impl PreparedMcpCall {
     )]
     pub(crate) fn new(
         connections: Arc<McpConnectionSet>,
-        client: Arc<ManagedClient>,
+        client: McpPooledBindingClient,
         config: Arc<McpConfig>,
         catalog_revision: u64,
         catalog_revision_source: Arc<RwLock<u64>>,
@@ -293,6 +293,11 @@ impl PreparedMcpCall {
             .map(std::num::NonZeroUsize::get)
     }
 
+    #[cfg(test)]
+    pub(crate) fn captured_tool_timeout(&self) -> Option<std::time::Duration> {
+        self.client.tool_timeout()
+    }
+
     pub fn plugin_id(&self) -> Option<&str> {
         self.plugin_id.as_deref()
     }
@@ -331,7 +336,7 @@ impl PreparedMcpCall {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Option<JsonValue>, Option<JsonValue>)>>,
     {
-        let effective_timeout = match (self.client.tool_timeout, requested_timeout) {
+        let effective_timeout = match (self.client.tool_timeout(), requested_timeout) {
             (Some(server_timeout), Some(requested_timeout)) => {
                 Some(server_timeout.min(requested_timeout))
             }
@@ -376,12 +381,17 @@ impl PreparedMcpCall {
             }
             None => None,
         };
+        let server_name = self.server_name.clone();
         let result = self
             .client
-            .client
-            .call_tool(tool_name.clone(), arguments, meta, remaining_timeout)
-            .await
-            .with_context(|| format!("tool call failed for `{}/{tool_name}`", self.server_name))?;
+            .run(move |client| async move {
+                client
+                    .client
+                    .call_tool(tool_name.clone(), arguments, meta, remaining_timeout)
+                    .await
+                    .with_context(|| format!("tool call failed for `{server_name}/{tool_name}`"))
+            })
+            .await?;
         drop(current_revision);
         Ok(call_tool_result_from_rmcp(result))
     }

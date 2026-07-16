@@ -75,6 +75,7 @@ pub use rmcp_client::SendElicitation;
 pub use rmcp_client::StreamableHttpBearerToken;
 pub use rmcp_client::ToolWithConnectorId;
 pub use service_error::mcp_error;
+pub use rmcp_client::is_connection_unusable;
 pub use startup_error::is_authentication_required_error;
 pub use stdio_server_launcher::ExecutorStdioServerLauncher;
 pub use stdio_server_launcher::LocalStdioServerLauncher;

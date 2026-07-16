@@ -3626,6 +3626,7 @@ dependencies = [
  "codex-utils-plugins",
  "futures",
  "insta",
+ "http 1.4.0",
  "lru",
  "pretty_assertions",
  "regex-lite",
