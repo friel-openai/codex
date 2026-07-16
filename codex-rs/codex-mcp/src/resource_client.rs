@@ -20,6 +20,7 @@ use tokio::runtime::Handle;
 
 use crate::McpRuntime;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpPooledClient;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 
 /// One page of resources returned by an MCP server.
@@ -66,7 +67,7 @@ pub struct McpEventNotification {
 pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
     runtime_handle: Handle,
-    _connections: Arc<McpConnectionSet>,
+    pooled_client: McpPooledClient,
 }
 
 impl McpEventStream {
@@ -117,14 +118,14 @@ impl Drop for McpEventStream {
         }) = self.request.take()
         {
             drop(notifications);
-            let connections = Arc::clone(&self._connections);
+            let pooled_client = self.pooled_client.clone();
             self.runtime_handle.spawn(async move {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
                     handle.cancel(Some("event subscription closed".to_string())),
                 )
                 .await;
-                drop(connections);
+                drop(pooled_client);
             });
         }
     }
@@ -224,14 +225,23 @@ impl McpResourceClient {
     pub async fn list_events(&self) -> Result<McpEventCatalogSnapshot> {
         let connections = self.runtime.latest_connections();
         let cache_key = McpResourceClientCacheKey(Arc::downgrade(&connections));
-        let (managed, request_timeout) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
+        let result = connections
+            .run_client_request_by_name(
+                CODEX_APPS_MCP_SERVER_NAME,
+                |client, request_timeout| async move {
+                    let managed = client.client().await.context("failed to get MCP client")?;
+                    managed
+                        .client
+                        .send_custom_request_with_timeout(
+                            "events/list",
+                            /*params*/ None,
+                            request_timeout,
+                        )
+                        .await
+                        .context("events/list failed for hosted Plugin Runtime")
+                },
+            )
             .await?;
-        let result = managed
-            .client
-            .send_custom_request_with_timeout("events/list", /*params*/ None, request_timeout)
-            .await
-            .context("events/list failed for hosted Plugin Runtime")?;
         let ServerResult::CustomResult(result) = result else {
             return Err(anyhow!("events/list returned an unexpected MCP result"));
         };
@@ -261,19 +271,25 @@ impl McpResourceClient {
         }
 
         let connections = self.runtime.latest_connections();
-        let (managed, _) = connections
-            .client_by_name(CODEX_APPS_MCP_SERVER_NAME)
+        let (request, pooled_client) = connections
+            .run_client_request_by_name(
+                CODEX_APPS_MCP_SERVER_NAME,
+                move |client, _request_timeout| async move {
+                    let managed = client.client().await.context("failed to get MCP client")?;
+                    let request = managed
+                        .client
+                        .send_event_stream_request(Some(params))
+                        .await
+                        .context("events/stream failed for hosted Plugin Runtime")?;
+                    Ok((request, client))
+                },
+            )
             .await?;
-        let request = managed
-            .client
-            .send_event_stream_request(Some(params))
-            .await
-            .context("events/stream failed for hosted Plugin Runtime")?;
 
         Ok(McpEventStream {
             request: Some(request),
             runtime_handle: Handle::current(),
-            _connections: connections,
+            pooled_client,
         })
     }
 }

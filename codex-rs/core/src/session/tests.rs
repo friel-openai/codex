@@ -30,8 +30,8 @@ use codex_config::loader::project_trust_key;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_config::types::ToolSuggestDisabledTool;
-use core_test_support::test_codex::TurnInputRequest as ExternalTurnInputRequest;
 use codex_extension_api::empty_extension_registry;
+use core_test_support::test_codex::TurnInputRequest as ExternalTurnInputRequest;
 
 use codex_features::Feature;
 use codex_http_client::ClientRouteClass;
@@ -4193,10 +4193,12 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
 
     child
         .thread
-        .start_or_steer_turn(ExternalTurnInputRequest::user_input(vec![UserInput::Text {
+        .start_or_steer_turn(ExternalTurnInputRequest::user_input(vec![
+            UserInput::Text {
                 text: "paginated-child-message".to_string(),
                 text_elements: Vec::new(),
-            }]))
+            },
+        ]))
         .await?;
     wait_for_event(&child.thread, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -9478,6 +9480,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
         codex_mcp::configured_mcp_servers(current.config()).contains_key("refreshed"),
         "the refreshed state should remain globally current"
     );
+}
+
+#[tokio::test]
+async fn mcp_publication_clears_inherited_tool_snapshot() {
+    let (session, _turn_context) = make_session_and_context().await;
+    *session.services.mcp_tool_snapshot.lock().await =
+        Some(crate::state::McpToolSnapshot::default());
+
+    session.clear_inherited_mcp_tool_snapshot().await;
+
+    assert!(session.services.mcp_tool_snapshot.lock().await.is_none());
 }
 
 #[tokio::test]
