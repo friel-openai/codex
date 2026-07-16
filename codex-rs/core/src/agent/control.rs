@@ -18,6 +18,7 @@ use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
 use crate::thread_manager::ThreadManagerState;
 use crate::thread_rollout_truncation::truncate_rollout_to_last_n_fork_turns;
+use codex_mcp::McpConnectionPool;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -135,6 +136,8 @@ pub(crate) struct AgentControl {
     state: Arc<AgentRegistry>,
     agent_residency: Arc<AgentResidency>,
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
+    /// MCP processes shared by the root agent and descendants with compatible startup inputs.
+    mcp_connection_pool: McpConnectionPool,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
 }
@@ -167,6 +170,10 @@ impl AgentControl {
 
     pub(crate) fn rollout_budget(&self) -> &RolloutBudget {
         self.rollout_budget.as_ref()
+    }
+
+    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
+        &self.mcp_connection_pool
     }
 
     /// Send rich user input items to an existing agent thread.
