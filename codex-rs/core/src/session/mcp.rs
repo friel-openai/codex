@@ -217,9 +217,9 @@ impl Session {
                 mcp_projection,
                 &ready_selected_capability_roots,
                 Some(self.mcp_elicitation_reviewer()),
+                codex_mcp::McpConnectionPoolMode::Reuse,
             )
             .await;
-            *self.services.mcp_tool_snapshot.lock().await = None;
             refresh_invalidation.published = true;
             if !self.mcp_refresh.is_pending() {
                 return;
@@ -275,16 +275,23 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
+            codex_mcp::McpConnectionPoolMode::Replace,
         );
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
         );
-        self.services.mcp_runtime.replace_fresh(input).await
+        let tools = self.services.mcp_runtime.replace_fresh(input).await?;
+        self.clear_inherited_mcp_tool_snapshot().await;
+        Ok(tools)
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {
         self.mcp_refresh.invalidate();
+    }
+
+    pub(super) async fn clear_inherited_mcp_tool_snapshot(&self) {
+        *self.services.mcp_tool_snapshot.lock().await = None;
     }
 
     #[tracing::instrument(name = "mcp.runtime.resolve_for_step", skip_all)]
@@ -337,6 +344,9 @@ impl Session {
             let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
             Arc::new(codex_mcp::McpBinding::empty(config))
         };
+        // A fork inherits the exact parent catalog so the shared prompt prefix remains stable.
+        // Automatic Reuse publications may finish while the child is starting; only an explicit
+        // replacement may discard the inherited catalog.
         let inherited_tools = self
             .services
             .mcp_tool_snapshot
@@ -678,9 +688,10 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            codex_mcp::McpConnectionPoolMode::Replace,
         )
         .await;
-        *self.services.mcp_tool_snapshot.lock().await = None;
+        self.clear_inherited_mcp_tool_snapshot().await;
     }
 
     pub(crate) fn ready_selected_capability_roots(
