@@ -3580,6 +3580,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-plugins",
  "futures",
+ "http 1.4.0",
  "lru",
  "pretty_assertions",
  "regex-lite",
