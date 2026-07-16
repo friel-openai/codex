@@ -48,6 +48,7 @@ impl EffectiveMcpServer {
 /// those belong to a publication and can change without reconnecting.
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
+    server_name: String,
     transport: McpServerTransportConfig,
     environment_id: String,
     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
@@ -113,6 +114,7 @@ impl McpServerConnectionIdentity {
         let runtime_auth_token = runtime_auth.as_ref().and_then(|auth| auth.get_token().ok());
 
         Self {
+            server_name: server_name.to_string(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
             oauth_store: stored_oauth_url
@@ -144,7 +146,8 @@ impl McpServerConnectionIdentity {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
-        self.transport == other.transport
+        self.server_name == other.server_name
+            && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.oauth_store == other.oauth_store
             && same_resolved_environment(&self.resolved_environment, &other.resolved_environment)
