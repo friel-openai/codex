@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -14,19 +13,19 @@ use rmcp::model::ResourceTemplate;
 use tokio::task::JoinSet;
 use tracing::warn;
 
-use crate::rmcp_client::ManagedClient;
+use crate::connection_pool::McpPooledBindingClient;
 
 /// The ready clients captured for one model step.
 pub(crate) struct McpBindingClients {
-    clients: HashMap<String, Arc<ManagedClient>>,
+    clients: HashMap<String, McpPooledBindingClient>,
 }
 
 impl McpBindingClients {
-    pub(crate) fn new(clients: HashMap<String, Arc<ManagedClient>>) -> Self {
+    pub(crate) fn new(clients: HashMap<String, McpPooledBindingClient>) -> Self {
         Self { clients }
     }
 
-    pub(crate) fn client(&self, server: &str) -> Option<Arc<ManagedClient>> {
+    pub(crate) fn client(&self, server: &str) -> Option<McpPooledBindingClient> {
         self.clients.get(server).cloned()
     }
 
@@ -38,11 +37,16 @@ impl McpBindingClients {
         let managed = self
             .client(server)
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
+        let server = server.to_string();
         managed
-            .client
-            .list_resources(params, managed.tool_timeout)
+            .run(move |client| async move {
+                client
+                    .client
+                    .list_resources(params, client.tool_timeout)
+                    .await
+                    .with_context(|| format!("resources/list failed for `{server}`"))
+            })
             .await
-            .with_context(|| format!("resources/list failed for `{server}`"))
     }
 
     pub(crate) async fn list_resource_templates(
@@ -53,11 +57,16 @@ impl McpBindingClients {
         let managed = self
             .client(server)
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
+        let server = server.to_string();
         managed
-            .client
-            .list_resource_templates(params, managed.tool_timeout)
+            .run(move |client| async move {
+                client
+                    .client
+                    .list_resource_templates(params, client.tool_timeout)
+                    .await
+                    .with_context(|| format!("resources/templates/list failed for `{server}`"))
+            })
             .await
-            .with_context(|| format!("resources/templates/list failed for `{server}`"))
     }
 
     pub(crate) async fn read_resource(
@@ -68,12 +77,17 @@ impl McpBindingClients {
         let managed = self
             .client(server)
             .ok_or_else(|| anyhow!("MCP server '{server}' was not ready for this step"))?;
+        let server = server.to_string();
         let uri = params.uri.clone();
         managed
-            .client
-            .read_resource(params, managed.tool_timeout)
+            .run(move |client| async move {
+                client
+                    .client
+                    .read_resource(params, client.tool_timeout)
+                    .await
+                    .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+            })
             .await
-            .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
     }
 
     pub(crate) async fn list_all_resources(
@@ -87,31 +101,34 @@ impl McpBindingClients {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let client = Arc::clone(&managed.client);
-            let timeout = managed.tool_timeout;
+            let managed = managed.clone();
             join_set.spawn(async move {
-                let mut collected = Vec::new();
-                let mut cursor: Option<String> = None;
-                loop {
-                    let params = cursor.as_ref().map(|next| {
-                        PaginatedRequestParams::default().with_cursor(Some(next.clone()))
-                    });
-                    let response = match client.list_resources(params, timeout).await {
-                        Ok(result) => result,
-                        Err(error) => return (server_name, Err(error)),
-                    };
-                    collected.extend(response.resources);
-                    match response.next_cursor {
-                        Some(next) if cursor.as_ref() == Some(&next) => {
-                            return (
-                                server_name,
-                                Err(anyhow!("resources/list returned duplicate cursor")),
-                            );
+                let result = managed
+                    .run(move |client| async move {
+                        let mut collected = Vec::new();
+                        let mut cursor: Option<String> = None;
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = client
+                                .client
+                                .list_resources(params, client.tool_timeout)
+                                .await?;
+                            collected.extend(response.resources);
+                            match response.next_cursor {
+                                Some(next) if cursor.as_ref() == Some(&next) => {
+                                    return Err(anyhow!(
+                                        "resources/list returned duplicate cursor"
+                                    ));
+                                }
+                                Some(next) => cursor = Some(next),
+                                None => return Ok(collected),
+                            }
                         }
-                        Some(next) => cursor = Some(next),
-                        None => return (server_name, Ok(collected)),
-                    }
-                }
+                    })
+                    .await;
+                (server_name, result)
             });
         }
         collect_resource_results(&mut join_set, "resources").await
@@ -128,33 +145,34 @@ impl McpBindingClients {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let client = Arc::clone(&managed.client);
-            let timeout = managed.tool_timeout;
+            let managed = managed.clone();
             join_set.spawn(async move {
-                let mut collected = Vec::new();
-                let mut cursor: Option<String> = None;
-                loop {
-                    let params = cursor.as_ref().map(|next| {
-                        PaginatedRequestParams::default().with_cursor(Some(next.clone()))
-                    });
-                    let response = match client.list_resource_templates(params, timeout).await {
-                        Ok(result) => result,
-                        Err(error) => return (server_name, Err(error)),
-                    };
-                    collected.extend(response.resource_templates);
-                    match response.next_cursor {
-                        Some(next) if cursor.as_ref() == Some(&next) => {
-                            return (
-                                server_name,
-                                Err(anyhow!(
-                                    "resources/templates/list returned duplicate cursor"
-                                )),
-                            );
+                let result = managed
+                    .run(move |client| async move {
+                        let mut collected = Vec::new();
+                        let mut cursor: Option<String> = None;
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = client
+                                .client
+                                .list_resource_templates(params, client.tool_timeout)
+                                .await?;
+                            collected.extend(response.resource_templates);
+                            match response.next_cursor {
+                                Some(next) if cursor.as_ref() == Some(&next) => {
+                                    return Err(anyhow!(
+                                        "resources/templates/list returned duplicate cursor"
+                                    ));
+                                }
+                                Some(next) => cursor = Some(next),
+                                None => return Ok(collected),
+                            }
                         }
-                        Some(next) => cursor = Some(next),
-                        None => return (server_name, Ok(collected)),
-                    }
-                }
+                    })
+                    .await;
+                (server_name, result)
             });
         }
         collect_resource_results(&mut join_set, "resource templates").await
