@@ -17,6 +17,7 @@ use crate::mcp::mcp_permission_prompt_is_auto_approved;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+#[cfg(test)]
 use async_channel::Sender;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::approvals::ElicitationRequestEvent;
@@ -57,6 +58,8 @@ pub trait ElicitationReviewer: Send + Sync {
 }
 
 pub type ElicitationReviewerHandle = Arc<dyn ElicitationReviewer>;
+
+pub(crate) type SendEvent = Arc<dyn Fn(Event) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Holds an owner-provided registration while an MCP elicitation is waiting for a response.
 #[derive(Clone)]
@@ -192,16 +195,46 @@ impl ElicitationRequestManager {
         true
     }
 
+    #[cfg(test)]
+    pub(crate) async fn resolve(
+        &self,
+        server_name: String,
+        id: RequestId,
+        response: ElicitationResponse,
+    ) -> Result<()> {
+        self.router.resolve(server_name, id, response).await
+    }
+
+    #[cfg(test)]
     pub(crate) fn make_sender(
         &self,
         server_name: String,
         tx_event: Option<Sender<Event>>,
     ) -> SendElicitation {
+        let send_event = tx_event.map(|tx_event| {
+            Arc::new(move |event| {
+                let tx_event = tx_event.clone();
+                async move {
+                    tx_event.send(event).await.map_err(|error| {
+                        anyhow!("failed to deliver MCP elicitation request: {error}")
+                    })
+                }
+                .boxed()
+            }) as SendEvent
+        });
+        self.make_sender_with_event_dispatch(server_name, send_event)
+    }
+
+    pub(crate) fn make_sender_with_event_dispatch(
+        &self,
+        server_name: String,
+        send_event: Option<SendEvent>,
+    ) -> SendElicitation {
         let router = self.router.clone();
         let authority = self.authority.clone();
         Box::new(move |id, elicitation| {
             let router = router.clone();
-            let tx_event = tx_event.clone();
+            let send_event = send_event.clone();
             let server_name = server_name.clone();
             let authority = authority.clone();
             async move {
@@ -305,7 +338,7 @@ impl ElicitationRequestManager {
                     }
                 }
 
-                let Some(tx_event) = tx_event else {
+                let Some(send_event) = send_event else {
                     return Ok(ElicitationResponse {
                         action: ElicitationAction::Decline,
                         content: None,
@@ -375,17 +408,16 @@ impl ElicitationRequestManager {
                     router: router.clone(),
                     key: request_key,
                 };
-                let _ = tx_event
-                    .send(Event {
-                        id: "mcp_elicitation_request".to_string(),
-                        msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
-                            turn_id: None,
-                            server_name,
-                            id: ProtocolRequestId::String(public_request_id),
-                            request,
-                        }),
-                    })
-                    .await;
+                send_event(Event {
+                    id: "mcp_elicitation_request".to_string(),
+                    msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                        turn_id: None,
+                        server_name,
+                        id: ProtocolRequestId::String(public_request_id),
+                        request,
+                    }),
+                })
+                .await?;
                 rx.await
                     .context("elicitation request channel closed unexpectedly")
             }
