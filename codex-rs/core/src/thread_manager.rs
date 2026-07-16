@@ -1030,15 +1030,21 @@ impl ThreadManager {
     }
 
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
-        Box::pin(self.start_thread_inner(options, /*forked_from_thread_id*/ None)).await
+        let agent_control = self.agent_control_for_config(&options.config);
+        Box::pin(self.start_thread_inner(
+            options,
+            /*forked_from_thread_id*/ None,
+            agent_control,
+        ))
+        .await
     }
 
     async fn start_thread_inner(
         &self,
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+        agent_control: AgentControl,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
             .get_resumed_session_sources()
@@ -1064,6 +1070,7 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
+        let agent_control = fork_source.session.services.agent_control.clone();
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
@@ -1083,7 +1090,7 @@ impl ThreadManager {
             .await?;
         options.initial_history = initial_history;
         let result = self
-            .start_thread_inner(options, Some(forked_from_thread_id))
+            .start_thread_inner(options, Some(forked_from_thread_id), agent_control)
             .await;
         if let Ok(new_thread) = &result {
             new_thread.thread.flush_rollout().await?;

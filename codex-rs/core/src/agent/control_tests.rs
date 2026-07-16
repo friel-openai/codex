@@ -80,6 +80,9 @@ use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
+use core_test_support::process::process_is_alive;
+use core_test_support::process::wait_for_pid_file;
+use core_test_support::process::wait_for_process_exit;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
@@ -193,6 +196,23 @@ async fn wait_for_turn_complete(thread: &CodexThread) {
     .expect("turn should complete");
 }
 
+async fn shared_mcp_process_id(thread: &CodexThread) -> u64 {
+    thread
+        .call_mcp_tool(
+            "retirement",
+            "shared_counter",
+            /*arguments*/ None,
+            /*meta*/ None,
+        )
+        .await
+        .expect("shared MCP call should succeed")
+        .structured_content
+        .as_ref()
+        .and_then(|value| value.get("pid"))
+        .and_then(serde_json::Value::as_u64)
+        .expect("shared MCP response should include a process ID")
+}
+
 #[cfg(target_os = "linux")]
 fn open_rollout_writer_paths(
     codex_home: &std::path::Path,
@@ -221,6 +241,11 @@ fn open_rollout_writer_paths(
                 && target.to_string_lossy().contains(".jsonl")
         })
         .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn open_rollout_writer_count(codex_home: &std::path::Path) -> usize {
+    open_rollout_writer_paths(codex_home).len()
 }
 
 fn request_tool_signatures(body: &serde_json::Value) -> std::collections::BTreeSet<String> {
@@ -3953,18 +3978,15 @@ async fn finished_ephemeral_goal_supervisor_closes_persisted_spawn_edge_inner() 
     assert!(closed_children.contains(&helper_thread_id));
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-fn finished_goal_supervisor_retires_session_and_rollout_descriptor() -> anyhow::Result<()> {
+fn finished_goal_supervisor_releases_shared_mcp_lease() -> anyhow::Result<()> {
     run_goal_supervisor_test(
-        "finished_goal_supervisor_retires_session_and_rollout_descriptor",
-        finished_goal_supervisor_retires_session_and_rollout_descriptor_inner(),
+        "finished_goal_supervisor_releases_shared_mcp_lease",
+        finished_goal_supervisor_releases_shared_mcp_lease_inner(),
     )
 }
 
-#[cfg(target_os = "linux")]
-async fn finished_goal_supervisor_retires_session_and_rollout_descriptor_inner()
--> anyhow::Result<()> {
+async fn finished_goal_supervisor_releases_shared_mcp_lease_inner() -> anyhow::Result<()> {
     let server = start_mock_server().await;
     Mock::given(method("POST"))
         .and(path_regex(".*/responses$"))
@@ -3982,89 +4004,261 @@ async fn finished_goal_supervisor_retires_session_and_rollout_descriptor_inner()
     let (home, mut config) = test_config().await;
     config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
     config.model_provider.supports_websockets = false;
+    let pid_file = home.path().join("shared-mcp.pid");
+    let mcp_server_path = home.path().join("shared_mcp_server.py");
+    std::fs::write(
+        &mcp_server_path,
+        r#"import json
+import os
+import pathlib
+import sys
+
+pathlib.Path(os.environ["MCP_TEST_PID_FILE"]).write_text(str(os.getpid()))
+
+for line in sys.stdin:
+    message = json.loads(line)
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    method = message.get("method")
+    if method == "initialize":
+        result = {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {"tools": {"listChanged": False}},
+            "serverInfo": {"name": "shared-mcp-test", "version": "1.0.0"},
+        }
+    elif method == "tools/list":
+        result = {
+            "tools": [{
+                "name": "shared_counter",
+                "description": "Return the shared server process ID",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": False,
+                },
+            }],
+        }
+    elif method == "tools/call":
+        result = {
+            "content": [{"type": "text", "text": "shared"}],
+            "structuredContent": {"pid": os.getpid()},
+            "isError": False,
+        }
+    else:
+        result = None
+    response = {"jsonrpc": "2.0", "id": request_id}
+    if result is None:
+        response["error"] = {"code": -32601, "message": "method not found"}
+    else:
+        response["result"] = result
+    sys.stdout.write(json.dumps(response) + "\n")
+    sys.stdout.flush()
+"#,
+    )?;
+    config
+        .mcp_servers
+        .set(std::collections::HashMap::from([(
+            "retirement".to_string(),
+            McpServerConfig {
+                auth: Default::default(),
+                transport: McpServerTransportConfig::Stdio {
+                    command: "python3".to_string(),
+                    args: vec![mcp_server_path.to_string_lossy().into_owned()],
+                    env: Some(std::collections::HashMap::from([(
+                        "MCP_TEST_PID_FILE".to_string(),
+                        pid_file.to_string_lossy().into_owned(),
+                    )])),
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+                enabled: true,
+                required: true,
+                supports_parallel_tool_calls: false,
+                omit_tools_from: None,
+                disabled_reason: None,
+                oauth: None,
+                startup_timeout_sec: Some(Duration::from_secs(5)),
+                tool_timeout_sec: Some(Duration::from_secs(5)),
+                default_tools_approval_mode: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                scopes: None,
+                oauth_resource: None,
+                tools: std::collections::HashMap::new(),
+            },
+        )]))
+        .expect("test MCP config should be valid");
     let harness = AgentControlHarness::new_with_config(home, config).await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     let agent_control = parent_thread.session.services.agent_control.clone();
-    let supervisor_path = AgentPath::root()
-        .join("goal_supervisor")
-        .expect("supervisor path");
-    let mut helper_config = harness.config.clone();
-    helper_config.ephemeral = true;
-    let helper_thread_id = agent_control
+
+    let sibling_thread_id = agent_control
         .spawn_agent_with_metadata(
-            helper_config,
-            text_input("supervise"),
+            harness.config.clone(),
+            text_input("sibling task"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
-                agent_path: Some(supervisor_path),
+                agent_path: None,
                 agent_nickname: None,
-                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+                agent_role: None,
             })),
             SpawnAgentOptions::default(),
         )
         .await?
         .thread_id;
-    let retained_helper = harness.manager.get_thread(helper_thread_id).await?;
-    timeout(Duration::from_secs(5), async {
-        while !matches!(retained_helper.agent_status().await, AgentStatus::Running) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("supervisor turn should start");
-    retained_helper.ensure_rollout_materialized().await;
-    let helper_rollout_path = retained_helper
-        .session
-        .current_rollout_path()
-        .await?
-        .expect("materialized supervisor should have a live rollout path");
-    assert!(
-        open_rollout_writer_paths(harness.config.codex_home.as_path())
-            .contains(&helper_rollout_path),
-        "the active supervisor must hold its rollout descriptor: {}",
-        helper_rollout_path.display()
-    );
+    let sibling_thread = harness
+        .manager
+        .get_thread(sibling_thread_id)
+        .await
+        .expect("sibling should be loaded");
+    wait_for_turn_complete(sibling_thread.as_ref()).await;
 
-    agent_control
-        .finish_internal_helper_thread(helper_thread_id)
-        .await?;
-    assert_thread_not_loaded(&harness.manager, helper_thread_id).await;
-    timeout(
-        Duration::from_secs(5),
-        retained_helper.wait_until_terminated(),
-    )
-    .await
-    .expect("supervisor session should terminate");
-    timeout(Duration::from_secs(2), async {
-        loop {
-            let event = retained_helper
-                .next_event()
-                .await
-                .expect("retained helper event channel should remain readable");
-            if matches!(event.msg, EventMsg::TurnComplete(_)) {
-                break;
+    let parent_pid = shared_mcp_process_id(parent_thread.as_ref()).await;
+    let sibling_pid = shared_mcp_process_id(sibling_thread.as_ref()).await;
+    let pid = wait_for_pid_file(&pid_file).await?;
+    let pid = pid.parse::<u64>()?;
+    assert_eq!(parent_pid, pid);
+    assert_eq!(sibling_pid, pid);
+    let iterations = std::env::var("CODEX_TEST_GOAL_SUPERVISOR_RETIREMENT_ITERATIONS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(1);
+    #[cfg(target_os = "linux")]
+    let baseline_rollout_descriptors =
+        open_rollout_writer_count(harness.config.codex_home.as_path());
+    #[cfg(target_os = "linux")]
+    let mut max_rollout_descriptors = baseline_rollout_descriptors;
+
+    for iteration in 0..iterations {
+        let supervisor_path = AgentPath::root()
+            .join("goal_supervisor")
+            .expect("supervisor path");
+        let mut helper_config = harness.config.clone();
+        helper_config.ephemeral = true;
+        let helper_thread_id = agent_control
+            .spawn_agent_with_metadata(
+                helper_config,
+                text_input("supervise"),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_path: Some(supervisor_path),
+                    agent_nickname: None,
+                    agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+                })),
+                SpawnAgentOptions::default(),
+            )
+            .await?
+            .thread_id;
+        let retained_helper = harness.manager.get_thread(helper_thread_id).await?;
+        timeout(Duration::from_secs(5), async {
+            while !matches!(retained_helper.agent_status().await, AgentStatus::Running) {
+                tokio::task::yield_now().await;
             }
-        }
-    })
-    .await
-    .expect("supervisor turn should complete before shutdown");
-    timeout(Duration::from_secs(2), async {
-        while open_rollout_writer_paths(harness.config.codex_home.as_path())
-            .contains(&helper_rollout_path)
+        })
+        .await
+        .expect("supervisor turn should start");
+        retained_helper
+            .session
+            .try_ensure_rollout_materialized()
+            .await
+            .expect("supervisor rollout should materialize for descriptor retirement");
+        #[cfg(target_os = "linux")]
+        let helper_rollout_path = retained_helper
+            .session
+            .current_rollout_path()
+            .await?
+            .expect("materialized supervisor should have a live rollout path");
+        #[cfg(target_os = "linux")]
         {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let active_paths = open_rollout_writer_paths(harness.config.codex_home.as_path());
+            assert!(
+                active_paths.contains(&helper_rollout_path),
+                "the active supervisor must hold its materialized rollout descriptor: helper={}, open={active_paths:?}",
+                helper_rollout_path.display()
+            );
+            let active = active_paths.len();
+            max_rollout_descriptors = max_rollout_descriptors.max(active);
         }
-    })
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "retired supervisor must release its rollout descriptor: {}",
-            helper_rollout_path.display()
+        assert_eq!(shared_mcp_process_id(retained_helper.as_ref()).await, pid);
+        assert_eq!(retained_helper.agent_status().await, AgentStatus::Running);
+
+        agent_control
+            .finish_internal_helper_thread(helper_thread_id)
+            .await?;
+        assert_thread_not_loaded(&harness.manager, helper_thread_id).await;
+        timeout(
+            Duration::from_secs(5),
+            retained_helper.wait_until_terminated(),
         )
-    });
+        .await
+        .unwrap_or_else(|_| panic!("supervisor session {iteration} should terminate"));
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let event = retained_helper
+                    .next_event()
+                    .await
+                    .expect("retained helper event channel should remain readable");
+                if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("supervisor turn {iteration} should complete before shutdown"));
+
+        #[cfg(target_os = "linux")]
+        {
+            let open_paths = timeout(Duration::from_secs(2), async {
+                loop {
+                    let open_paths = open_rollout_writer_paths(harness.config.codex_home.as_path());
+                    if !open_paths.contains(&helper_rollout_path) {
+                        break open_paths;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "retired supervisor must release its rollout descriptor: helper={}",
+                    helper_rollout_path.display()
+                )
+            });
+            let current = open_paths.len();
+            max_rollout_descriptors = max_rollout_descriptors.max(current);
+            assert!(
+                current <= baseline_rollout_descriptors,
+                "retired supervisors must not accumulate rollout descriptors: baseline={baseline_rollout_descriptors}, iteration={iteration}, current={current}"
+            );
+        }
+    }
+
+    assert_eq!(shared_mcp_process_id(parent_thread.as_ref()).await, pid);
+    assert_eq!(shared_mcp_process_id(sibling_thread.as_ref()).await, pid);
+    #[cfg(target_os = "linux")]
+    {
+        assert!(
+            max_rollout_descriptors <= baseline_rollout_descriptors.saturating_add(1),
+            "retired supervisors must keep rollout descriptors bounded"
+        );
+        assert!(
+            open_rollout_writer_count(harness.config.codex_home.as_path())
+                <= baseline_rollout_descriptors,
+            "retired supervisors must release their rollout descriptors"
+        );
+    }
+
+    sibling_thread.shutdown_and_wait().await?;
+    assert!(
+        process_is_alive(&pid.to_string())?,
+        "the parent lease should keep the shared MCP process alive"
+    );
     parent_thread.shutdown_and_wait().await?;
-    Ok(())
+    wait_for_process_exit(&pid.to_string()).await
 }
 
 #[test]

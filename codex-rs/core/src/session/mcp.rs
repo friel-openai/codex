@@ -216,9 +216,9 @@ impl Session {
                 mcp_projection,
                 &ready_selected_capability_roots,
                 Some(self.mcp_elicitation_reviewer()),
+                codex_mcp::McpConnectionPoolMode::Reuse,
             )
             .await;
-            *self.services.mcp_tool_snapshot.lock().await = None;
             refresh_invalidation.published = true;
             if !self.mcp_refresh.is_pending() {
                 return;
@@ -231,62 +231,69 @@ impl Session {
         self: &Arc<Self>,
     ) -> anyhow::Result<Vec<codex_mcp::ToolInfo>> {
         self.with_checkpoint_admission("hard refresh Codex Apps tools", || async {
-        self.refresh_mcp_if_dirty().await;
-        let _refresh = self
-            .mcp_refresh
-            .acquire()
-            .await
-            .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
-        let auth = self.services.auth_manager.auth().await;
-        self.services
-            .plugins_manager
-            .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
-        let desired = self.latest_mcp_desired_state(auth).await;
-        let selected_capability_roots = self
-            .resolve_selected_capability_roots_for_step(&desired.environments)
-            .await;
-        let ready_selected_capability_roots =
-            Self::ready_selected_capability_roots(&selected_capability_roots);
-        let executor_capability_discovery = self
-            .executor_capability_discovery_for_step(
-                &desired.config,
+            self.refresh_mcp_if_dirty().await;
+            let _refresh = self
+                .mcp_refresh
+                .acquire()
+                .await
+                .map_err(|_| anyhow::anyhow!("MCP runtime refresh semaphore closed"))?;
+            let auth = self.services.auth_manager.auth().await;
+            self.services
+                .plugins_manager
+                .set_auth_mode(auth.as_ref().map(CodexAuth::api_auth_mode));
+            let desired = self.latest_mcp_desired_state(auth).await;
+            let selected_capability_roots = self
+                .resolve_selected_capability_roots_for_step(&desired.environments)
+                .await;
+            let ready_selected_capability_roots =
+                Self::ready_selected_capability_roots(&selected_capability_roots);
+            let executor_capability_discovery = self
+                .executor_capability_discovery_for_step(
+                    &desired.config,
+                    &ready_selected_capability_roots,
+                    &desired.environments,
+                    desired.windows_sandbox_level,
+                )
+                .await;
+            let mcp_projection = self
+                .services
+                .mcp_manager
+                .runtime_config_for_step(
+                    &desired.config,
+                    &self.services.mcp_thread_init,
+                    &self.services.thread_extension_data,
+                    McpThreadIdentity {
+                        session_source: &desired.session_source,
+                        originator: &desired.originator,
+                    },
+                    &ready_selected_capability_roots,
+                    executor_capability_discovery.as_deref(),
+                )
+                .await;
+            let input = self.build_mcp_runtime_input(
+                &desired,
+                mcp_projection,
                 &ready_selected_capability_roots,
-                &desired.environments,
-                desired.windows_sandbox_level,
-            )
-            .await;
-        let mcp_projection = self
-            .services
-            .mcp_manager
-            .runtime_config_for_step(
-                &desired.config,
-                &self.services.mcp_thread_init,
-                &self.services.thread_extension_data,
-                McpThreadIdentity {
-                    session_source: &desired.session_source,
-                    originator: &desired.originator,
-                },
-                &ready_selected_capability_roots,
-                executor_capability_discovery.as_deref(),
-            )
-            .await;
-        let input = self.build_mcp_runtime_input(
-            &desired,
-            mcp_projection,
-            &ready_selected_capability_roots,
-            Some(self.mcp_elicitation_reviewer()),
-        );
-        anyhow::ensure!(
-            input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
-            "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
-        );
-        self.services.mcp_runtime.replace_fresh(input).await
+                Some(self.mcp_elicitation_reviewer()),
+                codex_mcp::McpConnectionPoolMode::Replace,
+            );
+            anyhow::ensure!(
+                input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
+                "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
+            );
+            let tools = self.services.mcp_runtime.replace_fresh(input).await?;
+            self.clear_inherited_mcp_tool_snapshot().await;
+            Ok(tools)
         })
         .await?
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {
         self.mcp_refresh.invalidate();
+    }
+
+    pub(super) async fn clear_inherited_mcp_tool_snapshot(&self) {
+        *self.services.mcp_tool_snapshot.lock().await = None;
     }
 
     #[tracing::instrument(name = "mcp.runtime.resolve_for_step", skip_all)]
@@ -339,6 +346,9 @@ impl Session {
             let config = Arc::new(self.runtime_mcp_config(&turn_context.config).await);
             Arc::new(codex_mcp::McpBinding::empty(config))
         };
+        // A fork inherits the exact parent catalog so the shared prompt prefix remains stable.
+        // Automatic Reuse publications may finish while the child is starting; only an explicit
+        // replacement may discard the inherited catalog.
         let inherited_tools = self
             .services
             .mcp_tool_snapshot
@@ -677,9 +687,10 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            codex_mcp::McpConnectionPoolMode::Replace,
         )
         .await;
-        *self.services.mcp_tool_snapshot.lock().await = None;
+        self.clear_inherited_mcp_tool_snapshot().await;
     }
 
     pub(crate) fn ready_selected_capability_roots(

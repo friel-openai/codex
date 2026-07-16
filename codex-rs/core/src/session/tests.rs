@@ -9913,6 +9913,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
 }
 
 #[tokio::test]
+async fn mcp_publication_clears_inherited_tool_snapshot() {
+    let (session, _turn_context) = make_session_and_context().await;
+    *session.services.mcp_tool_snapshot.lock().await =
+        Some(crate::state::McpToolSnapshot::default());
+
+    session.clear_inherited_mcp_tool_snapshot().await;
+
+    assert!(session.services.mcp_tool_snapshot.lock().await.is_none());
+}
+
+#[tokio::test]
 async fn refreshed_mcp_binding_captures_current_approval_authority() {
     let (session, old_turn) = make_session_and_context().await;
     let session = Arc::new(session);

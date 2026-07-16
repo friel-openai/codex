@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -17,8 +16,6 @@ use tracing::warn;
 
 use super::McpConnectionSet;
 use crate::pagination::collect_paginated;
-use crate::rmcp_client::ManagedClient;
-
 impl McpConnectionSet {
     /// Returns resources from servers selected by `include_server`.
     pub async fn list_all_resources(
@@ -32,21 +29,26 @@ impl McpConnectionSet {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let Ok(managed_client) = view.connection.client().await else {
-                continue;
-            };
+            view.trigger_startup().await;
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let client = managed_client.client;
             join_set.spawn(async move {
-                let resources = collect_paginated("resources/list", timeout, |params| {
-                    let client = Arc::clone(&client);
-                    async move {
-                        let response = client.list_resources(params, timeout).await?;
-                        Ok((response.resources, response.next_cursor))
-                    }
-                })
-                .await;
-                (server_name, resources)
+                let result = connection
+                    .run_mcp_request(session_route, move |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let client = Arc::clone(&managed.client);
+                        collect_paginated("resources/list", timeout, |params| {
+                            let client = Arc::clone(&client);
+                            async move {
+                                let response = client.list_resources(params, timeout).await?;
+                                Ok((response.resources, response.next_cursor))
+                            }
+                        })
+                        .await
+                    })
+                    .await;
+                (server_name, result)
             });
         }
 
@@ -79,21 +81,27 @@ impl McpConnectionSet {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let Ok(managed_client) = view.connection.client().await else {
-                continue;
-            };
+            view.trigger_startup().await;
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let client = managed_client.client;
             join_set.spawn(async move {
-                let templates = collect_paginated("resources/templates/list", timeout, |params| {
-                    let client = Arc::clone(&client);
-                    async move {
-                        let response = client.list_resource_templates(params, timeout).await?;
-                        Ok((response.resource_templates, response.next_cursor))
-                    }
-                })
-                .await;
-                (server_name, templates)
+                let result = connection
+                    .run_mcp_request(session_route, move |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let client = Arc::clone(&managed.client);
+                        collect_paginated("resources/templates/list", timeout, |params| {
+                            let client = Arc::clone(&client);
+                            async move {
+                                let response =
+                                    client.list_resource_templates(params, timeout).await?;
+                                Ok((response.resource_templates, response.next_cursor))
+                            }
+                        })
+                        .await
+                    })
+                    .await;
+                (server_name, result)
             });
         }
 
@@ -121,12 +129,23 @@ impl McpConnectionSet {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        managed
-            .client
-            .list_resources(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .list_resources(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/list failed for `{server}`"))
+            })
             .await
-            .with_context(|| format!("resources/list failed for `{server}`"))
     }
 
     pub async fn list_resource_templates(
@@ -134,12 +153,23 @@ impl McpConnectionSet {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        managed
-            .client
-            .list_resource_templates(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .list_resource_templates(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/templates/list failed for `{server}`"))
+            })
             .await
-            .with_context(|| format!("resources/templates/list failed for `{server}`"))
     }
 
     pub async fn read_resource(
@@ -147,28 +177,23 @@ impl McpConnectionSet {
         server: &str,
         params: ReadResourceRequestParams,
     ) -> Result<ReadResourceResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        let uri = params.uri.clone();
-        managed
-            .client
-            .read_resource(params, timeout)
-            .await
-            .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
-    }
-
-    pub(crate) async fn client_by_name(
-        &self,
-        name: &str,
-    ) -> Result<(ManagedClient, Option<Duration>)> {
         let view = self
             .servers
-            .get(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?;
-        let client = view
-            .connection
-            .client()
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        view.trigger_startup().await;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                let uri = params.uri.clone();
+                managed
+                    .client
+                    .read_resource(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+            })
             .await
-            .context("failed to get client")?;
-        Ok((client, view.tool_timeout))
     }
 }

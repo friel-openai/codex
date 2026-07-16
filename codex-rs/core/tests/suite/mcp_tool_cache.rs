@@ -332,6 +332,7 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
     wait_for_mcp_server(&eager_thread, SERVER_NAME).await?;
     eager_thread.shutdown_and_wait().await?;
     let cached_process = process_label(&eager_pid);
+    fixture.codex.shutdown_and_wait().await?;
 
     fs.remove(
         &barrier_file,
@@ -502,7 +503,6 @@ async fn cached_mcp_startup_is_eager_for_root_and_lazy_for_subagents() -> anyhow
         .context("an unrelated tool should complete while cached MCP startup is pending")?
         .context("the unrelated tool should emit its plan update")?;
 
-    fixture.codex.shutdown_and_wait().await?;
     fs.write_file(&barrier_file, b"ready".to_vec(), /*sandbox*/ None)
         .await?;
     let expected_error = format!("MCP tool `{SERVER_NAME}/cwd` is not available to the model");

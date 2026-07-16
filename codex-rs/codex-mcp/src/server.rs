@@ -95,6 +95,7 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 /// those belong to a publication and can change without reconnecting.
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
+    server_name: String,
     transport: McpServerTransportConfig,
     environment_id: String,
     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
@@ -107,7 +108,9 @@ pub(crate) struct McpServerConnectionIdentity {
     codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
+    effective_protocol_mode: Option<crate::McpProtocolMode>,
     agent_plugin: bool,
+    catalog_item_limit: usize,
 }
 
 impl McpServerConnectionIdentity {
@@ -124,6 +127,8 @@ impl McpServerConnectionIdentity {
         codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
         client_elicitation_capability: ElicitationCapability,
         client_mcp_extensions: ClientMcpExtensions,
+        effective_protocol_mode: Option<crate::McpProtocolMode>,
+        catalog_item_limit: usize,
     ) -> Self {
         let config = server.config();
         let stored_oauth_url = if runtime_auth_provider.is_none()
@@ -167,6 +172,7 @@ impl McpServerConnectionIdentity {
         let runtime_auth_token = runtime_auth.as_ref().and_then(|auth| auth.get_token().ok());
 
         Self {
+            server_name: server_name.to_string(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
             oauth_store: stored_oauth_url
@@ -181,7 +187,9 @@ impl McpServerConnectionIdentity {
             codex_apps_cache_identity,
             client_elicitation_capability,
             client_mcp_extensions,
+            effective_protocol_mode,
             agent_plugin: server.is_agent_plugin(),
+            catalog_item_limit,
         }
     }
 
@@ -199,7 +207,8 @@ impl McpServerConnectionIdentity {
             (None, None) => true,
             (Some(_), None) | (None, Some(_)) => false,
         };
-        self.transport == other.transport
+        self.server_name == other.server_name
+            && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.oauth_store == other.oauth_store
             && same_resolved_environment(&self.resolved_environment, &other.resolved_environment)
@@ -210,7 +219,9 @@ impl McpServerConnectionIdentity {
             && self.codex_apps_cache_identity == other.codex_apps_cache_identity
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
+            && self.effective_protocol_mode == other.effective_protocol_mode
             && self.agent_plugin == other.agent_plugin
+            && self.catalog_item_limit == other.catalog_item_limit
     }
 
     pub(crate) fn oauth_credentials(&self) -> Result<Option<&StoredOAuthTokens>, &String> {
