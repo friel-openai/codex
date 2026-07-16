@@ -324,8 +324,10 @@ pub async fn read_mcp_resource(
     let cancel_token = CancellationToken::new();
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
+    let connection_pool = crate::McpConnectionPool::default();
     let manager = McpConnectionSet::new(
         /*previous*/ None,
+        &connection_pool,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             config: Arc::new(runtime_config),
@@ -401,8 +403,10 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let cancel_token = CancellationToken::new();
     let mut runtime_config = config.clone();
     runtime_config.permission_profile = PermissionProfile::default();
+    let connection_pool = crate::McpConnectionPool::default();
     let mcp_connection_manager = McpConnectionSet::new(
         /*previous*/ None,
+        &connection_pool,
         McpPublicationGate::already_published(),
         McpRuntimeInput {
             config: Arc::new(runtime_config),

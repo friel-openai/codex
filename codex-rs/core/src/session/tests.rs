@@ -5398,6 +5398,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_packaged_zsh() {
         AgentControl::default(),
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -5785,6 +5786,7 @@ async fn make_session_with_config_and_rx(
         AgentControl::default(),
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),
@@ -5893,6 +5895,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
         agent_control,
         environment_manager,
         /*inherited_environments*/ None,
+        crate::inherited_thread_state::InheritedThreadState::default(),
         /*analytics_events_client*/ None,
         Arc::new(codex_thread_store::LocalThreadStore::new(
             codex_thread_store::LocalThreadStoreConfig::from_config(config.as_ref()),

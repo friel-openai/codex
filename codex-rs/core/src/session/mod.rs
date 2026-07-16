@@ -3215,6 +3215,23 @@ impl Session {
         turn_context: Arc<TurnContext>,
         cancellation_token: &CancellationToken,
     ) -> CodexResult<Arc<StepContext>> {
+        let sess = Arc::clone(self);
+        let cancellation_token = cancellation_token.clone();
+        // MCP runtime and tool construction exceed the default Tokio worker stack when nested in
+        // turn dispatch in debug builds. Let the scheduler poll capture as an independent task.
+        tokio::spawn(async move {
+            sess.capture_step_context_inner(turn_context, &cancellation_token)
+                .await
+        })
+        .await
+        .map_err(|error| CodexErr::Fatal(format!("step context task failed: {error}")))?
+    }
+
+    async fn capture_step_context_inner(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        cancellation_token: &CancellationToken,
+    ) -> CodexResult<Arc<StepContext>> {
         // Keep selections fixed for the turn while allowing their startup work to finish.
         let environments = turn_context.environments.refresh_readiness();
         self.services

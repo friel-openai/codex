@@ -22,7 +22,7 @@ use tokio::sync::RwLock;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
-use crate::rmcp_client::ManagedClient;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 
@@ -147,7 +147,8 @@ impl fmt::Debug for McpBinding {
 #[derive(Clone)]
 pub struct PreparedMcpCall {
     _connections: Arc<McpConnectionSet>,
-    client: Arc<ManagedClient>,
+    client: McpPooledBindingClient,
+    tool_timeout: Option<std::time::Duration>,
     config: Arc<McpConfig>,
     catalog_revision: u64,
     catalog_revision_source: Arc<RwLock<u64>>,
@@ -165,7 +166,8 @@ impl PreparedMcpCall {
     )]
     pub(crate) fn new(
         connections: Arc<McpConnectionSet>,
-        client: Arc<ManagedClient>,
+        client: McpPooledBindingClient,
+        tool_timeout: Option<std::time::Duration>,
         config: Arc<McpConfig>,
         catalog_revision: u64,
         catalog_revision_source: Arc<RwLock<u64>>,
@@ -178,6 +180,7 @@ impl PreparedMcpCall {
         Self {
             _connections: connections,
             client,
+            tool_timeout,
             config,
             catalog_revision,
             catalog_revision_source,
@@ -263,12 +266,18 @@ impl PreparedMcpCall {
             ));
         }
         let (arguments, meta) = prepare().await?;
+        let timeout = self.tool_timeout;
+        let server_name = self.server_name.clone();
         let result = self
             .client
-            .client
-            .call_tool(tool_name.clone(), arguments, meta, self.client.tool_timeout)
-            .await
-            .with_context(|| format!("tool call failed for `{}/{tool_name}`", self.server_name))?;
+            .run(move |client| async move {
+                client
+                    .client
+                    .call_tool(tool_name.clone(), arguments, meta, timeout)
+                    .await
+                    .with_context(|| format!("tool call failed for `{server_name}/{tool_name}`"))
+            })
+            .await?;
         drop(current_revision);
         Ok(call_tool_result_from_rmcp(result))
     }

@@ -23,6 +23,7 @@ use super::McpBinding;
 use super::PreparedMcpCall;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
@@ -87,14 +88,15 @@ async fn test_step(
             website_url: None,
         },
         tools: vec![tool.clone()],
-        tool_timeout: None,
         server_instructions: None,
         server_supports_sandbox_state_meta_capability: supports_sandbox_state_meta,
         codex_apps_tools_cache_context: None,
+        managed_oauth_credentials_for_test: None,
     });
+    let pooled_client = McpPooledBindingClient::for_test(Arc::clone(&managed_client));
     let clients = Arc::new(McpBindingClients::new(HashMap::from([(
         SERVER_NAME.to_string(),
-        Arc::clone(&managed_client),
+        (pooled_client.clone(), None),
     )])));
     let connections = Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true));
     let tool_catalog_revision = Arc::new(tokio::sync::RwLock::new(0));
@@ -108,7 +110,8 @@ async fn test_step(
     let config = Arc::new(config);
     let prepared = PreparedMcpCall::new(
         Arc::clone(&connections),
-        managed_client,
+        pooled_client,
+        /*tool_timeout*/ None,
         Arc::clone(&config),
         /*catalog_revision*/ 0,
         Arc::clone(&tool_catalog_revision),

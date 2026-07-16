@@ -1084,8 +1084,9 @@ impl Session {
                 )
             });
             // Extensions need a stable thread-owned resource client before the Session exists.
-            let mcp_runtime = Arc::new(McpRuntime::empty(
+            let mcp_runtime = Arc::new(McpRuntime::empty_with_connection_pool(
                 mcp_projection.config.prefix_mcp_tool_names,
+                agent_control.mcp_connection_pool().clone(),
             ));
             let session_extension_data =
                 codex_extension_api::ExtensionData::new(session_id.to_string());
@@ -1249,12 +1250,12 @@ impl Session {
             }
             turn_environments.start_connection_event_forwarding(tx_event.clone());
 
-            sess.install_initial_mcp_runtime(
+            Box::pin(sess.install_initial_mcp_runtime(
                 &session_configuration,
                 mcp_projection,
                 &resolved_environments,
                 mcp_runtime_cwd,
-            )
+            ))
             .await?;
             sess.schedule_startup_prewarm(session_configuration.base_instructions.clone())
                 .await;

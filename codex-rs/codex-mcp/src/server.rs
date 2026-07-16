@@ -160,6 +160,15 @@ impl McpServerConnectionIdentity {
     pub(crate) fn oauth_credentials(&self) -> Result<&Option<StoredOAuthTokens>, &String> {
         self.oauth_credentials.as_ref()
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_oauth_credentials_for_test(
+        mut self,
+        credentials: Option<StoredOAuthTokens>,
+    ) -> Self {
+        self.oauth_credentials = Ok(credentials);
+        self
+    }
 }
 
 impl PartialEq for McpServerConnectionIdentity {

@@ -66,12 +66,12 @@ impl Session {
             originator: session_configuration.originator.clone(),
             environments: resolved_environments.clone(),
         };
-        self.publish_mcp_runtime(
+        Box::pin(self.publish_mcp_runtime(
             &desired,
             mcp_projection,
             /*ready_selected_capability_roots*/ &[],
             Some(self.mcp_elicitation_reviewer()),
-        )
+        ))
         .instrument(info_span!(
             "session_init.mcp_manager_init",
             otel.name = "session_init.mcp_manager_init",
@@ -97,7 +97,7 @@ impl Session {
                 elicitation_reviewer,
             )
             .await;
-        self.services.mcp_runtime.replace(input).await;
+        Box::pin(self.services.mcp_runtime.replace(input)).await;
     }
 
     async fn build_mcp_runtime_input(

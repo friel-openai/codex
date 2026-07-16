@@ -24,7 +24,11 @@ impl McpConnectionSet {
                     continue;
                 };
 
-                match view.connection.client().await {
+                match view
+                    .connection
+                    .await_current_startup(std::sync::Arc::clone(&self.session_route))
+                    .await
+                {
                     Ok(_) => {}
                     Err(error) => failures.push(McpStartupFailure {
                         server: server_name.clone(),

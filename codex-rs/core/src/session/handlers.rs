@@ -53,6 +53,7 @@ use codex_protocol::dynamic_tools::DynamicToolResponse;
 use codex_protocol::mcp::RequestId as ProtocolRequestId;
 use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
+use futures::future::BoxFuture;
 use serde_json::Value;
 use std::sync::Arc;
 use tracing::debug;
@@ -79,13 +80,20 @@ pub async fn realtime_conversation_list_voices(sess: &Session, sub_id: String) {
     .await;
 }
 
-pub async fn user_input_or_turn(
-    sess: &Arc<Session>,
+pub fn user_input_or_turn<'a>(
+    sess: &'a Arc<Session>,
     sub_id: String,
     op: Op,
     client_user_message_id: Option<String>,
-) {
-    user_input_or_turn_inner(sess, sub_id, op, client_user_message_id).await;
+) -> BoxFuture<'a, ()> {
+    // Erase the turn future here so the session loop does not embed the sampling state machine in
+    // its own Tokio worker stack frame.
+    Box::pin(user_input_or_turn_inner(
+        sess,
+        sub_id,
+        op,
+        client_user_message_id,
+    ))
 }
 
 pub async fn update_thread_settings(

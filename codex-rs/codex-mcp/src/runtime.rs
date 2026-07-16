@@ -37,6 +37,7 @@ use tokio_util::sync::CancellationToken;
 use crate::McpConfig;
 use crate::binding::McpBinding;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpConnectionPool;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
@@ -71,6 +72,7 @@ pub struct McpRuntimeInput {
 pub struct McpRuntime {
     current: ArcSwap<PublishedMcpRuntime>,
     elicitation_router: ElicitationRequestRouter,
+    connection_pool: McpConnectionPool,
 }
 
 struct PublishedMcpRuntime {
@@ -121,6 +123,14 @@ impl McpRuntime {
     /// This is useful while constructing a thread that must publish a stable
     /// runtime handle before its full MCP inputs are available.
     pub fn empty(prefix_mcp_tool_names: bool) -> Self {
+        Self::empty_with_connection_pool(prefix_mcp_tool_names, McpConnectionPool::default())
+    }
+
+    /// Creates an empty runtime backed by an agent-tree-scoped connection pool.
+    pub fn empty_with_connection_pool(
+        prefix_mcp_tool_names: bool,
+        connection_pool: McpConnectionPool,
+    ) -> Self {
         Self {
             current: ArcSwap::from_pointee(PublishedMcpRuntime {
                 connections: Arc::new(McpConnectionSet::empty(prefix_mcp_tool_names)),
@@ -129,6 +139,7 @@ impl McpRuntime {
                 ready_selected_capability_roots: Vec::new(),
             }),
             elicitation_router: ElicitationRequestRouter::default(),
+            connection_pool,
         }
     }
 
@@ -148,6 +159,7 @@ impl McpRuntime {
         let connections = Arc::new(
             McpConnectionSet::new(
                 Some(current.connections.as_ref()),
+                &self.connection_pool,
                 publication_gate,
                 input,
                 self.elicitation_router.clone(),

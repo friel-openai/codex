@@ -138,6 +138,14 @@ use tracing::warn;
 
 const POST_SAMPLING_TOKEN_ESTIMATE_TARGET: &str = "codex_core::post_sampling_token_estimate";
 
+// Keep large sampling state machines heap allocated. An async helper still constructs its future
+// on the caller's stack; expanding the async body inside Box::pin avoids that intermediate value.
+macro_rules! boxed_async {
+    ($span:expr; $($body:tt)*) => {
+        Box::pin(async move { $($body)* }.instrument($span))
+    };
+}
+
 /// Takes initial turn input and runs a loop where, at each sampling request,
 /// the model replies with either:
 ///
@@ -1246,24 +1254,23 @@ pub(crate) fn build_prompt(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(deprecated)]
-#[instrument(level = "trace",
-    skip_all,
-    fields(
-        turn_id = %step_context.turn.sub_id,
-        model = %step_context.turn.model_info.slug,
-        cwd = %step_context.turn.cwd.display()
-    )
-)]
-async fn run_sampling_request(
+fn run_sampling_request<'a>(
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
     turn_diff_tracker: SharedTurnDiffTracker,
-    client_session: &mut ModelClientSession,
-    responses_metadata: &CodexResponsesMetadata,
+    client_session: &'a mut ModelClientSession,
+    responses_metadata: &'a CodexResponsesMetadata,
     input: Vec<ResponseItem>,
     cancellation_token: CancellationToken,
-) -> CodexResult<(SamplingRequestResult, Vec<ResponseItem>)> {
+) -> BoxFuture<'a, CodexResult<(SamplingRequestResult, Vec<ResponseItem>)>> {
+    let span = trace_span!(
+        "run_sampling_request",
+        turn_id = %step_context.turn.sub_id,
+        model = %step_context.turn.model_info.slug,
+        cwd = %step_context.turn.cwd.display(),
+    );
+    boxed_async!(span;
     let turn_context = Arc::clone(&step_context.turn);
     let router = Arc::clone(&step_context.tool_router);
 
@@ -1348,7 +1355,7 @@ async fn run_sampling_request(
         )
         .await?;
         turn_context.turn_timing_state.record_sampling_retry();
-    }
+    })
 }
 
 #[instrument(level = "trace",
@@ -2086,24 +2093,23 @@ fn assign_missing_streamed_response_item_id(
 }
 
 #[allow(clippy::too_many_arguments)]
-#[instrument(level = "trace",
-    skip_all,
-    fields(
-        turn_id = %step_context.turn.sub_id,
-        model = %step_context.turn.model_info.slug
-    )
-)]
-async fn try_run_sampling_request(
+fn try_run_sampling_request<'a>(
     tool_runtime: ToolCallRuntime,
     sess: Arc<Session>,
     step_context: Arc<StepContext>,
     turn_store: Arc<codex_extension_api::ExtensionData>,
-    client_session: &mut ModelClientSession,
-    responses_metadata: &CodexResponsesMetadata,
+    client_session: &'a mut ModelClientSession,
+    responses_metadata: &'a CodexResponsesMetadata,
     turn_diff_tracker: SharedTurnDiffTracker,
-    prompt: &Prompt,
+    prompt: &'a Prompt,
     cancellation_token: CancellationToken,
-) -> CodexResult<SamplingRequestResult> {
+) -> BoxFuture<'a, CodexResult<SamplingRequestResult>> {
+    let span = trace_span!(
+        "try_run_sampling_request",
+        turn_id = %step_context.turn.sub_id,
+        model = %step_context.turn.model_info.slug,
+    );
+    boxed_async!(span;
     let turn_context = Arc::clone(&step_context.turn);
     feedback_tags!(
         model = turn_context.model_info.slug.clone(),
@@ -2674,7 +2680,7 @@ async fn try_run_sampling_request(
     outcome.map(|mut outcome| {
         outcome.refresh_turn_context = step_context.turn_context_refresh_requested();
         outcome
-    })
+    }))
 }
 
 pub(crate) fn get_last_assistant_message_from_turn(responses: &[ResponseItem]) -> Option<String> {
