@@ -240,6 +240,8 @@ pub async fn list_accessible_connectors_from_mcp_tools_with_mcp_manager(
             .then(|| Arc::clone(&auth_manager));
     let mcp_connection_manager = McpConnectionSet::new(
         &mcp_servers,
+        &codex_mcp::McpConnectionPool::default(),
+        codex_mcp::McpConnectionPoolMode::Reuse,
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind(),
         &config.permissions.approval_policy,

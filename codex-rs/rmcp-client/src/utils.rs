@@ -1,13 +1,78 @@
 use anyhow::Result;
 use anyhow::anyhow;
+use codex_config::McpServerConfig;
+use codex_config::McpServerTransportConfig;
 use codex_config::types::McpServerEnvVar;
 use reqwest::ClientBuilder;
 use reqwest::header::HeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue;
+use sha2::Digest;
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
+
+/// Fingerprints the process-local environment values read while starting an MCP server.
+///
+/// The fingerprint lets an owner decide whether a running server is compatible with a new client
+/// without retaining bearer tokens, header values, or other environment secrets. Executor-owned
+/// environment values are represented by the selected executor rather than read on the host.
+pub fn mcp_server_environment_fingerprint(config: &McpServerConfig) -> [u8; 32] {
+    let mut values = match &config.transport {
+        McpServerTransportConfig::Stdio { env, env_vars, .. } => {
+            let env = env.clone().map(|env| {
+                env.into_iter()
+                    .map(|(key, value)| (key.into(), value.into()))
+                    .collect()
+            });
+            if config.is_local_environment() {
+                create_env_for_mcp_server(env, env_vars).unwrap_or_default()
+            } else {
+                create_env_overlay_for_remote_mcp_server(env, env_vars)
+            }
+        }
+        McpServerTransportConfig::StreamableHttp {
+            bearer_token_env_var,
+            env_http_headers,
+            ..
+        } => bearer_token_env_var
+            .iter()
+            .chain(env_http_headers.iter().flat_map(|headers| headers.values()))
+            .filter_map(|name| std::env::var_os(name).map(|value| (name.into(), value)))
+            .collect(),
+    }
+    .into_iter()
+    .collect::<Vec<_>>();
+    values.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut digest = Sha256::new();
+    for (name, value) in values {
+        update_os_string_digest(&mut digest, &name);
+        update_os_string_digest(&mut digest, &value);
+    }
+    digest.finalize().into()
+}
+
+#[cfg(unix)]
+fn update_os_string_digest(digest: &mut Sha256, value: &std::ffi::OsStr) {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = value.as_bytes();
+    digest.update(bytes.len().to_le_bytes());
+    digest.update(bytes);
+}
+
+#[cfg(windows)]
+fn update_os_string_digest(digest: &mut Sha256, value: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt;
+
+    let values = value.encode_wide().collect::<Vec<_>>();
+    digest.update(values.len().to_le_bytes());
+    for value in values {
+        digest.update(value.to_le_bytes());
+    }
+}
 
 pub(crate) fn create_env_for_mcp_server(
     extra_env: Option<HashMap<OsString, OsString>>,

@@ -718,16 +718,21 @@ impl ThreadManager {
         &self,
         options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
-        self.start_thread_with_options_and_fork_source(options, /*forked_from_thread_id*/ None)
-            .await
+        let agent_control = self.agent_control_for_config(&options.config);
+        self.start_thread_with_options_and_fork_source(
+            options,
+            /*forked_from_thread_id*/ None,
+            agent_control,
+        )
+        .await
     }
 
     async fn start_thread_with_options_and_fork_source(
         &self,
         options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
+        agent_control: AgentControl,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&options.config);
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
             .get_resumed_session_sources()
@@ -767,6 +772,7 @@ impl ThreadManager {
         mut options: StartThreadOptions,
     ) -> CodexResult<NewThread> {
         let fork_source = self.get_thread(forked_from_thread_id).await?;
+        let agent_control = fork_source.session.services.agent_control.clone();
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
@@ -783,8 +789,12 @@ impl ThreadManager {
                 /*expected_source_items*/ None,
             )
             .await?;
-        self.start_thread_with_options_and_fork_source(options, Some(forked_from_thread_id))
-            .await
+        self.start_thread_with_options_and_fork_source(
+            options,
+            Some(forked_from_thread_id),
+            agent_control,
+        )
+        .await
     }
 
     pub async fn resume_thread_from_rollout(
