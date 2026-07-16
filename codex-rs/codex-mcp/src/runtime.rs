@@ -37,6 +37,8 @@ use tokio_util::sync::CancellationToken;
 use crate::McpConfig;
 use crate::binding::McpBinding;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpConnectionPool;
+use crate::connection_pool::McpConnectionPoolMode;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
@@ -53,6 +55,8 @@ pub struct McpRuntimeInput {
     pub submit_id: String,
     pub tx_event: Option<Sender<Event>>,
     pub startup_cancellation_token: CancellationToken,
+    pub connection_pool: McpConnectionPool,
+    pub connection_pool_mode: McpConnectionPoolMode,
     pub runtime_context: McpRuntimeContext,
     pub codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     pub tool_catalog_cache: McpToolCatalogCache,
@@ -156,6 +160,10 @@ impl McpRuntime {
         let config = Arc::clone(&input.config);
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
+        let previous = match input.connection_pool_mode {
+            McpConnectionPoolMode::Reuse => previous,
+            McpConnectionPoolMode::Replace => None,
+        };
         let connections = Arc::new(
             McpConnectionSet::new(
                 previous,
