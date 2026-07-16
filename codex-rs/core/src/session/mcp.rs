@@ -191,6 +191,7 @@ impl Session {
                 mcp_projection,
                 &ready_selected_capability_roots,
                 Some(self.mcp_elicitation_reviewer()),
+                codex_mcp::McpConnectionPoolMode::Reuse,
             )
             .await;
             *self.services.mcp_tool_snapshot.lock().await = None;
@@ -244,6 +245,7 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             Some(self.mcp_elicitation_reviewer()),
+            codex_mcp::McpConnectionPoolMode::Replace,
         );
         anyhow::ensure!(
             input.mcp_servers.contains_key(CODEX_APPS_MCP_SERVER_NAME),
@@ -554,6 +556,7 @@ impl Session {
             mcp_projection,
             &ready_selected_capability_roots,
             elicitation_reviewer,
+            codex_mcp::McpConnectionPoolMode::Replace,
         )
         .await;
         *self.services.mcp_tool_snapshot.lock().await = None;
