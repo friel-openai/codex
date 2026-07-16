@@ -1,0 +1,837 @@
+//! Agent-tree-scoped ownership for reusable MCP connections.
+
+use std::future::Future;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+
+pub(crate) use crate::connection_identity::McpConnectionIdentity;
+use crate::request_router::McpConnectionRequestRouter;
+use crate::request_router::McpRouteAcquireError;
+use crate::request_router::McpSessionRoute;
+use crate::rmcp_client::AsyncManagedClient;
+use anyhow::Result;
+use anyhow::anyhow;
+
+/// Whether manager construction may reuse or replace the compatible tree connection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum McpConnectionPoolMode {
+    #[default]
+    Reuse,
+    /// Atomically replaces the connection followed by every compatible tree member.
+    Replace,
+}
+
+type ConnectionFactory =
+    Arc<dyn Fn(McpConnectionRequestRouter) -> AsyncManagedClient + Send + Sync>;
+
+const RETIREMENT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn shutdown_retired_connection(client: Arc<AsyncManagedClient>) {
+    if tokio::time::timeout(RETIREMENT_SHUTDOWN_TIMEOUT, client.shutdown())
+        .await
+        .is_err()
+    {
+        tracing::warn!("timed out shutting down retired MCP connection");
+    }
+}
+
+struct SharedConnection {
+    client: Arc<AsyncManagedClient>,
+    superseded: tokio_util::sync::CancellationToken,
+}
+
+impl Drop for SharedConnection {
+    fn drop(&mut self) {
+        self.client.request_router.close();
+        self.client.cancel_token.cancel();
+    }
+}
+
+struct ConnectionSlotState {
+    generation: u64,
+    connection: Arc<SharedConnection>,
+}
+
+struct ConnectionSlot {
+    state: Mutex<ConnectionSlotState>,
+    factory: Mutex<ConnectionFactory>,
+    routes: Mutex<Vec<Weak<McpSessionRoute>>>,
+    active_leases: AtomicUsize,
+}
+
+impl ConnectionSlot {
+    fn new(factory: ConnectionFactory, route: &Arc<McpSessionRoute>) -> Arc<Self> {
+        let request_router = McpConnectionRequestRouter::default();
+        request_router.register(route);
+        let connection = Arc::new(SharedConnection {
+            client: Arc::new(factory(request_router)),
+            superseded: tokio_util::sync::CancellationToken::new(),
+        });
+        Arc::new(Self {
+            state: Mutex::new(ConnectionSlotState {
+                generation: 0,
+                connection,
+            }),
+            factory: Mutex::new(factory),
+            routes: Mutex::new(vec![Arc::downgrade(route)]),
+            active_leases: AtomicUsize::new(1),
+        })
+    }
+
+    fn try_acquire(&self, route: &Arc<McpSessionRoute>) -> bool {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut active = self.active_leases.load(Ordering::Acquire);
+        loop {
+            if active == 0 {
+                return false;
+            }
+            let Some(incremented) = active.checked_add(1) else {
+                return false;
+            };
+            match self.active_leases.compare_exchange_weak(
+                active,
+                incremented,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    self.register_route_locked(&mut routes, route);
+                    return true;
+                }
+                Err(current) => active = current,
+            }
+        }
+    }
+
+    fn register_route(&self, route: &Arc<McpSessionRoute>) {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.register_route_locked(&mut routes, route);
+    }
+
+    fn register_route_locked(
+        &self,
+        routes: &mut Vec<Weak<McpSessionRoute>>,
+        route: &Arc<McpSessionRoute>,
+    ) {
+        routes.retain(|existing| existing.upgrade().is_some());
+        if !routes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|existing| Arc::ptr_eq(&existing, route))
+        {
+            routes.push(Arc::downgrade(route));
+        }
+        self.current().client.register_route(route);
+    }
+
+    fn unregister_route(&self, route: &Arc<McpSessionRoute>) {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routes.retain(|existing| {
+            existing
+                .upgrade()
+                .is_some_and(|existing| !Arc::ptr_eq(&existing, route))
+        });
+        drop(routes);
+        self.current().client.unregister_route(route);
+    }
+
+    fn has_live_route(&self) -> bool {
+        self.first_live_route().is_some()
+    }
+
+    fn has_live_route_other_than(&self, excluded: &Arc<McpSessionRoute>) -> bool {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routes.retain(|route| route.upgrade().is_some());
+        routes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .any(|route| !route.is_closed() && !Arc::ptr_eq(&route, excluded))
+    }
+
+    fn first_live_route(&self) -> Option<Arc<McpSessionRoute>> {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routes.retain(|route| route.upgrade().is_some());
+        routes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|route| !route.is_closed())
+    }
+
+    fn current(&self) -> Arc<SharedConnection> {
+        Arc::clone(
+            &self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .connection,
+        )
+    }
+
+    fn replace(&self, factory: ConnectionFactory) -> Arc<SharedConnection> {
+        *self
+            .factory
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::clone(&factory);
+        let previous = self.replace_with(factory);
+        previous.superseded.cancel();
+        previous
+    }
+
+    fn replace_if_current(
+        &self,
+        current: &Arc<SharedConnection>,
+        preferred_route: Option<&Arc<McpSessionRoute>>,
+    ) -> Option<(Arc<SharedConnection>, Arc<McpSessionRoute>)> {
+        let factory = Arc::clone(
+            &self
+                .factory
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routes.retain(|route| route.upgrade().is_some());
+        let live_routes = routes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|route| !route.is_closed())
+            .collect::<Vec<_>>();
+        if live_routes.is_empty() || self.active_leases.load(Ordering::Acquire) == 0 {
+            return None;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !Arc::ptr_eq(&state.connection, current) {
+            return None;
+        }
+        let replacement = Self::make_connection_for_routes(factory, &live_routes);
+        let startup_route = preferred_route
+            .filter(|preferred| {
+                live_routes
+                    .iter()
+                    .any(|route| Arc::ptr_eq(route, preferred))
+            })
+            .cloned()
+            .unwrap_or_else(|| Arc::clone(&live_routes[0]));
+        state.generation = state.generation.wrapping_add(1);
+        state.connection = Arc::clone(&replacement);
+        current.client.request_router.close();
+        current.client.cancel_token.cancel();
+        Some((replacement, startup_route))
+    }
+
+    fn replace_with(&self, factory: ConnectionFactory) -> Arc<SharedConnection> {
+        let mut routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        routes.retain(|route| route.upgrade().is_some());
+        let live_routes = routes
+            .iter()
+            .filter_map(Weak::upgrade)
+            .filter(|route| !route.is_closed())
+            .collect::<Vec<_>>();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let replacement = Self::make_connection_for_routes(factory, &live_routes);
+        state.generation = state.generation.wrapping_add(1);
+        std::mem::replace(&mut state.connection, replacement)
+    }
+
+    fn make_connection_for_routes(
+        factory: ConnectionFactory,
+        routes: &[Arc<McpSessionRoute>],
+    ) -> Arc<SharedConnection> {
+        let request_router = McpConnectionRequestRouter::default();
+        for route in routes {
+            request_router.register(route);
+        }
+        Arc::new(SharedConnection {
+            client: Arc::new(factory(request_router)),
+            superseded: tokio_util::sync::CancellationToken::new(),
+        })
+    }
+
+    fn release(&self) -> bool {
+        let _routes = self
+            .routes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.active_leases.fetch_sub(1, Ordering::AcqRel) == 1
+    }
+
+    #[cfg(test)]
+    fn from_client(client: AsyncManagedClient) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(ConnectionSlotState {
+                generation: 0,
+                connection: Arc::new(SharedConnection {
+                    client: Arc::new(client),
+                    superseded: tokio_util::sync::CancellationToken::new(),
+                }),
+            }),
+            factory: Mutex::new(Arc::new(|_| {
+                panic!("test-only standalone MCP lease cannot replace its connection")
+            })),
+            routes: Mutex::new(Vec::new()),
+            active_leases: AtomicUsize::new(1),
+        })
+    }
+}
+
+struct PoolEntry {
+    identity: McpConnectionIdentity,
+    slot: Weak<ConnectionSlot>,
+}
+
+struct LeaseInner {
+    slot: Arc<ConnectionSlot>,
+    released: AtomicBool,
+}
+
+/// One session's ownership of a shared MCP connection slot.
+///
+/// Cloning a lease for an in-flight operation does not create another session lease. Every tree
+/// member follows the slot's healthy generation, so retiring one physical connection does not
+/// strand siblings on a cancelled client.
+#[derive(Clone)]
+pub(crate) struct McpConnectionLease {
+    inner: Arc<LeaseInner>,
+}
+
+#[derive(Clone)]
+pub(crate) struct McpPooledClient {
+    connection: Arc<SharedConnection>,
+    slot: Weak<ConnectionSlot>,
+    route: Arc<McpSessionRoute>,
+}
+
+impl Deref for McpPooledClient {
+    type Target = AsyncManagedClient;
+
+    fn deref(&self) -> &Self::Target {
+        &self.connection.client
+    }
+}
+
+impl McpPooledClient {
+    fn is_current(&self) -> bool {
+        self.slot
+            .upgrade()
+            .is_some_and(|slot| Arc::ptr_eq(&slot.current(), &self.connection))
+    }
+
+    fn retire_after_failure(&self) {
+        if let Some(slot) = self.slot.upgrade()
+            && let Some((replacement, route)) =
+                slot.replace_if_current(&self.connection, Some(&self.route))
+        {
+            Self {
+                connection: replacement,
+                slot: Arc::downgrade(&slot),
+                route,
+            }
+            .start_in_background();
+        }
+        let client = Arc::clone(&self.connection.client);
+        tokio::spawn(async move {
+            shutdown_retired_connection(client).await;
+        });
+    }
+
+    async fn retire_after_route_close(&self) {
+        if let Some(slot) = self.slot.upgrade()
+            && slot.has_live_route()
+            && let Some((replacement, route)) =
+                slot.replace_if_current(&self.connection, /*preferred_route*/ None)
+        {
+            Self {
+                connection: replacement,
+                slot: Arc::downgrade(&slot),
+                route,
+            }
+            .start_in_background();
+        }
+        shutdown_retired_connection(Arc::clone(&self.connection.client)).await;
+    }
+
+    fn start_in_background(self) {
+        self.start_in_background_inner(
+            #[cfg(test)]
+            None,
+        );
+    }
+
+    #[cfg(test)]
+    fn start_in_background_after_check(self, hook: impl Future<Output = ()> + Send + 'static) {
+        self.start_in_background_inner(Some(Box::pin(hook)));
+    }
+
+    fn start_in_background_inner(
+        mut self,
+        #[cfg(test)] after_check: Option<
+            std::pin::Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+        >,
+    ) {
+        tokio::spawn(async move {
+            let Some(slot) = self.slot.upgrade() else {
+                return;
+            };
+            if self.connection.superseded.is_cancelled()
+                || !Arc::ptr_eq(&slot.current(), &self.connection)
+            {
+                return;
+            }
+            let active_route = loop {
+                match self
+                    .connection
+                    .client
+                    .request_router
+                    .acquire(Arc::clone(&self.route))
+                    .await
+                {
+                    Ok(active_route) => break active_route,
+                    Err(McpRouteAcquireError::ConnectionClosed) => return,
+                    Err(McpRouteAcquireError::RouteClosed) => {
+                        let Some(slot) = self.slot.upgrade() else {
+                            return;
+                        };
+                        if !Arc::ptr_eq(&slot.current(), &self.connection) {
+                            return;
+                        }
+                        let Some(route) = slot.first_live_route() else {
+                            return;
+                        };
+                        self.route = route;
+                    }
+                }
+            };
+            let _active_route = active_route;
+            if self.connection.superseded.is_cancelled()
+                || !Arc::ptr_eq(&slot.current(), &self.connection)
+            {
+                return;
+            }
+            #[cfg(test)]
+            if let Some(after_check) = after_check {
+                after_check.await;
+            }
+            tokio::select! {
+                biased;
+                () = self.connection.superseded.cancelled() => {}
+                () = self.route.closed() => self.retire_after_route_close().await,
+                _ = self.connection.client.client() => {}
+            }
+        });
+    }
+}
+
+/// Retires a physical connection when its dispatched operation outlives the caller.
+///
+/// Dropping a `JoinHandle` detaches its task. An MCP request that is waiting for a server request
+/// such as elicitation could otherwise keep the session route active forever and block sibling
+/// sessions that share the connection.
+struct RetireConnectionOnDrop {
+    client: Option<McpPooledClient>,
+    action: AbandonedOperationAction,
+}
+
+#[derive(Clone, Copy)]
+enum AbandonedOperationAction {
+    RetireConnection,
+    CancelIfSoleRoute,
+}
+
+#[derive(Clone, Copy)]
+enum SupersededOperationAction {
+    Drain,
+    Retry,
+}
+
+impl RetireConnectionOnDrop {
+    fn new(client: McpPooledClient, action: AbandonedOperationAction) -> Self {
+        Self {
+            client: Some(client),
+            action,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.client = None;
+    }
+}
+
+impl Drop for RetireConnectionOnDrop {
+    fn drop(&mut self) {
+        let Some(client) = self.client.take() else {
+            return;
+        };
+        let action = self.action;
+        tokio::spawn(async move {
+            match action {
+                AbandonedOperationAction::RetireConnection => {
+                    client.retire_after_failure();
+                }
+                AbandonedOperationAction::CancelIfSoleRoute => {
+                    let Some(slot) = client.slot.upgrade() else {
+                        return;
+                    };
+                    if Arc::ptr_eq(&slot.current(), &client.connection)
+                        && !slot.has_live_route_other_than(&client.route)
+                    {
+                        client.connection.client.request_router.close();
+                        client.connection.client.cancel_token.cancel();
+                        shutdown_retired_connection(Arc::clone(&client.connection.client)).await;
+                    }
+                }
+            }
+        });
+    }
+}
+
+impl McpConnectionLease {
+    fn new(slot: Arc<ConnectionSlot>) -> Self {
+        Self {
+            inner: Arc::new(LeaseInner {
+                slot,
+                released: AtomicBool::new(false),
+            }),
+        }
+    }
+
+    fn current(&self) -> Result<Arc<SharedConnection>> {
+        if self.inner.released.load(Ordering::Acquire) {
+            return Err(anyhow!("MCP connection lease released"));
+        }
+        Ok(self.inner.slot.current())
+    }
+
+    pub(crate) async fn run<T, F, Fut>(
+        &self,
+        route: Arc<McpSessionRoute>,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(McpPooledClient) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        self.run_with_abandoned_operation_action(
+            route,
+            AbandonedOperationAction::RetireConnection,
+            SupersededOperationAction::Drain,
+            operation,
+        )
+        .await
+    }
+
+    async fn run_with_abandoned_operation_action<T, F, Fut>(
+        &self,
+        route: Arc<McpSessionRoute>,
+        abandoned_operation_action: AbandonedOperationAction,
+        superseded_operation_action: SupersededOperationAction,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(McpPooledClient) -> Fut + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
+    {
+        let mut operation = Some(operation);
+        loop {
+            let connection = self.current()?;
+            self.inner.slot.register_route(&route);
+            let active_route = match connection
+                .client
+                .request_router
+                .acquire(Arc::clone(&route))
+                .await
+            {
+                Ok(active_route) => active_route,
+                Err(McpRouteAcquireError::ConnectionClosed) => {
+                    if Arc::ptr_eq(&self.inner.slot.current(), &connection) {
+                        return Err(anyhow!("shared MCP connection closed"));
+                    }
+                    continue;
+                }
+                Err(McpRouteAcquireError::RouteClosed) => {
+                    return Err(anyhow!("MCP session route closed"));
+                }
+            };
+            if !Arc::ptr_eq(&self.inner.slot.current(), &connection) {
+                drop(active_route);
+                continue;
+            }
+            let pooled_client = McpPooledClient {
+                connection: Arc::clone(&connection),
+                slot: Arc::downgrade(&self.inner.slot),
+                route: Arc::clone(&route),
+            };
+            let Some(operation) = operation.take() else {
+                return Err(anyhow!("shared MCP operation already started"));
+            };
+            let route_for_task = Arc::clone(&route);
+            let task_client = pooled_client.clone();
+            let connection_cancelled = task_client.connection.client.cancel_token.clone();
+            let connection_superseded = task_client.connection.superseded.clone();
+            let operation_task = tokio::spawn(async move {
+                let _active_route = active_route;
+                let superseded = async move {
+                    match superseded_operation_action {
+                        SupersededOperationAction::Drain => std::future::pending().await,
+                        SupersededOperationAction::Retry => connection_superseded.cancelled().await,
+                    }
+                };
+                tokio::select! {
+                    value = operation(task_client.clone()) => Ok(value),
+                    () = superseded => Err(anyhow!("shared MCP connection superseded")),
+                    () = connection_cancelled.cancelled() => {
+                        Err(anyhow!("shared MCP connection closed"))
+                    }
+                    () = route_for_task.closed() => {
+                        task_client.retire_after_route_close().await;
+                        Err(anyhow!("MCP session route closed"))
+                    }
+                }
+            });
+            let mut retire_on_drop =
+                RetireConnectionOnDrop::new(pooled_client, abandoned_operation_action);
+            let result = operation_task
+                .await
+                .map_err(|error| anyhow!("shared MCP operation task failed: {error}"));
+            retire_on_drop.disarm();
+            return result?;
+        }
+    }
+
+    pub(crate) async fn run_mcp_request<T, F, Fut>(
+        &self,
+        route: Arc<McpSessionRoute>,
+        operation: F,
+    ) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(McpPooledClient) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
+    {
+        self.run(route, move |client| async move {
+            let result = operation(client.clone()).await;
+            if result
+                .as_ref()
+                .is_err_and(codex_rmcp_client::is_connection_unusable)
+            {
+                client.retire_after_failure();
+            }
+            result
+        })
+        .await?
+    }
+
+    /// Waits for startup of the slot's current physical connection.
+    ///
+    /// Refresh may replace a connection while its startup future is still running. Startup status
+    /// must describe the replacement, not a superseded generation that happened to finish later.
+    pub(crate) async fn await_current_startup(
+        &self,
+        route: Arc<McpSessionRoute>,
+    ) -> std::result::Result<
+        crate::rmcp_client::ManagedClient,
+        crate::rmcp_client::StartupOutcomeError,
+    > {
+        loop {
+            let observed_connection = self.current();
+            let attempt = self
+                .run_with_abandoned_operation_action(
+                    Arc::clone(&route),
+                    AbandonedOperationAction::CancelIfSoleRoute,
+                    SupersededOperationAction::Retry,
+                    |client| async move {
+                        let outcome = client.client().await;
+                        (client, outcome)
+                    },
+                )
+                .await;
+            match attempt {
+                Ok((client, outcome)) if client.is_current() => return outcome,
+                Ok(_) => continue,
+                Err(_)
+                    if observed_connection.is_ok_and(|observed| {
+                        !Arc::ptr_eq(&observed, &self.inner.slot.current())
+                    }) =>
+                {
+                    continue;
+                }
+                Err(_) => return Err(crate::rmcp_client::StartupOutcomeError::Cancelled),
+            }
+        }
+    }
+
+    pub(crate) fn has_cached_tools(&self) -> bool {
+        self.current()
+            .is_ok_and(|connection| connection.client.has_cached_tools())
+    }
+
+    pub(crate) fn startup_complete(&self) -> bool {
+        self.current()
+            .is_ok_and(|connection| connection.client.startup_complete.load(Ordering::Acquire))
+    }
+
+    pub(crate) fn cached_server_info(&self) -> Option<codex_protocol::mcp::McpServerInfo> {
+        self.current()
+            .ok()
+            .and_then(|connection| connection.client.cached_server_info.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_tool_catalog_cache_context(&self) -> bool {
+        self.current()
+            .is_ok_and(|connection| connection.client.tool_catalog_cache_context.is_some())
+    }
+
+    pub(crate) async fn reconnect_failed_startup(&self, route: Arc<McpSessionRoute>) {
+        let lease = self.clone();
+        tokio::spawn(async move {
+            let reconnect_route = Arc::clone(&route);
+            let _ = lease
+                .run(route, move |client| async move {
+                    client.reconnect_failed_startup(reconnect_route).await;
+                })
+                .await;
+        });
+    }
+
+    pub(crate) fn unregister_route(&self, route: &Arc<McpSessionRoute>) {
+        self.inner.slot.unregister_route(route);
+    }
+
+    /// Releases this session's logical ownership, returning whether it was the final lease.
+    pub(crate) fn release(&self) -> bool {
+        if self.inner.released.swap(true, Ordering::AcqRel) {
+            return false;
+        }
+        self.inner.slot.release()
+    }
+
+    pub(crate) async fn shutdown(&self) {
+        self.inner.slot.current().client.shutdown().await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_exclusive(&self) -> bool {
+        self.inner.slot.active_leases.load(Ordering::Acquire) == 1
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner.slot, &other.inner.slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_connection_cancelled(&self) -> bool {
+        self.inner.slot.current().client.cancel_token.is_cancelled()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_cancel_token(&self) -> tokio_util::sync::CancellationToken {
+        self.inner.slot.current().client.cancel_token.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connection_id(&self) -> usize {
+        Arc::as_ptr(&self.inner.slot.current()) as usize
+    }
+}
+
+#[cfg(test)]
+impl From<AsyncManagedClient> for McpConnectionLease {
+    fn from(client: AsyncManagedClient) -> Self {
+        Self::new(ConnectionSlot::from_client(client))
+    }
+}
+
+impl Drop for LeaseInner {
+    fn drop(&mut self) {
+        if !self.released.swap(true, Ordering::AcqRel) && self.slot.release() {
+            self.slot.current().client.request_router.close();
+            self.slot.current().client.cancel_token.cancel();
+        }
+    }
+}
+
+/// Reuses compatible MCP connections within one root agent and its descendants.
+#[derive(Clone, Default)]
+pub struct McpConnectionPool {
+    entries: Arc<Mutex<Vec<PoolEntry>>>,
+}
+
+impl McpConnectionPool {
+    pub(crate) fn acquire(
+        &self,
+        identity: McpConnectionIdentity,
+        mode: McpConnectionPoolMode,
+        route: &Arc<McpSessionRoute>,
+        create: impl Fn(McpConnectionRequestRouter) -> AsyncManagedClient + Send + Sync + 'static,
+    ) -> McpConnectionLease {
+        let factory: ConnectionFactory = Arc::new(create);
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries.retain(|entry| {
+            entry
+                .slot
+                .upgrade()
+                .is_some_and(|slot| slot.active_leases.load(Ordering::Acquire) > 0)
+        });
+        if let Some(slot) = entries
+            .iter()
+            .rev()
+            .find(|entry| entry.identity == identity)
+            .and_then(|entry| entry.slot.upgrade())
+            .filter(|slot| slot.try_acquire(route))
+        {
+            if mode == McpConnectionPoolMode::Replace {
+                drop(slot.replace(factory));
+            }
+            return McpConnectionLease::new(slot);
+        }
+
+        let slot = ConnectionSlot::new(factory, route);
+        entries.push(PoolEntry {
+            identity,
+            slot: Arc::downgrade(&slot),
+        });
+        McpConnectionLease::new(slot)
+    }
+}
+
+#[cfg(test)]
+#[path = "connection_pool_tests.rs"]
+mod tests;

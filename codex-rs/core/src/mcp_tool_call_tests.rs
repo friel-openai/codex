@@ -1460,6 +1460,8 @@ async fn host_owned_codex_apps_manager(
     )]);
     let manager = codex_mcp::McpConnectionManager::new(
         &mcp_servers,
+        &codex_mcp::McpConnectionPool::default(),
+        codex_mcp::McpConnectionPoolMode::Reuse,
         turn_context.config.mcp_oauth_credentials_store_mode,
         turn_context.config.auth_keyring_backend_kind(),
         &turn_context.approval_policy,
