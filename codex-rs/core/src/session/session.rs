@@ -1251,6 +1251,8 @@ impl Session {
                     .then(|| Arc::clone(&sess.services.auth_manager));
             let mcp_connection_manager = McpConnectionManager::new(
                 &mcp_servers,
+                sess.services.agent_control.mcp_connection_pool(),
+                codex_mcp::McpConnectionPoolMode::Reuse,
                 config.mcp_oauth_credentials_store_mode,
                 config.auth_keyring_backend_kind(),
                 &session_configuration.approval_policy,
