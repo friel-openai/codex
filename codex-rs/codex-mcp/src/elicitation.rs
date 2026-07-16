@@ -16,6 +16,7 @@ use crate::mcp::mcp_permission_prompt_is_auto_approved;
 use anyhow::Context;
 use anyhow::Result;
 use anyhow::anyhow;
+#[cfg(test)]
 use async_channel::Sender;
 use codex_protocol::approvals::ElicitationRequest;
 use codex_protocol::approvals::ElicitationRequestEvent;
@@ -31,7 +32,6 @@ use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use rmcp::model::ElicitationAction;
 use rmcp::model::RequestId;
-use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 
 static NEXT_ELICITATION_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
@@ -51,6 +51,8 @@ pub trait ElicitationReviewer: Send + Sync {
 }
 
 pub type ElicitationReviewerHandle = Arc<dyn ElicitationReviewer>;
+
+pub(crate) type SendEvent = Arc<dyn Fn(Event) -> BoxFuture<'static, Result<()>> + Send + Sync>;
 
 /// Holds an owner-provided registration while an MCP elicitation is waiting for a response.
 #[derive(Clone)]
@@ -86,7 +88,7 @@ struct ActiveElicitation {
 /// the same server request ID without colliding.
 #[derive(Clone, Default)]
 pub struct ElicitationRequestRouter {
-    requests: Arc<Mutex<ResponderMap>>,
+    requests: Arc<StdMutex<ResponderMap>>,
 }
 
 impl ElicitationRequestRouter {
@@ -98,7 +100,7 @@ impl ElicitationRequestRouter {
     ) -> Result<()> {
         self.requests
             .lock()
-            .await
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(&(server_name, id))
             .ok_or_else(|| anyhow!("elicitation request not found"))?
             .send(response)
@@ -160,10 +162,30 @@ impl ElicitationRequestManager {
         self.router.clone()
     }
 
+    #[cfg(test)]
     pub(crate) fn make_sender(
         &self,
         server_name: String,
         tx_event: Option<Sender<Event>>,
+    ) -> SendElicitation {
+        let send_event = tx_event.map(|tx_event| {
+            Arc::new(move |event| {
+                let tx_event = tx_event.clone();
+                async move {
+                    tx_event.send(event).await.map_err(|error| {
+                        anyhow!("failed to deliver MCP elicitation request: {error}")
+                    })
+                }
+                .boxed()
+            }) as SendEvent
+        });
+        self.make_sender_with_event_dispatch(server_name, send_event)
+    }
+
+    pub(crate) fn make_sender_with_event_dispatch(
+        &self,
+        server_name: String,
+        send_event: Option<SendEvent>,
     ) -> SendElicitation {
         let router = self.router.clone();
         let approval_policy = self.approval_policy.clone();
@@ -173,7 +195,7 @@ impl ElicitationRequestManager {
         let lifecycle = self.lifecycle.clone();
         Box::new(move |id, elicitation| {
             let router = router.clone();
-            let tx_event = tx_event.clone();
+            let send_event = send_event.clone();
             let server_name = server_name.clone();
             let approval_policy = approval_policy.clone();
             let permission_profile = permission_profile.clone();
@@ -233,7 +255,7 @@ impl ElicitationRequestManager {
                     }
                 }
 
-                let Some(tx_event) = tx_event else {
+                let Some(send_event) = send_event else {
                     return Ok(ElicitationResponse {
                         action: ElicitationAction::Decline,
                         content: None,
@@ -290,21 +312,34 @@ impl ElicitationRequestManager {
                 };
                 let (tx, rx) = oneshot::channel();
                 let _active_elicitation = lifecycle.as_ref().map(ElicitationLifecycle::start);
+                let routed_key = (server_name.clone(), routed_request_id);
+                router
+                    .requests
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .insert(routed_key.clone(), tx);
+                let _pending_responder = PendingResponder {
+                    key: routed_key.clone(),
+                    requests: Arc::clone(&router.requests),
+                };
+                if let Err(error) = send_event(Event {
+                    id: "mcp_elicitation_request".to_string(),
+                    msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+                        turn_id: None,
+                        server_name,
+                        id: ProtocolRequestId::String(public_request_id),
+                        request,
+                    }),
+                })
+                .await
                 {
-                    let mut lock = router.requests.lock().await;
-                    lock.insert((server_name.clone(), routed_request_id), tx);
+                    router
+                        .requests
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .remove(&routed_key);
+                    return Err(error);
                 }
-                let _ = tx_event
-                    .send(Event {
-                        id: "mcp_elicitation_request".to_string(),
-                        msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
-                            turn_id: None,
-                            server_name,
-                            id: ProtocolRequestId::String(public_request_id),
-                            request,
-                        }),
-                    })
-                    .await;
                 rx.await
                     .context("elicitation request channel closed unexpectedly")
             }
@@ -323,6 +358,21 @@ pub(crate) fn elicitation_is_rejected_by_policy(approval_policy: AskForApproval)
 }
 
 type ResponderMap = HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>;
+
+/// Removes a pending responder when its transport request is cancelled or disconnected.
+struct PendingResponder {
+    key: (String, RequestId),
+    requests: Arc<StdMutex<ResponderMap>>,
+}
+
+impl Drop for PendingResponder {
+    fn drop(&mut self) {
+        self.requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.key);
+    }
+}
 
 fn can_auto_accept_elicitation(elicitation: &Elicitation) -> bool {
     match elicitation {

@@ -22,6 +22,7 @@ use super::McpBinding;
 use super::PreparedMcpCall;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::rmcp_client::ManagedClient;
 use crate::server::McpServerMetadata;
 use crate::server::McpServerOrigin;
@@ -93,9 +94,10 @@ async fn test_step(
         server_supports_sandbox_state_meta_capability: supports_sandbox_state_meta,
         codex_apps_tools_cache_context: None,
     });
+    let binding_client = McpPooledBindingClient::for_test(Arc::clone(&managed_client));
     let clients = Arc::new(McpBindingClients::new(HashMap::from([(
         SERVER_NAME.to_string(),
-        Arc::clone(&managed_client),
+        binding_client.clone(),
     )])));
     let connections = Arc::new(McpConnectionSet::new_uninitialized_with_permission_profile(
         &Constrained::allow_any(AskForApproval::OnRequest),
@@ -105,7 +107,7 @@ async fn test_step(
     let tool_catalog_revision = Arc::new(tokio::sync::RwLock::new(0));
     let prepared = PreparedMcpCall::new(
         Arc::clone(&connections),
-        managed_client,
+        binding_client,
         /*catalog_revision*/ 0,
         Arc::clone(&tool_catalog_revision),
         tool.clone(),
