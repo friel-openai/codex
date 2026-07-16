@@ -15,10 +15,10 @@ use crate::binding::McpBinding;
 use crate::binding::PreparedMcpCall;
 use crate::binding_clients::McpBindingClients;
 use crate::codex_apps::prepare_openai_file_params_for_model;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::rmcp_client::CODEX_APPS_REFRESH_DURATION_METRIC;
 use crate::rmcp_client::MCP_TOOLS_LIST_DURATION_METRIC;
-use crate::rmcp_client::ManagedClient;
 use crate::rmcp_client::list_tools_for_client_uncached;
 use crate::runtime::emit_duration;
 use crate::tools::ToolInfo;
@@ -33,13 +33,16 @@ impl McpConnectionSet {
         let mut available_server_count = 0;
         let mut unavailable_server_count = 0;
         for (server_name, managed_client) in &self.clients {
-            managed_client.reconnect_failed_startup().await;
+            managed_client
+                .reconnect_failed_startup(Arc::clone(&self.session_route))
+                .await;
             let has_cached_tools = managed_client.has_cached_tools();
-            let startup_complete = managed_client
-                .startup_complete
-                .load(std::sync::atomic::Ordering::Acquire);
-            let Some(server_tools) = managed_client
-                .listed_tools()
+            let startup_complete = managed_client.startup_complete();
+            let provenance = Arc::clone(&self.tool_plugin_provenance);
+            let Ok(Some(server_tools)) = managed_client
+                .run(Arc::clone(&self.session_route), move |client| async move {
+                    client.listed_tools(provenance.as_ref()).await
+                })
                 .instrument(trace_span!(
                     "list_tools_for_server",
                     server_name = %server_name,
@@ -77,9 +80,15 @@ impl McpConnectionSet {
     /// Returns one tool from the current live connection.
     pub async fn tool_info(&self, server: &str, tool: &str) -> Option<ToolInfo> {
         let client = self.clients.get(server)?;
-        let managed_client = client.client().await.ok()?;
-        let tool = client
-            .prepare_tools(managed_client.listed_tools())
+        let provenance = Arc::clone(&self.tool_plugin_provenance);
+        let tools = client
+            .run(Arc::clone(&self.session_route), move |client| async move {
+                let managed_client = client.client().await.ok()?;
+                Some(client.prepare_tools(managed_client.listed_tools(), provenance.as_ref()))
+            })
+            .await
+            .ok()??;
+        let tool = tools
             .into_iter()
             .find(|tool_info| tool_info.tool.name == tool)?;
         Some(self.with_server_metadata(tool))
@@ -105,7 +114,11 @@ impl McpConnectionSet {
                 None
             };
             let Some((client, server_tools)) = managed_client
-                .capture_ready_client_and_tools(catalog_override)
+                .capture_ready_client_and_tools(
+                    Arc::clone(&self.session_route),
+                    catalog_override,
+                    Arc::clone(&self.tool_plugin_provenance),
+                )
                 .await
             else {
                 trace!(
@@ -160,7 +173,7 @@ impl McpConnectionSet {
     fn prepare_call(
         self: &Arc<Self>,
         tool_info: &ToolInfo,
-        client: Arc<ManagedClient>,
+        client: McpPooledBindingClient,
         tool_catalog_revision: u64,
     ) -> Option<PreparedMcpCall> {
         let server_name = &tool_info.server_name;
@@ -189,34 +202,41 @@ impl McpConnectionSet {
     pub async fn hard_refresh_codex_apps_tools_cache(&self) -> Result<Vec<ToolInfo>> {
         let _refresh = self.codex_apps_refresh_lock.lock().await;
         let refresh_start = Instant::now();
-        let managed_client = self
+        let client = self
             .clients
             .get(CODEX_APPS_MCP_SERVER_NAME)
-            .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?
-            .client()
-            .await
-            .context("failed to get client")?;
-
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?;
         let list_start = Instant::now();
-        let fetch_ticket =
-            managed_client
-                .codex_apps_tools_cache_context
-                .as_ref()
-                .map(|cache_context| {
-                    cache_context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh)
-                });
-        let client_tools = list_tools_for_client_uncached(
-            CODEX_APPS_MCP_SERVER_NAME,
-            /*is_codex_apps_mcp_server*/ true,
-            /*codex_apps_refresh_trigger*/ "explicit",
-            &managed_client.client,
-            managed_client.tool_timeout,
-            managed_client.server_instructions.as_deref(),
-        )
-        .await
-        .with_context(|| {
-            format!("failed to refresh tools for MCP server '{CODEX_APPS_MCP_SERVER_NAME}'")
-        })?;
+        let (connection_id, managed_client, fetch_ticket, client_tools) =
+            client
+                .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                    let connection_id = client.connection_id();
+                    let managed_client = client.client().await.context("failed to get client")?;
+                    let fetch_ticket = managed_client.codex_apps_tools_cache_context.as_ref().map(
+                        |cache_context| {
+                            cache_context.begin_fetch(ConnectorRuntimeFetchSource::HardRefresh)
+                        },
+                    );
+                    let client_tools = list_tools_for_client_uncached(
+                        CODEX_APPS_MCP_SERVER_NAME,
+                        /*is_codex_apps_mcp_server*/ true,
+                        /*codex_apps_refresh_trigger*/ "explicit",
+                        &managed_client.client,
+                        managed_client.tool_timeout,
+                        managed_client.server_instructions.as_deref(),
+                    )
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to refresh tools for MCP server \
+                             '{CODEX_APPS_MCP_SERVER_NAME}'"
+                        )
+                    })?;
+                    Ok((connection_id, managed_client, fetch_ticket, client_tools))
+                })
+                .await
+                .context("failed to get client")?;
 
         let mut tool_catalog_revision = self.tool_catalog_revision.write().await;
         let tools = match (
@@ -231,7 +251,7 @@ impl McpConnectionSet {
             (None, None) => client_tools.clone(),
             _ => unreachable!("Codex Apps fetch ticket requires cache context"),
         };
-        *self.codex_apps_tools_override.write().await = Some(client_tools);
+        *self.codex_apps_tools_override.write().await = Some((connection_id, client_tools));
         *tool_catalog_revision += 1;
         drop(tool_catalog_revision);
         emit_duration(

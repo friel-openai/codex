@@ -14,18 +14,20 @@ mod tool_catalog;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crate::binding_clients::McpBindingClients;
+use crate::connection_pool::McpConnectionIdentity;
+use crate::connection_pool::McpConnectionLease;
+use crate::connection_pool::McpConnectionPool;
+use crate::connection_pool::McpConnectionPoolMode;
 use crate::elicitation::ElicitationRequestManager;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp::ToolPluginProvenance;
+use crate::request_router::McpSessionRoute;
 use crate::rmcp_client::AsyncManagedClient;
 use crate::rmcp_client::DEFAULT_STARTUP_TIMEOUT;
-use crate::rmcp_client::ManagedClient;
 use crate::rmcp_client::StartupOutcomeError;
 use crate::runtime::McpRuntimeContext;
 use crate::server::EffectiveMcpServer;
@@ -72,8 +74,6 @@ use rmcp::model::RequestId;
 use rmcp::model::Resource;
 use rmcp::model::ResourceTemplate;
 use serde_json::Value as JsonValue;
-use tokio::sync::Mutex;
-use tokio::sync::RwLock;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
@@ -108,15 +108,17 @@ pub fn tool_is_model_visible(tool: &ToolInfo) -> bool {
 
 /// A thin wrapper around a set of running [`RmcpClient`] instances.
 pub struct McpConnectionSet {
-    clients: HashMap<String, AsyncManagedClient>,
+    clients: HashMap<String, McpConnectionLease>,
     server_metadata: HashMap<String, McpServerMetadata>,
     required_servers: Vec<String>,
-    tool_catalog_revision: Arc<RwLock<u64>>,
-    codex_apps_tools_override: RwLock<Option<Vec<ToolInfo>>>,
-    codex_apps_refresh_lock: Mutex<()>,
+    tool_catalog_revision: Arc<tokio::sync::RwLock<u64>>,
+    /// Refreshed Codex Apps tools and the physical connection generation that listed them.
+    codex_apps_tools_override: tokio::sync::RwLock<Option<(u64, Vec<ToolInfo>)>>,
+    codex_apps_refresh_lock: tokio::sync::Mutex<()>,
     tool_plugin_provenance: Arc<ToolPluginProvenance>,
     prefix_mcp_tool_names: bool,
     elicitation_requests: ElicitationRequestManager,
+    session_route: Arc<McpSessionRoute>,
     startup_cancellation_token: CancellationToken,
 }
 
@@ -126,6 +128,8 @@ impl McpConnectionSet {
     #[allow(clippy::too_many_arguments)]
     pub async fn new(
         mcp_servers: &HashMap<String, EffectiveMcpServer>,
+        connection_pool: &McpConnectionPool,
+        connection_pool_mode: McpConnectionPoolMode,
         store_mode: OAuthCredentialsStoreMode,
         keyring_backend_kind: AuthKeyringBackendKind,
         approval_policy: &Constrained<AskForApproval>,
@@ -164,6 +168,11 @@ impl McpConnectionSet {
             elicitation_lifecycle,
             elicitation_router,
         );
+        let session_route = Arc::new(McpSessionRoute::new(
+            submit_id.clone(),
+            elicitation_requests.clone(),
+            tx_event.clone(),
+        ));
         let tool_plugin_provenance = Arc::new(tool_plugin_provenance);
         let startup_submit_id = submit_id.clone();
         let static_chatgpt_auth_provider = auth
@@ -252,29 +261,60 @@ impl McpConnectionSet {
                 None
             };
             let has_runtime_auth = runtime_auth_provider.is_some();
-            let async_managed_client = AsyncManagedClient::new(
+            let connection_identity = McpConnectionIdentity::new(
                 server_name.clone(),
-                startup_submit_id.clone(),
-                server,
+                configured_config.clone(),
                 store_mode,
                 keyring_backend_kind,
-                cancel_token.clone(),
-                tx_event.clone(),
-                elicitation_requests.clone(),
-                codex_apps_tools_cache_context,
-                tool_catalog_cache_context,
-                Arc::clone(&tool_plugin_provenance),
-                runtime_context.clone(),
-                resolved_environment,
-                runtime_auth_provider,
-                client_elicitation_capability.clone(),
+                runtime_context.local_stdio_fallback_cwd(),
+                &resolved_environment,
+                codex_home.clone(),
+                codex_apps_tools_cache_key.clone(),
+                runtime_auth_provider.as_ref(),
+                &client_elicitation_capability,
                 supports_openai_form_elicitation,
+            );
+            let factory_server_name = server_name.clone();
+            let factory_server = server.clone();
+            let factory_codex_apps_tools_cache_context = codex_apps_tools_cache_context.clone();
+            let factory_tool_catalog_cache_context = tool_catalog_cache_context.clone();
+            let factory_runtime_context = runtime_context.clone();
+            let factory_resolved_environment = resolved_environment.clone();
+            let factory_runtime_auth_provider = runtime_auth_provider.clone();
+            let factory_client_elicitation_capability = client_elicitation_capability.clone();
+            let async_managed_client = connection_pool.acquire(
+                connection_identity,
+                connection_pool_mode,
+                &session_route,
+                move |request_router| {
+                    AsyncManagedClient::new(
+                        factory_server_name.clone(),
+                        factory_server.clone(),
+                        store_mode,
+                        keyring_backend_kind,
+                        CancellationToken::new(),
+                        request_router,
+                        factory_codex_apps_tools_cache_context.clone(),
+                        factory_tool_catalog_cache_context.clone(),
+                        factory_runtime_context.clone(),
+                        factory_resolved_environment.clone(),
+                        factory_runtime_auth_provider.clone(),
+                        factory_client_elicitation_capability.clone(),
+                        supports_openai_form_elicitation,
+                    )
+                },
             );
             clients.insert(server_name.clone(), async_managed_client.clone());
             let tx_event = tx_event.clone();
             let submit_id = startup_submit_id.clone();
+            let startup_route = Arc::clone(&session_route);
             join_set.spawn(async move {
-                let mut outcome = async_managed_client.client().await;
+                let mut outcome = tokio::select! {
+                    outcome = async_managed_client.await_current_startup(
+                        Arc::clone(&startup_route),
+                    ) => outcome,
+                    () = cancel_token.cancelled() => Err(StartupOutcomeError::Cancelled),
+                };
                 if cancel_token.is_cancelled() {
                     outcome = Err(StartupOutcomeError::Cancelled);
                 }
@@ -312,9 +352,6 @@ impl McpConnectionSet {
                         }
                         Ok(_) | Err(_) => None,
                     };
-                    if cancel_token.is_cancelled() {
-                        outcome = Err(StartupOutcomeError::Cancelled);
-                    }
                     let status = match &outcome {
                         Ok(_) => McpStartupStatus::Ready,
                         Err(StartupOutcomeError::Cancelled) => McpStartupStatus::Cancelled,
@@ -347,7 +384,9 @@ impl McpConnectionSet {
                 }
 
                 if matches!(&outcome, Err(StartupOutcomeError::Failed { .. })) {
-                    async_managed_client.reconnect_failed_startup().await;
+                    async_managed_client
+                        .reconnect_failed_startup(Arc::clone(&startup_route))
+                        .await;
                 }
 
                 (server_name, outcome)
@@ -357,12 +396,13 @@ impl McpConnectionSet {
             clients,
             server_metadata,
             required_servers,
-            tool_catalog_revision: Arc::new(RwLock::new(0)),
-            codex_apps_tools_override: RwLock::new(None),
-            codex_apps_refresh_lock: Mutex::new(()),
+            tool_catalog_revision: Arc::new(tokio::sync::RwLock::new(0)),
+            codex_apps_tools_override: tokio::sync::RwLock::new(None),
+            codex_apps_refresh_lock: tokio::sync::Mutex::new(()),
             tool_plugin_provenance,
             prefix_mcp_tool_names,
             elicitation_requests: elicitation_requests.clone(),
+            session_route,
             startup_cancellation_token: startup_cancellation_token.clone(),
         };
         tokio::spawn(async move {
@@ -397,22 +437,28 @@ impl McpConnectionSet {
         permission_profile: &PermissionProfile,
         prefix_mcp_tool_names: bool,
     ) -> Self {
+        let elicitation_requests = ElicitationRequestManager::new(
+            approval_policy.value(),
+            permission_profile.clone(),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+            ElicitationRequestRouter::default(),
+        );
         Self {
             clients: HashMap::new(),
             server_metadata: HashMap::new(),
             required_servers: Vec::new(),
-            tool_catalog_revision: Arc::new(RwLock::new(0)),
-            codex_apps_tools_override: RwLock::new(None),
-            codex_apps_refresh_lock: Mutex::new(()),
+            tool_catalog_revision: Arc::new(tokio::sync::RwLock::new(0)),
+            codex_apps_tools_override: tokio::sync::RwLock::new(None),
+            codex_apps_refresh_lock: tokio::sync::Mutex::new(()),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             prefix_mcp_tool_names,
-            elicitation_requests: ElicitationRequestManager::new(
-                approval_policy.value(),
-                permission_profile.clone(),
-                /*reviewer*/ None,
-                /*lifecycle*/ None,
-                ElicitationRequestRouter::default(),
-            ),
+            elicitation_requests: elicitation_requests.clone(),
+            session_route: Arc::new(McpSessionRoute::new(
+                String::new(),
+                elicitation_requests,
+                None,
+            )),
             startup_cancellation_token: CancellationToken::new(),
         }
     }
@@ -436,11 +482,33 @@ impl McpConnectionSet {
     /// Stop all MCP clients owned by this manager and terminate stdio server processes.
     pub async fn shutdown(&self) {
         self.startup_cancellation_token.cancel();
+        self.session_route.close();
         let clients = self.clients.values().cloned().collect::<Vec<_>>();
+        let session_route = Arc::clone(&self.session_route);
         // Keep cleanup alive if an interrupt cancels the refresh that requested it.
         let shutdown_task = tokio::spawn(async move {
+            let mut final_clients = Vec::new();
             for client in clients {
-                client.shutdown().await;
+                client.unregister_route(&session_route);
+                if client.release() {
+                    final_clients.push(client);
+                }
+            }
+            let mut shutdowns = tokio::task::JoinSet::new();
+            for client in final_clients {
+                shutdowns.spawn(async move {
+                    if tokio::time::timeout(Duration::from_secs(10), client.shutdown())
+                        .await
+                        .is_err()
+                    {
+                        warn!("timed out shutting down MCP client");
+                    }
+                });
+            }
+            while let Some(result) = shutdowns.join_next().await {
+                if let Err(error) = result {
+                    warn!("MCP client shutdown task failed: {error}");
+                }
             }
         });
         if let Err(error) = shutdown_task.await {
@@ -532,7 +600,12 @@ impl McpConnectionSet {
             return false;
         };
 
-        match tokio::time::timeout(timeout, async_managed_client.client()).await {
+        match tokio::time::timeout(
+            timeout,
+            async_managed_client.await_current_startup(Arc::clone(&self.session_route)),
+        )
+        .await
+        {
             Ok(Ok(_)) => true,
             Ok(Err(_)) | Err(_) => false,
         }
@@ -544,10 +617,72 @@ impl McpConnectionSet {
         &self,
         include_server: impl Fn(&str) -> bool,
     ) -> HashMap<String, Vec<Resource>> {
-        self.ready_clients_matching(&include_server)
-            .await
-            .list_all_resources(|_| true)
-            .await
+        let mut join_set = JoinSet::new();
+
+        let clients_snapshot = &self.clients;
+
+        for (server_name, _) in clients_snapshot
+            .iter()
+            .filter(|(server_name, _)| include_server(server_name))
+        {
+            let server_name = server_name.clone();
+            let Ok(async_managed_client) = self.client_by_name(&server_name) else {
+                continue;
+            };
+            let session_route = Arc::clone(&self.session_route);
+
+            join_set.spawn(async move {
+                let result = async_managed_client
+                    .run_mcp_request(session_route, |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let mut collected: Vec<Resource> = Vec::new();
+                        let mut cursor: Option<String> = None;
+
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = managed
+                                .client
+                                .list_resources(params, managed.tool_timeout)
+                                .await?;
+                            collected.extend(response.resources);
+
+                            match response.next_cursor {
+                                Some(next) => {
+                                    if cursor.as_ref() == Some(&next) {
+                                        return Err(anyhow!(
+                                            "resources/list returned duplicate cursor"
+                                        ));
+                                    }
+                                    cursor = Some(next);
+                                }
+                                None => return Ok(collected),
+                            }
+                        }
+                    })
+                    .await;
+                (server_name, result)
+            });
+        }
+
+        let mut aggregated: HashMap<String, Vec<Resource>> = HashMap::new();
+
+        while let Some(join_res) = join_set.join_next().await {
+            match join_res {
+                Ok((server_name, Ok(resources))) => {
+                    aggregated.insert(server_name, resources);
+                }
+                Ok((server_name, Err(err))) => {
+                    warn!("Failed to list resources for MCP server '{server_name}': {err:#}");
+                }
+                Err(err) => {
+                    warn!("Task panic when listing resources for MCP server: {err:#}");
+                }
+            }
+        }
+
+        aggregated
     }
 
     /// Returns resource templates from servers selected by `include_server`.
@@ -556,27 +691,74 @@ impl McpConnectionSet {
         &self,
         include_server: impl Fn(&str) -> bool,
     ) -> HashMap<String, Vec<ResourceTemplate>> {
-        self.ready_clients_matching(&include_server)
-            .await
-            .list_all_resource_templates(|_| true)
-            .await
-    }
+        let mut join_set = JoinSet::new();
 
-    async fn ready_clients_matching(
-        &self,
-        include_server: &impl Fn(&str) -> bool,
-    ) -> McpBindingClients {
-        let mut clients = HashMap::new();
-        for (server, client) in self
-            .clients
+        let clients_snapshot = &self.clients;
+
+        for (server_name, _) in clients_snapshot
             .iter()
-            .filter(|(server, _)| include_server(server))
+            .filter(|(server_name, _)| include_server(server_name))
         {
-            if let Ok(client) = client.client().await {
-                clients.insert(server.clone(), Arc::new(client));
+            let server_name_cloned = server_name.clone();
+            let Ok(async_managed_client) = self.client_by_name(server_name) else {
+                continue;
+            };
+            let session_route = Arc::clone(&self.session_route);
+
+            join_set.spawn(async move {
+                let result = async_managed_client
+                    .run_mcp_request(session_route, |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let mut collected: Vec<ResourceTemplate> = Vec::new();
+                        let mut cursor: Option<String> = None;
+
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = managed
+                                .client
+                                .list_resource_templates(params, managed.tool_timeout)
+                                .await?;
+                            collected.extend(response.resource_templates);
+
+                            match response.next_cursor {
+                                Some(next) => {
+                                    if cursor.as_ref() == Some(&next) {
+                                        return Err(anyhow!(
+                                            "resources/templates/list returned duplicate cursor"
+                                        ));
+                                    }
+                                    cursor = Some(next);
+                                }
+                                None => return Ok(collected),
+                            }
+                        }
+                    })
+                    .await;
+                (server_name_cloned, result)
+            });
+        }
+
+        let mut aggregated: HashMap<String, Vec<ResourceTemplate>> = HashMap::new();
+
+        while let Some(join_res) = join_set.join_next().await {
+            match join_res {
+                Ok((server_name, Ok(templates))) => {
+                    aggregated.insert(server_name, templates);
+                }
+                Ok((server_name, Err(err))) => {
+                    warn!(
+                        "Failed to list resource templates for MCP server '{server_name}': {err:#}"
+                    );
+                }
+                Err(err) => {
+                    warn!("Task panic when listing resource templates for MCP server: {err:#}");
+                }
             }
         }
-        McpBindingClients::new(clients)
+
+        aggregated
     }
 
     /// Invoke the tool indicated by the (server, tool) pair.
@@ -587,16 +769,19 @@ impl McpConnectionSet {
         arguments: Option<serde_json::Value>,
         meta: Option<serde_json::Value>,
     ) -> Result<CallToolResult> {
-        let client = self.client_by_name(server).await?;
-        if !client.tool_filter.allows(tool) {
-            return Err(anyhow!(
-                "tool '{tool}' is disabled for MCP server '{server}'"
-            ));
-        }
-
-        let result: rmcp::model::CallToolResult = client
-            .client
-            .call_tool(tool.to_string(), arguments, meta, client.tool_timeout)
+        let async_client = self.client_by_name(server)?;
+        let tool_name = tool.to_string();
+        let result: rmcp::model::CallToolResult = async_client
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                if !managed.tool_filter.allows(&tool_name) {
+                    return Err(anyhow!("tool '{tool_name}' is disabled"));
+                }
+                managed
+                    .client
+                    .call_tool(tool_name, arguments, meta, managed.tool_timeout)
+                    .await
+            })
             .await
             .with_context(|| format!("tool call failed for `{server}/{tool}`"))?;
 
@@ -621,10 +806,15 @@ impl McpConnectionSet {
         &self,
         server: &str,
     ) -> Result<bool> {
-        Ok(self
-            .client_by_name(server)
+        self.client_by_name(server)?
+            .run(Arc::clone(&self.session_route), |client| async move {
+                Ok(client
+                    .client()
+                    .await
+                    .context("failed to get client")?
+                    .server_supports_sandbox_state_meta_capability)
+            })
             .await?
-            .server_supports_sandbox_state_meta_capability)
     }
 
     /// List resources from the specified server.
@@ -633,12 +823,14 @@ impl McpConnectionSet {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult> {
-        let managed = self.client_by_name(server).await?;
-        let timeout = managed.tool_timeout;
-
-        managed
-            .client
-            .list_resources(params, timeout)
+        self.client_by_name(server)?
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .list_resources(params, managed.tool_timeout)
+                    .await
+            })
             .await
             .with_context(|| format!("resources/list failed for `{server}`"))
     }
@@ -649,12 +841,14 @@ impl McpConnectionSet {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourceTemplatesResult> {
-        let managed = self.client_by_name(server).await?;
-        let client = managed.client.clone();
-        let timeout = managed.tool_timeout;
-
-        client
-            .list_resource_templates(params, timeout)
+        self.client_by_name(server)?
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .list_resource_templates(params, managed.tool_timeout)
+                    .await
+            })
             .await
             .with_context(|| format!("resources/templates/list failed for `{server}`"))
     }
@@ -665,13 +859,16 @@ impl McpConnectionSet {
         server: &str,
         params: ReadResourceRequestParams,
     ) -> Result<ReadResourceResult> {
-        let managed = self.client_by_name(server).await?;
-        let client = managed.client.clone();
-        let timeout = managed.tool_timeout;
         let uri = params.uri.clone();
 
-        client
-            .read_resource(params, timeout)
+        self.client_by_name(server)?
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .read_resource(params, managed.tool_timeout)
+                    .await
+            })
             .await
             .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
     }
@@ -682,18 +879,23 @@ impl McpConnectionSet {
     pub(crate) async fn list_available_server_infos(&self) -> HashMap<String, McpServerInfo> {
         let mut server_infos = HashMap::new();
         for (server_name, client) in &self.clients {
-            if !client.startup_complete.load(Ordering::Acquire)
-                && let Some(server_info) = client.cached_server_info.clone()
+            if !client.startup_complete()
+                && let Some(server_info) = client.cached_server_info()
             {
                 server_infos.insert(server_name.clone(), server_info);
                 continue;
             }
-            match client.client().await {
-                Ok(managed_client) => {
+            let outcome = client
+                .run(Arc::clone(&self.session_route), |client| async move {
+                    client.client().await
+                })
+                .await;
+            match outcome {
+                Ok(Ok(managed_client)) => {
                     server_infos.insert(server_name.clone(), managed_client.server_info);
                 }
-                Err(_) => {
-                    if let Some(server_info) = client.cached_server_info.clone() {
+                Ok(Err(_)) | Err(_) => {
+                    if let Some(server_info) = client.cached_server_info() {
                         server_infos.insert(server_name.clone(), server_info);
                     }
                 }
@@ -702,13 +904,11 @@ impl McpConnectionSet {
         server_infos
     }
 
-    async fn client_by_name(&self, name: &str) -> Result<ManagedClient> {
+    fn client_by_name(&self, name: &str) -> Result<McpConnectionLease> {
         self.clients
             .get(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?
-            .client()
-            .await
-            .context("failed to get client")
+            .cloned()
+            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))
     }
 
     #[cfg(test)]

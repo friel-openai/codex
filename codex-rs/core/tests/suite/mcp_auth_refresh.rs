@@ -86,6 +86,8 @@ async fn hosted_plugin_runtime_ps_mcp_tool_calls_use_current_auth_manager_token(
     let approval_policy = Constrained::allow_any(AskForApproval::Never);
     let manager = McpConnectionSet::new(
         &mcp_servers,
+        &codex_mcp::McpConnectionPool::default(),
+        codex_mcp::McpConnectionPoolMode::Reuse,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
         &approval_policy,
