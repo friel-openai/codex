@@ -74,6 +74,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::tempdir;
 use tokio::io::DuplexStream;
 use tokio::sync::Notify;
@@ -85,6 +86,18 @@ impl McpConnectionSet {
         permission_profile: &Constrained<PermissionProfile>,
         prefix_mcp_tool_names: bool,
     ) -> Self {
+        let elicitation_requests = ElicitationRequestManager::new(
+            approval_policy.value(),
+            permission_profile.get().clone(),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+            ElicitationRequestRouter::default(),
+        );
+        let session_route = Arc::new(crate::request_router::McpSessionRoute::new(
+            String::new(),
+            elicitation_requests.clone(),
+            /*tx_event*/ None,
+        ));
         Self {
             servers: HashMap::new(),
             required_servers: Vec::new(),
@@ -95,13 +108,10 @@ impl McpConnectionSet {
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),
             prefix_mcp_tool_names,
             non_prefixed_mcp_tool_servers: Vec::new(),
-            elicitation_requests: ElicitationRequestManager::new(
-                approval_policy.value(),
-                permission_profile.get().clone(),
-                /*reviewer*/ None,
-                /*lifecycle*/ None,
-                ElicitationRequestRouter::default(),
-            ),
+            elicitation_requests,
+            session_route,
+            startup_cancellation_token: CancellationToken::new(),
+            connection_pool: crate::McpConnectionPool::default(),
         }
     }
 
@@ -111,10 +121,7 @@ impl McpConnectionSet {
             name,
             McpServerView {
                 tool_filter: ToolFilter::default(),
-                connection: Arc::new(McpServerConnection {
-                    identity: None,
-                    client,
-                }),
+                connection: client.into(),
                 metadata: McpServerMetadata {
                     environment_id: String::new(),
                     pollutes_memory: true,
@@ -127,10 +134,6 @@ impl McpConnectionSet {
                 catalog_item_limit: crate::pagination::MAX_MCP_CATALOG_ITEMS,
             },
         );
-    }
-
-    fn test_client(&self, name: &str) -> &AsyncManagedClient {
-        &self.servers[name].connection.client
     }
 
     fn set_test_server_metadata(&mut self, name: &str, metadata: McpServerMetadata) {
@@ -147,7 +150,7 @@ impl McpConnectionSet {
         let Some(right) = other.servers.get(name) else {
             return false;
         };
-        Arc::ptr_eq(&left.connection, &right.connection)
+        left.connection.ptr_eq(&right.connection)
     }
 }
 
@@ -429,6 +432,7 @@ async fn create_ready_async_managed_client(tools: Vec<ToolInfo>) -> AsyncManaged
         tool_catalog_cache_context: None,
         startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         startup_reconnect: None,
+        request_router: Default::default(),
         cancel_token: CancellationToken::new(),
     }
 }
@@ -462,6 +466,7 @@ fn create_gated_async_managed_client(
             tool_catalog_cache_context: None,
             startup_complete,
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
         started_rx,
@@ -529,6 +534,7 @@ async fn create_test_manager_with_ready_apps_client(
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
+            request_router: Default::default(),
         },
     );
     manager.set_test_server_metadata(
@@ -569,6 +575,7 @@ fn create_test_manager_with_failed_apps_startup(
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
+    let request_router = crate::request_router::McpConnectionRequestRouter::default();
     manager.insert_test_client(
         CODEX_APPS_MCP_SERVER_NAME.to_string(),
         AsyncManagedClient {
@@ -578,7 +585,12 @@ fn create_test_manager_with_failed_apps_startup(
             codex_apps_tools_cache_context: Some(cache_context),
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_reconnect: Some(Arc::new(CodexAppsStartupReconnect::new(reconnect_factory))),
+            startup_reconnect: Some(Arc::new(CodexAppsStartupReconnect::new(
+                reconnect_factory,
+                CODEX_APPS_MCP_SERVER_NAME.to_string(),
+                request_router.clone(),
+            ))),
+            request_router,
             cancel_token: CancellationToken::new(),
         },
     );
@@ -1346,18 +1358,28 @@ async fn codex_apps_extension_does_not_share_host_owned_tools_cache() -> anyhow:
             codex_apps_auth_manager: None,
             elicitation_reviewer: None,
             elicitation_lifecycle: None,
+            connection_pool: crate::McpConnectionPool::default(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
         },
         ElicitationRequestRouter::default(),
     )
     .await;
 
-    let client = manager.test_client(CODEX_APPS_MCP_SERVER_NAME);
+    let (has_cache_context, has_cached_tools) = manager.servers[CODEX_APPS_MCP_SERVER_NAME]
+        .connection
+        .run(Arc::clone(&manager.session_route), |client| async move {
+            (
+                client.codex_apps_tools_cache_context.is_some(),
+                client.has_cached_tools(),
+            )
+        })
+        .await?;
     assert!(
-        client.codex_apps_tools_cache_context.is_none(),
+        !has_cache_context,
         "an extension must not receive the host-owned Apps cache"
     );
     assert!(
-        !client.has_cached_tools(),
+        !has_cached_tools,
         "an extension must not expose cached host-owned Apps tools"
     );
 
@@ -1399,6 +1421,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_while_client_is_pending() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -1458,6 +1481,7 @@ async fn capture_binding_uses_the_ready_clients_own_tools() {
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
+            request_router: Default::default(),
         },
     );
     manager
@@ -1716,6 +1740,7 @@ async fn list_available_server_infos_uses_cache_while_client_is_pending() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -1813,6 +1838,7 @@ async fn capture_binding_exposes_cached_tools_before_startup() {
             startup_complete,
             startup_reconnect: None,
             cancel_token: CancellationToken::new(),
+            request_router: Default::default(),
         },
     );
     manager.set_test_server_metadata(
@@ -1904,6 +1930,7 @@ async fn capture_binding_skips_pending_optional_servers_after_one_shared_startup
                 tool_catalog_cache_context: None,
                 startup_complete: Arc::new(AtomicBool::new(false)),
                 startup_reconnect: None,
+                request_router: Default::default(),
                 cancel_token: CancellationToken::new(),
             },
         );
@@ -1919,6 +1946,21 @@ async fn capture_binding_skips_pending_optional_servers_after_one_shared_startup
         .await
         .expect("later bindings must not restart the optional startup grace");
     assert!(binding.tools().is_empty());
+
+    let required_servers = vec!["pending-one".to_string()];
+    let required_binding = tokio::time::timeout(
+        Duration::from_millis(1),
+        manager.capture_binding_with_metadata(
+            Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
+            /*plugins_available*/ false,
+            &required_servers,
+        ),
+    )
+    .await;
+    assert!(
+        required_binding.is_err(),
+        "explicitly requested servers must wait"
+    );
 
     assert!(
         tokio::time::timeout(
@@ -1938,18 +1980,6 @@ async fn capture_binding_skips_pending_optional_servers_after_one_shared_startup
         .is_ok(),
         "resource discovery must not wait for an omitted optional server"
     );
-
-    let required_servers = vec!["pending-one".to_string()];
-    let binding = tokio::time::timeout(
-        Duration::from_millis(1),
-        manager.capture_binding_with_metadata(
-            Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
-            /*plugins_available*/ false,
-            &required_servers,
-        ),
-    )
-    .await;
-    assert!(binding.is_err(), "explicitly requested servers must wait");
 }
 
 #[tokio::test(start_paused = true)]
@@ -1994,6 +2024,7 @@ async fn capture_binding_shares_optional_startup_grace_across_connection_sets() 
                 startup_complete: Arc::new(AtomicBool::new(false)),
                 startup_reconnect: None,
                 cancel_token: CancellationToken::new(),
+                request_router: Default::default(),
             },
         );
         Arc::new(manager)
@@ -2254,6 +2285,7 @@ async fn list_all_tools_blocks_while_client_is_pending_without_cached_tools() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -2308,6 +2340,7 @@ async fn shutdown_cancels_pending_tool_listing() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token,
         },
     );
@@ -2354,6 +2387,7 @@ async fn shutdown_continues_after_caller_is_aborted() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -2375,6 +2409,59 @@ async fn shutdown_continues_after_caller_is_aborted() {
         .await
         .expect("client shutdown should survive caller cancellation")
         .expect("client shutdown completion sender should stay alive");
+}
+
+#[tokio::test(start_paused = true)]
+async fn shutdown_starts_all_clients_and_bounds_unresponsive_cleanup() {
+    let (second_started_tx, second_started_rx) = tokio::sync::oneshot::channel();
+    let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
+    let permission_profile = Constrained::allow_any(PermissionProfile::default());
+    let mut manager = McpConnectionSet::new_uninitialized(
+        &approval_policy,
+        &permission_profile,
+        /*prefix_mcp_tool_names*/ true,
+    );
+    for (name, startup) in [
+        (
+            "first",
+            std::future::pending::<Result<ManagedClient, StartupOutcomeError>>()
+                .boxed()
+                .shared(),
+        ),
+        (
+            "second",
+            async move {
+                let _ = second_started_tx.send(());
+                std::future::pending().await
+            }
+            .boxed()
+            .shared(),
+        ),
+    ] {
+        manager.insert_test_client(
+            name,
+            AsyncManagedClient {
+                client: startup,
+                is_codex_apps_mcp_server: false,
+                cached_server_info: None,
+                codex_apps_tools_cache_context: None,
+                tool_catalog_cache_context: None,
+                startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                startup_reconnect: None,
+                request_router: Default::default(),
+                cancel_token: CancellationToken::new(),
+            },
+        );
+    }
+
+    let shutdown = tokio::spawn(async move { manager.shutdown().await });
+    second_started_rx
+        .await
+        .expect("both final MCP clients should begin shutdown");
+    tokio::time::timeout(Duration::from_secs(11), shutdown)
+        .await
+        .expect("MCP shutdown should enforce its cleanup bound")
+        .expect("MCP shutdown task should not panic");
 }
 
 #[tokio::test]
@@ -2406,6 +2493,7 @@ async fn list_all_tools_does_not_block_when_shared_codex_apps_cache_is_empty() {
             tool_catalog_cache_context: None,
             startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -2458,6 +2546,7 @@ async fn list_all_tools_uses_shared_codex_apps_cache_when_client_startup_fails()
             tool_catalog_cache_context: None,
             startup_complete,
             startup_reconnect: None,
+            request_router: Default::default(),
             cancel_token: CancellationToken::new(),
         },
     );
@@ -2642,12 +2731,13 @@ async fn later_tool_list_retries_after_failed_reconnect_and_keeps_cached_tools()
     tokio::time::advance(CODEX_APPS_RECONNECT_INITIAL_BACKOFF).await;
     let third_reconnect_finished = reconnect_finished.notified();
     let tools = manager.list_all_tools().await;
-    assert_eq!(
-        tools
-            .iter()
-            .map(|tool| tool.callable_name.as_str())
-            .collect::<Vec<_>>(),
-        vec!["cached_drive_search"]
+    let names = tools
+        .iter()
+        .map(|tool| tool.callable_name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        names == vec!["cached_drive_search"] || names == vec!["drive_search"],
+        "the trigger call should return cached or concurrently recovered tools: {names:?}"
     );
     third_reconnect_finished.await;
     assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
@@ -2793,7 +2883,6 @@ async fn list_all_tools_adds_server_metadata_to_tools() {
             tool_approval_modes: HashMap::new(),
         },
     );
-
     let tools = manager.list_all_tools().await;
     assert_eq!(tools.len(), 1);
     let tool = &tools[0];
@@ -2996,6 +3085,7 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 /*codex_apps_cache_identity*/ None,
                 ElicitationCapability::default(),
                 /*supports_openai_form_elicitation*/ false,
+                crate::pagination::MAX_MCP_CATALOG_ITEMS,
             )
         };
         let direct_keyring_identity = connection_identity(AuthKeyringBackendKind::Direct);
@@ -3051,11 +3141,23 @@ async fn executor_owned_chatgpt_mcp_accepts_only_safe_explicit_authorization() -
                 codex_apps_auth_manager: None,
                 elicitation_reviewer: None,
                 elicitation_lifecycle: None,
+                connection_pool: crate::McpConnectionPool::default(),
+                connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             },
             ElicitationRequestRouter::default(),
         )
         .await;
-        let error = match manager.test_client("fake-first-party").client().await {
+        let error = match manager
+            .servers
+            .get("fake-first-party")
+            .expect("fake first-party server")
+            .connection
+            .run(Arc::clone(&manager.session_route), |client| async move {
+                client.client().await
+            })
+            .await
+            .expect("fake first-party startup operation should run")
+        {
             Ok(_) => panic!("{case}: the unreachable fake executor must not connect"),
             Err(error) => error,
         };
@@ -3154,6 +3256,8 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
             submit_id: String::new(),
             tx_event: None,
             startup_cancellation_token: cancel_token.clone(),
+            connection_pool: crate::McpConnectionPool::default(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context: McpRuntimeContext::new(
                 Arc::new(environment_manager_without_environments()),
                 PathBuf::from("/tmp"),
@@ -3176,17 +3280,29 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
     assert!(manager.contains_server("stdio"));
     assert!(manager.contains_server("http"));
     assert!(
-        manager
-            .test_client("http")
-            .tool_catalog_cache_context
-            .is_none()
+        !manager
+            .servers
+            .get("http")
+            .expect("http server")
+            .connection
+            .has_tool_catalog_cache_context()
     );
     assert!(
         !manager
             .wait_for_server_ready("stdio", Duration::from_millis(10))
             .await
     );
-    let error = match manager.test_client("stdio").client().await {
+    let error = match manager
+        .servers
+        .get("stdio")
+        .expect("stdio server")
+        .connection
+        .run(Arc::clone(&manager.session_route), |client| async move {
+            client.client().await
+        })
+        .await
+        .expect("stdio startup operation should run")
+    {
         Ok(_) => panic!("local stdio MCP startup should fail"),
         Err(error) => error,
     };
@@ -3423,6 +3539,7 @@ fn reusable_server_identity(
         /*codex_apps_cache_identity*/ None,
         ElicitationCapability::default(),
         /*supports_openai_form_elicitation*/ false,
+        crate::pagination::MAX_MCP_CATALOG_ITEMS,
     )
 }
 
@@ -3438,14 +3555,31 @@ async fn manager_with_reusable_ready_server(
         &permission_profile,
         /*prefix_mcp_tool_names*/ true,
     );
+    let connection_pool = crate::McpConnectionPool::default();
+    manager.connection_pool = connection_pool.clone();
     let server = EffectiveMcpServer::configured(config.clone());
+    let client = Arc::new(std::sync::Mutex::new(Some(
+        create_ready_async_managed_client(tools).await,
+    )));
+    let connection = connection_pool.acquire_named(
+        "docs".to_string(),
+        reusable_server_identity(config, runtime_context),
+        crate::McpConnectionPoolMode::Reuse,
+        &manager.session_route,
+        move |request_router| {
+            let mut client = client
+                .lock()
+                .expect("test client factory lock")
+                .take()
+                .expect("test client factory should run once");
+            client.request_router = request_router;
+            client
+        },
+    );
     manager.servers.insert(
         "docs".to_string(),
         McpServerView {
-            connection: Arc::new(McpServerConnection {
-                identity: Some(reusable_server_identity(config, runtime_context)),
-                client: create_ready_async_managed_client(tools).await,
-            }),
+            connection,
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(config),
             tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
@@ -3478,6 +3612,8 @@ async fn reconcile_reusable_server(
             submit_id: "refresh".to_string(),
             tx_event: Some(tx_event),
             startup_cancellation_token: CancellationToken::new(),
+            connection_pool: previous.connection_pool.clone(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
@@ -3561,22 +3697,36 @@ async fn reconciliation_reuses_connection_without_relisting_regular_tools() -> a
         /*prefix_mcp_tool_names*/ true,
     );
     let server = EffectiveMcpServer::configured(config.clone());
+    let client = Arc::new(std::sync::Mutex::new(Some(AsyncManagedClient {
+        client: futures::future::ready(Ok(managed_client)).boxed().shared(),
+        is_codex_apps_mcp_server: false,
+        cached_server_info: None,
+        codex_apps_tools_cache_context: None,
+        tool_catalog_cache_context: None,
+        startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        startup_reconnect: None,
+        cancel_token: CancellationToken::new(),
+        request_router: Default::default(),
+    })));
+    let connection = previous.connection_pool.acquire_named(
+        "docs".to_string(),
+        reusable_server_identity(&config, &runtime_context),
+        crate::McpConnectionPoolMode::Reuse,
+        &previous.session_route,
+        move |request_router| {
+            let mut client = client
+                .lock()
+                .expect("test client factory lock")
+                .take()
+                .expect("test client factory should run once");
+            client.request_router = request_router;
+            client
+        },
+    );
     previous.servers.insert(
         "docs".to_string(),
         McpServerView {
-            connection: Arc::new(McpServerConnection {
-                identity: Some(reusable_server_identity(&config, &runtime_context)),
-                client: AsyncManagedClient {
-                    client: futures::future::ready(Ok(managed_client)).boxed().shared(),
-                    is_codex_apps_mcp_server: false,
-                    cached_server_info: None,
-                    codex_apps_tools_cache_context: None,
-                    tool_catalog_cache_context: None,
-                    startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-                    startup_reconnect: None,
-                    cancel_token: CancellationToken::new(),
-                },
-            }),
+            connection,
             metadata: McpServerMetadata::from(&server),
             tool_filter: ToolFilter::from_config(&config),
             tool_timeout: Some(config.tool_timeout_sec.unwrap_or(DEFAULT_TOOL_TIMEOUT)),
@@ -3681,6 +3831,12 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
         vec![create_test_tool("docs", "search")],
     )
     .await;
+    let previous_connection_id = previous
+        .servers
+        .get("docs")
+        .expect("docs server")
+        .connection
+        .connection_id();
     let codex_home = tempdir().expect("tempdir");
     let mut mcp_config = crate::mcp::tests::test_mcp_config(codex_home.path().to_path_buf());
     mcp_config.protocol_mode = codex_rmcp_client::McpProtocolMode::V20260728;
@@ -3699,6 +3855,8 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
             submit_id: "refresh".to_string(),
             tx_event: None,
             startup_cancellation_token: CancellationToken::new(),
+            connection_pool: previous.connection_pool.clone(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
@@ -3715,7 +3873,15 @@ async fn reconciliation_replaces_connection_when_protocol_mode_changes() {
     )
     .await;
 
-    assert!(!previous.shares_test_connection_with(&reconciled, "docs"));
+    assert_ne!(
+        previous_connection_id,
+        reconciled
+            .servers
+            .get("docs")
+            .expect("docs server")
+            .connection
+            .connection_id()
+    );
 }
 
 #[tokio::test]
@@ -3756,6 +3922,8 @@ async fn reconciliation_reuses_legacy_stdio_server_when_modern_protocol_is_enabl
             submit_id: "refresh".to_string(),
             tx_event: None,
             startup_cancellation_token: CancellationToken::new(),
+            connection_pool: previous.connection_pool.clone(),
+            connection_pool_mode: crate::McpConnectionPoolMode::Reuse,
             runtime_context,
             codex_apps_tools_cache: ConnectorRuntimeManager::default(),
             tool_catalog_cache: McpToolCatalogCache::default(),
@@ -3860,27 +4028,53 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
             Box::new(|_, _| async { Err(anyhow!("unexpected elicitation")) }.boxed()),
         )
         .await?;
-    let view = previous
+    let mut connected_client = previous
+        .servers
+        .get("docs")
+        .expect("test server should exist")
+        .connection
+        .await_current_startup(Arc::clone(&previous.session_route))
+        .await?;
+    connected_client.client = Arc::clone(&client);
+    let replacement = Arc::new(std::sync::Mutex::new(Some(AsyncManagedClient {
+        client: futures::future::ready(Ok(connected_client))
+            .boxed()
+            .shared(),
+        is_codex_apps_mcp_server: false,
+        cached_server_info: None,
+        codex_apps_tools_cache_context: None,
+        tool_catalog_cache_context: None,
+        startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        startup_reconnect: None,
+        cancel_token: CancellationToken::new(),
+        request_router: Default::default(),
+    })));
+    let connection = previous.connection_pool.acquire_named(
+        "docs".to_string(),
+        reusable_server_identity(&config, &runtime_context),
+        crate::McpConnectionPoolMode::Replace,
+        &previous.session_route,
+        move |request_router| {
+            let mut client = replacement
+                .lock()
+                .expect("replacement client factory lock")
+                .take()
+                .expect("replacement client factory should run once");
+            client.request_router = request_router;
+            client
+        },
+    );
+    previous
         .servers
         .get_mut("docs")
-        .expect("test server should exist");
-    let mut connected_client = view.connection.client().await?;
-    connected_client.client = Arc::clone(&client);
-    view.connection = Arc::new(McpServerConnection {
-        identity: Some(reusable_server_identity(&config, &runtime_context)),
-        client: AsyncManagedClient {
-            client: futures::future::ready(Ok(connected_client))
-                .boxed()
-                .shared(),
-            is_codex_apps_mcp_server: false,
-            cached_server_info: None,
-            codex_apps_tools_cache_context: None,
-            tool_catalog_cache_context: None,
-            startup_complete: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            startup_reconnect: None,
-            cancel_token: CancellationToken::new(),
-        },
-    });
+        .expect("test server should exist")
+        .connection = connection;
+    let disconnected_connection_id = previous
+        .servers
+        .get("docs")
+        .expect("test server should exist")
+        .connection
+        .connection_id();
 
     assert!(!client.is_closed().await);
     disconnect.cancel();
@@ -3894,7 +4088,16 @@ async fn reconciliation_replaces_closed_connections() -> anyhow::Result<()> {
 
     let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
 
-    assert!(!previous.shares_test_connection_with(&reconciled, "docs"));
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+    assert_ne!(
+        disconnected_connection_id,
+        reconciled
+            .servers
+            .get("docs")
+            .expect("test server should exist")
+            .connection
+            .connection_id()
+    );
     Ok(())
 }
 
@@ -3949,6 +4152,7 @@ async fn connection_identity_distinguishes_accounts_with_the_same_token() -> any
             /*codex_apps_cache_identity*/ None,
             ElicitationCapability::default(),
             /*supports_openai_form_elicitation*/ false,
+            crate::pagination::MAX_MCP_CATALOG_ITEMS,
         )
     };
 
@@ -4000,6 +4204,7 @@ async fn connection_identity_distinguishes_agent_account_runtime_and_task() -> a
             /*codex_apps_cache_identity*/ None,
             ElicitationCapability::default(),
             /*supports_openai_form_elicitation*/ false,
+            crate::pagination::MAX_CODEX_APPS_TOOL_CATALOG_ITEMS,
         )
     };
     let previous_identity = connection_identity(&previous_auth);
@@ -4065,8 +4270,14 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
     let mut new_config = old_config;
     new_config.enabled_tools = Some(vec!["search".to_string()]);
     new_config.default_tools_approval_mode = Some(AppToolApproval::Approve);
-    let reconciled =
-        Arc::new(reconcile_reusable_server(previous.as_ref(), new_config, runtime_context).await);
+    let reconciled = Arc::new(
+        reconcile_reusable_server(
+            previous.as_ref(),
+            new_config.clone(),
+            runtime_context.clone(),
+        )
+        .await,
+    );
     assert!(previous.shares_test_connection_with(&reconciled, "docs"));
 
     let new_step = capture_binding(&reconciled).await;
@@ -4093,4 +4304,56 @@ async fn view_only_changes_reuse_connection_and_preserve_the_old_step() {
         vec!["search".to_string()]
     );
     assert_eq!(new_call.tool_approval_mode(), AppToolApproval::Approve);
+
+    new_config.enabled_tools = None;
+    let restored =
+        reconcile_reusable_server(reconciled.as_ref(), new_config, runtime_context).await;
+    assert!(reconciled.shares_test_connection_with(&restored, "docs"));
+    assert_eq!(
+        capture_binding(&Arc::new(restored))
+            .await
+            .tools()
+            .iter()
+            .map(|tool| tool.tool.name.to_string())
+            .collect::<HashSet<_>>(),
+        HashSet::from(["search".to_string(), "write".to_string()])
+    );
+}
+
+#[tokio::test]
+async fn view_only_timeout_change_reuses_connection_and_updates_the_new_binding() {
+    let runtime_context = reusable_server_runtime_context();
+    let mut old_config = reusable_server_config("http://127.0.0.1:1");
+    old_config.tool_timeout_sec = Some(Duration::from_secs(1));
+    let previous = Arc::new(
+        manager_with_reusable_ready_server(
+            &old_config,
+            &runtime_context,
+            vec![create_test_tool("docs", "search")],
+        )
+        .await,
+    );
+    let old_call = capture_binding(&previous)
+        .await
+        .prepare_call("docs", "search")
+        .expect("old step should prepare search");
+
+    let mut new_config = old_config;
+    new_config.tool_timeout_sec = Some(Duration::from_secs(9));
+    let reconciled =
+        Arc::new(reconcile_reusable_server(previous.as_ref(), new_config, runtime_context).await);
+    assert!(previous.shares_test_connection_with(&reconciled, "docs"));
+    let new_call = capture_binding(&reconciled)
+        .await
+        .prepare_call("docs", "search")
+        .expect("new step should prepare search");
+
+    assert_eq!(
+        old_call.captured_tool_timeout(),
+        Some(Duration::from_secs(1))
+    );
+    assert_eq!(
+        new_call.captured_tool_timeout(),
+        Some(Duration::from_secs(9))
+    );
 }
