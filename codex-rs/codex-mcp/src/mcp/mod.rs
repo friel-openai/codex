@@ -313,6 +313,8 @@ pub async fn read_mcp_resource(
     let cancel_token = CancellationToken::new();
     let manager = McpConnectionSet::new(
         &mcp_servers,
+        &crate::McpConnectionPool::default(),
+        crate::McpConnectionPoolMode::Reuse,
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind,
         &config.approval_policy,
@@ -390,6 +392,8 @@ pub async fn collect_mcp_server_status_snapshot_with_detail(
     let cancel_token = CancellationToken::new();
     let mcp_connection_manager = McpConnectionSet::new(
         &mcp_servers,
+        &crate::McpConnectionPool::default(),
+        crate::McpConnectionPoolMode::Reuse,
         config.mcp_oauth_credentials_store_mode,
         config.auth_keyring_backend_kind,
         &config.approval_policy,
