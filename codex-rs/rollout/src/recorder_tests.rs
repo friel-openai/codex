@@ -9,6 +9,8 @@ use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandBeginEvent;
+use codex_protocol::protocol::ExecCommandEndEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SandboxPolicy;
@@ -401,6 +403,100 @@ async fn load_rollout_items_preserves_legacy_guardian_assessment_lines() -> std:
     assert_eq!(assessment.id, "guardian-1");
     assert_eq!(assessment.turn_id, "turn-1");
     assert_eq!(assessment.started_at_ms, 0);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_accepts_legacy_command_event_cwds() -> std::io::Result<()> {
+    let home = TempDir::new().expect("temp dir");
+    let ts = "2025-01-03T12:00:00Z";
+    let uuid = Uuid::new_v4();
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let rollout_path = write_session_file(home.path(), ts, uuid)?;
+    let mut file = fs::OpenOptions::new().append(true).open(&rollout_path)?;
+    let legacy_cwd = if cfg!(windows) {
+        r"C:\legacy\workspace"
+    } else {
+        "/legacy/workspace"
+    };
+
+    for record in [
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_begin",
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "command": ["true"],
+                "cwd": legacy_cwd,
+                "parsed_cmd": [],
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "exec_command_end",
+                "call_id": "call-1",
+                "turn_id": "turn-1",
+                "command": ["true"],
+                "cwd": legacy_cwd,
+                "parsed_cmd": [],
+                "stdout": "",
+                "stderr": "",
+                "exit_code": 0,
+                "duration": {"secs": 0, "nanos": 1},
+                "formatted_output": "",
+                "status": "completed",
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "agent_message",
+                "message": "after legacy command events",
+            },
+        }),
+    ] {
+        writeln!(file, "{record}")?;
+    }
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    let expected_cwd = if cfg!(windows) {
+        "file:///C:/legacy/workspace"
+    } else {
+        "file:///legacy/workspace"
+    };
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 0);
+    assert_eq!(items.len(), 5);
+    let RolloutItem::EventMsg(EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+        cwd: begin_cwd,
+        ..
+    })) = &items[2]
+    else {
+        panic!("expected command begin");
+    };
+    assert_eq!(begin_cwd.to_string(), expected_cwd);
+    let RolloutItem::EventMsg(EventMsg::ExecCommandEnd(ExecCommandEndEvent {
+        cwd: end_cwd, ..
+    })) = &items[3]
+    else {
+        panic!("expected command end");
+    };
+    assert_eq!(end_cwd.to_string(), expected_cwd);
+    assert!(matches!(
+        &items[4],
+        RolloutItem::EventMsg(EventMsg::AgentMessage(_))
+    ));
+
+    let serialized_end = serde_json::to_value(&items[3]).expect("serialize command end");
+    assert_eq!(serialized_end["payload"]["cwd"], expected_cwd);
 
     Ok(())
 }

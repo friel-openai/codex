@@ -58,6 +58,7 @@ use crate::request_permissions::RequestPermissionsResponse;
 use crate::request_user_input::RequestUserInputResponse;
 use crate::user_input::UserInput;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -3554,6 +3555,7 @@ pub struct ExecCommandBeginEvent {
     /// The command to be executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3580,6 +3582,7 @@ pub struct ExecCommandEndEvent {
     /// The command that was executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3606,6 +3609,21 @@ pub struct ExecCommandEndEvent {
     pub formatted_output: String,
     /// Completion status for this command execution.
     pub status: ExecCommandStatus,
+}
+
+/// Command events stored absolute native paths before `cwd` became a `PathUri`.
+/// Keep current serialization while accepting those persisted records during resume.
+fn deserialize_path_uri_or_legacy_absolute_path<'de, D>(
+    deserializer: D,
+) -> Result<PathUri, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = LegacyAppPathString::deserialize(deserializer)?;
+    if let Ok(path_uri) = PathUri::parse(path.as_str()) {
+        return Ok(path_uri);
+    }
+    path.try_into().map_err(D::Error::custom)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -4507,6 +4525,26 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
+
+    #[test]
+    fn command_event_cwd_accepts_only_uri_or_legacy_absolute_path() {
+        for (serialized, expected) in [
+            (r#""file:///workspace""#, "file:///workspace"),
+            (r#""/legacy/workspace""#, "file:///legacy/workspace"),
+            (r#""C:\\legacy\\workspace""#, "file:///C:/legacy/workspace"),
+        ] {
+            let mut deserializer = serde_json::Deserializer::from_str(serialized);
+            let cwd = deserialize_path_uri_or_legacy_absolute_path(&mut deserializer)
+                .expect("URI or absolute path should deserialize");
+            assert_eq!(cwd.to_string(), expected);
+        }
+
+        for serialized in [r#""relative/workspace""#, r#""artifact://workspace""#] {
+            let mut deserializer = serde_json::Deserializer::from_str(serialized);
+            deserialize_path_uri_or_legacy_absolute_path(&mut deserializer)
+                .expect_err("relative paths and unsupported URI schemes must remain invalid");
+        }
+    }
 
     #[test]
     fn thread_goal_objective_enforces_length_and_model_context_limits() {
