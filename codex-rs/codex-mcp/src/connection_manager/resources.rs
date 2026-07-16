@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Arc;
 
 use anyhow::Context;
 use anyhow::Result;
@@ -14,8 +14,6 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 use super::McpConnectionSet;
-use crate::rmcp_client::ManagedClient;
-
 impl McpConnectionSet {
     /// Returns resources from servers selected by `include_server`.
     pub async fn list_all_resources(
@@ -29,34 +27,34 @@ impl McpConnectionSet {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let Ok(managed_client) = view.connection.client().await else {
-                continue;
-            };
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let client = managed_client.client;
             join_set.spawn(async move {
-                let mut resources = Vec::new();
-                let mut cursor: Option<String> = None;
-                loop {
-                    let params = cursor.as_ref().map(|next| {
-                        PaginatedRequestParams::default().with_cursor(Some(next.clone()))
-                    });
-                    let response = match client.list_resources(params, timeout).await {
-                        Ok(result) => result,
-                        Err(error) => return (server_name, Err(error)),
-                    };
-                    resources.extend(response.resources);
-                    match response.next_cursor {
-                        Some(next) if cursor.as_ref() == Some(&next) => {
-                            return (
-                                server_name,
-                                Err(anyhow!("resources/list returned duplicate cursor")),
-                            );
+                let result = connection
+                    .run_mcp_request(session_route, move |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let mut resources = Vec::new();
+                        let mut cursor: Option<String> = None;
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = managed.client.list_resources(params, timeout).await?;
+                            resources.extend(response.resources);
+                            match response.next_cursor {
+                                Some(next) if cursor.as_ref() == Some(&next) => {
+                                    return Err(anyhow!(
+                                        "resources/list returned duplicate cursor"
+                                    ));
+                                }
+                                Some(next) => cursor = Some(next),
+                                None => return Ok(resources),
+                            }
                         }
-                        Some(next) => cursor = Some(next),
-                        None => return (server_name, Ok(resources)),
-                    }
-                }
+                    })
+                    .await;
+                (server_name, result)
             });
         }
 
@@ -89,36 +87,37 @@ impl McpConnectionSet {
             .filter(|(server_name, _)| include_server(server_name))
         {
             let server_name = server_name.clone();
-            let Ok(managed_client) = view.connection.client().await else {
-                continue;
-            };
+            let connection = view.connection.clone();
+            let session_route = Arc::clone(&self.session_route);
             let timeout = view.tool_timeout;
-            let client = managed_client.client;
             join_set.spawn(async move {
-                let mut templates = Vec::new();
-                let mut cursor: Option<String> = None;
-                loop {
-                    let params = cursor.as_ref().map(|next| {
-                        PaginatedRequestParams::default().with_cursor(Some(next.clone()))
-                    });
-                    let response = match client.list_resource_templates(params, timeout).await {
-                        Ok(result) => result,
-                        Err(error) => return (server_name, Err(error)),
-                    };
-                    templates.extend(response.resource_templates);
-                    match response.next_cursor {
-                        Some(next) if cursor.as_ref() == Some(&next) => {
-                            return (
-                                server_name,
-                                Err(anyhow!(
-                                    "resources/templates/list returned duplicate cursor"
-                                )),
-                            );
+                let result = connection
+                    .run_mcp_request(session_route, move |client| async move {
+                        let managed = client.client().await.context("failed to get client")?;
+                        let mut templates = Vec::new();
+                        let mut cursor: Option<String> = None;
+                        loop {
+                            let params = cursor.as_ref().map(|next| {
+                                PaginatedRequestParams::default().with_cursor(Some(next.clone()))
+                            });
+                            let response = managed
+                                .client
+                                .list_resource_templates(params, timeout)
+                                .await?;
+                            templates.extend(response.resource_templates);
+                            match response.next_cursor {
+                                Some(next) if cursor.as_ref() == Some(&next) => {
+                                    return Err(anyhow!(
+                                        "resources/templates/list returned duplicate cursor"
+                                    ));
+                                }
+                                Some(next) => cursor = Some(next),
+                                None => return Ok(templates),
+                            }
                         }
-                        Some(next) => cursor = Some(next),
-                        None => return (server_name, Ok(templates)),
-                    }
-                }
+                    })
+                    .await;
+                (server_name, result)
             });
         }
 
@@ -146,12 +145,22 @@ impl McpConnectionSet {
         server: &str,
         params: Option<PaginatedRequestParams>,
     ) -> Result<ListResourcesResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        managed
-            .client
-            .list_resources(params, timeout)
+        let view = self
+            .servers
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                managed
+                    .client
+                    .list_resources(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/list failed for `{server}`"))
+            })
             .await
-            .with_context(|| format!("resources/list failed for `{server}`"))
     }
 
     pub async fn read_resource(
@@ -159,25 +168,22 @@ impl McpConnectionSet {
         server: &str,
         params: ReadResourceRequestParams,
     ) -> Result<ReadResourceResult> {
-        let (managed, timeout) = self.client_by_name(server).await?;
-        let uri = params.uri.clone();
-        managed
-            .client
-            .read_resource(params, timeout)
-            .await
-            .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
-    }
-
-    async fn client_by_name(&self, name: &str) -> Result<(ManagedClient, Option<Duration>)> {
         let view = self
             .servers
-            .get(name)
-            .ok_or_else(|| anyhow!("unknown MCP server '{name}'"))?;
-        let client = view
-            .connection
-            .client()
+            .get(server)
+            .ok_or_else(|| anyhow!("unknown MCP server '{server}'"))?;
+        let server = server.to_string();
+        let timeout = view.tool_timeout;
+        view.connection
+            .run_mcp_request(Arc::clone(&self.session_route), move |client| async move {
+                let managed = client.client().await.context("failed to get client")?;
+                let uri = params.uri.clone();
+                managed
+                    .client
+                    .read_resource(params, timeout)
+                    .await
+                    .with_context(|| format!("resources/read failed for `{server}` ({uri})"))
+            })
             .await
-            .context("failed to get client")?;
-        Ok((client, view.tool_timeout))
     }
 }
