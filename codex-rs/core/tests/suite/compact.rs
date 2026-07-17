@@ -4406,6 +4406,16 @@ async fn post_compaction_root_continues_with_active_goal_impl(
         compact_mock.single_request().header("thread-id").as_deref(),
         Some(parent_thread_id.as_str())
     );
+    let initial_root_body = requests[0].body_json();
+    let continuation_root_body = requests[1].body_json();
+    let root_turn_id = initial_root_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("initial root request should include a turn id");
+    assert_eq!(
+        continuation_root_body["client_metadata"]["turn_id"].as_str(),
+        Some(root_turn_id),
+        "post-compaction sampling should continue the same root turn"
+    );
     let root_continuation_body = requests[1].body_json().to_string();
     assert!(body_contains_text(
         &root_continuation_body,
