@@ -1888,8 +1888,25 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
     }));
 }
 
-#[tokio::test]
-async fn interrupted_fork_accepts_source_appends_before_freeze() {
+#[test]
+fn interrupted_fork_accepts_source_appends_before_freeze() {
+    let test_thread = std::thread::Builder::new()
+        .name("interrupted_fork_accepts_source_appends_before_freeze".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build fork snapshot test runtime")
+                .block_on(interrupted_fork_accepts_source_appends_before_freeze_inner())
+        })
+        .expect("spawn fork snapshot test thread");
+    if let Err(err) = test_thread.join() {
+        std::panic::resume_unwind(err);
+    }
+}
+
+async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -1937,8 +1954,6 @@ async fn interrupted_fork_accepts_source_appends_before_freeze() {
     let stale_history = RolloutRecorder::get_rollout_history(&source_path)
         .await
         .expect("read source before append");
-    let stale_source_items = stale_history.get_rollout_items().to_vec();
-
     let appended_item = assistant_msg("append before freeze");
     let turn = source
         .thread
@@ -1954,17 +1969,11 @@ async fn interrupted_fork_accepts_source_appends_before_freeze() {
         .session
         .record_conversation_items(&turn, std::slice::from_ref(&appended_item))
         .await;
-    source
-        .thread
-        .flush_rollout()
-        .await
-        .expect("flush appended item");
-
     let forked = manager
         .fork_thread_from_history(
             ForkSnapshot::Interrupted,
             config.clone(),
-            stale_history,
+            stale_history.clone(),
             /*thread_source*/ None,
             /*parent_trace*/ None,
             /*supports_openai_form_elicitation*/ false,
@@ -2001,17 +2010,20 @@ async fn interrupted_fork_accepts_source_appends_before_freeze() {
         1,
     );
 
-    let err = manager
-        .state
-        .reference_backed_snapshot_history(
-            source.thread_id,
-            config.codex_home.as_path(),
+    let err = match manager
+        .fork_thread_from_history(
             ForkSnapshot::TruncateBeforeNthUserMessage(1),
-            InterruptedTurnHistoryMarker::Disabled,
-            Some(stale_source_items),
+            config,
+            stale_history,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
         )
         .await
-        .expect_err("rollback fork should reject a source that changed before freeze");
+    {
+        Ok(_) => panic!("rollback fork should reject a source that changed before freeze"),
+        Err(err) => err,
+    };
     assert!(
         err.to_string()
             .contains("changed before its snapshot was frozen"),
