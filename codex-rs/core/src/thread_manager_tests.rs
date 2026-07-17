@@ -1675,6 +1675,10 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config
+        .features
+        .disable(codex_features::Feature::MultiAgentV2)
+        .expect("exercise the legacy contextual-user interrupt marker");
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =
@@ -1885,11 +1889,146 @@ async fn interrupted_fork_snapshot_preserves_explicit_turn_id() {
 }
 
 #[tokio::test]
+async fn interrupted_fork_accepts_source_appends_before_freeze() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let state_db = init_state_db(&config).await;
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, state_db.clone()),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let source = manager
+        .resume_thread_with_history(
+            config.clone(),
+            InitialHistory::Forked(vec![
+                RolloutItem::ResponseItem(user_msg("hello")),
+                RolloutItem::ResponseItem(assistant_msg("first answer")),
+            ]),
+            auth_manager,
+            /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
+        )
+        .await
+        .expect("create source thread");
+    let source_path = source
+        .thread
+        .rollout_path()
+        .expect("source rollout path should exist");
+    source.thread.flush_rollout().await.expect("flush source");
+    let stale_history = RolloutRecorder::get_rollout_history(&source_path)
+        .await
+        .expect("read source before append");
+    let stale_source_items = stale_history.get_rollout_items().to_vec();
+
+    let appended_item = assistant_msg("append before freeze");
+    let turn = source
+        .thread
+        .session
+        .new_turn_with_sub_id(
+            "source-append".to_string(),
+            SessionSettingsUpdate::default(),
+        )
+        .await
+        .expect("create append turn");
+    source
+        .thread
+        .session
+        .record_conversation_items(&turn, std::slice::from_ref(&appended_item))
+        .await;
+    source
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush appended item");
+
+    let forked = manager
+        .fork_thread_from_history(
+            ForkSnapshot::Interrupted,
+            config.clone(),
+            stale_history,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+            /*supports_openai_form_elicitation*/ false,
+        )
+        .await
+        .expect("fork source after append");
+    let forked_path = forked
+        .thread
+        .rollout_path()
+        .expect("forked rollout path should exist");
+    let forked_items = codex_rollout::materialize_rollout_items(
+        config.codex_home.as_path(),
+        forked_path.as_path(),
+    )
+    .await
+    .expect("materialize fork history");
+    assert_eq!(
+        forked_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(ResponseItem::Message {
+                        role,
+                        content,
+                        ..
+                    }) if role == "assistant"
+                        && content == &vec![ContentItem::OutputText {
+                            text: "append before freeze".to_string(),
+                        }]
+                )
+            })
+            .count(),
+        1,
+    );
+
+    let err = manager
+        .state
+        .reference_backed_snapshot_history(
+            source.thread_id,
+            config.codex_home.as_path(),
+            ForkSnapshot::TruncateBeforeNthUserMessage(1),
+            InterruptedTurnHistoryMarker::Disabled,
+            Some(stale_source_items),
+        )
+        .await
+        .expect_err("rollback fork should reject a source that changed before freeze");
+    assert!(
+        err.to_string()
+            .contains("changed before its snapshot was frozen"),
+        "unexpected rollback fork error: {err}"
+    );
+}
+
+#[tokio::test]
 async fn interrupted_fork_snapshot_uses_persisted_mid_turn_history_without_live_source() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
     config.cwd = config.codex_home.abs();
+    config
+        .features
+        .disable(codex_features::Feature::MultiAgentV2)
+        .expect("exercise the legacy contextual-user interrupt marker");
     std::fs::create_dir_all(&config.codex_home).expect("create codex home");
 
     let auth_manager =

@@ -1097,14 +1097,22 @@ impl ThreadManager {
         let interrupted_marker =
             InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
         let history = if let Some(source_thread_id) = source_thread_id {
-            let expected_source_items = history.get_rollout_items().to_vec();
+            // Interrupted forks linearize at the store freeze because the source turn can append
+            // after app-server reads its history. Rollback keeps the equality check because its
+            // user-message boundary was derived from that earlier history.
+            let expected_source_items = match snapshot {
+                ForkSnapshot::Interrupted => None,
+                ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
+                    Some(history.get_rollout_items().to_vec())
+                }
+            };
             self.state
                 .reference_backed_snapshot_history(
                     source_thread_id,
                     config.codex_home.as_path(),
                     snapshot,
                     interrupted_marker,
-                    Some(expected_source_items),
+                    expected_source_items,
                 )
                 .await?
         } else {
