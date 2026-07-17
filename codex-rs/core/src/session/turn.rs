@@ -155,7 +155,6 @@ pub(crate) async fn run_turn(
     prewarmed_client_session: Option<ModelClientSession>,
     cancellation_token: CancellationToken,
 ) -> CodexResult<Option<String>> {
-    crate::goal_supervisor::clear_post_compaction_activation_for_turn_start(&sess).await;
     let mut client_session =
         prewarmed_client_session.unwrap_or_else(|| sess.services.model_client.new_session());
     // TODO(ccunningham): Pre-turn compaction runs before context updates and the
@@ -441,17 +440,6 @@ pub(crate) async fn run_turn(
                         let error = err.to_codex_protocol_error();
                         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
                             .await;
-                        return Ok(None);
-                    }
-                    let has_pending_input_after_compaction =
-                        sess.input_queue.has_pending_input(&sess.active_turn).await;
-                    if !has_pending_input_after_compaction
-                        && crate::goal_supervisor::mark_post_compaction_activation_if_supervised_goal_active(
-                            &sess,
-                            &turn_context.sub_id,
-                        )
-                        .await
-                    {
                         return Ok(None);
                     }
                     can_drain_pending_input = !model_needs_follow_up;

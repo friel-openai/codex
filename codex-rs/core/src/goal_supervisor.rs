@@ -3,7 +3,6 @@ use crate::agent::control::SpawnAgentOptions;
 use crate::agent::next_thread_spawn_depth;
 use crate::session::session::Session;
 use chrono::Utc;
-use codex_features::Feature;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -39,7 +38,6 @@ pub(crate) struct GoalSupervisorRuntimeState {
     scheduled_wakeup: Mutex<bool>,
     last_action: Mutex<Option<SupervisorActionRecord>>,
     snooze_records: Mutex<Vec<SupervisorSnoozeRecord>>,
-    pending_post_compaction_activation: Mutex<Option<PostCompactionActivation>>,
 }
 
 impl GoalSupervisorRuntimeState {
@@ -52,15 +50,8 @@ impl GoalSupervisorRuntimeState {
             scheduled_wakeup: Mutex::new(false),
             last_action: Mutex::new(None),
             snooze_records: Mutex::new(Vec::new()),
-            pending_post_compaction_activation: Mutex::new(None),
         }
     }
-}
-
-/// One-use context for a supervisor check-in started after mid-turn compaction.
-#[derive(Debug)]
-struct PostCompactionActivation {
-    parent_turn_id: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -93,54 +84,6 @@ pub(crate) fn is_goal_supervisor_helper_source(session_source: &SessionSource) -
             ..
         }) if agent_role == GOAL_SUPERVISOR_ROLE_NAME
     )
-}
-
-pub(crate) async fn mark_post_compaction_activation_if_supervised_goal_active(
-    session: &Arc<Session>,
-    parent_turn_id: &str,
-) -> bool {
-    if !session.enabled(Feature::Goals) || !session.enabled(Feature::GoalSupervisor) {
-        return false;
-    }
-    let Some(state_db) = session.services.state_db.as_ref() else {
-        return false;
-    };
-    let goal = match state_db
-        .thread_goals()
-        .get_thread_goal(session.thread_id)
-        .await
-    {
-        Ok(goal) => goal,
-        Err(err) => {
-            warn!(
-                thread_id = %session.thread_id,
-                "failed to read active goal after mid-turn compaction: {err}"
-            );
-            return false;
-        }
-    };
-    if !matches!(
-        goal,
-        Some(goal) if goal.status == codex_state::ThreadGoalStatus::Active
-    ) {
-        return false;
-    }
-    *session
-        .goal_supervisor_runtime
-        .pending_post_compaction_activation
-        .lock()
-        .await = Some(PostCompactionActivation {
-        parent_turn_id: parent_turn_id.to_string(),
-    });
-    true
-}
-
-pub(crate) async fn clear_post_compaction_activation_for_turn_start(session: &Arc<Session>) {
-    *session
-        .goal_supervisor_runtime
-        .pending_post_compaction_activation
-        .lock()
-        .await = None;
 }
 
 pub(crate) async fn restart_active_helper_for_execution_settings_change(session: &Arc<Session>) {
@@ -607,13 +550,6 @@ pub(crate) async fn supervisor_continuity_context_item(
         RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
         _ => None,
     });
-    let post_compaction_parent_turn_id = session
-        .goal_supervisor_runtime
-        .pending_post_compaction_activation
-        .lock()
-        .await
-        .take()
-        .map(|activation| activation.parent_turn_id);
     let snooze_records = session
         .goal_supervisor_runtime
         .snooze_records
@@ -632,13 +568,7 @@ pub(crate) async fn supervisor_continuity_context_item(
         });
     let continuity = serde_json::json!({
         "supervisor_identity": "/root/goal_supervisor",
-        "activation_reason": if post_compaction_parent_turn_id.is_some() { "post_compaction" } else { "thread_idle" },
-        "compaction": post_compaction_parent_turn_id.as_ref().map(|parent_turn_id| serde_json::json!({
-            "phase": "mid_turn",
-            "reason": "context_limit",
-            "parent_turn_id": parent_turn_id,
-            "requested_by": "automatic",
-        })),
+        "activation_reason": "thread_idle",
         "previous_supervisor_action": previous_supervisor_action.as_ref().map(|action| serde_json::json!({
             "kind": action.kind,
             "sent_at_utc": action.sent_at.to_rfc3339(),

@@ -32,16 +32,15 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
-use codex_protocol::config_types::ServiceTier;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -2191,98 +2190,6 @@ async fn goal_supervisor_waits_for_parent_turn_to_finish_inner() {
 
     let helper_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
     assert!(harness.manager.get_thread(helper_thread_id).await.is_ok());
-}
-
-#[test]
-fn post_compaction_activation_requires_active_supervised_goal() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "post_compaction_activation_requires_active_supervised_goal",
-        post_compaction_activation_requires_active_supervised_goal_inner(),
-    )
-}
-
-async fn post_compaction_activation_requires_active_supervised_goal_inner() -> anyhow::Result<()> {
-    let (home, mut config) = test_config().await;
-    config.features.enable(Feature::Goals)?;
-    config.features.enable(Feature::GoalSupervisor)?;
-    config.features.enable(Feature::Sqlite)?;
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    assert!(
-        !crate::goal_supervisor::mark_post_compaction_activation_if_supervised_goal_active(
-            &parent_thread.session,
-            "turn-without-goal",
-        )
-        .await
-    );
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (_goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Keep supervising after compaction.",
-    )
-    .await?;
-    assert!(
-        crate::goal_supervisor::mark_post_compaction_activation_if_supervised_goal_active(
-            &parent_thread.session,
-            "compacted-turn",
-        )
-        .await
-    );
-    crate::goal_supervisor::clear_post_compaction_activation_for_turn_start(&parent_thread.session)
-        .await;
-    let continuity_text =
-        goal_supervisor_continuity_text_for_test(&parent_thread.session, &goal).await;
-    assert!(continuity_text.contains("\"activation_reason\": \"thread_idle\""));
-    assert!(continuity_text.contains("\"compaction\": null"));
-
-    let (home, mut config) = test_config().await;
-    config.features.enable(Feature::Goals)?;
-    config.features.disable(Feature::GoalSupervisor)?;
-    config.features.enable(Feature::Sqlite)?;
-    let disabled_harness = AgentControlHarness::new_with_config(home, config).await;
-    let (disabled_thread_id, disabled_thread) = disabled_harness.start_thread().await;
-    create_active_thread_goal_for_test(
-        disabled_harness
-            .state_db
-            .as_ref()
-            .expect("sqlite state db should be available"),
-        disabled_thread_id,
-        &disabled_thread.session,
-        "Do not hand this goal to a disabled supervisor.",
-    )
-    .await?;
-    assert!(
-        !crate::goal_supervisor::mark_post_compaction_activation_if_supervised_goal_active(
-            &disabled_thread.session,
-            "disabled-supervisor-turn",
-        )
-        .await
-    );
-
-    let (_home, mut config) = test_config().await;
-    config.features.enable(Feature::Goals)?;
-    config.features.enable(Feature::GoalSupervisor)?;
-    let no_state_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.to_path_buf(),
-        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        /*state_db*/ None,
-    );
-    let no_state_thread = no_state_manager.start_thread(config).await?.thread;
-    assert!(
-        !crate::goal_supervisor::mark_post_compaction_activation_if_supervised_goal_active(
-            &no_state_thread.session,
-            "no-state-db-turn",
-        )
-        .await
-    );
-    Ok(())
 }
 
 #[test]
