@@ -293,15 +293,15 @@ async fn post_compaction_root_completes_before_goal_supervisor_starts() -> Resul
         ),
         responses::ev_completed_with_tokens("supervisor-response", /*total_tokens*/ 10),
     ]);
-    let responses_log = responses::mount_response_sequence(
+    let (responses_log, mut continuation_gate) = responses::mount_gated_response_sequence(
         &server,
         vec![
             responses::sse_response(root_response),
-            responses::sse_response(root_continuation)
-                .set_delay(std::time::Duration::from_millis(250)),
+            responses::sse_response(root_continuation),
             responses::sse_response(root_final),
             responses::sse_response(supervisor_response),
         ],
+        /*gated_index*/ 1,
     )
     .await;
     let compact_mock = responses::mount_compact_json_once(
@@ -372,12 +372,20 @@ async fn post_compaction_root_completes_before_goal_supervisor_starts() -> Resul
     .await??;
     let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_response)?;
 
-    wait_for_responses_request_count(&server, /*expected_count*/ 2).await?;
+    timeout(DEFAULT_READ_TIMEOUT, continuation_gate.wait_until_entered())
+        .await
+        .expect("root continuation should reach the response gate");
     assert_eq!(
         responses_log.requests().len(),
         2,
         "the goal supervisor must not start while root continuation is in flight"
     );
+    assert_eq!(
+        compact_mock.requests().len(),
+        1,
+        "root continuation must start only after compaction completes"
+    );
+    continuation_gate.release();
     wait_for_turn_completed(&mut mcp, &turn.id).await?;
     wait_for_responses_request_count(&server, /*expected_count*/ 4).await?;
 
