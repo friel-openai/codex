@@ -3,8 +3,11 @@
 use super::*;
 use crate::config::RolloutConfig;
 use chrono::TimeZone;
+use codex_extension_items::ExtensionItem;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
+use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
@@ -304,6 +307,132 @@ async fn load_rollout_items_defaults_legacy_session_id() -> std::io::Result<()> 
     assert!(matches!(
         items[1],
         RolloutItem::ResponseItem(ResponseItem::Message { .. })
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn load_rollout_items_normalizes_legacy_sleep_without_weakening_errors() -> std::io::Result<()>
+{
+    let home = TempDir::new().expect("temp dir");
+    let rollout_path = home.path().join("rollout.jsonl");
+    let mut file = File::create(&rollout_path)?;
+    let thread_id = ThreadId::new();
+    let ts = "2025-01-03T12:00:00Z";
+    let legacy_sleep = serde_json::json!({
+        "timestamp": ts,
+        "type": "event_msg",
+        "payload": {
+            "type": "item_completed",
+            "thread_id": thread_id,
+            "turn_id": "turn-1",
+            "item": {
+                "type": "Sleep",
+                "id": "sleep-1",
+                "duration_ms": 1_000,
+            },
+            "completed_at_ms": 0,
+        },
+    });
+    assert!(serde_json::from_value::<RolloutLine>(legacy_sleep.clone()).is_err());
+
+    for record in [
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "session_meta",
+            "payload": {
+                "id": thread_id,
+                "timestamp": ts,
+                "cwd": ".",
+                "originator": "test_originator",
+                "cli_version": "test_version",
+                "source": "cli",
+                "model_provider": "test-provider",
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "before"}],
+            },
+        }),
+        legacy_sleep,
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "response_item",
+            "payload": {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "after"}],
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-2",
+                "item": {
+                    "type": "FutureItem",
+                    "id": "future-1",
+                },
+                "completed_at_ms": 0,
+            },
+        }),
+        serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "item_completed",
+                "thread_id": thread_id,
+                "turn_id": "turn-3",
+                "item": {
+                    "type": "Sleep",
+                    "id": "sleep-2",
+                    "duration_ms": "not-a-number",
+                },
+                "completed_at_ms": 0,
+            },
+        }),
+    ] {
+        writeln!(file, "{record}")?;
+    }
+
+    let (items, loaded_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path).await?;
+
+    assert_eq!(loaded_thread_id, Some(thread_id));
+    assert_eq!(parse_errors, 2);
+    assert_eq!(items.len(), 4);
+    assert!(matches!(
+        &items[1],
+        RolloutItem::ResponseItem(ResponseItem::Message { content, .. })
+            if content.iter().any(|item| matches!(
+                item,
+                ContentItem::OutputText { text } if text == "before"
+            ))
+    ));
+    assert!(matches!(
+        &items[2],
+        RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+            if matches!(
+                &event.item,
+                TurnItem::Extension(ExtensionItem::Sleep(item))
+                    if item.id == "sleep-1" && item.duration_ms == 1_000
+            )
+    ));
+    assert!(matches!(
+        &items[3],
+        RolloutItem::ResponseItem(ResponseItem::Message { content, .. })
+            if content.iter().any(|item| matches!(
+                item,
+                ContentItem::OutputText { text } if text == "after"
+            ))
     ));
 
     Ok(())

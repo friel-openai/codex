@@ -1063,6 +1063,9 @@ impl RolloutRecorder {
                 trace!("skipping legacy ghost_snapshot rollout line");
                 continue;
             }
+            if normalize_legacy_sleep_item_completed_rollout_line(&mut value) {
+                trace!("normalized legacy item_completed Sleep rollout line");
+            }
             if thread_id.is_none() {
                 // The first SessionMeta belongs to this rollout. Later SessionMeta lines
                 // can be copied from fork history, so only validate unknown history modes
@@ -1182,6 +1185,33 @@ fn strip_legacy_ghost_snapshot_rollout_line(value: &mut Value) -> bool {
 
 fn is_legacy_ghost_snapshot_response_item(value: &Value) -> bool {
     value.get("type").and_then(Value::as_str) == Some("ghost_snapshot")
+}
+
+fn normalize_legacy_sleep_item_completed_rollout_line(value: &mut Value) -> bool {
+    if value.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return false;
+    }
+    let Some(payload) = value.get_mut("payload").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if payload.get("type").and_then(Value::as_str) != Some("item_completed") {
+        return false;
+    }
+    let Some(item) = payload.get_mut("item").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    if item.get("type").and_then(Value::as_str) != Some("Sleep")
+        || !item.contains_key("duration_ms")
+    {
+        return false;
+    }
+
+    item.insert("type".to_string(), Value::String("Extension".to_string()));
+    item.insert("kind".to_string(), Value::String("clock.sleep".to_string()));
+    if let Some(duration_ms) = item.remove("duration_ms") {
+        item.insert("durationMs".to_string(), duration_ms);
+    }
+    true
 }
 
 fn truncate_fs_page(
