@@ -2,10 +2,14 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_mock_responses_server_repeating_assistant;
+use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_protocol::ThreadId;
+use codex_state::DirectionalThreadSpawnEdgeStatus;
+use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -60,6 +64,7 @@ async fn thread_loaded_list_paginates() -> Result<()> {
         .send_thread_loaded_list_request(ThreadLoadedListParams {
             cursor: None,
             limit: Some(1),
+            ancestor_thread_id: None,
         })
         .await?;
     let ThreadLoadedListResponse {
@@ -73,6 +78,7 @@ async fn thread_loaded_list_paginates() -> Result<()> {
         .send_thread_loaded_list_request(ThreadLoadedListParams {
             cursor: next_cursor,
             limit: Some(1),
+            ancestor_thread_id: None,
         })
         .await?;
     let ThreadLoadedListResponse {

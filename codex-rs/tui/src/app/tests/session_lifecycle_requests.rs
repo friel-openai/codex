@@ -1526,14 +1526,12 @@ fn session_lifecycle_avoids_redundant_subagent_metadata_reads() -> Result<()> {
                     .thread_loaded_list(ThreadLoadedListParams {
                         cursor: None,
                         limit: None,
+                        ancestor_thread_id: Some(root_thread_id.to_string()),
                     })
                     .await?
                     .data;
-                let expected_reads = loaded_threads
-                    .iter()
-                    .filter(|thread_id| *thread_id != &root_thread_id.to_string())
-                    .count();
-                assert!(loaded_threads.contains(&child_thread_id.to_string()));
+                assert_eq!(loaded_threads, vec![child_thread_id.to_string()]);
+                let expected_reads = loaded_threads.len();
                 take_backfill_counts(&requests);
                 app.harness_overrides.cwd = Some(app.config.cwd.to_path_buf());
 
