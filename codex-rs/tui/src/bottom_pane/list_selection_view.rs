@@ -487,6 +487,11 @@ impl ListSelectionView {
             .selected_actual_idx()
             .filter(|actual_idx| self.enabled_actual_idx(*actual_idx).is_some())
             .or_else(|| {
+                self.initial_selected_idx
+                    .take()
+                    .filter(|actual_idx| self.enabled_actual_idx(*actual_idx).is_some())
+            })
+            .or_else(|| {
                 (!self.is_searchable)
                     .then(|| {
                         self.active_items()
@@ -494,11 +499,6 @@ impl ListSelectionView {
                             .position(|item| item.is_current && Self::item_is_enabled(item))
                     })
                     .flatten()
-            })
-            .or_else(|| {
-                self.initial_selected_idx
-                    .take()
-                    .filter(|actual_idx| self.enabled_actual_idx(*actual_idx).is_some())
             });
 
         if self.is_searchable && !self.search_query.is_empty() {
@@ -1094,6 +1094,12 @@ impl BottomPaneView for ListSelectionView {
 
     fn selected_index(&self) -> Option<usize> {
         self.selected_actual_idx()
+    }
+
+    fn selected_item_description(&self) -> Option<&str> {
+        self.selected_actual_idx()
+            .and_then(|index| self.items.get(index))
+            .and_then(|item| item.description.as_deref())
     }
 
     fn active_tab_id(&self) -> Option<&str> {

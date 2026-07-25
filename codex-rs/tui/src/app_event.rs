@@ -30,6 +30,7 @@ use codex_app_server_protocol::PluginReadParams;
 use codex_app_server_protocol::PluginReadResponse;
 use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::SkillsListResponse;
+use codex_app_server_protocol::Thread;
 use codex_app_server_protocol::ThreadGoalStatus;
 use codex_connectors::AppInfo;
 use codex_file_search::FileMatch;
@@ -172,11 +173,30 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentPickerRefresh {
+    TimedOut {
+        known_at_start: std::collections::HashSet<ThreadId>,
+        threads: Vec<Thread>,
+    },
+    Completed {
+        known_at_start: std::collections::HashSet<ThreadId>,
+        exhaustive: bool,
+        result: Result<Vec<Thread>, String>,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Apply a background descendant refresh without blocking the agent picker.
+    AgentPickerThreadsLoaded {
+        primary_thread_id: ThreadId,
+        generation: u64,
+        refresh: AgentPickerRefresh,
+    },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 
