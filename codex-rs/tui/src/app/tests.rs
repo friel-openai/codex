@@ -2,6 +2,8 @@
 
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
+#[path = "tests/agent_picker_requests.rs"]
+mod agent_picker_requests;
 #[path = "tests/key_chords.rs"]
 mod key_chords;
 #[path = "tests/mcp_startup.rs"]
@@ -12,6 +14,8 @@ mod rate_limits;
 mod safety_buffering;
 #[path = "tests/session_lifecycle_requests.rs"]
 mod session_lifecycle_requests;
+#[path = "tests/session_request_support.rs"]
+mod session_request_support;
 mod session_summary;
 mod startup;
 #[path = "tests/turn_submission.rs"]
@@ -1594,8 +1598,9 @@ async fn open_agent_picker_keeps_missing_threads_for_replay() -> Result<()> {
     .await
     .expect("embedded app server");
     let thread_id = ThreadId::new();
-    app.thread_event_channels
-        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    let mut channel = ThreadEventChannel::new(/*capacity*/ 1);
+    channel.mark_replay_only();
+    app.thread_event_channels.insert(thread_id, channel);
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
 
@@ -1607,7 +1612,7 @@ async fn open_agent_picker_keeps_missing_threads_for_replay() -> Result<()> {
             agent_role: None,
             agent_path: None,
             is_running: false,
-            is_closed: true,
+            is_closed: false,
         })
     );
     assert_eq!(app.agent_navigation.ordered_thread_ids(), vec![thread_id]);
@@ -1623,8 +1628,9 @@ async fn open_agent_picker_preserves_cached_metadata_for_replay_threads() -> Res
     .await
     .expect("embedded app server");
     let thread_id = ThreadId::new();
-    app.thread_event_channels
-        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    let mut channel = ThreadEventChannel::new(/*capacity*/ 1);
+    channel.mark_replay_only();
+    app.thread_event_channels.insert(thread_id, channel);
     app.agent_navigation.upsert(
         thread_id,
         Some("Robie".to_string()),
@@ -1657,8 +1663,9 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
     .await
     .expect("embedded app server");
     let thread_id = ThreadId::new();
-    app.thread_event_channels
-        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 4));
+    let channel = ThreadEventChannel::new(/*capacity*/ 4);
+    let store = Arc::clone(&channel.store);
+    app.thread_event_channels.insert(thread_id, channel);
     app.agent_navigation
         .record_sub_agent_activity(SubAgentActivityDisplay {
             thread_id,
@@ -1666,7 +1673,10 @@ async fn open_agent_picker_preserves_running_hints_until_observed_completion() -
             is_running_hint: true,
         });
 
-    Box::pin(app.open_agent_picker(&mut app_server)).await;
+    let store_guard = store.try_lock_owned().expect("uncontended thread store");
+    futures::FutureExt::now_or_never(app.open_agent_picker(&mut app_server))
+        .expect("opening the agent picker waited for a locked thread store");
+    drop(store_guard);
 
     let mut expected_entry = AgentPickerThreadEntry {
         agent_nickname: None,
@@ -1811,8 +1821,8 @@ async fn open_agent_picker_selects_path_backed_agent() -> Result<()> {
 }
 
 #[tokio::test]
-async fn open_agent_picker_refreshes_replay_only_path_backed_liveness() -> Result<()> {
-    let mut app = Box::pin(make_test_app()).await;
+async fn open_agent_picker_preserves_replay_only_path_backed_liveness() -> Result<()> {
+    let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
     ))
@@ -1841,15 +1851,31 @@ async fn open_agent_picker_refreshes_replay_only_path_backed_liveness() -> Resul
             agent_nickname: None,
             agent_role: None,
             agent_path: Some("/root/child".to_string()),
-            is_running: false,
-            is_closed: true,
+            is_running: true,
+            is_closed: false,
         })
     );
+    let status = loop {
+        let event = app_event_rx.try_recv().expect("agent status history cell");
+        if let AppEvent::InsertHistoryCell(cell) = event {
+            let rendered = lines_to_single_string(&cell.display_lines(/*width*/ 80));
+            if rendered.contains("/agent") {
+                break rendered;
+            }
+        }
+    };
+    assert_snapshot!(status, @r###"
+    /agent
+    Sub-agents running
+
+      • `/root/child`
+        No recent activity yet.
+    "###);
     Ok(())
 }
 
 #[tokio::test]
-async fn open_agent_picker_prunes_terminal_metadata_only_threads() -> Result<()> {
+async fn open_agent_picker_keeps_pathless_cached_threads_until_refreshed() -> Result<()> {
     let mut app = Box::pin(make_test_app()).await;
     let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(
         app.chat_widget.config_ref(),
@@ -1866,8 +1892,7 @@ async fn open_agent_picker_prunes_terminal_metadata_only_threads() -> Result<()>
 
     Box::pin(app.open_agent_picker(&mut app_server)).await;
 
-    assert_eq!(app.agent_navigation.get(&thread_id), None);
-    assert!(app.agent_navigation.is_empty());
+    assert!(render_bottom_popup(&app.chat_widget, /*width*/ 80).contains("Ghost"));
     Ok(())
 }
 
@@ -1880,8 +1905,9 @@ async fn open_agent_picker_marks_terminal_read_errors_closed() -> Result<()> {
     .await
     .expect("embedded app server");
     let thread_id = ThreadId::new();
-    app.thread_event_channels
-        .insert(thread_id, ThreadEventChannel::new(/*capacity*/ 1));
+    let mut channel = ThreadEventChannel::new(/*capacity*/ 1);
+    channel.mark_replay_only();
+    app.thread_event_channels.insert(thread_id, channel);
     app.agent_navigation.upsert(
         thread_id,
         Some("Robie".to_string()),
@@ -1889,6 +1915,8 @@ async fn open_agent_picker_marks_terminal_read_errors_closed() -> Result<()> {
         /*is_closed*/ false,
     );
 
+    app.refresh_agent_picker_thread_liveness(&mut app_server, thread_id)
+        .await;
     Box::pin(app.open_agent_picker(&mut app_server)).await;
 
     assert_eq!(
@@ -2032,8 +2060,14 @@ fn selected_and_resumed_threads_use_server_capability_for_v1_and_v2_children() -
         let backfill = app.backfill_loaded_subagent_threads(&mut app_server).await;
         assert!(backfill.completed);
         assert_eq!(
-            backfill.refreshed_thread_ids,
-            [child_thread_ids[1]].into_iter().collect()
+            app.agent_navigation.get(&child_thread_ids[1]),
+            Some(&AgentPickerThreadEntry {
+                agent_nickname: Some("child-1".to_string()),
+                agent_role: Some("worker".to_string()),
+                agent_path: None,
+                is_running: false,
+                is_closed: false,
+            })
         );
         assert_eq!(
             app.agent_navigation.get(&child_thread_ids[0]),
