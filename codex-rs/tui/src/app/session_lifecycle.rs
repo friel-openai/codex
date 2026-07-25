@@ -806,6 +806,7 @@ impl App {
             .thread_loaded_list(ThreadLoadedListParams {
                 cursor: None,
                 limit: None,
+                ancestor_thread_id: Some(primary_thread_id.to_string()),
             })
             .await
         {
