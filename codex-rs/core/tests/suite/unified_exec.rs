@@ -19,6 +19,7 @@ use codex_protocol::protocol::Op;
 use codex_protocol::user_input::UserInput;
 use codex_utils_output_truncation::approx_tokens_from_byte_count;
 use codex_utils_path_uri::PathUri;
+use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use core_test_support::TempDirExt;
 use core_test_support::assert_regex_match;
 use core_test_support::managed_network_requirements_loader;
@@ -3085,11 +3086,25 @@ PY
 
     submit_unified_exec_turn(&test, "summarize large output", PermissionProfile::Disabled).await?;
 
-    let end_event = wait_for_event_match(&test.codex, |event| match event {
-        EventMsg::ExecCommandEnd(event) if event.call_id == call_id => Some(event.clone()),
-        _ => None,
-    })
-    .await;
+    let mut streamed_output_bytes = 0;
+    let end_event = loop {
+        let event = test
+            .codex
+            .next_event()
+            .await
+            .expect("event while waiting for large output");
+        match event.msg {
+            EventMsg::ExecCommandOutputDelta(delta) if delta.call_id == call_id => {
+                streamed_output_bytes += delta.chunk.len();
+                assert!(
+                    streamed_output_bytes <= DEFAULT_OUTPUT_BYTES_CAP,
+                    "streamed command output exceeds its byte budget"
+                );
+            }
+            EventMsg::ExecCommandEnd(event) if event.call_id == call_id => break event,
+            _ => {}
+        }
+    };
     assert!(end_event.aggregated_output.contains("HEAD\n"));
     assert!(end_event.aggregated_output.contains("TAIL\n"));
     assert_regex_match(
