@@ -4,11 +4,11 @@
 //! resuming/forking saved sessions, replacing ChatWidget instances, and maintaining the agent picker
 //! cache used for multi-agent navigation.
 
+use super::agent_picker::AGENT_PICKER_VIEW_ID;
 use super::*;
 use crate::app_server_session::source_agent_path;
 use crate::app_server_session::thread_blocks_direct_input;
 use codex_config::types::ResumeCwdMode;
-use std::collections::HashSet;
 
 #[derive(Clone, Copy)]
 pub(super) enum ThreadAttachPresentation {
@@ -16,50 +16,42 @@ pub(super) enum ThreadAttachPresentation {
     PromptEdit,
 }
 
-/// Reports whether a loaded-thread backfill completed and which descendants already had their
-/// liveness metadata refreshed, allowing the picker to skip duplicate `thread/read` requests.
+/// Reports whether a loaded-thread backfill completed without a thread-read error.
 #[derive(Default)]
 pub(super) struct LoadedSubagentBackfill {
     pub(super) completed: bool,
-    pub(super) refreshed_thread_ids: HashSet<ThreadId>,
 }
 
 impl App {
     pub(super) async fn open_agent_picker(&mut self, app_server: &mut AppServerSession) {
-        let backfill = self.backfill_loaded_subagent_threads(app_server).await;
-        // V2 subagents are identified by canonical paths observed from activity events or loaded
-        // thread metadata. A buffered active turn is positive liveness evidence; a completed
-        // snapshot is terminal evidence. An empty store does not clear a successful spawn hint.
         let path_backed_thread_ids: Vec<_> = self
             .agent_navigation
             .ordered_path_backed_subagent_threads(self.primary_thread_id)
             .into_iter()
             .map(|(thread_id, _)| thread_id)
             .collect();
+
         for thread_id in path_backed_thread_ids.iter().copied() {
             if let Some(channel) = self.thread_event_channels.get(&thread_id)
                 && channel.attachment() == ThreadEventAttachment::Live
             {
-                let (has_active_turn, has_terminal_snapshot) = {
-                    let store = channel.store.lock().await;
-                    (
-                        store.active_turn_id().is_some(),
-                        store
-                            .turns
-                            .last()
-                            .is_some_and(|turn| !matches!(turn.status, TurnStatus::InProgress)),
-                    )
+                let Ok(store) = channel.store.try_lock() else {
+                    continue;
                 };
+                let has_active_turn = store.active_turn_id().is_some();
+                let has_terminal_snapshot = store
+                    .turns
+                    .last()
+                    .is_some_and(|turn| !matches!(turn.status, TurnStatus::InProgress));
+                drop(store);
                 if has_active_turn {
                     self.agent_navigation.mark_running(thread_id);
                 } else if has_terminal_snapshot {
                     self.agent_navigation.mark_stopped(thread_id);
                 }
-            } else if !backfill.refreshed_thread_ids.contains(&thread_id) {
-                self.refresh_agent_picker_thread_liveness(app_server, thread_id)
-                    .await;
             }
         }
+
         let path_backed_threads = self
             .agent_navigation
             .ordered_path_backed_subagent_threads(self.primary_thread_id);
@@ -76,80 +68,119 @@ impl App {
             let mut entries = Vec::new();
             for (thread_id, agent_path) in running_threads {
                 let preview = if let Some(channel) = self.thread_event_channels.get(&thread_id) {
-                    let store = channel.store.lock().await;
-                    super::agent_status_feed::AgentStatusThreadPreview::from_store(
-                        agent_path, &store,
-                    )
+                    if channel.attachment() != ThreadEventAttachment::Live {
+                        super::agent_status_feed::AgentStatusThreadPreview::empty(agent_path)
+                    } else {
+                        match channel.store.try_lock() {
+                            Ok(store) => {
+                                super::agent_status_feed::AgentStatusThreadPreview::from_store(
+                                    agent_path, &store,
+                                )
+                            }
+                            Err(_) => super::agent_status_feed::AgentStatusThreadPreview::empty(
+                                agent_path,
+                            ),
+                        }
+                    }
                 } else {
                     super::agent_status_feed::AgentStatusThreadPreview::empty(agent_path)
                 };
                 entries.push(preview);
             }
-
-            self.chat_widget
-                .add_to_history(super::agent_status_feed::AgentStatusHistoryCell::new(
-                    entries,
-                ));
-        }
-
-        let mut thread_ids = self.agent_navigation.tracked_thread_ids();
-        for thread_id in self.thread_event_channels.keys().copied() {
-            if !thread_ids.contains(&thread_id) {
-                thread_ids.push(thread_id);
-            }
-        }
-        for thread_id in thread_ids {
-            if path_backed_thread_ids.contains(&thread_id)
-                || self.side_threads.contains_key(&thread_id)
-                || backfill.refreshed_thread_ids.contains(&thread_id)
-            {
-                continue;
-            }
-            if !self
-                .refresh_agent_picker_thread_liveness(app_server, thread_id)
-                .await
-            {
-                continue;
+            if !entries.is_empty() {
+                self.chat_widget.add_to_history(
+                    super::agent_status_feed::AgentStatusHistoryCell::new(entries),
+                );
             }
         }
 
-        let collab_enabled = self.config.features.enabled(Feature::Collab);
+        let thread_updates: Vec<_> = self
+            .thread_event_channels
+            .iter()
+            .filter_map(|(&thread_id, _)| {
+                if path_backed_thread_ids.contains(&thread_id)
+                    || self.side_threads.contains_key(&thread_id)
+                    || self.primary_thread_id == Some(thread_id)
+                {
+                    return None;
+                }
+                self.agent_navigation
+                    .get(&thread_id)
+                    .is_none()
+                    .then_some(thread_id)
+            })
+            .collect();
+        for thread_id in thread_updates {
+            self.upsert_agent_picker_thread(
+                thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+                /*is_closed*/ false,
+            );
+        }
+
         let selectable_threads = self
             .agent_navigation
             .ordered_threads()
             .into_iter()
             .filter(|(thread_id, entry)| {
                 let is_primary = Some(*thread_id) == self.primary_thread_id;
-                let is_supervisor = entry.is_goal_supervisor();
-                let is_open_agent = !entry.is_closed && !is_supervisor;
+                let is_open_agent = !entry.is_closed && !entry.is_goal_supervisor();
                 let is_existing_replay_thread = self.thread_event_channels.contains_key(thread_id)
                     && entry.agent_role.is_none();
-                is_primary || is_open_agent || (is_existing_replay_thread && !is_supervisor)
+                is_primary || is_open_agent || is_existing_replay_thread
             })
             .collect::<Vec<_>>();
         let has_non_primary_agent_thread = selectable_threads
             .iter()
             .any(|(thread_id, _)| Some(*thread_id) != self.primary_thread_id);
-        if !collab_enabled && !has_non_primary_agent_thread {
+        if !self.config.features.enabled(Feature::Collab) && !has_non_primary_agent_thread {
             self.chat_widget.open_multi_agent_enable_prompt();
             return;
         }
-
         if selectable_threads.is_empty() {
             self.chat_widget
                 .add_info_message("No agents available yet.".to_string(), /*hint*/ None);
             return;
         }
 
+        let selected_thread_id = self
+            .chat_widget
+            .selected_item_description_for_present_view(AGENT_PICKER_VIEW_ID)
+            .and_then(|description| ThreadId::from_string(description).ok());
+        let params = self.agent_picker_selection_view_params(selected_thread_id);
+        if !self
+            .chat_widget
+            .replace_selection_view_if_present(AGENT_PICKER_VIEW_ID, params)
+        {
+            let params = self.agent_picker_selection_view_params(selected_thread_id);
+            self.chat_widget.show_selection_view(params);
+        }
+        if let Some(primary_thread_id) = self.primary_thread_id {
+            self.refresh_agent_picker_threads(app_server, primary_thread_id);
+        }
+    }
+
+    pub(super) fn agent_picker_selection_view_params(
+        &self,
+        selected_thread_id: Option<ThreadId>,
+    ) -> SelectionViewParams {
         let mut initial_selected_idx = None;
-        let items: Vec<SelectionItem> = selectable_threads
+        let selected_thread_id = selected_thread_id.or(self.active_thread_id);
+        let items = self
+            .agent_navigation
+            .ordered_threads()
             .into_iter()
+            .filter(|(thread_id, entry)| {
+                let is_primary = Some(*thread_id) == self.primary_thread_id;
+                let is_open_agent = !entry.is_closed && !entry.is_goal_supervisor();
+                let is_existing_replay_thread = self.thread_event_channels.contains_key(thread_id)
+                    && entry.agent_role.is_none();
+                is_primary || is_open_agent || is_existing_replay_thread
+            })
             .enumerate()
             .map(|(idx, (thread_id, entry))| {
-                if self.active_thread_id == Some(thread_id) {
+                if selected_thread_id == Some(thread_id) {
                     initial_selected_idx = Some(idx);
                 }
-                let id = thread_id;
                 let is_primary = self.primary_thread_id == Some(thread_id);
                 let name = entry
                     .agent_path
@@ -171,7 +202,7 @@ impl App {
                     description: Some(uuid.clone()),
                     is_current: self.active_thread_id == Some(thread_id),
                     actions: vec![Box::new(move |tx| {
-                        tx.send(AppEvent::SelectAgentThread(id));
+                        tx.send(AppEvent::SelectAgentThread(thread_id));
                     })],
                     dismiss_on_select: true,
                     search_value: Some(format!("{name} {uuid}")),
@@ -180,14 +211,15 @@ impl App {
             })
             .collect();
 
-        self.chat_widget.show_selection_view(SelectionViewParams {
+        SelectionViewParams {
+            view_id: Some(AGENT_PICKER_VIEW_ID),
             title: Some("Subagents".to_string()),
             subtitle: Some(AgentNavigationState::picker_subtitle()),
             footer_hint: Some(standard_popup_hint_line()),
             items,
             initial_selected_idx,
             ..Default::default()
-        });
+        }
     }
 
     pub(super) fn is_terminal_thread_read_error(err: &color_eyre::Report) -> bool {
@@ -792,7 +824,6 @@ impl App {
             }
         }
 
-        let mut refreshed_thread_ids = HashSet::new();
         for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
             let agent_path = thread.agent_path;
             let has_live_channel = self
@@ -820,14 +851,12 @@ impl App {
                     self.agent_navigation
                         .set_running(thread.thread_id, /*is_running*/ false);
                 }
-                refreshed_thread_ids.insert(thread.thread_id);
             }
         }
         self.sync_active_agent_label();
 
         LoadedSubagentBackfill {
             completed: !had_read_error,
-            refreshed_thread_ids,
         }
     }
 

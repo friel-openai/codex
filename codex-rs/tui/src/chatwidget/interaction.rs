@@ -233,6 +233,40 @@ impl ChatWidget {
         self.request_redraw();
     }
 
+    pub(crate) fn selected_index_for_present_view(&self, view_id: &'static str) -> Option<usize> {
+        self.bottom_pane.selected_index_for_present_view(view_id)
+    }
+
+    pub(crate) fn selected_item_description_for_present_view(
+        &self,
+        view_id: &'static str,
+    ) -> Option<&str> {
+        self.bottom_pane
+            .selected_item_description_for_present_view(view_id)
+    }
+
+    pub(crate) fn replace_selection_view_if_present(
+        &mut self,
+        view_id: &'static str,
+        params: SelectionViewParams,
+    ) -> bool {
+        let replaced = self
+            .bottom_pane
+            .replace_selection_view_if_present(view_id, params);
+        if replaced {
+            self.refresh_plan_mode_nudge();
+        }
+        replaced
+    }
+
+    pub(crate) fn replace_selection_view_with_multi_agent_enable_prompt(
+        &mut self,
+        view_id: &'static str,
+    ) -> bool {
+        let params = self.multi_agent_enable_prompt_params(Some(view_id));
+        self.replace_selection_view_if_present(view_id, params)
+    }
+
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
         self.bottom_pane.no_modal_or_popup_active()
     }

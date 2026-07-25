@@ -2113,6 +2113,18 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker(app_server).await;
             }
+            AppEvent::AgentPickerThreadsLoaded {
+                primary_thread_id,
+                generation,
+                refresh,
+            } => {
+                self.apply_agent_picker_thread_refresh(
+                    app_server,
+                    primary_thread_id,
+                    generation,
+                    refresh,
+                );
+            }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread_and_discard_side(tui, app_server, thread_id)
                     .await?;
