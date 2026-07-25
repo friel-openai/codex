@@ -770,6 +770,59 @@ impl ThreadManager {
         Ok(subtree_thread_ids)
     }
 
+    /// Returns whether a loaded thread's recorded parent chain reaches `ancestor_thread_id`.
+    ///
+    /// Loaded parents are read from memory. Unloaded intermediates are resolved by thread ID from
+    /// the thread store so callers do not depend on a complete spawn-edge index for older homes.
+    pub async fn loaded_thread_descends_from(
+        &self,
+        thread_id: ThreadId,
+        ancestor_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let Ok(thread) = self.get_thread(thread_id).await else {
+            return Ok(false);
+        };
+        let mut parent_thread_id = thread
+            .session_configured()
+            .parent_thread_id
+            .or_else(|| thread.session_source.parent_thread_id());
+        let mut visited = HashSet::from([thread_id]);
+        while let Some(parent_id) = parent_thread_id {
+            if parent_id == ancestor_thread_id {
+                return Ok(true);
+            }
+            if !visited.insert(parent_id) {
+                return Ok(false);
+            }
+            if let Ok(loaded_parent) = self.get_thread(parent_id).await {
+                parent_thread_id = loaded_parent
+                    .session_configured()
+                    .parent_thread_id
+                    .or_else(|| loaded_parent.session_source.parent_thread_id());
+                continue;
+            }
+            let stored_parent = match self
+                .state
+                .read_stored_thread(ReadThreadParams {
+                    thread_id: parent_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+            {
+                Ok(stored_parent) => stored_parent,
+                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            };
+            parent_thread_id = stored_parent
+                .parent_thread_id
+                .or_else(|| stored_parent.source.parent_thread_id());
+        }
+        Ok(false)
+    }
+
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&options.config);
         Box::pin(self.start_thread_inner(
