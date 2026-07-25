@@ -2240,14 +2240,49 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadLoadedListParams,
     ) -> Result<ThreadLoadedListResponse, JSONRPCErrorError> {
-        let ThreadLoadedListParams { cursor, limit } = params;
-        let mut data: Vec<String> = self
-            .thread_manager
-            .list_thread_ids()
-            .await
-            .into_iter()
-            .map(|thread_id| thread_id.to_string())
-            .collect();
+        let ThreadLoadedListParams {
+            cursor,
+            limit,
+            ancestor_thread_id,
+        } = params;
+        let mut data: Vec<String> = match ancestor_thread_id {
+            Some(ancestor_thread_id) => {
+                let ancestor_thread_id = ThreadId::from_string(&ancestor_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+                let indexed_descendants: HashSet<_> = self
+                    .state_db_spawn_subtree_thread_ids(ancestor_thread_id)
+                    .await?
+                    .into_iter()
+                    .collect();
+                let mut descendants = Vec::new();
+                for thread_id in self.thread_manager.list_thread_ids().await {
+                    if thread_id == ancestor_thread_id {
+                        continue;
+                    }
+                    if indexed_descendants.contains(&thread_id)
+                        || self
+                            .thread_manager
+                            .loaded_thread_descends_from(thread_id, ancestor_thread_id)
+                            .await
+                            .map_err(|err| {
+                                internal_error(format!(
+                                    "failed to resolve ancestry for loaded thread {thread_id}: {err}"
+                                ))
+                            })?
+                    {
+                        descendants.push(thread_id.to_string());
+                    }
+                }
+                descendants
+            }
+            None => self
+                .thread_manager
+                .list_thread_ids()
+                .await
+                .into_iter()
+                .map(|thread_id| thread_id.to_string())
+                .collect(),
+        };
 
         if data.is_empty() {
             return Ok(ThreadLoadedListResponse {
