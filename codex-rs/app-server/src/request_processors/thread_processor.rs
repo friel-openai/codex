@@ -23,6 +23,7 @@ use std::time::SystemTime;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
+const THREAD_RELATION_LIST_MAX_LIMIT: usize = 200;
 const CODEX_TUI_CLIENT_NAME: &str = "codex-tui";
 const THREAD_ROLLBACK_DEPRECATION_SUMMARY: &str =
     "thread/rollback is deprecated and will be removed soon";
@@ -2170,10 +2171,15 @@ impl ThreadRequestProcessor {
             (None, None) => None,
         };
 
+        let max_page_size = if relation_filter.is_some() {
+            THREAD_RELATION_LIST_MAX_LIMIT
+        } else {
+            THREAD_LIST_MAX_LIMIT
+        };
         let requested_page_size = limit
             .map(|value| value as usize)
             .unwrap_or(THREAD_LIST_DEFAULT_LIMIT)
-            .clamp(1, THREAD_LIST_MAX_LIMIT);
+            .clamp(1, max_page_size);
         let store_sort_key = match sort_key.unwrap_or(ThreadSortKey::CreatedAt) {
             ThreadSortKey::CreatedAt => StoreThreadSortKey::CreatedAt,
             ThreadSortKey::UpdatedAt => StoreThreadSortKey::UpdatedAt,
@@ -2359,14 +2365,49 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadLoadedListParams,
     ) -> Result<ThreadLoadedListResponse, JSONRPCErrorError> {
-        let ThreadLoadedListParams { cursor, limit } = params;
-        let mut data: Vec<String> = self
-            .thread_manager
-            .list_thread_ids()
-            .await
-            .into_iter()
-            .map(|thread_id| thread_id.to_string())
-            .collect();
+        let ThreadLoadedListParams {
+            cursor,
+            limit,
+            ancestor_thread_id,
+        } = params;
+        let mut data: Vec<String> = match ancestor_thread_id {
+            Some(ancestor_thread_id) => {
+                let ancestor_thread_id = ThreadId::from_string(&ancestor_thread_id)
+                    .map_err(|err| invalid_request(format!("invalid ancestor thread id: {err}")))?;
+                let indexed_descendants: HashSet<_> = self
+                    .state_db_spawn_subtree_thread_ids(ancestor_thread_id)
+                    .await?
+                    .into_iter()
+                    .collect();
+                let mut descendants = Vec::new();
+                for thread_id in self.thread_manager.list_thread_ids().await {
+                    if thread_id == ancestor_thread_id {
+                        continue;
+                    }
+                    if indexed_descendants.contains(&thread_id)
+                        || self
+                            .thread_manager
+                            .loaded_thread_descends_from(thread_id, ancestor_thread_id)
+                            .await
+                            .map_err(|err| {
+                                internal_error(format!(
+                                    "failed to resolve ancestry for loaded thread {thread_id}: {err}"
+                                ))
+                            })?
+                    {
+                        descendants.push(thread_id.to_string());
+                    }
+                }
+                descendants
+            }
+            None => self
+                .thread_manager
+                .list_thread_ids()
+                .await
+                .into_iter()
+                .map(|thread_id| thread_id.to_string())
+                .collect(),
+        };
 
         if data.is_empty() {
             return Ok(ThreadLoadedListResponse {
@@ -5763,9 +5804,14 @@ impl ThreadRequestProcessor {
             SortDirection::Asc => StoreSortDirection::Asc,
             SortDirection::Desc => StoreSortDirection::Desc,
         };
+        let max_page_size = if relation_filter.is_some() {
+            THREAD_RELATION_LIST_MAX_LIMIT
+        } else {
+            THREAD_LIST_MAX_LIMIT
+        };
 
         while remaining > 0 {
-            let page_size = remaining.min(THREAD_LIST_MAX_LIMIT);
+            let page_size = remaining.min(max_page_size);
             let page = self
                 .thread_store
                 .list_threads(StoreListThreadsParams {
