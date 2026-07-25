@@ -117,6 +117,7 @@ async fn list_threads_with_sort(
     .await
 }
 
+#[derive(Clone, Copy)]
 enum ThreadListRelation {
     DirectChildrenOf(ThreadId),
     DescendantsOf(ThreadId),
@@ -1197,6 +1198,105 @@ async fn thread_list_relation_filters_read_spawn_graph_from_state_db() -> Result
         ]
     );
     assert_eq!(descendants.next_cursor, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_list_relation_filters_allow_desktop_page_size() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    create_minimal_config(codex_home.path())?;
+    let mut mcp = init_mcp(codex_home.path()).await?;
+    let parent_id = ThreadId::new();
+    let state_db = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".to_string(),
+    )
+    .await?;
+    let mut child_ids = Vec::with_capacity(205);
+    let created_at = DateTime::parse_from_rfc3339("2025-02-01T10:00:00Z")?.with_timezone(&Utc);
+    for index in 0..205 {
+        let child_id = ThreadId::new();
+        let source = CoreSessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: parent_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: Some(format!("worker-{index}")),
+            agent_role: None,
+        });
+        let mut builder = codex_state::ThreadMetadataBuilder::new(
+            child_id,
+            codex_home.path().join(format!("{child_id}.jsonl")),
+            created_at + chrono::Duration::seconds(index),
+            source,
+        );
+        builder.model_provider = Some("mock_provider".to_string());
+        builder.cwd = codex_home.path().to_path_buf();
+        builder.cli_version = Some("0.0.0".to_string());
+        state_db
+            .upsert_thread(&builder.build("mock_provider"))
+            .await?;
+        state_db
+            .upsert_thread_spawn_edge(parent_id, child_id, DirectionalThreadSpawnEdgeStatus::Open)
+            .await?;
+        child_ids.push(child_id.to_string());
+    }
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+    child_ids.reverse();
+
+    for relation in [
+        ThreadListRelation::DirectChildrenOf(parent_id),
+        ThreadListRelation::DescendantsOf(parent_id),
+    ] {
+        let first_page = list_threads_for_relation(
+            &mut mcp, relation, /*cursor*/ None, /*limit*/ 200,
+            /*model_providers*/ None, /*source_kinds*/ None,
+        )
+        .await?;
+        assert_eq!(first_page.data.len(), 200);
+        assert!(first_page.next_cursor.is_some());
+        assert_eq!(
+            first_page
+                .data
+                .iter()
+                .map(|thread| thread.id.clone())
+                .collect::<Vec<_>>(),
+            child_ids[..200].to_vec()
+        );
+        let second_page = list_threads_for_relation(
+            &mut mcp,
+            relation,
+            first_page.next_cursor,
+            /*limit*/ 200,
+            /*model_providers*/ None,
+            /*source_kinds*/ None,
+        )
+        .await?;
+        assert_eq!(second_page.data.len(), 5);
+        assert_eq!(second_page.next_cursor, None);
+        assert_eq!(
+            second_page
+                .data
+                .iter()
+                .map(|thread| thread.id.clone())
+                .collect::<Vec<_>>(),
+            child_ids[200..].to_vec()
+        );
+    }
+
+    let oversized_page = list_threads_for_relation(
+        &mut mcp,
+        ThreadListRelation::DescendantsOf(parent_id),
+        /*cursor*/ None,
+        /*limit*/ 500,
+        /*model_providers*/ None,
+        /*source_kinds*/ None,
+    )
+    .await?;
+    assert_eq!(oversized_page.data.len(), 200);
+    assert!(oversized_page.next_cursor.is_some());
+
     Ok(())
 }
 
