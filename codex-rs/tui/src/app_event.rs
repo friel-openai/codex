@@ -39,7 +39,6 @@ use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ModelPreset;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_approval_presets::ApprovalPreset;
-use uuid::Uuid;
 
 use crate::app_command::AppCommand;
 use crate::app_server_session::AppServerStartedThread;
@@ -174,16 +173,29 @@ pub(crate) enum KeymapEditIntent {
     ReplaceOne { old_key: String },
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentPickerRefresh {
+    TimedOut {
+        known_at_start: std::collections::HashSet<ThreadId>,
+        threads: Vec<Thread>,
+    },
+    Completed {
+        known_at_start: std::collections::HashSet<ThreadId>,
+        exhaustive: bool,
+        result: Result<Vec<Thread>, String>,
+    },
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
 pub(crate) enum AppEvent {
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
-    /// Merge a completed root-scoped agent-picker refresh without blocking terminal input.
+    /// Apply a background descendant refresh without blocking the agent picker.
     AgentPickerThreadsLoaded {
         primary_thread_id: ThreadId,
-        request_id: Uuid,
-        result: Result<Vec<Thread>, String>,
+        generation: u64,
+        refresh: AgentPickerRefresh,
     },
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
