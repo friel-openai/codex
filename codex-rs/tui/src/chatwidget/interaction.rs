@@ -241,6 +241,14 @@ impl ChatWidget {
         self.bottom_pane.selected_index_for_present_view(view_id)
     }
 
+    pub(crate) fn selected_item_description_for_present_view(
+        &self,
+        view_id: &'static str,
+    ) -> Option<&str> {
+        self.bottom_pane
+            .selected_item_description_for_present_view(view_id)
+    }
+
     pub(crate) fn replace_selection_view_if_present(
         &mut self,
         view_id: &'static str,
@@ -253,6 +261,14 @@ impl ChatWidget {
             self.refresh_plan_mode_nudge();
         }
         replaced
+    }
+
+    pub(crate) fn replace_selection_view_with_multi_agent_enable_prompt(
+        &mut self,
+        view_id: &'static str,
+    ) -> bool {
+        let params = self.multi_agent_enable_prompt_params(Some(view_id));
+        self.replace_selection_view_if_present(view_id, params)
     }
 
     pub(crate) fn no_modal_or_popup_active(&self) -> bool {
