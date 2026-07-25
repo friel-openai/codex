@@ -24,6 +24,7 @@ use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
@@ -1318,6 +1319,100 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
             .expect("subtree should load from injected graph store"),
         expected_thread_ids
     );
+}
+
+#[tokio::test]
+async fn loaded_thread_ancestry_uses_persisted_unloaded_intermediates() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        /*agent_graph_store*/ None,
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root");
+    let intermediate = manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root.thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            ..StartThreadOptions::new(config.clone())
+        })
+        .await
+        .expect("start intermediate");
+    let grandchild = manager
+        .start_thread(StartThreadOptions {
+            session_source: Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: intermediate.thread_id,
+                depth: 2,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            ..StartThreadOptions::new(config)
+        })
+        .await
+        .expect("start grandchild");
+
+    intermediate.thread.ensure_rollout_materialized().await;
+    intermediate
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush intermediate rollout");
+    intermediate
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown intermediate");
+    manager.remove_thread(&intermediate.thread_id).await;
+
+    assert!(
+        manager
+            .loaded_thread_descends_from(grandchild.thread_id, root.thread_id)
+            .await
+            .expect("resolve grandchild ancestry")
+    );
+    assert!(
+        !manager
+            .loaded_thread_descends_from(root.thread_id, grandchild.thread_id)
+            .await
+            .expect("resolve unrelated ancestry")
+    );
+
+    grandchild
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown grandchild");
+    root.thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown root");
 }
 
 #[tokio::test]
