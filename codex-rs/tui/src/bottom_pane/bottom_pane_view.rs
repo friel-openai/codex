@@ -56,6 +56,11 @@ pub(crate) trait BottomPaneView: Renderable {
         None
     }
 
+    /// Stable description of the selected list item, if this view has one.
+    fn selected_item_description(&self) -> Option<&str> {
+        None
+    }
+
     /// Active tab id for tabbed list-based views.
     #[allow(dead_code)]
     fn active_tab_id(&self) -> Option<&str> {
