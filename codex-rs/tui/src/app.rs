@@ -217,6 +217,7 @@ mod history_ui;
 mod input;
 mod loaded_threads;
 mod pending_interactive_replay;
+mod pending_thread_approvals;
 mod pets;
 mod placed_side;
 mod platform_actions;
@@ -244,6 +245,7 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
+pub(crate) use self::thread_events::ThreadEventChannelIdentity;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -607,6 +609,7 @@ pub(crate) struct App {
     windows_sandbox: WindowsSandboxState,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+    pending_thread_approval_labels: HashMap<ThreadId, String>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     side_threads: HashMap<ThreadId, SideThreadState>,
@@ -1142,6 +1145,7 @@ See the Codex keymap documentation for supported actions and examples."
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            pending_thread_approval_labels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
