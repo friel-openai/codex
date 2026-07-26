@@ -615,7 +615,7 @@ impl App {
             (channel.sender.clone(), Arc::clone(&channel.store))
         };
 
-        let should_send = {
+        let (should_send, has_pending_approvals) = {
             let mut guard = store.lock().await;
             guard
                 .buffer
@@ -628,7 +628,7 @@ impl App {
                     .pending_interactive_replay
                     .note_evicted_server_request(request.as_ref());
             }
-            guard.active
+            (guard.active, guard.has_pending_thread_approvals())
         };
 
         if should_send {
@@ -646,6 +646,7 @@ impl App {
                 }
             }
         }
+        self.update_pending_thread_approval(thread_id, has_pending_approvals);
     }
 
     pub(super) async fn handle_feedback_submitted(
