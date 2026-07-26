@@ -4,6 +4,8 @@
 mod advanced_reasoning_tests;
 #[path = "tests/agent_picker_requests.rs"]
 mod agent_picker_requests;
+#[path = "tests/approval_routing_tests.rs"]
+mod approval_routing;
 mod model_catalog;
 mod plugin_catalog;
 mod rate_limits;
@@ -4845,6 +4847,7 @@ async fn make_test_app() -> App {
         pending_shutdown_exit_thread_id: None,
         windows_sandbox: WindowsSandboxState::default(),
         thread_event_channels: HashMap::new(),
+        pending_thread_approval_labels: HashMap::new(),
         thread_event_listener_tasks: HashMap::new(),
         agent_navigation: AgentNavigationState::default(),
         side_threads: HashMap::new(),
@@ -4913,6 +4916,7 @@ async fn make_test_app_with_channels() -> (
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
+            pending_thread_approval_labels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
