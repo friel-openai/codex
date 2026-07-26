@@ -105,8 +105,8 @@ async fn native_adoption_waits_for_active_root_without_interrupting_its_turn() -
             responses::ev_response_created("resp-active-adoption-tool"),
             responses::ev_function_call_with_namespace(
                 ADOPT_CALL_ID,
-                "collaboration",
-                "spawn_agent",
+                "frodex",
+                "adopt_agent",
                 &adopt_arguments,
             ),
             responses::ev_completed("resp-active-adoption-tool"),
@@ -169,6 +169,42 @@ async fn native_adoption_waits_for_active_root_without_interrupting_its_turn() -
         response_has_thread_id(request, &parent_id) && request.body_contains_text(ADOPT_PROMPT)
     })
     .await?;
+    let adoption_tool_request = adoption_request
+        .requests()
+        .into_iter()
+        .find(|request| {
+            response_has_thread_id(request, &parent_id) && request.body_contains_text(ADOPT_PROMPT)
+        })
+        .context("parent adoption request was not captured")?;
+    let spawn_agent = adoption_tool_request
+        .tool_by_name("collaboration", "spawn_agent")
+        .context("canonical collaboration.spawn_agent was not declared")?;
+    assert!(
+        spawn_agent["parameters"]["properties"]
+            .get("existing_thread_id")
+            .is_none(),
+        "collaboration.spawn_agent must keep the canonical parameter schema"
+    );
+    assert!(
+        adoption_tool_request
+            .tool_by_name("collaboration", "adopt_agent")
+            .is_none()
+    );
+    assert!(
+        adoption_tool_request
+            .tool_by_name("collaboration", "promote_agent")
+            .is_none()
+    );
+    assert!(
+        adoption_tool_request
+            .tool_by_name("frodex", "adopt_agent")
+            .is_some()
+    );
+    assert!(
+        adoption_tool_request
+            .tool_by_name("frodex", "promote_agent")
+            .is_some()
+    );
 
     let active_source: ThreadReadResponse = request(
         &client,
@@ -204,9 +240,9 @@ async fn native_adoption_waits_for_active_root_without_interrupting_its_turn() -
 
     let output = adoption_result
         .function_call_output_text(ADOPT_CALL_ID)
-        .context("spawn_agent did not return an adoption result")?;
+        .context("adopt_agent did not return an adoption result")?;
     let output: Value = serde_json::from_str(&output)
-        .with_context(|| format!("spawn_agent returned {output:?}"))?;
+        .with_context(|| format!("adopt_agent returned {output:?}"))?;
     assert_eq!(
         output.get("task_name").and_then(Value::as_str),
         Some("/root/active_adopted_worker")

@@ -12,6 +12,7 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -1073,11 +1074,11 @@ async fn multi_agent_v2_adoption_rejects_existing_threads_when_disabled() {
         .expect("test config should allow feature update");
     set_turn_config(&mut turn, config);
 
-    let Err(error) = SpawnAgentHandlerV2::default()
+    let Err(error) = AdoptAgentHandler::new(false)
         .handle(invocation(
             Arc::new(session),
             Arc::new(turn),
-            "spawn_agent",
+            "adopt_agent",
             function_payload(json!({
                 "message": "continue the existing thread",
                 "task_name": "adopted_worker",
@@ -1180,11 +1181,11 @@ async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
                     .clone(),
             );
 
-        let err = SpawnAgentHandlerV2::default()
+        let err = AdoptAgentHandler::new(false)
             .handle(invocation(
                 session.clone(),
                 turn.clone(),
-                "spawn_agent",
+                "adopt_agent",
                 function_payload(arguments),
             ))
             .await

@@ -78,7 +78,6 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        enable_thread_adoption: true,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -102,7 +101,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
         .expect("spawn_agent should use object params");
     assert!(description.contains("Spawns an agent to work on the specified task."));
     assert!(description.contains("The spawned agent will have the same tools as you"));
-    assert!(description.contains("existing_thread_id"));
+    assert!(!description.contains("existing_thread_id"));
     assert!(!description.contains("max_concurrent_threads_per_session"));
     assert!(description.contains(SPAWN_AGENT_INHERITED_MODEL_GUIDANCE));
     assert!(
@@ -116,14 +115,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     assert!(!description.contains("incompatible-model"));
     assert!(properties.contains_key("task_name"));
     assert!(properties.contains_key("message"));
-    assert_eq!(
-        properties
-            .get("existing_thread_id")
-            .and_then(|schema| schema.description.as_deref()),
-        Some(
-            "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish. Do not combine with fork or configuration overrides."
-        )
-    );
+    assert!(!properties.contains_key("existing_thread_id"));
     assert_eq!(
         properties
             .get("message")
@@ -157,6 +149,48 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
     );
     assert_eq!(
         output_schema.expect("spawn_agent output schema")["required"],
+        json!(["task_name", "nickname"])
+    );
+}
+
+#[test]
+fn adopt_agent_tool_requires_thread_task_and_message() {
+    let tool = create_adopt_agent_tool(/*hide_agent_metadata*/ false);
+
+    let ToolSpec::Function(ResponsesApiTool {
+        name,
+        parameters,
+        output_schema,
+        ..
+    }) = tool
+    else {
+        panic!("adopt_agent should be a function tool");
+    };
+
+    assert_eq!(name, "adopt_agent");
+    assert_eq!(
+        parameters.required,
+        Some(vec![
+            "existing_thread_id".to_string(),
+            "task_name".to_string(),
+            "message".to_string(),
+        ])
+    );
+    let properties = parameters
+        .properties
+        .as_ref()
+        .expect("adopt_agent should use object params");
+    assert_eq!(
+        properties.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "existing_thread_id".to_string(),
+            "message".to_string(),
+            "task_name".to_string(),
+        ]
+    );
+    assert_eq!(properties["message"].encrypted, None);
+    assert_eq!(
+        output_schema.expect("adopt_agent output schema")["required"],
         json!(["task_name", "nickname"])
     );
 }
@@ -198,7 +232,6 @@ fn spawn_agent_tool_v1_keeps_legacy_fork_context_field() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V1,
         usage_hint_text: None,
     });
@@ -265,7 +298,6 @@ fn spawn_agent_tool_caps_visible_model_summaries() {
         expose_agent_type: true,
         hide_agent_type_model_reasoning: false,
         expose_spawn_agent_model_overrides: true,
-        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -312,7 +344,6 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: true,
-        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });
@@ -346,7 +377,6 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
         expose_agent_type: false,
         hide_agent_type_model_reasoning: true,
         expose_spawn_agent_model_overrides: false,
-        enable_thread_adoption: false,
         multi_agent_version: MultiAgentVersion::V2,
         usage_hint_text: None,
     });

@@ -20,8 +20,7 @@ const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
 const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
     "Service tier override for the new agent. Omit unless explicitly requested.";
-const SPAWN_AGENT_THREAD_ADOPTION_DESCRIPTION: &str = "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish. Do not combine with fork or configuration overrides.";
-const SPAWN_AGENT_THREAD_ADOPTION_GUIDANCE: &str = "Set `existing_thread_id` to adopt an existing independent thread without copying or forking its history. Preserve its configuration and descendants, wait for active turns to finish, and do not combine adoption with `fork_turns`, `agent_type`, `model`, `reasoning_effort`, or `service_tier`.";
+const ADOPT_AGENT_THREAD_DESCRIPTION: &str = "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 
 #[derive(Debug, Clone)]
@@ -31,7 +30,6 @@ pub struct SpawnAgentToolOptions {
     pub expose_agent_type: bool,
     pub hide_agent_type_model_reasoning: bool,
     pub expose_spawn_agent_model_overrides: bool,
-    pub enable_thread_adoption: bool,
     pub multi_agent_version: MultiAgentVersion,
     pub usage_hint_text: Option<String>,
 }
@@ -44,7 +42,6 @@ impl Default for SpawnAgentToolOptions {
             expose_agent_type: true,
             hide_agent_type_model_reasoning: false,
             expose_spawn_agent_model_overrides: false,
-            enable_thread_adoption: false,
             multi_agent_version: MultiAgentVersion::Disabled,
             usage_hint_text: None,
         }
@@ -128,20 +125,12 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
                 .to_string(),
         )),
     );
-    if options.enable_thread_adoption {
-        properties.insert(
-            "existing_thread_id".to_string(),
-            JsonSchema::string(Some(SPAWN_AGENT_THREAD_ADOPTION_DESCRIPTION.to_string())),
-        );
-    }
-
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
         description: spawn_agent_tool_description_v2(
             available_models_description.as_deref(),
             inherited_model_guidance,
             options.usage_hint_text,
-            options.enable_thread_adoption,
         ),
         strict: false,
         defer_loading: None,
@@ -153,6 +142,43 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         output_schema: Some(spawn_agent_output_schema_v2(
             options.hide_agent_type_model_reasoning,
         )),
+    })
+}
+
+pub fn create_adopt_agent_tool(hide_agent_metadata: bool) -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "existing_thread_id".to_string(),
+            JsonSchema::string(Some(ADOPT_AGENT_THREAD_DESCRIPTION.to_string())),
+        ),
+        (
+            "task_name".to_string(),
+            JsonSchema::string(Some(
+                "Task name for the adopted agent. Use lowercase letters, digits, and underscores."
+                    .to_string(),
+            )),
+        ),
+        (
+            "message".to_string(),
+            JsonSchema::string(Some("Initial task for the adopted agent.".to_string())),
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "adopt_agent".to_string(),
+        description: "Adopt an existing independent thread as a native subagent without copying or forking its history. Preserve its thread ID, conversation history, configuration, and descendants; wait for any active turn to finish. Use collaboration.spawn_agent instead to create a new or forked agent.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::object(
+            properties,
+            Some(vec![
+                "existing_thread_id".to_string(),
+                "task_name".to_string(),
+                "message".to_string(),
+            ]),
+            Some(false.into()),
+        ),
+        output_schema: Some(spawn_agent_output_schema_v2(hide_agent_metadata)),
     })
 }
 
@@ -890,16 +916,9 @@ fn spawn_agent_tool_description_v2(
     available_models_description: Option<&str>,
     inherited_model_guidance: Option<&str>,
     usage_hint_text: Option<String>,
-    enable_thread_adoption: bool,
 ) -> String {
     let agent_role_guidance = available_models_description.unwrap_or_default();
     let inherited_model_guidance = inherited_model_guidance.unwrap_or_default();
-    let thread_adoption_guidance = if enable_thread_adoption {
-        SPAWN_AGENT_THREAD_ADOPTION_GUIDANCE
-    } else {
-        ""
-    };
-
     let tool_description = format!(
         r#"
         {agent_role_guidance}
@@ -910,8 +929,6 @@ The spawned agent will have the same tools as you and the ability to spawn its o
 Only call this tool for a concrete, bounded subtask that can run independently alongside useful local work; otherwise continue locally.
 It will be able to send you and other running agents messages, and its final answer will be provided to you when it finishes.
 The new agent's canonical task name will be provided to it along with the message.
-
-{thread_adoption_guidance}
 
 Note that passing `fork_turns="none"` will not pass any surrounding context to the spawned subagent, which may cause the agent to lack the context it needs to complete its task, whereas `fork_turns="all"` will provide the subagent with all surrounding context."#
     );

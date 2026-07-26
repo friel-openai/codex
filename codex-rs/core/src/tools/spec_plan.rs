@@ -46,6 +46,7 @@ use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MIN_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_spec::SpawnAgentToolOptions;
 use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
@@ -97,6 +98,7 @@ use tracing::instrument;
 use tracing::warn;
 
 const MULTI_AGENT_V2_NAMESPACE_DESCRIPTION: &str = "Tools for spawning and managing sub-agents.";
+const FRODEX_AGENT_OWNERSHIP_NAMESPACE: &str = "frodex";
 const IMAGE_GEN_NAMESPACE: &str = "image_gen";
 const IMAGEGEN_TOOL_NAME: &str = "imagegen";
 
@@ -860,10 +862,6 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                             .config
                             .multi_agent_v2
                             .expose_spawn_agent_model_overrides,
-                        enable_thread_adoption: turn_context
-                            .config
-                            .multi_agent_v2
-                            .enable_thread_adoption,
                         multi_agent_version: turn_context.multi_agent_version,
                         usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
                     }),
@@ -898,7 +896,17 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
             ));
             if turn_context.config.multi_agent_v2.enable_thread_adoption {
                 planned_tools.add_arc(override_tool_exposure(
-                    multi_agent_v2_handler(PromoteAgentHandler, tool_namespace),
+                    multi_agent_v2_handler(
+                        AdoptAgentHandler::new(hide_spawn_agent_metadata),
+                        Some(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+                    ),
+                    exposure,
+                ));
+                planned_tools.add_arc(override_tool_exposure(
+                    multi_agent_v2_handler(
+                        PromoteAgentHandler,
+                        Some(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+                    ),
                     exposure,
                 ));
             }
@@ -917,7 +925,6 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, planned_tools: &mu
                     expose_agent_type: !turn_context.config.agent_roles.is_empty(),
                     hide_agent_type_model_reasoning: false,
                     expose_spawn_agent_model_overrides: true,
-                    enable_thread_adoption: false,
                     multi_agent_version: turn_context.multi_agent_version,
                     usage_hint_text: turn_context.config.multi_agent_v2.usage_hint_text.clone(),
                 }),

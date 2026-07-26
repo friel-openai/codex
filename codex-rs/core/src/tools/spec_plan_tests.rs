@@ -49,6 +49,7 @@ use crate::tools::router::ToolSuggestCandidates;
 use crate::tools::router::ToolSuggestPresentation;
 
 const MULTI_AGENT_V2_NAMESPACE: &str = "collaboration";
+const FRODEX_AGENT_OWNERSHIP_NAMESPACE: &str = "frodex";
 
 #[derive(Default)]
 struct ToolPlanInputs {
@@ -1454,6 +1455,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "followup_task",
         "assign_task",
         "list_agents",
+        "adopt_agent",
         "promote_agent",
     ]);
     assert_eq!(
@@ -1511,6 +1513,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "resume_agent",
         "assign_task",
         "close_agent",
+        "adopt_agent",
         "promote_agent",
     ]);
     for tool_name in [
@@ -1584,6 +1587,7 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
         "spawn_agent",
         "send_message",
         "wait_agent",
+        "adopt_agent",
         "promote_agent",
     ]);
     assert_eq!(
@@ -1608,8 +1612,9 @@ async fn multi_agent_thread_adoption_tools_require_explicit_configuration() {
         !disabled
             .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
             .iter()
-            .any(|name| name == "promote_agent")
+            .any(|name| matches!(name.as_str(), "adopt_agent" | "promote_agent"))
     );
+    disabled.assert_visible_lacks(&[FRODEX_AGENT_OWNERSHIP_NAMESPACE]);
     let Some(ResponsesApiNamespaceTool::Function(disabled_spawn)) =
         disabled_namespace.tools.iter().find(|tool| {
             matches!(
@@ -1643,10 +1648,18 @@ async fn multi_agent_thread_adoption_tools_require_explicit_configuration() {
         panic!("expected the explicitly enabled multi-agent namespace");
     };
     assert!(
-        enabled
+        !enabled
             .namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
             .iter()
-            .any(|name| name == "promote_agent")
+            .any(|name| matches!(name.as_str(), "adopt_agent" | "promote_agent"))
+    );
+    assert_eq!(
+        enabled.namespace_function_names(MULTI_AGENT_V2_NAMESPACE),
+        disabled.namespace_function_names(MULTI_AGENT_V2_NAMESPACE)
+    );
+    assert_eq!(
+        enabled.namespace_function_names(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+        &["adopt_agent".to_string(), "promote_agent".to_string()]
     );
     let Some(ResponsesApiNamespaceTool::Function(enabled_spawn)) =
         enabled_namespace.tools.iter().find(|tool| {
@@ -1658,15 +1671,29 @@ async fn multi_agent_thread_adoption_tools_require_explicit_configuration() {
     else {
         panic!("explicit thread adoption must preserve agent spawning");
     };
-    assert!(
-        enabled_spawn
-            .parameters
-            .properties
-            .as_ref()
-            .expect("spawn_agent should use object params")
-            .contains_key("existing_thread_id")
-    );
-    assert!(enabled_spawn.description.contains("existing_thread_id"));
+    assert_eq!(enabled_spawn, disabled_spawn);
+    let ToolSpec::Namespace(frodex_namespace) =
+        enabled.visible_spec(FRODEX_AGENT_OWNERSHIP_NAMESPACE)
+    else {
+        panic!("expected the Frodex ownership namespace");
+    };
+    let Some(ResponsesApiNamespaceTool::Function(adopt_agent)) =
+        frodex_namespace.tools.iter().find(|tool| {
+            matches!(
+                tool,
+                ResponsesApiNamespaceTool::Function(tool) if tool.name == "adopt_agent"
+            )
+        })
+    else {
+        panic!("explicit thread adoption must expose adopt_agent");
+    };
+    let adopt_properties = adopt_agent
+        .parameters
+        .properties
+        .as_ref()
+        .expect("adopt_agent should use object params");
+    assert!(adopt_properties.contains_key("existing_thread_id"));
+    assert_eq!(adopt_properties["message"].encrypted, None);
 }
 
 #[tokio::test]

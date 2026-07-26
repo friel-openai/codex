@@ -54,7 +54,8 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
-const NAMESPACE: &str = "collaboration";
+const COLLABORATION_NAMESPACE: &str = "collaboration";
+const FRODEX_NAMESPACE: &str = "frodex";
 const THREAD_ADOPTION_FEATURE_CONFIG: &str =
     "[features.multi_agent_v2]\nenabled = true\nenable_thread_adoption = true";
 const THREAD_ADOPTION_DISABLED_CONFIG: &str =
@@ -254,7 +255,7 @@ async fn native_ephemeral_child_promotion_materializes_original_thread_and_histo
     );
 
     let promote_arguments = serde_json::to_string(&json!({"target": "ephemeral_worker"}))?;
-    let _promote_call = mount_tool_response(
+    let _promote_call = mount_frodex_tool_response(
         &server,
         PROMOTE_PROMPT,
         "resp-native-ephemeral-worker-promote",
@@ -615,8 +616,8 @@ async fn assert_native_thread_adoption_and_promotion(
                 responses::ev_response_created("resp-native-ancestor-cycle-attempt"),
                 responses::ev_function_call_with_namespace(
                     ANCESTOR_CYCLE_ADOPT_CALL_ID,
-                    NAMESPACE,
-                    "spawn_agent",
+                    FRODEX_NAMESPACE,
+                    "adopt_agent",
                     &cycle_arguments,
                 ),
                 responses::ev_completed("resp-native-ancestor-cycle-attempt"),
@@ -712,12 +713,12 @@ async fn assert_native_thread_adoption_and_promotion(
         "task_name": "adopted_worker",
         "message": ADOPT_MESSAGE,
     }))?;
-    let _adopt_call = mount_tool_response(
+    let _adopt_call = mount_frodex_tool_response(
         &server,
         ADOPT_PROMPT,
         "resp-native-adopt-call",
         ADOPT_CALL_ID,
-        "spawn_agent",
+        "adopt_agent",
         &adopt_args,
     )
     .await;
@@ -1099,7 +1100,7 @@ async fn assert_native_thread_adoption_and_promotion(
     }
 
     let promote_args = serde_json::to_string(&json!({"target": "adopted_worker"}))?;
-    let _promote_call = mount_tool_response(
+    let _promote_call = mount_frodex_tool_response(
         &server,
         PROMOTE_PROMPT,
         "resp-native-promote-call",
@@ -1567,7 +1568,37 @@ async fn mount_tool_response(
         move |request: &wiremock::Request| request_contains(request, matching_text),
         responses::sse(vec![
             responses::ev_response_created(response_id),
-            responses::ev_function_call_with_namespace(call_id, NAMESPACE, tool_name, arguments),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                COLLABORATION_NAMESPACE,
+                tool_name,
+                arguments,
+            ),
+            responses::ev_completed(response_id),
+        ]),
+    )
+    .await
+}
+
+async fn mount_frodex_tool_response(
+    server: &wiremock::MockServer,
+    matching_text: &'static str,
+    response_id: &'static str,
+    call_id: &'static str,
+    tool_name: &'static str,
+    arguments: &str,
+) -> responses::ResponseMock {
+    responses::mount_sse_once_match(
+        server,
+        move |request: &wiremock::Request| request_contains(request, matching_text),
+        responses::sse(vec![
+            responses::ev_response_created(response_id),
+            responses::ev_function_call_with_namespace(
+                call_id,
+                FRODEX_NAMESPACE,
+                tool_name,
+                arguments,
+            ),
             responses::ev_completed(response_id),
         ]),
     )
