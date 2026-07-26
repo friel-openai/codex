@@ -203,7 +203,11 @@ pub(crate) fn log_inbound_app_event(event: &AppEvent) {
                 "ts": now_ts(),
                 "dir": "to_tui",
                 "kind": "app_event",
-                "variant": format!("{other:?}").split('(').next().unwrap_or("app_event"),
+                "variant": format!("{other:?}")
+                    .split(['(', '{'])
+                    .next()
+                    .unwrap_or("app_event")
+                    .trim_end(),
             });
             LOGGER.write_json_line(value);
         }
