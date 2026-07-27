@@ -5192,24 +5192,32 @@ impl ThreadRequestProcessor {
                 (None, None) => codex_thread_store::ForkBoundary::Latest,
                 (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
             };
-            Some(
-                self.thread_store
-                    .prepare_fork(codex_thread_store::PrepareForkParams {
-                        thread_id: source_thread_id,
-                        boundary,
-                    })
+            let params = codex_thread_store::PrepareForkParams {
+                thread_id: source_thread_id,
+                boundary,
+            };
+            let prepared = if !include_turns
+                && let Some(local_store) = self
+                    .thread_store
+                    .as_any()
+                    .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            {
+                local_store
+                    .prepare_fork_without_response_history(params)
                     .await
-                    .map_err(|err| match err {
-                        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                        ThreadStoreError::ThreadNotFound { thread_id } => {
-                            invalid_request(format!("no rollout found for thread id {thread_id}"))
-                        }
-                        ThreadStoreError::Unsupported { .. } => {
-                            method_not_found("paginated_threads is not supported yet")
-                        }
-                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
-                    })?,
-            )
+            } else {
+                self.thread_store.prepare_fork(params).await
+            };
+            Some(prepared.map_err(|err| match err {
+                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    invalid_request(format!("no rollout found for thread id {thread_id}"))
+                }
+                ThreadStoreError::Unsupported { .. } => {
+                    method_not_found("paginated_threads is not supported yet")
+                }
+                err => internal_error(format!("failed to prepare paginated fork: {err}")),
+            })?)
         } else {
             None
         };

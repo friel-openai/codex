@@ -12,9 +12,30 @@ use crate::PreparedFork;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+#[derive(Clone, Copy)]
+enum ForkResponseHistory {
+    Full,
+    ModelContext,
+}
+
 pub(super) async fn prepare(
     store: &LocalThreadStore,
     params: PrepareForkParams,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(store, params, ForkResponseHistory::Full).await
+}
+
+pub(super) async fn prepare_without_response_history(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(store, params, ForkResponseHistory::ModelContext).await
+}
+
+async fn prepare_with_response_history(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    response_history: ForkResponseHistory,
 ) -> ThreadStoreResult<PreparedFork> {
     let PrepareForkParams {
         thread_id,
@@ -226,10 +247,17 @@ pub(super) async fn prepare(
     drop(prefix_writer_guard);
     let latest_model_context =
         Arc::new(model_context::load_for_fork(lineage.clone(), Some(latest_position)).await?);
-    let model_context =
-        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?);
-    let response_history =
-        Arc::new(model_context::load_full_for_fork(lineage, history_base).await?);
+    let model_context = if history_base == Some(latest_position) {
+        Arc::clone(&latest_model_context)
+    } else {
+        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?)
+    };
+    let response_history = match response_history {
+        ForkResponseHistory::Full => {
+            Arc::new(model_context::load_full_for_fork(lineage, history_base).await?)
+        }
+        ForkResponseHistory::ModelContext => Arc::clone(&model_context),
+    };
     drop(source_writer_guard);
 
     Ok(PreparedFork::new(
