@@ -297,6 +297,14 @@ impl LocalThreadStore {
         segment::freeze_thread_segment(self, thread_id, params).await
     }
 
+    /// Freezes a paginated fork without reading history excluded from its response.
+    pub async fn prepare_fork_without_response_history(
+        &self,
+        params: PrepareForkParams,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history(self, params).await
+    }
+
     /// Prevents deletion, archive, and unarchive while a new child reference is initialized.
     pub async fn reserve_thread_lifecycle(
         &self,
