@@ -29,6 +29,12 @@ use crate::StoredTurnStatus;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
 
+#[derive(Clone, Copy)]
+enum ForkResponseHistory {
+    Full,
+    ModelContext,
+}
+
 pub(super) async fn prepare(
     store: &LocalThreadStore,
     params: PrepareForkParams,
