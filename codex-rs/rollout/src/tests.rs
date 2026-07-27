@@ -23,9 +23,12 @@ use crate::INTERACTIVE_SESSION_SOURCES;
 use crate::find_thread_path_by_id_str;
 use crate::list::Cursor;
 use crate::list::ThreadItem;
+use crate::list::ThreadListConfig;
+use crate::list::ThreadListLayout;
 use crate::list::ThreadSortKey;
 use crate::list::ThreadsPage;
 use crate::list::get_threads;
+use crate::list::get_threads_in_root;
 use crate::list::read_head_for_summary;
 use crate::rollout_date_parts;
 use anyhow::Result;
@@ -33,11 +36,13 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InternalSessionSource;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadGoalUpdatedEvent;
@@ -1811,6 +1816,79 @@ async fn test_source_filter_excludes_non_matching_sessions() {
 }
 
 #[tokio::test]
+async fn test_filesystem_listing_excludes_background_and_subagent_sources() -> Result<()> {
+    let temp = TempDir::new()?;
+    let home = temp.path();
+    let sources = [
+        (1, SessionSource::Cli, true),
+        (2, SessionSource::VSCode, true),
+        (3, SessionSource::Custom("atlas".to_string()), true),
+        (4, SessionSource::Custom("chatgpt".to_string()), true),
+        (5, SessionSource::Exec, false),
+        (6, SessionSource::Mcp, false),
+        (
+            7,
+            SessionSource::Internal(InternalSessionSource::MemoryConsolidation),
+            false,
+        ),
+        (8, SessionSource::SubAgent(SubAgentSource::Review), false),
+        (9, SessionSource::SubAgent(SubAgentSource::Compact), false),
+        (
+            10,
+            SessionSource::SubAgent(SubAgentSource::Other("title_generation".to_string())),
+            false,
+        ),
+        (
+            11,
+            SessionSource::Custom("title_generation".to_string()),
+            false,
+        ),
+    ];
+
+    for (second, source, _) in sources.clone() {
+        let timestamp = format!("2025-09-05T12-00-{second:02}");
+        write_session_file(
+            home,
+            &timestamp,
+            Uuid::from_u128(500 + second),
+            /*num_records*/ 1,
+            Some(source),
+        )?;
+    }
+
+    let page = get_threads(
+        home,
+        /*page_size*/ 20,
+        /*cursor*/ None,
+        ThreadSortKey::CreatedAt,
+        INTERACTIVE_SESSION_SOURCES.as_slice(),
+        /*model_providers*/ None,
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+    )
+    .await?;
+
+    assert_eq!(
+        page.items
+            .iter()
+            .filter_map(|item| item.thread_id)
+            .collect::<Vec<_>>(),
+        sources
+            .iter()
+            .rev()
+            .filter(|(_, _, interactive)| *interactive)
+            .map(|(second, _, _)| thread_id_from_uuid(Uuid::from_u128(500 + second)))
+            .collect::<Vec<_>>(),
+    );
+    assert!(page.items.iter().all(|item| {
+        item.source
+            .as_ref()
+            .is_some_and(|source| INTERACTIVE_SESSION_SOURCES.contains(source))
+    }));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_model_provider_filter_selects_only_matching_sessions() -> Result<()> {
     let temp = TempDir::new().unwrap();
     let home = temp.path();
@@ -1915,4 +1993,195 @@ async fn test_model_provider_filter_selects_only_matching_sessions() -> Result<(
     assert_eq!(all_sessions.items.len(), 3);
 
     Ok(())
+}
+
+async fn assert_filesystem_listing_pages(
+    root: &Path,
+    layout: ThreadListLayout,
+    providers: &[String],
+    cwd_filters: Option<&[std::path::PathBuf]>,
+    default_provider: &str,
+    expected: [u128; 3],
+    compressed: bool,
+) -> Result<()> {
+    for sort_key in [
+        ThreadSortKey::CreatedAt,
+        ThreadSortKey::UpdatedAt,
+        ThreadSortKey::RecencyAt,
+    ] {
+        let config = || ThreadListConfig {
+            allowed_sources: INTERACTIVE_SESSION_SOURCES.as_slice(),
+            model_providers: Some(providers),
+            cwd_filters,
+            default_provider,
+            layout,
+        };
+        let first = get_threads_in_root(
+            root.to_path_buf(),
+            /*page_size*/ 2,
+            /*cursor*/ None,
+            sort_key,
+            config(),
+        )
+        .await?;
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .filter_map(|item| item.thread_id)
+                .collect::<Vec<_>>(),
+            expected[..2]
+                .iter()
+                .map(|id| thread_id_from_uuid(Uuid::from_u128(*id)))
+                .collect::<Vec<_>>(),
+            "first page for {layout:?}, {sort_key:?}",
+        );
+        let cursor = first.next_cursor.expect("third matching thread exists");
+        if sort_key == ThreadSortKey::RecencyAt {
+            assert!(
+                !serde_json::to_string(&cursor)?.contains('|'),
+                "filesystem recency cursors retain their timestamp-only representation",
+            );
+        }
+
+        let second = get_threads_in_root(
+            root.to_path_buf(),
+            /*page_size*/ 2,
+            Some(&cursor),
+            sort_key,
+            config(),
+        )
+        .await?;
+        assert_eq!(
+            second.items[0].thread_id,
+            Some(thread_id_from_uuid(Uuid::from_u128(expected[2]))),
+            "second page for {layout:?}, {sort_key:?}",
+        );
+        assert_eq!(second.next_cursor, None);
+        if compressed {
+            let extension = Some(OsStr::new("zst"));
+            assert_eq!(first.items[0].path.extension(), extension);
+            assert_eq!(second.items[0].path.extension(), extension);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_filesystem_listing_filters_before_paginating_for_every_sort_key() -> Result<()> {
+    let temp = TempDir::new()?;
+    let home = temp.path();
+    let matching_cwd = home.join("matching");
+    let other_cwd = home.join("other");
+    for (second, source, provider, cwd_matches) in [
+        (6, SessionSource::Exec, "openai", true),
+        (5, SessionSource::Cli, "other", true),
+        (4, SessionSource::Cli, "openai", false),
+        (3, SessionSource::Cli, "openai", true),
+        (2, SessionSource::Cli, "openai", true),
+        (1, SessionSource::Cli, "openai", true),
+    ] {
+        let timestamp = format!("2025-09-02T12-00-{second:02}");
+        let uuid = Uuid::from_u128(107 - second);
+        write_session_file_with_provider(
+            home,
+            &timestamp,
+            uuid,
+            /*num_records*/ 1,
+            Some(source),
+            Some(provider),
+        )?;
+        let path = home.join(format!(
+            "sessions/2025/09/02/rollout-{timestamp}-{uuid}.jsonl"
+        ));
+        let modified = fs::metadata(&path)?.modified()?;
+        let contents = fs::read_to_string(&path)?;
+        let (metadata, remaining) = contents
+            .split_once('\n')
+            .expect("rollout contains session metadata");
+        let mut metadata: serde_json::Value = serde_json::from_str(metadata)?;
+        metadata["payload"]["cwd"] = serde_json::to_value(if cwd_matches {
+            &matching_cwd
+        } else {
+            &other_cwd
+        })?;
+        fs::write(&path, format!("{metadata}\n{remaining}"))?;
+        File::open(&path)?.set_times(FileTimes::new().set_modified(modified))?;
+    }
+
+    assert_filesystem_listing_pages(
+        &home.join("sessions"),
+        ThreadListLayout::NestedByDate,
+        &provider_vec(&["openai"]),
+        Some(&[matching_cwd]),
+        "openai",
+        [104, 105, 106],
+        /*compressed*/ false,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_filesystem_listing_paginates_compressed_active_and_archived_rollouts() -> Result<()> {
+    let temp = TempDir::new()?;
+    let home = temp.path();
+    let mut paths = Vec::new();
+    for (second, compressed) in [(3, true), (2, false), (1, true)] {
+        let timestamp = format!("2025-09-03T12-00-{second:02}");
+        let uuid = Uuid::from_u128(204 - second);
+        write_session_file(
+            home,
+            &timestamp,
+            uuid,
+            /*num_records*/ 1,
+            Some(SessionSource::Cli),
+        )?;
+        let mut path = home.join(format!(
+            "sessions/2025/09/03/rollout-{timestamp}-{uuid}.jsonl"
+        ));
+        if compressed {
+            let modified = fs::metadata(&path)?.modified()?;
+            let compressed_path = path.with_extension("jsonl.zst");
+            fs::write(
+                &compressed_path,
+                zstd::stream::encode_all(fs::read(&path)?.as_slice(), 0)?,
+            )?;
+            fs::remove_file(&path)?;
+            File::open(&compressed_path)?.set_times(FileTimes::new().set_modified(modified))?;
+            path = compressed_path;
+        }
+        paths.push(path);
+    }
+
+    let providers = provider_vec(&[TEST_PROVIDER]);
+    assert_filesystem_listing_pages(
+        &home.join("sessions"),
+        ThreadListLayout::NestedByDate,
+        &providers,
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+        [201, 202, 203],
+        /*compressed*/ true,
+    )
+    .await?;
+
+    let archived_root = home.join("archived_sessions");
+    fs::create_dir_all(&archived_root)?;
+    for path in paths {
+        fs::rename(
+            &path,
+            archived_root.join(path.file_name().expect("rollout filename")),
+        )?;
+    }
+
+    assert_filesystem_listing_pages(
+        &archived_root,
+        ThreadListLayout::Flat,
+        &providers,
+        /*cwd_filters*/ None,
+        TEST_PROVIDER,
+        [201, 202, 203],
+        /*compressed*/ true,
+    )
+    .await
 }
