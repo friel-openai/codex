@@ -226,8 +226,11 @@ pub(super) async fn prepare(
     drop(prefix_writer_guard);
     let latest_model_context =
         Arc::new(model_context::load_for_fork(lineage.clone(), Some(latest_position)).await?);
-    let model_context =
-        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?);
+    let model_context = if history_base == Some(latest_position) {
+        Arc::clone(&latest_model_context)
+    } else {
+        Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?)
+    };
     let response_history =
         Arc::new(model_context::load_full_for_fork(lineage, history_base).await?);
     drop(source_writer_guard);
