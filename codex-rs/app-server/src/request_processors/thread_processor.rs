@@ -5214,24 +5214,32 @@ impl ThreadRequestProcessor {
                 (None, None) => codex_thread_store::ForkBoundary::Latest,
                 (Some(_), Some(_)) => unreachable!("fork boundaries are mutually exclusive"),
             };
-            Some(
-                self.thread_store
-                    .prepare_fork(codex_thread_store::PrepareForkParams {
-                        thread_id: source_thread_id,
-                        boundary,
-                    })
+            let params = codex_thread_store::PrepareForkParams {
+                thread_id: source_thread_id,
+                boundary,
+            };
+            let prepared = if !include_turns
+                && let Some(local_store) = self
+                    .thread_store
+                    .as_any()
+                    .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            {
+                local_store
+                    .prepare_fork_without_response_history(params)
                     .await
-                    .map_err(|err| match err {
-                        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
-                        ThreadStoreError::ThreadNotFound { thread_id } => {
-                            invalid_request(format!("no rollout found for thread id {thread_id}"))
-                        }
-                        ThreadStoreError::Unsupported { .. } => {
-                            method_not_found("paginated_threads is not supported yet")
-                        }
-                        err => internal_error(format!("failed to prepare paginated fork: {err}")),
-                    })?,
-            )
+            } else {
+                self.thread_store.prepare_fork(params).await
+            };
+            Some(prepared.map_err(|err| match err {
+                ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    invalid_request(format!("no rollout found for thread id {thread_id}"))
+                }
+                ThreadStoreError::Unsupported { .. } => {
+                    method_not_found("paginated_threads is not supported yet")
+                }
+                err => internal_error(format!("failed to prepare paginated fork: {err}")),
+            })?)
         } else {
             None
         };
@@ -5565,7 +5573,39 @@ impl ThreadRequestProcessor {
                     /*active_turn*/ None,
                 );
             } else {
-                thread.turns = self.paginated_thread_full_turns(thread_id).await?;
+                let loaded_status = self
+                    .thread_watch_manager
+                    .loaded_status_for_thread(&thread_id.to_string())
+                    .await;
+                let has_live_running_thread =
+                    matches!(forked_thread.agent_status().await, AgentStatus::Running);
+                thread.turns = reconstruct_paginated_thread_turns(
+                    response_history_items.as_slice(),
+                    loaded_status,
+                    has_live_running_thread,
+                    /*active_turn*/ None,
+                );
+                // Paginated projection creates visible turns only from lifecycle events. Older
+                // fixtures can also contain Legacy response events that synthesize rollout turns.
+                let projected_turn_ids: HashSet<_> = response_history_items
+                    .iter()
+                    .filter_map(|item| match item {
+                        RolloutItem::EventMsg(EventMsg::TurnStarted(event)) => {
+                            Some(event.turn_id.as_str())
+                        }
+                        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                            Some(event.turn_id.as_str())
+                        }
+                        RolloutItem::EventMsg(EventMsg::TurnAborted(event)) => {
+                            event.turn_id.as_deref()
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                thread
+                    .turns
+                    .retain(|turn| projected_turn_ids.contains(turn.id.as_str()));
+                apply_thread_turns_items_view(&mut thread.turns, TurnItemsView::Full);
             }
             token_usage_turn_id = Some(restored_token_usage_turn_id(
                 token_usage_history_items
@@ -6103,43 +6143,12 @@ fn build_thread_turns_page_response_for_history_mode(
             has_live_running_thread,
             active_turn,
         ),
-        ThreadHistoryMode::Paginated => {
-            let mut builder = ThreadHistoryBuilder::new();
-            let mut projected_items: HashMap<String, Vec<ThreadItem>> = HashMap::new();
-            for item in items {
-                builder.handle_rollout_item(item);
-                if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = item {
-                    let materialized_item = ThreadItem::from(event.item.clone());
-                    let turn_items = projected_items.entry(event.turn_id.clone()).or_default();
-                    if let Some(existing_item) = turn_items
-                        .iter_mut()
-                        .find(|item| item.id() == materialized_item.id())
-                    {
-                        *existing_item = materialized_item;
-                    } else {
-                        turn_items.push(materialized_item);
-                    }
-                }
-            }
-            let mut turns = builder.finish();
-            if turns.iter().any(|turn| !turn.id.starts_with("rollout-")) {
-                turns.retain(|turn| !turn.id.starts_with("rollout-"));
-            }
-            for turn in &mut turns {
-                if let Some(items) = projected_items.remove(&turn.id) {
-                    turn.items = items;
-                }
-            }
-            let has_live_in_progress_turn = has_live_running_thread
-                || active_turn
-                    .as_ref()
-                    .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
-            normalize_thread_turns_status(&mut turns, loaded_status, has_live_in_progress_turn);
-            if let Some(active_turn) = active_turn {
-                merge_turn_history_with_active_turn(&mut turns, active_turn);
-            }
-            turns
-        }
+        ThreadHistoryMode::Paginated => reconstruct_paginated_thread_turns(
+            items,
+            loaded_status,
+            has_live_running_thread,
+            active_turn,
+        ),
     };
     apply_thread_turns_items_view(&mut turns, options.items_view);
     let page = paginate_thread_turns(
@@ -6154,6 +6163,52 @@ fn build_thread_turns_page_response_for_history_mode(
         next_cursor: page.next_cursor,
         backwards_cursor: page.backwards_cursor,
     })
+}
+
+/// Reconstructs projected Paginated turns without rereading inherited SQLite rows.
+fn reconstruct_paginated_thread_turns(
+    items: &[RolloutItem],
+    loaded_status: ThreadStatus,
+    has_live_running_thread: bool,
+    active_turn: Option<Turn>,
+) -> Vec<Turn> {
+    let mut builder = ThreadHistoryBuilder::new();
+    let mut projected_items: HashMap<String, Vec<ThreadItem>> = HashMap::new();
+    for item in items {
+        builder.handle_rollout_item(item);
+        if let RolloutItem::EventMsg(EventMsg::ItemCompleted(event)) = item {
+            let materialized_item = ThreadItem::from(event.item.clone());
+            let turn_items = projected_items.entry(event.turn_id.clone()).or_default();
+            if let Some(existing_item) = turn_items
+                .iter_mut()
+                .find(|item| item.id() == materialized_item.id())
+            {
+                *existing_item = materialized_item;
+            } else {
+                turn_items.push(materialized_item);
+            }
+        }
+    }
+
+    let mut turns = builder.finish();
+    if turns.iter().any(|turn| !turn.id.starts_with("rollout-")) {
+        turns.retain(|turn| !turn.id.starts_with("rollout-"));
+    }
+    for turn in &mut turns {
+        if let Some(items) = projected_items.remove(&turn.id) {
+            turn.items = items;
+        }
+    }
+
+    let has_live_in_progress_turn = has_live_running_thread
+        || active_turn
+            .as_ref()
+            .is_some_and(|turn| matches!(turn.status, TurnStatus::InProgress));
+    normalize_thread_turns_status(&mut turns, loaded_status, has_live_in_progress_turn);
+    if let Some(active_turn) = active_turn {
+        merge_turn_history_with_active_turn(&mut turns, active_turn);
+    }
+    turns
 }
 
 pub(super) fn build_thread_resume_initial_turns_page(

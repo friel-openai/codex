@@ -18,6 +18,7 @@ use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::SortDirection;
 use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadForkResponse;
 use codex_app_server_protocol::ThreadHistoryMode;
@@ -47,9 +48,13 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
+use codex_protocol::items::AgentMessageContent;
+use codex_protocol::items::AgentMessageItem;
+use codex_protocol::items::ReasoningItem;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
@@ -1447,6 +1452,156 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
             ..
         ]
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapshots() -> Result<()>
+{
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let source_thread_id = create_fake_paginated_rollout(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        "2025-01-05T12:00:00Z",
+        "Saved user message",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let source_path = rollout_path(
+        codex_home.path(),
+        "2025-01-05T12-00-00",
+        source_thread_id.as_str(),
+    );
+    let source_id = ThreadId::from_string(source_thread_id.as_str())?;
+
+    for index in 0..101 {
+        let turn_id = format!("turn-{index}");
+        let started_at = 100 + index;
+        append_rollout_item_to_path(
+            source_path.as_path(),
+            &RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: turn_id.clone(),
+                trace_id: None,
+                started_at: Some(started_at),
+                model_context_window: None,
+                collaboration_mode_kind: Default::default(),
+            })),
+        )
+        .await?;
+
+        let user_item = CoreTurnItem::UserMessage(UserMessageItem {
+            id: format!("user-{index}"),
+            client_id: None,
+            content: vec![codex_protocol::user_input::UserInput::Text {
+                text: format!("question {index}"),
+                text_elements: Vec::new(),
+            }],
+        });
+        let draft_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            id: format!("agent-{index}"),
+            content: vec![AgentMessageContent::Text {
+                text: format!("draft answer {index}"),
+            }],
+            phase: Some(MessagePhase::Commentary),
+            memory_citation: None,
+        });
+        let final_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            id: format!("agent-{index}"),
+            content: vec![AgentMessageContent::Text {
+                text: format!("final answer {index}"),
+            }],
+            phase: Some(MessagePhase::FinalAnswer),
+            memory_citation: None,
+        });
+        let reasoning_item = CoreTurnItem::Reasoning(ReasoningItem {
+            id: format!("reasoning-{index}"),
+            summary_text: vec![format!("reasoning summary {index}")],
+            raw_content: Vec::new(),
+        });
+
+        for (item_index, item) in [
+            user_item,
+            reasoning_item,
+            draft_agent_item,
+            final_agent_item,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            append_rollout_item_to_path(
+                source_path.as_path(),
+                &RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id: source_id,
+                    turn_id: turn_id.clone(),
+                    item,
+                    started_at_ms: Some(started_at * 1_000),
+                    completed_at_ms: started_at * 1_000 + item_index as i64 + 1,
+                })),
+            )
+            .await?;
+        }
+
+        append_rollout_item_to_path(
+            source_path.as_path(),
+            &RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id,
+                last_agent_message: None,
+                error: None,
+                started_at: Some(started_at),
+                completed_at: Some(started_at + 1),
+                duration_ms: Some(1_000),
+                time_to_first_token_ms: None,
+            })),
+        )
+        .await?;
+    }
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let mut source_turns = Vec::new();
+    let mut cursor = None;
+    loop {
+        let response: ThreadTurnsListResponse = mcp
+            .request(|request_id| ClientRequest::ThreadTurnsList {
+                request_id,
+                params: ThreadTurnsListParams {
+                    thread_id: source_thread_id.clone(),
+                    cursor: cursor.clone(),
+                    limit: Some(100),
+                    sort_direction: Some(SortDirection::Asc),
+                    items_view: Some(TurnItemsView::Full),
+                },
+            })
+            .await?;
+        source_turns.extend(response.data);
+        let Some(next_cursor) = response.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(source_turns.len(), 101);
+    assert!(source_turns.iter().all(|turn| turn.items.len() == 3));
+
+    let ThreadForkResponse {
+        thread: forked_thread,
+        ..
+    } = mcp
+        .request(|request_id| ClientRequest::ThreadFork {
+            request_id,
+            params: ThreadForkParams {
+                thread_id: source_thread_id,
+                ..Default::default()
+            },
+        })
+        .await?;
+
+    assert_eq!(forked_thread.turns, source_turns);
     Ok(())
 }
 
