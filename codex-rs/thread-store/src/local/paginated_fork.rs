@@ -79,6 +79,21 @@ pub(super) async fn prepare_without_response_history(
     .await
 }
 
+pub(super) async fn prepare_without_response_history_for_rollout(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    expected_rollout_id: RolloutId,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(
+        store,
+        params,
+        ForkResponseHistory::ModelContext,
+        None,
+        Some(expected_rollout_id),
+    )
+    .await
+}
+
 pub(super) async fn prepare_with_model_context(
     store: &LocalThreadStore,
     params: PrepareForkParams,
@@ -95,6 +110,23 @@ pub(super) async fn prepare_with_model_context(
     .await
 }
 
+pub(super) async fn prepare_with_model_context_for_rollout(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    model_context: Arc<Vec<ResponseItemEnvelope>>,
+    expected_position: HistoryPosition,
+    expected_rollout_id: RolloutId,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(
+        store,
+        params,
+        ForkResponseHistory::Full,
+        Some((model_context, expected_position)),
+        Some(expected_rollout_id),
+    )
+    .await
+}
+
 pub(super) async fn prepare_without_response_history_with_model_context(
     store: &LocalThreadStore,
     params: PrepareForkParams,
@@ -107,6 +139,23 @@ pub(super) async fn prepare_without_response_history_with_model_context(
         ForkResponseHistory::ModelContext,
         Some((model_context, expected_position)),
         /*expected_rollout_id*/ None,
+    )
+    .await
+}
+
+pub(super) async fn prepare_without_response_history_with_model_context_for_rollout(
+    store: &LocalThreadStore,
+    params: PrepareForkParams,
+    model_context: Arc<Vec<ResponseItemEnvelope>>,
+    expected_position: HistoryPosition,
+    expected_rollout_id: RolloutId,
+) -> ThreadStoreResult<PreparedFork> {
+    prepare_with_response_history(
+        store,
+        params,
+        ForkResponseHistory::ModelContext,
+        Some((model_context, expected_position)),
+        Some(expected_rollout_id),
     )
     .await
 }
