@@ -1,6 +1,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -700,6 +701,137 @@ async fn active_turn_stores_only_its_start_position() {
         .history_base,
         None
     );
+}
+
+#[tokio::test]
+async fn latest_paginated_fork_reuses_latest_model_context() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("first-turn"),
+                user_message("first message"),
+                turn_completed("first-turn"),
+                turn_started("second-turn"),
+                user_message("second message"),
+                turn_completed("second-turn"),
+            ],
+        })
+        .await
+        .expect("append source history");
+
+    let latest = prepare_paginated_fork(&store, thread_id, ForkBoundary::Latest).await;
+    assert!(
+        Arc::ptr_eq(&latest.model_context, &latest.latest_model_context),
+        "a latest-boundary fork should scan its frozen model context only once"
+    );
+    assert!(contains_user_message(
+        latest.model_context.as_slice(),
+        "second message"
+    ));
+    drop(latest);
+
+    let historical = prepare_paginated_fork(
+        &store,
+        thread_id,
+        ForkBoundary::BeforeTurn("second-turn".to_string()),
+    )
+    .await;
+    assert!(
+        !Arc::ptr_eq(&historical.model_context, &historical.latest_model_context),
+        "a historical boundary must retain its distinct frozen model context"
+    );
+    assert!(contains_user_message(
+        historical.model_context.as_slice(),
+        "first message"
+    ));
+    assert!(!contains_user_message(
+        historical.model_context.as_slice(),
+        "second message"
+    ));
+    assert!(contains_user_message(
+        historical.latest_model_context.as_slice(),
+        "second message"
+    ));
+}
+
+#[tokio::test]
+async fn paginated_fork_without_response_history_reuses_bounded_model_context() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![
+                turn_started("first-turn"),
+                user_message("first message"),
+                turn_completed("first-turn"),
+                turn_started("second-turn"),
+                user_message("second message"),
+                turn_completed("second-turn"),
+            ],
+        })
+        .await
+        .expect("append source history");
+
+    let latest = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::Latest,
+        })
+        .await
+        .expect("prepare bounded latest fork");
+    assert_eq!(latest.source_thread_id, thread_id);
+    assert!(latest.interrupt_if_open);
+    assert!(
+        Arc::ptr_eq(&latest.response_history, &latest.model_context),
+        "a fork excluding turns must not materialize full source response history"
+    );
+    assert!(Arc::ptr_eq(
+        &latest.model_context,
+        &latest.latest_model_context
+    ));
+    assert!(contains_user_message(
+        latest.model_context.as_slice(),
+        "second message"
+    ));
+    drop(latest);
+
+    let historical = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::BeforeTurn("second-turn".to_string()),
+        })
+        .await
+        .expect("prepare bounded historical fork");
+    assert_eq!(historical.source_thread_id, thread_id);
+    assert!(!historical.interrupt_if_open);
+    assert!(Arc::ptr_eq(
+        &historical.response_history,
+        &historical.model_context
+    ));
+    assert!(!Arc::ptr_eq(
+        &historical.model_context,
+        &historical.latest_model_context
+    ));
+    assert!(contains_user_message(
+        historical.model_context.as_slice(),
+        "first message"
+    ));
+    assert!(!contains_user_message(
+        historical.model_context.as_slice(),
+        "second message"
+    ));
+    assert!(contains_user_message(
+        historical.latest_model_context.as_slice(),
+        "second message"
+    ));
 }
 
 #[tokio::test]
