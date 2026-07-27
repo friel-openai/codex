@@ -6,6 +6,7 @@ use std::io::Read;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -20,6 +21,9 @@ const MAX_NOT_FOUND_RETRIES: usize = 3;
 const OPEN_ROLLOUT_LINE_READER_RETRY_DELAY: Duration = Duration::from_millis(50);
 const TEMP_SUFFIX: &str = ".tmp";
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+// Feedback and SQLite subscribers capture TRACE by default, so file-open events must be opt-in.
+static HISTORY_IO_OBSERVATION_ENABLED: LazyLock<bool> =
+    LazyLock::new(|| std::env::var_os("FRODEX_HISTORY_IO_TRACE").is_some_and(|value| value == "1"));
 
 /// Starts a best-effort background job that compresses cold local rollout files.
 ///
@@ -1037,6 +1041,15 @@ mod reader {
         let path = path::existing_rollout_path(path)
             .await
             .unwrap_or_else(|| path.to_path_buf());
+        if *super::HISTORY_IO_OBSERVATION_ENABLED {
+            tracing::event!(
+                target: "codex_history_io",
+                tracing::Level::TRACE,
+                event.name = "codex.history.rollout.open",
+                rollout_path = %path.display(),
+                "opening rollout history file"
+            );
+        }
         if path::is_compressed_rollout_path(path.as_path()) {
             let reader = tokio::task::spawn_blocking(move || {
                 let input = File::open(path.as_path())?;
