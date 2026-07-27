@@ -357,6 +357,20 @@ impl LocalThreadStore {
         paginated_fork::prepare_without_response_history(self, params).await
     }
 
+    /// Freezes the selected paginated fork without reading history excluded from its response.
+    pub async fn prepare_fork_without_response_history_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_for_rollout(
+            self,
+            params,
+            expected_rollout_id,
+        )
+        .await
+    }
+
     /// Prepares a latest fork using a verified complete, in-memory source model context.
     pub async fn prepare_fork_with_model_context(
         &self,
@@ -366,6 +380,24 @@ impl LocalThreadStore {
     ) -> ThreadStoreResult<PreparedFork> {
         paginated_fork::prepare_with_model_context(self, params, model_context, expected_position)
             .await
+    }
+
+    /// Prepares the selected latest fork using a verified in-memory source model context.
+    pub async fn prepare_fork_with_model_context_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_with_model_context_for_rollout(
+            self,
+            params,
+            model_context,
+            expected_position,
+            expected_rollout_id,
+        )
+        .await
     }
 
     /// Prepares a latest side fork without materializing projected response turns.
@@ -380,6 +412,24 @@ impl LocalThreadStore {
             params,
             model_context,
             expected_position,
+        )
+        .await
+    }
+
+    /// Prepares the selected latest side fork without materializing projected response turns.
+    pub async fn prepare_fork_without_response_history_with_model_context_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
+            self,
+            params,
+            model_context,
+            expected_position,
+            expected_rollout_id,
         )
         .await
     }
