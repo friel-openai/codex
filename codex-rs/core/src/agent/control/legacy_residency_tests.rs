@@ -60,6 +60,13 @@ impl LegacyTerminalStatus {
 }
 
 async fn legacy_harness(network_proxy_enabled: bool) -> AgentControlHarness {
+    legacy_harness_with_max_threads(network_proxy_enabled, LEGACY_TEST_MAX_THREADS).await
+}
+
+async fn legacy_harness_with_max_threads(
+    network_proxy_enabled: bool,
+    max_threads: usize,
+) -> AgentControlHarness {
     let home = TempDir::new().expect("create benchmark Codex home");
     let mut cli_overrides = if network_proxy_enabled {
         std::fs::write(
@@ -90,7 +97,7 @@ network_access = true
         .await
         .expect("load benchmark config");
     let _ = config.features.disable(Feature::MultiAgentV2);
-    config.agent_max_threads = Some(LEGACY_TEST_MAX_THREADS);
+    config.agent_max_threads = Some(max_threads);
     AgentControlHarness::new_with_config(home, config).await
 }
 

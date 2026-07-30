@@ -2,7 +2,10 @@ use super::is_resident_session_source;
 use crate::StartThreadOptions;
 use crate::ThreadManager;
 use crate::agent::AgentControl;
+use crate::agent::control::AgentInputDelivery;
 use crate::agent::registry::AgentMetadata;
+use crate::agent_communication::AgentCommunicationContext;
+use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
 use crate::config::test_config;
@@ -11,11 +14,13 @@ use crate::context::SubagentNotification;
 use crate::thread_manager::ThreadManagerState;
 use codex_features::Feature;
 use codex_login::CodexAuth;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -628,8 +633,8 @@ async fn pathless_v2_interrupted_watcher_does_not_block_residency_eviction() {
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
-            /*environments*/ None,
             Default::default(),
+            /*environments*/ None,
         )
         .await
         .expect("spawn first pathless v2 agent");
@@ -731,8 +736,8 @@ async fn spawn_subagent(
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
             /*inherited_exec_policy*/ None,
-            /*environments*/ None,
             Default::default(),
+            /*environments*/ None,
         )
         .await
         .expect("spawn subagent")

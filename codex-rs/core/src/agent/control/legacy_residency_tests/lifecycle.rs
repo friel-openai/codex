@@ -71,6 +71,19 @@ async fn legacy_subagent_completion_becomes_lru_evictable_after_notification() {
     )
     .await;
     assert!(harness.manager.get_thread(child_thread_id).await.is_err());
+    assert_eq!(
+        harness.control.get_status(child_thread_id).await,
+        AgentStatus::Completed(Some("completed child 0".to_string()))
+    );
+    let status_rx = harness
+        .control
+        .subscribe_status(child_thread_id)
+        .await
+        .expect("cold completed child must retain its status for wait_agent");
+    assert_eq!(
+        status_rx.borrow().clone(),
+        AgentStatus::Completed(Some("completed child 0".to_string()))
+    );
     assert!(
         wait_for_loaded_child_count_at_most(
             &harness,
@@ -79,6 +92,83 @@ async fn legacy_subagent_completion_becomes_lru_evictable_after_notification() {
             Duration::from_secs(5),
         )
         .await
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::print_stdout)]
+async fn completed_parallel_legacy_agents_trim_without_reducing_spawn_capacity() {
+    let harness = legacy_harness_with_max_threads(
+        /*network_proxy_enabled*/ true, /*max_threads*/ 32,
+    )
+    .await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let mut children = Vec::new();
+    let baseline_listeners = super::benchmark::loopback_listener_count();
+    let baseline_pss_kib = super::benchmark::process_memory().pss_kib;
+
+    for child_index in 0..24 {
+        let (thread_id, thread, turn) = spawn_quiescent_legacy_child(
+            &harness,
+            parent_thread_id,
+            child_index,
+            /*history_bytes*/ 256 * 1024,
+        )
+        .await;
+        children.push((thread_id, thread, turn));
+    }
+    let loaded_listeners = super::benchmark::loopback_listener_count();
+    let loaded_pss_kib = super::benchmark::process_memory().pss_kib;
+
+    for (thread_id, _, _) in &children {
+        assert!(
+            harness.manager.get_thread(*thread_id).await.is_ok(),
+            "active children must remain loaded beyond the idle-resident target"
+        );
+    }
+
+    let first_child = children[0].0;
+    for (child_index, (_, child_thread, turn)) in children.into_iter().enumerate() {
+        child_thread
+            .session
+            .send_event(
+                turn.as_ref(),
+                LegacyTerminalStatus::Completed.event(&turn.sub_id, child_index),
+            )
+            .await;
+    }
+    wait_for_notification_count(&parent_thread, /*expected*/ 24).await;
+
+    assert!(
+        wait_for_loaded_child_count_at_most(
+            &harness,
+            parent_thread_id,
+            /*max_loaded_children*/ 8,
+            Duration::from_secs(5),
+        )
+        .await,
+        "completed children should be trimmed without waiting for another spawn"
+    );
+    assert!(harness.manager.get_thread(first_child).await.is_err());
+    let retained_children = harness
+        .manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|thread_id| *thread_id != parent_thread_id)
+        .count();
+    let retained_listeners = super::benchmark::loopback_listener_count();
+    let retained_pss_kib = super::benchmark::process_memory().pss_kib;
+    println!(
+        "residency_benchmark baseline_listeners={baseline_listeners} \
+         active_children=24 active_listeners={loaded_listeners} \
+         retained_children={retained_children} retained_listeners={retained_listeners} \
+         baseline_pss_kib={baseline_pss_kib} active_pss_kib={loaded_pss_kib} \
+         retained_pss_kib={retained_pss_kib}"
+    );
+    assert_eq!(
+        subagent_notification_count(parent_thread.session.clone_history().await.raw_items()),
+        24
     );
 }
 

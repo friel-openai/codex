@@ -2223,7 +2223,7 @@ async fn ensure_agent_loaded_reloads_registered_unloaded_agent() {
 
     harness
         .control
-        .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
+        .ensure_agent_loaded(sender_config, spawned_agent.thread_id)
         .await
         .expect("known v2 agent should reload");
     let reloaded_child = harness

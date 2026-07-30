@@ -277,6 +277,7 @@ impl AgentControl {
             .await
         {
             Ok(reloaded_thread) => {
+                registered_agent.lifecycle.clear_cold_terminal_status();
                 if let Some(residency_slot) = residency_slot {
                     residency_slot.commit(reloaded_thread.thread_id);
                 }

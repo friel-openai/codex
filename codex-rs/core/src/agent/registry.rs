@@ -3,6 +3,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
@@ -156,6 +157,34 @@ impl AgentLifecycle {
 
     pub(crate) fn is_visible_when_cold(&self) -> bool {
         self.visible_when_cold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn remember_cold_terminal_status(
+        &self,
+        status: AgentStatus,
+        visible_when_cold: bool,
+    ) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+        if visible_when_cold {
+            self.mark_visible_when_cold();
+        }
+    }
+
+    pub(crate) fn cold_terminal_status(&self) -> Option<AgentStatus> {
+        self.cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn clear_cold_terminal_status(&self) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     pub(crate) fn try_start_completion_watcher(

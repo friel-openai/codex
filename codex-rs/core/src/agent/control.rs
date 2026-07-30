@@ -450,7 +450,10 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         let Ok(thread) = state.get_thread(agent_id).await else {
-            return AgentStatus::NotFound;
+            return self
+                .get_agent_metadata(agent_id)
+                .and_then(|metadata| metadata.lifecycle.cold_terminal_status())
+                .unwrap_or(AgentStatus::NotFound);
         };
         thread.agent_status().await
     }
@@ -525,8 +528,19 @@ impl AgentControl {
         agent_id: ThreadId,
     ) -> CodexResult<watch::Receiver<AgentStatus>> {
         let state = self.upgrade()?;
-        let thread = state.get_thread(agent_id).await?;
-        Ok(thread.subscribe_status())
+        match state.get_thread(agent_id).await {
+            Ok(thread) => Ok(thread.subscribe_status()),
+            Err(err)
+                if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_))
+                    && let Some(status) = self
+                        .get_agent_metadata(agent_id)
+                        .and_then(|metadata| metadata.lifecycle.cold_terminal_status()) =>
+            {
+                let (_, receiver) = watch::channel(status);
+                Ok(receiver)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     pub(crate) async fn format_environment_context_subagents(
