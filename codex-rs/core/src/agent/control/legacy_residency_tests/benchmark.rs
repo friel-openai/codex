@@ -12,8 +12,8 @@ const MAX_WAVE_TWO_TO_FIVE_PSS_GROWTH_KIB: u64 = 64 * 1024;
 const MAX_LISTENER_GROWTH: usize = LEGACY_TEST_MAX_THREADS * 2;
 
 #[derive(Debug, Default, Serialize)]
-struct ProcessMemory {
-    pss_kib: u64,
+pub(super) struct ProcessMemory {
+    pub(super) pss_kib: u64,
     rss_kib: u64,
     swap_kib: u64,
 }
@@ -92,7 +92,7 @@ async fn capture_snapshot(
     }
 }
 
-fn process_memory() -> ProcessMemory {
+pub(super) fn process_memory() -> ProcessMemory {
     let Ok(contents) = std::fs::read_to_string("/proc/self/smaps_rollup") else {
         return ProcessMemory::default();
     };
@@ -113,7 +113,7 @@ fn process_memory() -> ProcessMemory {
     }
 }
 
-fn loopback_listener_count() -> usize {
+pub(super) fn loopback_listener_count() -> usize {
     let Ok(entries) = std::fs::read_dir("/proc/self/fd") else {
         return 0;
     };
