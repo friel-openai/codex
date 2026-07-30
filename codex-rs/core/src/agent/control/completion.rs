@@ -278,6 +278,17 @@ impl AgentControl {
                         .inject_user_message_without_turn(message)
                         .await;
                 }
+                if completion_quiescent && let Some(child_thread) = child_thread.as_ref() {
+                    let config = child_thread.session.get_config().await;
+                    let multi_agent_version = child_thread
+                        .multi_agent_version()
+                        .unwrap_or_else(|| config.multi_agent_version_from_features());
+                    control.schedule_agent_residency_trim(
+                        config.as_ref(),
+                        multi_agent_version,
+                        &child_thread.session_source,
+                    );
+                }
                 if child_uses_multi_agent_v2 {
                     return;
                 }
