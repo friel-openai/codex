@@ -23,6 +23,15 @@ impl App {
         event: AppEvent,
     ) -> Result<AppRunControl> {
         match event {
+            AppEvent::RefreshModelCatalog => match app_server.refresh_available_models().await {
+                Ok(models) => {
+                    self.model_catalog.replace_models(models);
+                    self.chat_widget.open_model_popup();
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to refresh TUI model catalog");
+                }
+            },
             AppEvent::NewSession { name } => {
                 self.start_fresh_session_with_summary_hint(
                     tui, app_server, /*session_start_source*/ None,
