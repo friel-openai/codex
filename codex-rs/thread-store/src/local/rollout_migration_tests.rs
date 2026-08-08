@@ -1451,6 +1451,8 @@ async fn migration_compacts_subagent_prefix_and_does_not_project_it() {
                 multi_agent_mode: None,
                 realtime_active: None,
                 effort: None,
+                service_tier: None,
+                model_profile: None,
                 summary: ReasoningSummary::Auto,
             }),
             user_message("child question"),
