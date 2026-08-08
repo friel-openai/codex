@@ -3694,6 +3694,7 @@ dependencies = [
 name = "codex-models-manager"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
  "chrono",
  "codex-collaboration-mode-templates",
  "codex-http-client",

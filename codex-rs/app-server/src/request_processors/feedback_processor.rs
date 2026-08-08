@@ -656,6 +656,8 @@ mod tests {
                     multi_agent_mode: None,
                     realtime_active: None,
                     effort: effort.clone(),
+                    service_tier: None,
+                    model_profile: None,
                     summary: ReasoningSummary::Auto,
                 }),
             }

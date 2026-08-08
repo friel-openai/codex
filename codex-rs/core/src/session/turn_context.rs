@@ -6,11 +6,13 @@ use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::TrustedPluginRoots;
 use codex_file_system::FileSystemSandboxContext;
 use codex_model_provider::SharedModelProvider;
+use codex_models_manager::ModelRoutingCandidate;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
+use codex_protocol::openai_models::ModelServiceTier;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -25,7 +27,16 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use tracing::instrument;
 
+use super::model_routing::ModelRoutingReason;
+
 pub(crate) type ShellSnapshotTask = Shared<BoxFuture<'static, Option<Arc<ShellSnapshotFile>>>>;
+
+/// Determines whether local catalog metadata may reject a configured routing candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RoutingCandidateValidation {
+    RequireCatalogSupport,
+    TrustConfiguration,
+}
 
 /// Effective per-environment config; fields move here as executor config is migrated.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -134,6 +145,16 @@ pub struct TurnContext {
     pub config: Arc<Config>,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     pub(crate) model_info: ModelInfo,
+    /// Selected routed custom-model alias, while `model_info` is the concrete candidate.
+    pub(crate) model_profile: Option<String>,
+    /// Exact configured tuple used to key this candidate's health state.
+    pub(crate) model_routing_candidate: Option<ModelRoutingCandidate>,
+    /// Previous successful tuple used to explain a turn-boundary promotion.
+    pub(crate) model_routing_previous_candidate: Option<ModelRoutingCandidate>,
+    /// Why this turn selected a different tuple before its first request.
+    pub(crate) model_routing_selection_reason: Option<ModelRoutingReason>,
+    /// Earliest time this concrete routing candidate may issue its first provider request.
+    pub(crate) model_routing_retry_at: Option<chrono::DateTime<Utc>>,
     pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: SharedModelProvider,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
@@ -322,6 +343,11 @@ impl TurnContext {
             config: Arc::new(config),
             auth_manager: self.auth_manager.clone(),
             model_info: model_info.clone(),
+            model_profile: self.model_profile.clone(),
+            model_routing_candidate: self.model_routing_candidate.clone(),
+            model_routing_previous_candidate: self.model_routing_previous_candidate.clone(),
+            model_routing_selection_reason: self.model_routing_selection_reason,
+            model_routing_retry_at: self.model_routing_retry_at,
             session_telemetry: self
                 .session_telemetry
                 .clone()
@@ -363,6 +389,127 @@ impl TurnContext {
                 self.model_verification_emitted.load(Ordering::Relaxed),
             ),
         }
+    }
+
+    /// Resolves one routed custom-model candidate without changing the thread's selected alias.
+    pub(crate) async fn with_routing_candidate(
+        &self,
+        model_profile: &str,
+        candidate: &ModelRoutingCandidate,
+        models_manager: &SharedModelsManager,
+    ) -> Option<Self> {
+        self.with_routing_candidate_validation(
+            model_profile,
+            candidate,
+            models_manager,
+            RoutingCandidateValidation::RequireCatalogSupport,
+        )
+        .await
+    }
+
+    /// Preserves an exact configured tuple when every candidate is rejected by local metadata.
+    ///
+    /// The provider remains authoritative for experimental models. Sending the lowest-ranked
+    /// configured tuple is safer than silently sending the profile alias with its constraints
+    /// removed.
+    pub(crate) async fn with_unchecked_routing_candidate(
+        &self,
+        model_profile: &str,
+        candidate: &ModelRoutingCandidate,
+        models_manager: &SharedModelsManager,
+    ) -> Self {
+        match self
+            .with_routing_candidate_validation(
+                model_profile,
+                candidate,
+                models_manager,
+                RoutingCandidateValidation::TrustConfiguration,
+            )
+            .await
+        {
+            Some(context) => context,
+            None => unreachable!("trusted routing candidates are always resolved"),
+        }
+    }
+
+    async fn with_routing_candidate_validation(
+        &self,
+        model_profile: &str,
+        candidate: &ModelRoutingCandidate,
+        models_manager: &SharedModelsManager,
+        validation: RoutingCandidateValidation,
+    ) -> Option<Self> {
+        let mut routed = self
+            .with_model(candidate.model.clone(), models_manager)
+            .await;
+        if let Some(custom_model) = self.config.custom_models.get(model_profile) {
+            let mut models_manager_config = routed.config.to_models_manager_config();
+            models_manager_config.model_context_window = custom_model
+                .model_context_window
+                .or(models_manager_config.model_context_window);
+            models_manager_config.model_auto_compact_token_limit = custom_model
+                .model_auto_compact_token_limit
+                .or(models_manager_config.model_auto_compact_token_limit);
+            routed.model_info = codex_models_manager::model_info::with_config_overrides(
+                routed.model_info,
+                &models_manager_config,
+            );
+        }
+        let has_authoritative_metadata = !routed.model_info.used_fallback_model_metadata;
+
+        if let Some(reasoning_effort) = candidate.reasoning_effort.as_ref() {
+            let supports_effort = routed
+                .model_info
+                .supported_reasoning_levels
+                .iter()
+                .any(|preset| preset.effort == *reasoning_effort);
+            if validation == RoutingCandidateValidation::RequireCatalogSupport
+                && has_authoritative_metadata
+                && !supports_effort
+            {
+                return None;
+            }
+            routed.reasoning_effort = Some(reasoning_effort.clone());
+        } else {
+            routed.reasoning_effort = routed.model_info.default_reasoning_level.clone();
+        }
+
+        let fast_mode_enabled = routed.config.features.enabled(Feature::FastMode);
+        let service_tier = if let Some(service_tier) = candidate.service_tier.as_ref() {
+            if validation == RoutingCandidateValidation::RequireCatalogSupport
+                && has_authoritative_metadata
+                && !routed.model_info.supports_service_tier(service_tier)
+            {
+                return None;
+            }
+            if !has_authoritative_metadata && !routed.model_info.supports_service_tier(service_tier)
+            {
+                routed.model_info.service_tiers.push(ModelServiceTier {
+                    id: service_tier.clone(),
+                    name: service_tier.clone(),
+                    description: "Configured by a custom model routing profile.".to_string(),
+                });
+            }
+            Some(service_tier.clone())
+        } else if fast_mode_enabled {
+            routed
+                .model_info
+                .default_service_tier
+                .clone()
+                .filter(|tier| routed.model_info.supports_service_tier(tier))
+        } else {
+            None
+        };
+
+        let mut config = (*routed.config).clone();
+        config.model_reasoning_effort = routed.reasoning_effort.clone();
+        config.service_tier = service_tier;
+        routed.multi_agent_version =
+            config.multi_agent_version_for_model(routed.model_info.multi_agent_version);
+        routed.config = Arc::new(config);
+        routed.model_profile = Some(model_profile.to_string());
+        routed.model_routing_candidate = Some(candidate.clone());
+        Some(routed)
     }
 
     pub(crate) fn file_system_sandbox_context(
@@ -428,6 +575,8 @@ impl TurnContext {
             multi_agent_mode: None,
             realtime_active: Some(self.realtime_active),
             effort: self.reasoning_effort.clone(),
+            service_tier: self.config.service_tier.clone(),
+            model_profile: self.model_profile.clone(),
             summary: ReasoningSummaryConfig::Auto,
         }
     }
@@ -592,6 +741,11 @@ impl Session {
             config: per_turn_config,
             auth_manager,
             model_info,
+            model_profile: None,
+            model_routing_candidate: None,
+            model_routing_previous_candidate: None,
+            model_routing_selection_reason: None,
+            model_routing_retry_at: None,
             session_telemetry: session_telemetry_for_context,
             provider,
             reasoning_effort,
@@ -728,6 +882,7 @@ impl Session {
             final_output_json_schema,
             TurnMultiAgentRuntime::ResolveAndStore,
             self.git_enrichment_policy,
+            true,
         )
         .await
     }
@@ -743,6 +898,7 @@ impl Session {
             /*final_output_json_schema*/ None,
             TurnMultiAgentRuntime::Preview,
             GitEnrichmentPolicy::Skip,
+            true,
         )
         .await
     }
@@ -755,6 +911,7 @@ impl Session {
         final_output_json_schema: Option<Option<Value>>,
         multi_agent_runtime: TurnMultiAgentRuntime,
         git_enrichment_policy: GitEnrichmentPolicy,
+        resolve_model_routing: bool,
     ) -> Arc<TurnContext> {
         let turn_environments = self.services.turn_environments.snapshot().await;
         let primary_turn_environment = turn_environments.primary();
@@ -773,10 +930,6 @@ impl Session {
                 &per_turn_config.to_models_manager_config(),
             )
             .await;
-        self.services
-            .thread_extension_data
-            .insert(model_info.clone());
-
         let multi_agent_version = match multi_agent_runtime {
             TurnMultiAgentRuntime::ResolveAndStore => {
                 self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
@@ -846,6 +999,32 @@ impl Session {
         if let Some(final_schema) = final_output_json_schema {
             turn_context.final_output_json_schema = final_schema;
         }
+        if resolve_model_routing {
+            let profile_name = session_configuration.collaboration_mode.model();
+            if let Some(selection) = self
+                .select_model_routing_context(&turn_context, profile_name, &HashSet::new())
+                .await
+            {
+                let mut routed = selection.context;
+                routed.model_routing_retry_at = selection.retry_at;
+                if let (Some(previous), Some(selected)) = (
+                    selection.last_success,
+                    routed.model_routing_candidate.as_ref(),
+                ) && previous != *selected
+                {
+                    routed.model_routing_previous_candidate = Some(previous);
+                    routed.model_routing_selection_reason = Some(if selection.profile_changed {
+                        ModelRoutingReason::ProfileConfigurationChanged
+                    } else {
+                        ModelRoutingReason::PreferredCandidateRecovered
+                    });
+                }
+                turn_context = routed;
+            }
+        }
+        self.services
+            .thread_extension_data
+            .insert(turn_context.model_info.clone());
         let turn_context = Arc::new(turn_context);
         if git_enrichment_policy == GitEnrichmentPolicy::Fresh
             && turn_context
@@ -908,6 +1087,60 @@ impl Session {
             /*final_output_json_schema*/ None,
         )
         .await
+    }
+
+    /// Rebuilds request configuration after a tool changes the active thread's workspace.
+    ///
+    /// The refreshed context keeps state that belongs to the current user turn, including timing,
+    /// implicit skill invocation deduplication, and terminal error tracking. Filesystem-derived
+    /// configuration, environment selections, permissions, skills, extension attachments, and
+    /// request metadata come from the updated session configuration.
+    pub(crate) async fn refresh_active_turn_context(
+        &self,
+        current: &TurnContext,
+    ) -> Arc<TurnContext> {
+        let session_configuration = self.default_turn_configuration().await;
+        let refreshed = self
+            .new_turn_context_from_configuration(
+                current.sub_id.clone(),
+                session_configuration,
+                Some(current.final_output_json_schema.clone()),
+                TurnMultiAgentRuntime::ResolveAndStore,
+                self.git_enrichment_policy,
+                false,
+            )
+            .await;
+        let mut refreshed = Arc::try_unwrap(refreshed)
+            .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
+
+        crate::skills::preserve_implicit_skill_invocations(
+            current.extension_data.as_ref(),
+            refreshed.extension_data.as_ref(),
+        )
+        .await;
+        refreshed.trace_id = current.trace_id.clone();
+        refreshed.turn_timing_state = Arc::clone(&current.turn_timing_state);
+        refreshed.terminal_error = Arc::clone(&current.terminal_error);
+        refreshed.server_model_warning_emitted =
+            AtomicBool::new(current.server_model_warning_emitted.load(Ordering::Relaxed));
+        refreshed.model_verification_emitted =
+            AtomicBool::new(current.model_verification_emitted.load(Ordering::Relaxed));
+        if let (Some(profile_name), Some(candidate)) = (
+            current.model_profile.as_deref(),
+            current.model_routing_candidate.as_ref(),
+        ) {
+            refreshed = refreshed
+                .with_unchecked_routing_candidate(
+                    profile_name,
+                    candidate,
+                    &self.services.models_manager,
+                )
+                .await;
+        }
+        self.services
+            .thread_extension_data
+            .insert(refreshed.model_info.clone());
+        Arc::new(refreshed)
     }
 
     pub(crate) async fn new_startup_prewarm_turn_with_sub_id(
