@@ -224,6 +224,7 @@ impl StepContext {
             mcp: Arc::new(codex_mcp::McpBinding::empty(mcp_config_for_test(
                 &turn.config,
             ))),
+            required_mcp_servers: Vec::new(),
             tool_router: Arc::new(ToolRouter::from_parts(
                 ToolRegistry::empty_for_test(),
                 Vec::new(),
@@ -1572,6 +1573,173 @@ exclude = ["SECRET_*", 17]
         .effective_user_config()
         .expect("current user config");
     assert_eq!(current_config, previous_config);
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_health() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let primary = codex_models_manager::ModelRoutingCandidate {
+        model: "test-primary".to_string(),
+        reasoning_effort: None,
+        service_tier: None,
+    };
+    let fallback = codex_models_manager::ModelRoutingCandidate {
+        model: "test-fallback".to_string(),
+        reasoning_effort: None,
+        service_tier: None,
+    };
+    let profile = codex_models_manager::CustomModelConfig {
+        model: primary.model.clone(),
+        routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+            candidates: vec![primary, fallback.clone()],
+        }),
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+    };
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("old-profile".to_string(), profile.clone());
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        state.session_configuration.collaboration_mode =
+            state.session_configuration.collaboration_mode.with_updates(
+                Some("old-profile".to_string()),
+                /*effort*/ None,
+                /*developer_instructions*/ None,
+            );
+        state.model_routing.reconcile_profile("old-profile");
+        state.model_routing.record_success(&fallback);
+    }
+    next_config.custom_models = HashMap::from([("new-profile".to_string(), profile)]);
+
+    session.refresh_runtime_config(next_config).await;
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state.session_configuration.collaboration_mode.model(),
+        "new-profile"
+    );
+    assert_eq!(state.model_routing.last_success(), Some(&fallback));
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tuple() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let primary = codex_models_manager::ModelRoutingCandidate {
+        model: "test-primary".to_string(),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+        service_tier: Some("test-tier-primary".to_string()),
+    };
+    let fallback = codex_models_manager::ModelRoutingCandidate {
+        model: "test-fallback".to_string(),
+        reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::Medium),
+        service_tier: Some("test-tier-fallback".to_string()),
+    };
+    let profile = codex_models_manager::CustomModelConfig {
+        model: primary.model.clone(),
+        routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+            candidates: vec![primary, fallback.clone()],
+        }),
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+    };
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("removed-profile".to_string(), profile);
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        state.session_configuration.collaboration_mode =
+            state.session_configuration.collaboration_mode.with_updates(
+                Some("removed-profile".to_string()),
+                /*effort*/ None,
+                /*developer_instructions*/ None,
+            );
+        state.model_routing.record_success(&fallback);
+    }
+    next_config.custom_models.clear();
+
+    session.refresh_runtime_config(next_config).await;
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state.session_configuration.collaboration_mode.model(),
+        fallback.model
+    );
+    assert_eq!(
+        state
+            .session_configuration
+            .collaboration_mode
+            .reasoning_effort(),
+        fallback.reasoning_effort
+    );
+    assert_eq!(
+        state.session_configuration.service_tier,
+        fallback.service_tier
+    );
+    assert_eq!(state.model_routing.last_success(), None);
+    assert!(
+        state
+            .session_configuration
+            .original_config_do_not_use
+            .custom_models
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_request_settings() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let alias = codex_models_manager::CustomModelConfig {
+        model: "test-model".to_string(),
+        routing_profile: None,
+        model_context_window: None,
+        model_auto_compact_token_limit: None,
+    };
+    let effort = codex_protocol::openai_models::ReasoningEffort::High;
+    let service_tier = "test-tier".to_string();
+    let mut next_config = (*session.get_config().await).clone();
+    {
+        let mut state = session.state.lock().await;
+        let mut current_config = next_config.clone();
+        current_config
+            .custom_models
+            .insert("removed-alias".to_string(), alias);
+        state.session_configuration.original_config_do_not_use = Arc::new(current_config);
+        state.session_configuration.collaboration_mode =
+            state.session_configuration.collaboration_mode.with_updates(
+                Some("removed-alias".to_string()),
+                Some(Some(effort.clone())),
+                /*developer_instructions*/ None,
+            );
+        state.session_configuration.service_tier = Some(service_tier.clone());
+    }
+    next_config.custom_models.clear();
+
+    session.refresh_runtime_config(next_config).await;
+
+    let state = session.state.lock().await;
+    assert_eq!(
+        state.session_configuration.collaboration_mode.model(),
+        "test-model"
+    );
+    assert_eq!(
+        state
+            .session_configuration
+            .collaboration_mode
+            .reasoning_effort(),
+        Some(effort)
+    );
+    assert_eq!(
+        state.session_configuration.service_tier.as_deref(),
+        Some(service_tier.as_str())
+    );
+    assert_eq!(state.model_routing.last_success(), None);
 }
 
 #[tokio::test]
@@ -3507,6 +3675,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
         multi_agent_mode: None,
         realtime_active: Some(turn_context.realtime_active),
         effort: turn_context.reasoning_effort.clone(),
+        service_tier: None,
+        model_profile: None,
         summary: codex_protocol::config_types::ReasoningSummary::Auto,
     };
     let turn_id = previous_context_item
