@@ -9094,6 +9094,34 @@ async fn custom_models_load_from_config_toml() -> std::io::Result<()> {
 }
 
 #[tokio::test]
+async fn custom_models_allow_alias_that_matches_backend_model() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cfg = ConfigToml {
+        custom_models: vec![CustomModelToml {
+            name: "gpt-5.4-pro".to_string(),
+            model: Some("gpt-5.4-pro".to_string()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let config = Config::load_from_base_config_with_overrides(
+        cfg,
+        ConfigOverrides::default(),
+        codex_home.abs(),
+    )
+    .await?;
+
+    let custom = config
+        .custom_models
+        .get("gpt-5.4-pro")
+        .expect("custom model with matching backend slug should load");
+    assert_eq!(custom.model, "gpt-5.4-pro");
+    assert!(custom.routing_profile.is_none());
+    Ok(())
+}
+
+#[tokio::test]
 async fn custom_models_reject_duplicate_aliases() -> std::io::Result<()> {
     let codex_home = TempDir::new()?;
     let cfg = ConfigToml {
@@ -9326,6 +9354,48 @@ fn routed_custom_models_reject_alias_candidates() {
             .to_string()
             .contains("routed candidate that references custom model alias")
     );
+}
+
+#[test]
+fn routed_custom_models_allow_candidate_that_matches_own_alias() -> std::io::Result<()> {
+    let custom_models = resolve_custom_models(vec![CustomModelToml {
+        name: "gpt-5.4-pro".to_string(),
+        candidates: vec![
+            ModelRoutingCandidateToml {
+                model: "gpt-5.4-pro".to_string(),
+                reasoning_effort: None,
+                service_tier: None,
+            },
+            ModelRoutingCandidateToml {
+                model: "gpt-5.4-pro-fallback".to_string(),
+                reasoning_effort: None,
+                service_tier: None,
+            },
+        ],
+        ..Default::default()
+    }])?;
+
+    assert_eq!(
+        custom_models
+            .get("gpt-5.4-pro")
+            .and_then(CustomModelConfig::routing_candidates),
+        Some(
+            [
+                ModelRoutingCandidate {
+                    model: "gpt-5.4-pro".to_string(),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+                ModelRoutingCandidate {
+                    model: "gpt-5.4-pro-fallback".to_string(),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+            ]
+            .as_slice()
+        )
+    );
+    Ok(())
 }
 
 #[test]
