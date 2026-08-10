@@ -41,16 +41,6 @@ async fn handle_compact_parent_context(
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("compact_parent_context failed: {err}"))
         })?;
-    if !matches!(
-        &result,
-        SupervisorParentCompactionResult::NotSupervisorHelper
-    ) {
-        let _ = session
-            .services
-            .agent_control
-            .finish_goal_supervisor_helper(session.thread_id)
-            .await;
-    }
     Ok(CompactParentContextResult::from(result))
 }
 

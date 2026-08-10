@@ -26,6 +26,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
+use std::sync::Mutex as StdMutex;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 
@@ -46,7 +47,7 @@ pub(crate) struct Session {
     pub(crate) installation_id: String,
     pub(super) tx_event: Sender<Event>,
     pub(super) agent_status: watch::Sender<AgentStatus>,
-    pub(super) state: Mutex<SessionState>,
+    pub(super) state: Arc<Mutex<SessionState>>,
     /// Serializes rebuild/apply cycles for the running proxy; each cycle
     /// rebuilds from the current SessionState while holding this lock.
     pub(super) managed_network_proxy_refresh_lock: Semaphore,
@@ -66,6 +67,13 @@ pub(crate) struct Session {
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
+    /// Serializes high-level state-changing operations with a checkpoint commit decision.
+    pub(crate) checkpoint_admission_lock: Arc<Mutex<()>>,
+    /// Acknowledges internal submissions only after receiver-ordered checkpoint admission.
+    pub(crate) checkpoint_submission_acknowledgements:
+        StdMutex<HashMap<String, oneshot::Sender<CodexResult<OwnedMutexGuard<()>>>>>,
+    /// Serializes multi-await direct history injection with rollback replay and publication.
+    pub(crate) history_rewrite_lock: Arc<Mutex<()>>,
     pub(crate) pending_user_message_admissions:
         crate::user_message_admission::PendingUserMessageAdmissions,
     pub(crate) input_queue: InputQueue,
@@ -74,6 +82,8 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) next_internal_sub_id: AtomicU64,
+    /// Rejects every operation that could mutate state after an indeterminate checkpoint commit.
+    pub(super) persistence_restart_required: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -258,6 +268,7 @@ impl SessionConfiguration {
             environments: self.environments.clone(),
             workspace_roots: self.primary_workspace_roots(),
             profile_workspace_roots: self.profile_workspace_roots().to_vec(),
+            windows_sandbox_level: self.windows_sandbox_level,
             ephemeral: self.original_config_do_not_use.ephemeral,
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,
@@ -1371,7 +1382,7 @@ impl Session {
                 installation_id,
                 tx_event: tx_event.clone(),
                 agent_status,
-                state: Mutex::new(state),
+                state: Arc::new(Mutex::new(state)),
                 managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
                 features: config.features.clone(),
                 windows_sandbox_proxy_settings_mode,
@@ -1385,6 +1396,9 @@ impl Session {
                 conversation: Arc::new(RealtimeConversationManager::new()),
                 active_turn: Mutex::new(None),
                 async_hook_results,
+                checkpoint_admission_lock: Arc::new(Mutex::new(())),
+                checkpoint_submission_acknowledgements: StdMutex::new(HashMap::new()),
+                history_rewrite_lock: Arc::new(Mutex::new(())),
                 pending_user_message_admissions: Default::default(),
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
@@ -1392,6 +1406,7 @@ impl Session {
                 services,
                 git_enrichment_policy,
                 next_internal_sub_id: AtomicU64::new(0),
+                persistence_restart_required: AtomicBool::new(false),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;
@@ -1500,6 +1515,11 @@ impl Session {
                 let mut state = sess.state.lock().await;
                 state.queue_pending_session_start_source(session_start_source);
             }
+            // Every root session owns its current-membership registry. Persisted descendants are
+            // resolved individually when a tool targets them; root startup never restores the tree.
+            sess.services
+                .agent_control
+                .register_session_root(thread_id, parent_thread_id);
             Ok(sess)
         }
         .await;

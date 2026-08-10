@@ -2774,38 +2774,39 @@ async fn workspace_profile_applies_rules_to_runtime_and_profile_workspace_roots(
         std::fs::create_dir_all(root.join(".codex"))?;
     }
 
+    let base_config = ConfigToml {
+        default_permissions: Some("dev".to_string()),
+        permissions: Some(PermissionsToml {
+            entries: BTreeMap::from([(
+                "dev".to_string(),
+                PermissionProfileToml {
+                    description: None,
+                    extends: None,
+                    workspace_roots: Some(WorkspaceRootsToml {
+                        entries: BTreeMap::from([(
+                            profile_root.to_string_lossy().into_owned(),
+                            true,
+                        )]),
+                    }),
+                    filesystem: Some(FilesystemPermissionsToml {
+                        glob_scan_max_depth: None,
+                        entries: BTreeMap::from([(
+                            ":workspace_roots".to_string(),
+                            FilesystemPermissionToml::Scoped(BTreeMap::from([
+                                (".".to_string(), FileSystemAccessMode::Write),
+                                (".git".to_string(), FileSystemAccessMode::Read),
+                                (".codex".to_string(), FileSystemAccessMode::Read),
+                            ])),
+                        )]),
+                    }),
+                    network: None,
+                },
+            )]),
+        }),
+        ..Default::default()
+    };
     let config = Config::load_from_base_config_with_overrides(
-        ConfigToml {
-            default_permissions: Some("dev".to_string()),
-            permissions: Some(PermissionsToml {
-                entries: BTreeMap::from([(
-                    "dev".to_string(),
-                    PermissionProfileToml {
-                        description: None,
-                        extends: None,
-                        workspace_roots: Some(WorkspaceRootsToml {
-                            entries: BTreeMap::from([(
-                                profile_root.to_string_lossy().into_owned(),
-                                true,
-                            )]),
-                        }),
-                        filesystem: Some(FilesystemPermissionsToml {
-                            glob_scan_max_depth: None,
-                            entries: BTreeMap::from([(
-                                ":workspace_roots".to_string(),
-                                FilesystemPermissionToml::Scoped(BTreeMap::from([
-                                    (".".to_string(), FileSystemAccessMode::Write),
-                                    (".git".to_string(), FileSystemAccessMode::Read),
-                                    (".codex".to_string(), FileSystemAccessMode::Read),
-                                ])),
-                            )]),
-                        }),
-                        network: None,
-                    },
-                )]),
-            }),
-            ..Default::default()
-        },
+        base_config.clone(),
         ConfigOverrides {
             cwd: Some(cwd.clone()),
             additional_writable_roots: vec![runtime_root.clone()],
@@ -2857,6 +2858,48 @@ async fn workspace_profile_applies_rules_to_runtime_and_profile_workspace_roots(
     assert_eq!(
         config.permissions.active_permission_profile(),
         Some(ActivePermissionProfile::new("dev"))
+    );
+
+    let legacy_snapshot = Config::load_from_base_config_with_overrides(
+        base_config.clone(),
+        ConfigOverrides {
+            cwd: Some(cwd.clone()),
+            additional_writable_roots: vec![runtime_root.clone()],
+            persisted_thread_settings: Some(PersistedThreadSettingsBaseline {
+                active_permission_profile: Some(Some(ActivePermissionProfile::new("dev"))),
+                profile_workspace_roots: None,
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert_eq!(
+        legacy_snapshot.permissions.profile_workspace_roots(),
+        std::slice::from_ref(&profile_root_abs)
+    );
+
+    let explicit_empty_snapshot = Config::load_from_base_config_with_overrides(
+        base_config,
+        ConfigOverrides {
+            cwd: Some(cwd),
+            additional_writable_roots: vec![runtime_root],
+            persisted_thread_settings: Some(PersistedThreadSettingsBaseline {
+                active_permission_profile: Some(Some(ActivePermissionProfile::new("dev"))),
+                profile_workspace_roots: Some(Vec::new()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        codex_home.abs(),
+    )
+    .await?;
+    assert!(
+        explicit_empty_snapshot
+            .permissions
+            .profile_workspace_roots()
+            .is_empty()
     );
     Ok(())
 }
@@ -12551,6 +12594,130 @@ async fn absent_allow_login_shell_does_not_report_an_override() -> std::io::Resu
             .startup_warnings
             .iter()
             .all(|warning| !warning.contains("allow_login_shell"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn persisted_thread_settings_baseline_restores_complete_config() -> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let cwd = AbsolutePathBuf::try_from(codex_home.path().join("persisted-cwd"))?;
+    let workspace_root = AbsolutePathBuf::try_from(codex_home.path().join("persisted-workspace"))?;
+    let profile_workspace_root =
+        AbsolutePathBuf::try_from(codex_home.path().join("persisted-profile-workspace"))?;
+    std::fs::create_dir_all(cwd.as_path())?;
+    std::fs::create_dir_all(workspace_root.as_path())?;
+    std::fs::create_dir_all(profile_workspace_root.as_path())?;
+    let permission_profile = PermissionProfile::read_only();
+    let active_permission_profile = ActivePermissionProfile {
+        id: "persisted-profile".to_string(),
+        extends: None,
+    };
+    let collaboration_mode = codex_protocol::config_types::CollaborationMode {
+        mode: codex_protocol::config_types::ModeKind::Plan,
+        settings: codex_protocol::config_types::Settings {
+            model: "gpt-5.1-codex-max".to_string(),
+            reasoning_effort: Some(codex_protocol::openai_models::ReasoningEffort::High),
+            developer_instructions: Some("persisted plan instructions".to_string()),
+        },
+    };
+
+    let expected = PersistedThreadSettingsBaseline {
+        model: Some("gpt-5.1-codex-max".to_string()),
+        model_provider: Some(codex_model_provider_info::OPENAI_PROVIDER_ID.to_string()),
+        service_tier: Some(Some("flex".to_string())),
+        cwd: Some(cwd.to_path_buf()),
+        workspace_roots: Some(vec![workspace_root.clone()]),
+        environments: Some(Some(TurnEnvironmentSelections::new(
+            cwd.clone(),
+            Vec::new(),
+        ))),
+        approval_policy: Some(AskForApproval::Never),
+        approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+        permission_profile: Some(permission_profile.clone()),
+        active_permission_profile: Some(Some(active_permission_profile.clone())),
+        profile_workspace_roots: Some(vec![profile_workspace_root.clone()]),
+        windows_sandbox_level: Some(WindowsSandboxLevel::RestrictedToken),
+        reasoning_effort: Some(Some(codex_protocol::openai_models::ReasoningEffort::High)),
+        reasoning_summary: Some(Some(codex_protocol::config_types::ReasoningSummary::Auto)),
+        personality: Some(Some(codex_protocol::config_types::Personality::Friendly)),
+        collaboration_mode: Some(collaboration_mode.clone()),
+    };
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .harness_overrides(ConfigOverrides {
+            persisted_thread_settings: Some(expected.clone()),
+            ..Default::default()
+        })
+        .build()
+        .await?;
+
+    assert_eq!(
+        PersistedThreadSettingsBaseline {
+            model: config.model,
+            model_provider: Some(config.model_provider_id),
+            service_tier: Some(config.service_tier),
+            cwd: Some(config.cwd.to_path_buf()),
+            workspace_roots: Some(config.workspace_roots),
+            environments: config.persisted_thread_environments,
+            approval_policy: Some(config.permissions.approval_policy.value()),
+            approvals_reviewer: Some(config.approvals_reviewer),
+            permission_profile: Some(config.permissions.permission_profile().clone()),
+            active_permission_profile: Some(config.permissions.active_permission_profile()),
+            profile_workspace_roots: Some(config.permissions.profile_workspace_roots().to_vec(),),
+            windows_sandbox_level: Some(config.windows_sandbox_level),
+            reasoning_effort: Some(config.model_reasoning_effort),
+            reasoning_summary: Some(config.model_reasoning_summary),
+            personality: Some(config.personality),
+            collaboration_mode: config.initial_collaboration_mode,
+        },
+        expected
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn direct_persisted_thread_settings_restore_respects_current_requirements()
+-> std::io::Result<()> {
+    let codex_home = TempDir::new()?;
+    let mut config = ConfigBuilder::without_managed_config_for_tests()
+        .codex_home(codex_home.path().to_path_buf())
+        .fallback_cwd(Some(codex_home.path().to_path_buf()))
+        .cloud_config_bundle(
+            CloudConfigBundleFixture::loader_with_enterprise_requirement(
+                r#"allowed_approvals_reviewers = ["guardian_subagent"]
+allowed_sandbox_modes = ["read-only"]
+
+[windows]
+allowed_sandbox_implementations = ["elevated"]
+"#,
+            ),
+        )
+        .build()
+        .await?;
+    let original_network = config.permissions.network.clone();
+
+    config.apply_persisted_thread_settings_baseline(PersistedThreadSettingsBaseline {
+        approvals_reviewer: Some(ApprovalsReviewer::User),
+        permission_profile: Some(PermissionProfile::workspace_write()),
+        active_permission_profile: Some(None),
+        windows_sandbox_level: Some(WindowsSandboxLevel::RestrictedToken),
+        ..Default::default()
+    })?;
+
+    assert_eq!(
+        (
+            config.approvals_reviewer,
+            config.permissions.permission_profile().clone(),
+            config.windows_sandbox_level,
+            config.permissions.network,
+        ),
+        (
+            ApprovalsReviewer::AutoReview,
+            PermissionProfile::read_only(),
+            WindowsSandboxLevel::Elevated,
+            original_network,
+        )
     );
     Ok(())
 }

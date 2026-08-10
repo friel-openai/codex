@@ -60,6 +60,11 @@ fn spawn_agent_tool_v2_hides_thread_adoption_by_default() {
         .expect("spawn_agent should use object params");
 
     assert!(properties.contains_key("task_name"));
+    assert_eq!(
+        serde_json::to_value(&parameters).expect("serialize spawn_agent schema")["properties"]["task_name"]
+            ["maxLength"],
+        json!(AgentPath::MAX_SEGMENT_BYTES)
+    );
     assert!(properties.contains_key("message"));
     assert!(!properties.contains_key("existing_thread_id"));
     assert!(!description.contains("existing_thread_id"));
@@ -196,6 +201,11 @@ fn adopt_agent_tool_requires_thread_task_and_message() {
         ]
     );
     assert_eq!(properties["message"].encrypted, None);
+    assert_eq!(
+        serde_json::to_value(&parameters).expect("serialize adopt_agent schema")["properties"]["task_name"]
+            ["maxLength"],
+        json!(AgentPath::MAX_SEGMENT_BYTES)
+    );
     assert_eq!(
         output_schema.expect("adopt_agent output schema")["required"],
         json!(["task_name", "nickname"])
@@ -411,6 +421,7 @@ fn spawn_agent_tool_hides_model_controls_without_override_exposure() {
 #[test]
 fn send_message_tool_requires_message_and_has_no_output_schema() {
     let ToolSpec::Function(ResponsesApiTool {
+        description: _,
         parameters,
         output_schema,
         ..
@@ -538,7 +549,7 @@ fn close_agent_tool_v2_uses_owned_task_targets_and_previous_status_output() {
     assert_eq!(name, "close_agent");
     assert_eq!(
         description,
-        "Close an owned descendant agent and its live descendants, then return its previous status."
+        "Permanently close an owned descendant subtree. This closes persisted descendant edges, stops loaded runtimes, pauses Goals, clears queued input, evicts current identities, and returns bounded cleanup counts."
     );
     assert!(!description.contains("concurrency"));
     assert_eq!(
@@ -555,7 +566,16 @@ fn close_agent_tool_v2_uses_owned_task_targets_and_previous_status_output() {
     );
     assert_eq!(
         output_schema.expect("close_agent output schema")["required"],
-        json!(["previous_status"])
+        json!([
+            "previous_status",
+            "closed_agents",
+            "closed_edges",
+            "newly_closed_edges",
+            "stopped_runtimes",
+            "paused_goals",
+            "cleared_queued_items",
+            "evicted_identities"
+        ])
     );
 }
 
@@ -605,6 +625,7 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
 #[test]
 fn list_agents_tool_includes_path_prefix_and_agent_fields() {
     let ToolSpec::Function(ResponsesApiTool {
+        description,
         parameters,
         output_schema,
         ..
@@ -625,12 +646,23 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
         properties
             .get("path_prefix")
             .and_then(|schema| schema.description.as_deref()),
-        Some("Task-path prefix filter without a trailing slash. Omit to list all live agents.")
+        Some(
+            "Task-path prefix filter without a trailing slash. Omit to list all current subagents."
+        )
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!(["agent_name", "agent_status"])
+        json!([
+            "agent_id",
+            "parent_agent_id",
+            "agent_name",
+            "agent_status",
+            "last_task_message"
+        ])
     );
+    assert!(description.contains("registered ephemeral agents"));
+    assert!(description.contains("excludes the root thread"));
+    assert!(description.contains("cold historical persisted-open descendants"));
 }
 
 #[test]

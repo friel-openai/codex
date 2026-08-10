@@ -241,6 +241,7 @@ struct FakeAgentGraphStore {
     root_thread_id: ThreadId,
     descendant_thread_ids: Vec<ThreadId>,
     expected_status_filter: Option<codex_agent_graph_store::ThreadSpawnEdgeStatus>,
+    incoming_edges: HashMap<ThreadId, codex_agent_graph_store::ThreadSpawnEdge>,
 }
 
 impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
@@ -279,6 +280,20 @@ impl codex_agent_graph_store::AgentGraphStore for FakeAgentGraphStore {
         let descendant_thread_ids = self.descendant_thread_ids.clone();
         Box::pin(async move { Ok(descendant_thread_ids) })
     }
+
+    fn list_thread_spawn_edges_by_child_ids(
+        &self,
+        child_thread_ids: &[ThreadId],
+    ) -> codex_agent_graph_store::AgentGraphStoreFuture<
+        '_,
+        Vec<codex_agent_graph_store::ThreadSpawnEdge>,
+    > {
+        let incoming_edges = child_thread_ids
+            .iter()
+            .filter_map(|thread_id| self.incoming_edges.get(thread_id).copied())
+            .collect();
+        Box::pin(async move { Ok(incoming_edges) })
+    }
 }
 
 fn user_msg(text: &str) -> ResponseItem {
@@ -291,6 +306,24 @@ fn user_msg(text: &str) -> ResponseItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+fn cleared_segment_checkpoint(
+    compacted: codex_protocol::protocol::CompactedItem,
+    thread_settings: codex_protocol::protocol::ThreadSettingsAppliedEvent,
+) -> codex_rollout::CertifiedSegmentStateCheckpoint {
+    codex_rollout::CertifiedSegmentStateCheckpoint::new(
+        compacted,
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        thread_settings,
+        codex_protocol::protocol::TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid cleared test checkpoint")
 }
 fn assistant_msg(text: &str) -> ResponseItem {
     ResponseItem::Message {
@@ -312,6 +345,85 @@ fn contextual_user_interrupted_marker() -> ResponseItem {
 fn developer_interrupted_marker() -> ResponseItem {
     interrupted_turn_history_marker(InterruptedTurnHistoryMarker::Developer)
         .expect("developer interrupted marker should be enabled")
+}
+
+#[tokio::test]
+async fn resume_thread_with_history_rejects_permanently_closed_identity() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let root_thread_id = ThreadId::new();
+    let closed_ancestor_thread_id = ThreadId::new();
+    let closed_descendant_thread_id = ThreadId::new();
+    let graph_store = Arc::new(FakeAgentGraphStore {
+        root_thread_id,
+        descendant_thread_ids: Vec::new(),
+        expected_status_filter: None,
+        incoming_edges: HashMap::from([
+            (
+                closed_ancestor_thread_id,
+                codex_agent_graph_store::ThreadSpawnEdge {
+                    parent_thread_id: root_thread_id,
+                    child_thread_id: closed_ancestor_thread_id,
+                    status: codex_agent_graph_store::ThreadSpawnEdgeStatus::PermanentlyClosed,
+                },
+            ),
+            (
+                closed_descendant_thread_id,
+                codex_agent_graph_store::ThreadSpawnEdge {
+                    parent_thread_id: closed_ancestor_thread_id,
+                    child_thread_id: closed_descendant_thread_id,
+                    status: codex_agent_graph_store::ThreadSpawnEdgeStatus::Open,
+                },
+            ),
+        ]),
+    });
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, /*state_db*/ None),
+        Some(graph_store),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let result = manager
+        .resume_thread_with_history(
+            config,
+            InitialHistory::Resumed(ResumedHistory {
+                conversation_id: closed_descendant_thread_id,
+                history: Arc::new(Vec::new()),
+                rollout_path: None,
+            }),
+            auth_manager,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("permanently closed thread must not resume"),
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("permanently closed"));
+    assert!(
+        manager
+            .get_thread(closed_descendant_thread_id)
+            .await
+            .is_err()
+    );
 }
 
 #[test]
@@ -1512,6 +1624,7 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
         root_thread_id,
         descendant_thread_ids: descendant_thread_ids.clone(),
         expected_status_filter: None,
+        incoming_edges: HashMap::new(),
     });
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -1544,7 +1657,71 @@ async fn subtree_listing_uses_injected_graph_store_without_state_db() {
 }
 
 #[tokio::test]
-async fn agent_identity_restoration_uses_injected_graph_store_with_local_state_db() {
+async fn open_subtree_listing_stops_at_a_closed_promotion_boundary() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+    let state_db = init_state_db(&config)
+        .await
+        .expect("local state db should initialize");
+    let former_owner_thread_id = ThreadId::new();
+    let promoted_thread_id = ThreadId::new();
+    let promoted_child_thread_id = ThreadId::new();
+    state_db
+        .upsert_thread_spawn_edge(
+            former_owner_thread_id,
+            promoted_thread_id,
+            codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed promotion boundary should persist");
+    state_db
+        .upsert_thread_spawn_edge(
+            promoted_thread_id,
+            promoted_child_thread_id,
+            codex_state::DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("promoted subtree should persist");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store_from_config(&config, Some(Arc::clone(&state_db))),
+        local_agent_graph_store_from_state_db(Some(&state_db)),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    assert_eq!(
+        manager
+            .list_open_agent_subtree_thread_ids(former_owner_thread_id)
+            .await
+            .expect("former owner open subtree"),
+        vec![former_owner_thread_id]
+    );
+    assert_eq!(
+        manager
+            .list_open_agent_subtree_thread_ids(promoted_thread_id)
+            .await
+            .expect("promoted root open subtree"),
+        vec![promoted_thread_id, promoted_child_thread_id]
+    );
+}
+
+#[tokio::test]
+async fn thread_manager_does_not_eagerly_restore_persisted_agent_identities() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -1595,6 +1772,7 @@ async fn agent_identity_restoration_uses_injected_graph_store_with_local_state_d
         root_thread_id,
         descendant_thread_ids: vec![allowed_thread_id],
         expected_status_filter: Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+        incoming_edges: HashMap::new(),
     });
     let auth_manager =
         AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
@@ -1616,14 +1794,10 @@ async fn agent_identity_restoration_uses_injected_graph_store_with_local_state_d
     );
     let agent_control = manager.agent_control();
 
-    agent_control
-        .restore_v2_agent_metadata(&config, root_thread_id)
-        .await;
-
     assert!(
         agent_control
             .get_agent_metadata(allowed_thread_id)
-            .is_some()
+            .is_none()
     );
     assert!(agent_control.get_agent_metadata(denied_thread_id).is_none());
 }
@@ -1723,7 +1897,7 @@ async fn loaded_thread_ancestry_uses_persisted_unloaded_intermediates() {
 }
 
 #[tokio::test]
-async fn rollout_path_resume_reads_history_through_thread_store() {
+async fn rollout_path_resume_reads_latest_model_context_through_thread_store() {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -1808,12 +1982,284 @@ async fn rollout_path_resume_reads_history_through_thread_store() {
 
     let calls = in_memory_store.calls().await;
     assert_eq!(calls.read_thread_by_rollout_path, 1);
+    assert_eq!(calls.load_latest_model_context, 1);
+    assert_eq!(calls.load_history, 0);
 
     resumed_from_path
         .thread
         .shutdown_and_wait()
         .await
         .expect("shutdown path-resumed thread");
+}
+
+#[tokio::test]
+async fn rollout_path_resume_uses_active_checkpoint_without_its_predecessor() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let state_db = init_state_db(&config).await;
+    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let local_store = thread_store
+        .as_any()
+        .downcast_ref::<LocalThreadStore>()
+        .expect("configured local thread store");
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let source = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start source thread");
+    source.thread.ensure_rollout_materialized().await;
+    source
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush source rollout");
+    let rollout_path = source
+        .thread
+        .rollout_path()
+        .expect("materialized rollout path");
+    let persisted_environment_cwd = config.codex_home.join("persisted-environment");
+    std::fs::create_dir_all(persisted_environment_cwd.as_path())
+        .expect("create persisted environment cwd");
+    let persisted_environment = codex_protocol::protocol::TurnEnvironmentSelection {
+        environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+        cwd: PathUri::from_abs_path(&persisted_environment_cwd),
+        workspace_roots: vec![PathUri::from_abs_path(&persisted_environment_cwd)],
+    };
+    let mut persisted_settings = source
+        .thread
+        .config_snapshot()
+        .await
+        .into_thread_settings_snapshot();
+    persisted_settings.environments =
+        Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
+            persisted_environment_cwd,
+            vec![persisted_environment.clone()],
+        ));
+    let thread_settings = codex_protocol::protocol::ThreadSettingsAppliedEvent {
+        thread_settings: persisted_settings,
+    };
+    let window_id = uuid::Uuid::now_v7();
+    let checkpoint = cleared_segment_checkpoint(
+        codex_protocol::protocol::CompactedItem {
+            message: String::new(),
+            replacement_history: Some(vec![user_msg("checkpoint-local history")]),
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        thread_settings,
+    );
+    let frozen = local_store
+        .freeze_thread_segment(
+            source.thread_id,
+            FreezeRolloutSegmentParams::rotate(checkpoint),
+        )
+        .await
+        .expect("rotate source rollout");
+    let unavailable_predecessor = frozen.reference.rollout_path.with_extension("unavailable");
+    tokio::fs::rename(
+        frozen.reference.rollout_path.as_path(),
+        unavailable_predecessor.as_path(),
+    )
+    .await
+    .expect("hide immutable predecessor");
+
+    source
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source thread");
+    let _ = manager.remove_thread(&source.thread_id).await;
+
+    let resumed = manager
+        .resume_thread_from_rollout(
+            config,
+            rollout_path,
+            auth_manager,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("resume from the active checkpoint");
+    assert_eq!(resumed.thread_id, source.thread_id);
+    assert_eq!(
+        resumed.thread.environment_selections().await,
+        vec![persisted_environment]
+    );
+    assert!(!frozen.reference.rollout_path.exists());
+
+    resumed
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown resumed thread");
+}
+
+#[tokio::test]
+async fn legacy_fork_response_expands_more_than_two_rotated_segments() {
+    let temp_dir = tempdir().expect("tempdir");
+    let mut config = test_config().await;
+    config.codex_home = temp_dir.path().join("codex-home").abs();
+    config.cwd = config.codex_home.abs();
+    std::fs::create_dir_all(&config.codex_home).expect("create codex home");
+
+    let auth_manager =
+        AuthManager::from_auth_for_testing(CodexAuth::create_dummy_chatgpt_auth_for_testing());
+    let state_db = init_state_db(&config).await;
+    let thread_store = thread_store_from_config(&config, state_db.clone());
+    let local_store = thread_store
+        .as_any()
+        .downcast_ref::<LocalThreadStore>()
+        .expect("configured local thread store");
+    let manager = ThreadManager::new(
+        &config,
+        auth_manager.clone(),
+        build_models_manager(&config, auth_manager.clone()),
+        crate::CodexAppsToolsCache::default(),
+        SessionSource::Exec,
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        empty_extension_registry(),
+        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
+        /*analytics_events_client*/ None,
+        thread_store.clone(),
+        local_agent_graph_store_from_state_db(state_db.as_ref()),
+        TEST_INSTALLATION_ID.to_string(),
+        /*attestation_provider*/ None,
+        /*external_time_provider*/ None,
+    );
+
+    let source = manager
+        .start_thread(StartThreadOptions {
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..StartThreadOptions::new(config.clone())
+        })
+        .await
+        .expect("start legacy source thread");
+    source.thread.ensure_rollout_materialized().await;
+    let source_rollout_path = source
+        .thread
+        .rollout_path()
+        .expect("materialized source rollout path");
+    let historical_activity = codex_protocol::protocol::SubAgentActivityEvent {
+        event_id: "oldest-segment-activity".to_string(),
+        occurred_at_ms: 1,
+        agent_thread_id: ThreadId::new(),
+        agent_path: codex_protocol::AgentPath::root()
+            .join("historical_worker")
+            .expect("historical worker path"),
+        kind: codex_protocol::protocol::SubAgentActivityKind::Started,
+    };
+    source
+        .thread
+        .session
+        .persist_rollout_items(&[RolloutItem::EventMsg(EventMsg::SubAgentActivity(
+            historical_activity.clone(),
+        ))])
+        .await;
+    source
+        .thread
+        .flush_rollout()
+        .await
+        .expect("flush historical activity");
+
+    let thread_settings = codex_protocol::protocol::ThreadSettingsAppliedEvent {
+        thread_settings: source
+            .thread
+            .config_snapshot()
+            .await
+            .into_thread_settings_snapshot(),
+    };
+    let first_window_id = uuid::Uuid::now_v7();
+    let mut previous_window_id = None;
+    for rotation_index in 0..3 {
+        let window_id = uuid::Uuid::now_v7();
+        local_store
+            .freeze_thread_segment(
+                source.thread_id,
+                FreezeRolloutSegmentParams::rotate(cleared_segment_checkpoint(
+                    codex_protocol::protocol::CompactedItem {
+                        message: String::new(),
+                        replacement_history: Some(Vec::new()),
+                        window_number: Some(rotation_index + 1),
+                        first_window_id: Some(first_window_id.to_string()),
+                        previous_window_id: previous_window_id.map(|id: uuid::Uuid| id.to_string()),
+                        window_id: Some(window_id.to_string()),
+                        segment_state_checkpoint: None,
+                    },
+                    thread_settings.clone(),
+                )),
+            )
+            .await
+            .expect("rotate source rollout");
+        previous_window_id = Some(window_id);
+    }
+
+    let latest_history = manager
+        .latest_initial_history_from_rollout_path(source_rollout_path)
+        .await
+        .expect("load checkpoint-local source context");
+    assert!(latest_history.get_rollout_items().iter().all(|item| {
+        !matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::SubAgentActivity(activity))
+                if activity.event_id == historical_activity.event_id
+        )
+    }));
+
+    let (forked, response_history) = manager
+        .fork_thread_from_history_with_response(
+            ForkSnapshot::Interrupted,
+            config,
+            latest_history,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+            ClientMcpExtensions::default(),
+        )
+        .await
+        .expect("fork complete legacy response history");
+    let response_activities = response_history
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::SubAgentActivity(activity)) => Some(activity.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(response_activities, vec![historical_activity]);
+
+    forked
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown forked thread");
+    source
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source thread");
 }
 
 #[tokio::test]

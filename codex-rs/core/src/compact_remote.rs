@@ -26,6 +26,7 @@ use crate::responses_metadata::CompactionTurnMetadata;
 use crate::session::session::Session;
 use crate::session::step_context::StepContext;
 use crate::session::turn_context::TurnContext;
+use crate::state::PreparedAutoCompactWindowAdvance;
 use codex_analytics::CompactionImplementation;
 use codex_analytics::CompactionPhase;
 use codex_analytics::CompactionReason;
@@ -279,8 +280,7 @@ async fn run_remote_compact_task_inner_impl(
         new_history,
         trace_input_history,
     } = attempt;
-    let (new_window_number, new_window_ids) = sess.advance_auto_compact_window().await;
-    let (new_history, world_state_baseline) =
+    let (new_history, world_state_baseline, prepared_window_advance) =
         process_compacted_history(sess.as_ref(), new_history, &initial_context_injection).await;
 
     let reference_context_item = match initial_context_injection {
@@ -299,17 +299,16 @@ async fn run_remote_compact_task_inner_impl(
         });
     }
     sess.replace_compacted_history(
+        compaction_turn_context,
         new_history,
         reference_context_item,
         world_state_baseline,
         CompactedHistoryMetadata {
             message: String::new(),
-            window_number: new_window_number,
-            window_ids: new_window_ids,
+            prepared_window_advance,
         },
     )
-    .await;
-    sess.recompute_token_usage(compaction_turn_context).await;
+    .await?;
 
     if reporting.defers_lifecycle() {
         sess.emit_turn_item_started(compaction_turn_context, &compaction_item)
@@ -324,11 +323,15 @@ pub(crate) async fn process_compacted_history(
     sess: &Session,
     compacted_history: Vec<ResponseItem>,
     initial_context_injection: &InitialContextInjection,
-) -> (Vec<ResponseItem>, Option<Arc<WorldState>>) {
+) -> (
+    Vec<ResponseItem>,
+    Option<Arc<WorldState>>,
+    PreparedAutoCompactWindowAdvance,
+) {
     // Mid-turn compaction is the only path that must inject initial context above the last user
     // message in the replacement history. Pre-turn compaction instead injects context after the
     // compaction item, but mid-turn compaction keeps the compaction item last for model training.
-    let (initial_context, world_state_baseline) =
+    let (initial_context, world_state_baseline, prepared_window_advance) =
         build_compaction_initial_context(sess, initial_context_injection).await;
 
     let mut compacted_history = history_item_groups(compacted_history)
@@ -346,6 +349,7 @@ pub(crate) async fn process_compacted_history(
     (
         insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context),
         world_state_baseline,
+        prepared_window_advance,
     )
 }
 

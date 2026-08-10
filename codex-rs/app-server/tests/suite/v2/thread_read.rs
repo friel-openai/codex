@@ -1,3 +1,4 @@
+use super::checkpoint_test_support::test_segment_state_checkpoint;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
@@ -87,6 +88,7 @@ use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutRecorder;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
@@ -408,7 +410,10 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
             .await?;
         if index < 7 {
             store
-                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+                )
                 .await?;
         }
     }
@@ -697,13 +702,19 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
         })
         .await?;
     let malformed_segment = store
-        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+        )
         .await?
         .reference
         .rollout_path;
     for _ in 0..2 {
         store
-            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .freeze_thread_segment(
+                thread_id,
+                FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+            )
             .await?;
     }
     store
@@ -731,7 +742,10 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
         .await?;
     for _ in 0..6 {
         store
-            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .freeze_thread_segment(
+                thread_id,
+                FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+            )
             .await?;
     }
     store
@@ -836,8 +850,10 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
         [
             RolloutItem::SessionMeta(_),
             RolloutItem::RolloutReference(_),
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
-        ]
+            RolloutItem::Compacted(compacted),
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_)),
+            RolloutItem::EventMsg(EventMsg::TokenCount(_))
+        ] if compacted.segment_state_checkpoint.is_some()
     ));
     assert!(
         !std::fs::read_to_string(fork_path.as_path())?.contains("latest user"),
@@ -951,7 +967,10 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
             })
             .await?;
         store
-            .freeze_thread_segment(child_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+            .freeze_thread_segment(
+                child_id,
+                FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+            )
             .await?;
         store.shutdown_thread(child_id).await?;
         child_ids.push(child_id);
@@ -1042,7 +1061,10 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
         })
         .await?;
     let malformed_segment = store
-        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+        )
         .await?
         .reference
         .rollout_path;
@@ -1069,7 +1091,10 @@ async fn running_legacy_resume_initial_page_reads_enough_referenced_segments() -
             .await?;
         if index < 7 {
             store
-                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+                )
                 .await?;
         }
     }
@@ -1374,6 +1399,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }));
             items.push(RolloutItem::TurnContext(TurnContextItem {
                 turn_id: Some(turn_id.clone()),
@@ -1430,7 +1456,10 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
             .await?;
         if index < 2 {
             let frozen = store
-                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+                )
                 .await?;
             if index == 0 {
                 oldest_segment_path = Some(frozen.reference.rollout_path);
@@ -1812,7 +1841,7 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
                 store
                     .freeze_thread_segment(
                         thread_id,
-                        FreezeRolloutSegmentParams::rotate(Vec::new()),
+                        FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
                     )
                     .await?
                     .reference
@@ -3890,6 +3919,25 @@ fn paginated_turn_started(turn_id: &str) -> RolloutItem {
         model_context_window: None,
         collaboration_mode_kind: Default::default(),
     }))
+}
+
+fn empty_segment_state_checkpoint() -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    test_segment_state_checkpoint(
+        CompactedItem {
+            message: String::new(),
+            replacement_history: Some(Vec::new()),
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+    )
+    .expect("test segment-state checkpoint")
 }
 
 fn paginated_turn_completed(turn_id: &str) -> RolloutItem {

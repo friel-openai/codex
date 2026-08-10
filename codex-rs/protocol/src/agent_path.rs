@@ -6,10 +6,8 @@ use std::ops::Deref;
 use std::str::FromStr;
 use ts_rs::TS;
 
-#[derive(
-    Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema, TS,
-)]
-#[serde(try_from = "String", into = "String")]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema, TS)]
+#[serde(into = "String")]
 #[schemars(with = "String")]
 #[ts(type = "string")]
 pub struct AgentPath(String);
@@ -17,6 +15,16 @@ pub struct AgentPath(String);
 impl AgentPath {
     pub const ROOT: &str = "/root";
     pub const MORPHEUS: &str = "/morpheus";
+    /// Maximum byte length of one newly created agent path segment.
+    ///
+    /// Agent path segments are ASCII, so this is also the maximum character
+    /// length exposed by model tool schemas.
+    pub const MAX_SEGMENT_BYTES: usize = 255;
+    /// Maximum byte length of a newly created canonical absolute agent path.
+    ///
+    /// This bound keeps exact agent paths safe to include in bounded tool and
+    /// model-context payloads regardless of the number of path segments.
+    pub const MAX_PATH_BYTES: usize = 4 * 1024;
     const ROOT_SEGMENT: &str = "root";
 
     pub fn root() -> Self {
@@ -29,6 +37,17 @@ impl AgentPath {
 
     pub fn from_string(path: String) -> Result<Self, String> {
         validate_absolute_path(path.as_str())?;
+        Ok(Self(path))
+    }
+
+    /// Parse an agent path read from persistent storage.
+    ///
+    /// Historical paths predate the current byte limits. This constructor
+    /// preserves those paths for resume and ownership operations while still
+    /// rejecting invalid path syntax. New paths must use [`Self::from_string`]
+    /// or [`Self::join`].
+    pub fn from_persisted_string(path: String) -> Result<Self, String> {
+        validate_legacy_absolute_path(&path)?;
         Ok(Self(path))
     }
 
@@ -80,6 +99,16 @@ impl TryFrom<String> for AgentPath {
     }
 }
 
+impl<'de> Deserialize<'de> for AgentPath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let path = String::deserialize(deserializer)?;
+        Self::from_persisted_string(path).map_err(serde::de::Error::custom)
+    }
+}
+
 impl TryFrom<&str> for AgentPath {
     type Error = String;
 
@@ -123,6 +152,65 @@ impl fmt::Display for AgentPath {
 }
 
 fn validate_agent_name(agent_name: &str) -> Result<(), String> {
+    if agent_name.len() > AgentPath::MAX_SEGMENT_BYTES {
+        return Err(format!(
+            "agent_name must not exceed {} bytes",
+            AgentPath::MAX_SEGMENT_BYTES
+        ));
+    }
+    validate_legacy_agent_name(agent_name)
+}
+
+fn validate_absolute_path(path: &str) -> Result<(), String> {
+    if path.len() > AgentPath::MAX_PATH_BYTES {
+        return Err(format!(
+            "agent path must not exceed {} bytes",
+            AgentPath::MAX_PATH_BYTES
+        ));
+    }
+    validate_legacy_absolute_path(path)?;
+    if path == AgentPath::MORPHEUS {
+        return Ok(());
+    }
+
+    for segment in path.trim_start_matches('/').split('/').skip(1) {
+        if segment.len() > AgentPath::MAX_SEGMENT_BYTES {
+            return Err(format!(
+                "agent_name must not exceed {} bytes",
+                AgentPath::MAX_SEGMENT_BYTES
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate the historical on-disk representation without applying limits
+/// introduced after that representation was persisted.
+fn validate_legacy_absolute_path(path: &str) -> Result<(), String> {
+    if path == AgentPath::MORPHEUS {
+        return Ok(());
+    }
+
+    let Some(stripped) = path.strip_prefix('/') else {
+        return Err("absolute agent paths must start with `/root` or be `/morpheus`".to_string());
+    };
+    let mut segments = stripped.split('/');
+    let Some(root) = segments.next() else {
+        return Err("absolute agent path must not be empty".to_string());
+    };
+    if root != AgentPath::ROOT_SEGMENT {
+        return Err("absolute agent paths must start with `/root` or be `/morpheus`".to_string());
+    }
+    if stripped.ends_with('/') {
+        return Err("absolute agent path must not end with `/`".to_string());
+    }
+    for segment in segments {
+        validate_legacy_agent_name(segment)?;
+    }
+    Ok(())
+}
+
+fn validate_legacy_agent_name(agent_name: &str) -> Result<(), String> {
     if agent_name.is_empty() {
         return Err("agent_name must not be empty".to_string());
     }
@@ -146,31 +234,13 @@ fn validate_agent_name(agent_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_absolute_path(path: &str) -> Result<(), String> {
-    if path == AgentPath::MORPHEUS {
-        return Ok(());
-    }
-
-    let Some(stripped) = path.strip_prefix('/') else {
-        return Err("absolute agent paths must start with `/root` or be `/morpheus`".to_string());
-    };
-    let mut segments = stripped.split('/');
-    let Some(root) = segments.next() else {
-        return Err("absolute agent path must not be empty".to_string());
-    };
-    if root != AgentPath::ROOT_SEGMENT {
-        return Err("absolute agent paths must start with `/root` or be `/morpheus`".to_string());
-    }
-    if stripped.ends_with('/') {
-        return Err("absolute agent path must not end with `/`".to_string());
-    }
-    for segment in segments {
-        validate_agent_name(segment)?;
-    }
-    Ok(())
-}
-
 fn validate_relative_reference(reference: &str) -> Result<(), String> {
+    if reference.len() > AgentPath::MAX_PATH_BYTES {
+        return Err(format!(
+            "agent path reference must not exceed {} bytes",
+            AgentPath::MAX_PATH_BYTES
+        ));
+    }
     if reference.ends_with('/') {
         return Err("relative agent path must not end with `/`".to_string());
     }
@@ -235,6 +305,58 @@ mod tests {
         assert_eq!(
             AgentPath::root().resolve("../sibling"),
             Err("agent_name `..` is reserved".to_string())
+        );
+    }
+
+    #[test]
+    fn segment_byte_limit_is_inclusive() {
+        let maximum_name = "a".repeat(AgentPath::MAX_SEGMENT_BYTES);
+        let maximum_child = AgentPath::root()
+            .join(&maximum_name)
+            .expect("maximum-length segment should be valid");
+        assert_eq!(maximum_child.name(), maximum_name);
+
+        let overlong_name = "a".repeat(AgentPath::MAX_SEGMENT_BYTES + 1);
+        assert_eq!(
+            AgentPath::root().join(&overlong_name),
+            Err(format!(
+                "agent_name must not exceed {} bytes",
+                AgentPath::MAX_SEGMENT_BYTES
+            ))
+        );
+    }
+
+    #[test]
+    fn absolute_path_byte_limit_is_inclusive() {
+        let maximum_path = format!(
+            "/root{}/{}",
+            format!("/{}", "a".repeat(AgentPath::MAX_SEGMENT_BYTES)).repeat(15),
+            "b".repeat(250)
+        );
+        assert_eq!(maximum_path.len(), AgentPath::MAX_PATH_BYTES);
+        assert_eq!(
+            AgentPath::try_from(maximum_path.as_str())
+                .expect("maximum-length path should be valid")
+                .as_str(),
+            maximum_path
+        );
+
+        let overlong_path = format!("{maximum_path}/c");
+        assert_eq!(
+            AgentPath::try_from(overlong_path.as_str()),
+            Err(format!(
+                "agent path must not exceed {} bytes",
+                AgentPath::MAX_PATH_BYTES
+            ))
+        );
+        let deserialized = serde_json::from_value::<AgentPath>(serde_json::json!(overlong_path))
+            .expect("historical overlong paths must remain deserializable");
+        assert_eq!(deserialized.as_str(), overlong_path);
+        assert_eq!(
+            AgentPath::from_persisted_string(overlong_path.clone())
+                .expect("historical overlong paths must remain resumable")
+                .as_str(),
+            overlong_path
         );
     }
 }

@@ -31,6 +31,17 @@ struct AgentResidencyState {
     pending_slots: usize,
 }
 
+/// Whether a reservation may temporarily exceed the configured execution limit.
+///
+/// A completion parent can require one extra loaded slot while the completing child owns the
+/// watcher that will make that child unloadable. The scheduled residency trim removes the excess
+/// resident after delivery.
+#[derive(Clone, Copy)]
+enum ResidencyReservationKind {
+    Standard,
+    CompletionParent,
+}
+
 /// A pending resident slot that must be committed after a thread loads successfully.
 pub(super) struct AgentResidencySlot {
     /// Shared LRU that owns the pending slot.
@@ -62,11 +73,60 @@ impl AgentControl {
         multi_agent_version: MultiAgentVersion,
         protected_thread_id: Option<ThreadId>,
     ) -> CodexResult<AgentResidencySlot> {
-        let capacity = config
+        let protected_thread_ids = protected_thread_id.into_iter().collect();
+        self.reserve_agent_residency_slot_with_protected_thread_ids(
+            state,
+            config,
+            multi_agent_version,
+            protected_thread_ids,
+            ResidencyReservationKind::Standard,
+        )
+        .await
+    }
+
+    pub(super) async fn reserve_agent_residency_slot_for_completion_parent(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        config: &Config,
+        multi_agent_version: MultiAgentVersion,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+    ) -> CodexResult<AgentResidencySlot> {
+        self.reserve_agent_residency_slot_with_protected_thread_ids(
+            state,
+            config,
+            multi_agent_version,
+            vec![parent_thread_id, child_thread_id],
+            ResidencyReservationKind::CompletionParent,
+        )
+        .await
+    }
+
+    async fn reserve_agent_residency_slot_with_protected_thread_ids(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        config: &Config,
+        multi_agent_version: MultiAgentVersion,
+        protected_thread_ids: Vec<ThreadId>,
+        reservation_kind: ResidencyReservationKind,
+    ) -> CodexResult<AgentResidencySlot> {
+        let execution_capacity = config
             .effective_agent_max_threads(multi_agent_version)
             .unwrap_or(usize::MAX);
+        let resident_capacity = execution_capacity.min(DEFAULT_AGENT_RESIDENCY_LIMIT);
+        let overflow_capacity = match reservation_kind {
+            ResidencyReservationKind::Standard => execution_capacity,
+            ResidencyReservationKind::CompletionParent => execution_capacity.saturating_add(1),
+        };
         Arc::clone(&self.agent_residency)
-            .reserve_slot(self, state, capacity, protected_thread_id)
+            .reserve_slot(
+                self,
+                state,
+                resident_capacity,
+                execution_capacity,
+                overflow_capacity,
+                protected_thread_ids,
+            )
             .await
     }
 
@@ -82,7 +142,7 @@ impl AgentControl {
         }
     }
 
-    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+    pub(crate) fn forget_agent_residency(&self, thread_id: ThreadId) {
         self.agent_residency.remove(thread_id);
     }
 }
@@ -99,8 +159,10 @@ impl AgentResidency {
         self: Arc<Self>,
         control: &AgentControl,
         manager: &Arc<ThreadManagerState>,
-        capacity: usize,
-        protected_thread_id: Option<ThreadId>,
+        resident_capacity: usize,
+        execution_capacity: usize,
+        overflow_capacity: usize,
+        protected_thread_ids: Vec<ThreadId>,
     ) -> CodexResult<AgentResidencySlot> {
         loop {
             if self.try_reserve_pending_slot(capacity) {
@@ -110,15 +172,48 @@ impl AgentResidency {
                 });
             }
             match self
-                .try_unload_one_resident(control, manager, protected_thread_id)
+                .try_unload_one_resident(control, manager, &protected_thread_ids)
                 .await
             {
-                EvictionResult::Unloaded | EvictionResult::Retry => {}
+                EvictionResult::Unloaded => {}
+                EvictionResult::Retry => {
+                    if overflow_capacity > execution_capacity
+                        && self.try_reserve_pending_slot(overflow_capacity)
+                    {
+                        return Ok(AgentResidencySlot {
+                            residency: self,
+                            active: true,
+                        });
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
                 EvictionResult::Unavailable => {
+                    if self.try_reserve_pending_slot(overflow_capacity) {
+                        return Ok(AgentResidencySlot {
+                            residency: self,
+                            active: true,
+                        });
+                    }
                     return Err(CodexErr::new(CodexErrorDetails::AgentLimitReached {
                         max_threads: capacity,
                     }));
                 }
+            }
+        }
+    }
+
+    async fn trim_idle_residents(
+        &self,
+        control: &AgentControl,
+        manager: &Arc<ThreadManagerState>,
+        resident_capacity: usize,
+    ) {
+        while self.resident_count() > resident_capacity {
+            if matches!(
+                self.try_unload_one_resident(control, manager, &[]).await,
+                EvictionResult::Retry | EvictionResult::Unavailable
+            ) {
+                return;
             }
         }
     }
@@ -139,12 +234,17 @@ impl AgentResidency {
         &self,
         control: &AgentControl,
         manager: &Arc<ThreadManagerState>,
-        protected_thread_id: Option<ThreadId>,
+        protected_thread_ids: &[ThreadId],
     ) -> EvictionResult {
         let candidates_to_scan = self.resident_count();
+        let mut saw_active_watcher = false;
         for _ in 0..candidates_to_scan {
-            let Some(candidate_thread_id) = self.pop_lru_candidate(protected_thread_id) else {
-                return EvictionResult::Unavailable;
+            let Some(candidate_thread_id) = self.pop_lru_candidate(protected_thread_ids) else {
+                return if saw_active_watcher {
+                    EvictionResult::Retry
+                } else {
+                    EvictionResult::Unavailable
+                };
             };
             let lifecycle = control
                 .get_agent_metadata(candidate_thread_id)
@@ -165,9 +265,8 @@ impl AgentResidency {
             }
             if lifecycle.completion_watcher_active() {
                 self.touch(candidate_thread_id);
-                drop(_transition);
-                lifecycle.wait_for_completion_watcher().await;
-                return EvictionResult::Retry;
+                saw_active_watcher = true;
+                continue;
             }
             if let Err(err) = control
                 .unload_agent_thread(manager, candidate_thread_id)
@@ -181,7 +280,11 @@ impl AgentResidency {
             }
             return EvictionResult::Unloaded;
         }
-        EvictionResult::Unavailable
+        if saw_active_watcher {
+            EvictionResult::Retry
+        } else {
+            EvictionResult::Unavailable
+        }
     }
 
     fn resident_count(&self) -> usize {
@@ -192,7 +295,7 @@ impl AgentResidency {
             .len()
     }
 
-    fn pop_lru_candidate(&self, protected_thread_id: Option<ThreadId>) -> Option<ThreadId> {
+    fn pop_lru_candidate(&self, protected_thread_ids: &[ThreadId]) -> Option<ThreadId> {
         let mut state = self
             .state
             .lock()
@@ -200,7 +303,7 @@ impl AgentResidency {
         let candidates_to_scan = state.residents.len();
         for _ in 0..candidates_to_scan {
             let candidate_thread_id = state.residents.pop_front()?;
-            if Some(candidate_thread_id) == protected_thread_id {
+            if protected_thread_ids.contains(&candidate_thread_id) {
                 state.residents.push_back(candidate_thread_id);
                 continue;
             }

@@ -28,6 +28,15 @@ pub struct ActiveGoalSupervisorSchedulesPage {
     pub next_cursor: Option<ThreadId>,
 }
 
+/// Counts of thread-scoped Goal records changed by subtree cleanup.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ThreadGoalCleanupCounts {
+    /// Threads whose active Goal was paused.
+    pub paused_goal_threads: usize,
+    /// Threads whose persisted Goal supervisor state was removed.
+    pub cleared_supervisor_state_threads: usize,
+}
+
 impl GoalStore {
     pub(crate) fn new(pool: Arc<SqlitePool>) -> Self {
         Self { pool }
@@ -569,6 +578,67 @@ WHERE thread_id = ?
     ) -> anyhow::Result<Option<crate::ThreadGoal>> {
         self.update_active_thread_goal_status(thread_id, crate::ThreadGoalStatus::Paused)
             .await
+    }
+
+    /// Pause active Goals and clear supervisor state for a set of closed threads.
+    ///
+    /// The input is deduplicated and split into bounded SQL statements inside one transaction.
+    /// Counts describe distinct threads changed by this call.
+    pub async fn pause_active_thread_goals_and_clear_supervisor_states(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> anyhow::Result<ThreadGoalCleanupCounts> {
+        let thread_ids = thread_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if thread_ids.is_empty() {
+            return Ok(ThreadGoalCleanupCounts::default());
+        }
+
+        let now_ms = datetime_to_epoch_millis(Utc::now());
+        let mut transaction = self.pool.begin().await?;
+        let mut counts = ThreadGoalCleanupCounts::default();
+        for chunk in thread_ids.chunks(THREAD_CLEANUP_BATCH_SIZE) {
+            let mut pause = QueryBuilder::<Sqlite>::new("UPDATE thread_goals SET status = ");
+            pause
+                .push_bind(crate::ThreadGoalStatus::Paused.as_str())
+                .push(", updated_at_ms = ")
+                .push_bind(now_ms)
+                .push(" WHERE status = 'active' AND thread_id IN (");
+            let mut separated = pause.separated(", ");
+            for thread_id in chunk {
+                separated.push_bind(thread_id);
+            }
+            separated.push_unseparated(")");
+            counts.paused_goal_threads += usize::try_from(
+                pause
+                    .build()
+                    .execute(transaction.as_mut())
+                    .await?
+                    .rows_affected(),
+            )?;
+
+            let mut clear = QueryBuilder::<Sqlite>::new(
+                "DELETE FROM thread_goal_supervisor_state WHERE thread_id IN (",
+            );
+            let mut separated = clear.separated(", ");
+            for thread_id in chunk {
+                separated.push_bind(thread_id);
+            }
+            separated.push_unseparated(")");
+            counts.cleared_supervisor_state_threads += usize::try_from(
+                clear
+                    .build()
+                    .execute(transaction.as_mut())
+                    .await?
+                    .rows_affected(),
+            )?;
+        }
+        transaction.commit().await?;
+        Ok(counts)
     }
 
     pub async fn usage_limit_active_thread_goal(
@@ -1349,6 +1419,154 @@ mod tests {
                 .get_thread_goal(thread_id)
                 .await
                 .expect("goal read should succeed")
+        );
+    }
+
+    #[tokio::test]
+    async fn goal_closure_cleanup_pauses_active_goal_and_clears_supervisor_state() {
+        let runtime = test_runtime().await;
+        let thread_id = test_thread_id();
+        upsert_test_thread(&runtime, thread_id).await;
+        let goal = runtime
+            .thread_goals()
+            .replace_thread_goal(
+                thread_id,
+                "close the subtree",
+                crate::ThreadGoalStatus::Active,
+                /*token_budget*/ Some(100_000),
+            )
+            .await
+            .expect("goal replacement should succeed");
+        runtime
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id, Some(123_456))
+            .await
+            .expect("supervisor state should persist");
+
+        let cleanup = runtime
+            .thread_goals()
+            .pause_active_thread_goals_and_clear_supervisor_states(&[thread_id])
+            .await
+            .expect("goal cleanup should succeed");
+        assert_eq!(cleanup.paused_goal_threads, 1);
+        assert_eq!(cleanup.cleared_supervisor_state_threads, 1);
+        assert_eq!(
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
+                .await
+                .expect("supervisor state should load"),
+            None
+        );
+        assert_eq!(
+            runtime
+                .thread_goals()
+                .pause_active_thread_goals_and_clear_supervisor_states(&[thread_id])
+                .await
+                .expect("repeated goal cleanup should succeed"),
+            ThreadGoalCleanupCounts::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn batched_goal_closure_cleanup_handles_4097_threads() {
+        const THREAD_COUNT: usize = 4_097;
+        let runtime = test_runtime().await;
+        let thread_ids = (1..=THREAD_COUNT)
+            .map(|index| {
+                ThreadId::from_string(&Uuid::from_u128(index as u128).to_string())
+                    .expect("generated UUID should be a valid thread ID")
+            })
+            .collect::<Vec<_>>();
+        let preserved_thread_id = ThreadId::from_string(
+            &Uuid::from_u128(u128::try_from(THREAD_COUNT).unwrap() + 1).to_string(),
+        )
+        .expect("generated UUID should be a valid thread ID");
+        let mut transaction = runtime
+            .thread_goals()
+            .pool
+            .begin()
+            .await
+            .expect("goal transaction should start");
+        for thread_id in thread_ids
+            .iter()
+            .copied()
+            .chain(std::iter::once(preserved_thread_id))
+        {
+            let thread_id = thread_id.to_string();
+            sqlx::query(
+                r#"
+INSERT INTO thread_goals (
+    thread_id, goal_id, objective, status, token_budget, tokens_used,
+    time_used_seconds, created_at_ms, updated_at_ms
+) VALUES (?, ?, 'close the subtree', 'active', NULL, 0, 0, 1, 1)
+                "#,
+            )
+            .bind(&thread_id)
+            .bind(format!("goal-{thread_id}"))
+            .execute(transaction.as_mut())
+            .await
+            .expect("goal should be inserted");
+            sqlx::query(
+                r#"
+INSERT INTO thread_goal_supervisor_state (
+    thread_id, goal_id, snoozed_until_ms, updated_at_ms
+) VALUES (?, ?, 123456, 1)
+                "#,
+            )
+            .bind(&thread_id)
+            .bind(format!("goal-{thread_id}"))
+            .execute(transaction.as_mut())
+            .await
+            .expect("supervisor state should be inserted");
+        }
+        transaction
+            .commit()
+            .await
+            .expect("goal setup should commit");
+
+        let mut cleanup_ids = thread_ids.clone();
+        cleanup_ids.extend_from_slice(&thread_ids[..2]);
+        let counts = runtime
+            .thread_goals()
+            .pause_active_thread_goals_and_clear_supervisor_states(&cleanup_ids)
+            .await
+            .expect("batched goal cleanup should succeed");
+        assert_eq!(
+            ThreadGoalCleanupCounts {
+                paused_goal_threads: THREAD_COUNT,
+                cleared_supervisor_state_threads: THREAD_COUNT,
+            },
+            counts
+        );
+        assert_eq!(
+            crate::ThreadGoalStatus::Active,
+            runtime
+                .thread_goals()
+                .get_thread_goal(preserved_thread_id)
+                .await
+                .expect("preserved goal should load")
+                .expect("preserved goal should exist")
+                .status
+        );
+        assert_eq!(
+            Some(123_456),
+            runtime
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(
+                    preserved_thread_id,
+                    &format!("goal-{preserved_thread_id}"),
+                )
+                .await
+                .expect("preserved supervisor state should load")
+        );
+        assert_eq!(
+            ThreadGoalCleanupCounts::default(),
+            runtime
+                .thread_goals()
+                .pause_active_thread_goals_and_clear_supervisor_states(&thread_ids)
+                .await
+                .expect("repeated batched goal cleanup should succeed")
         );
     }
 

@@ -14,6 +14,7 @@ use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -23,12 +24,16 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode as MemoryMode;
+use codex_protocol::protocol::ThreadRolledBackEvent;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TokenUsage;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use serde::Deserialize;
 use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
+
+use crate::error::ThreadStoreError;
 
 mod optional_option {
     use super::*;
@@ -180,6 +185,24 @@ pub struct AppendThreadItemsParams {
 pub struct FreezeRolloutSegmentParams {
     mode: FreezeRolloutSegmentMode,
     initial_items: Vec<RolloutItem>,
+    /// Index of the certified checkpoint after an optional invariant-preserving prefix.
+    certified_checkpoint_start: Option<usize>,
+}
+
+/// Authoritative result of persisting one segment-state checkpoint.
+///
+/// `NotCommitted` is stronger than an ordinary write error: the store guarantees that none of the
+/// checkpoint records became durable or remained queued for a later retry. `Indeterminate` means
+/// the store cannot prove whether the checkpoint committed, so callers must stop mutating the
+/// thread until it is reloaded from durable history.
+#[derive(Debug)]
+pub enum SegmentCheckpointPersistenceOutcome {
+    /// The complete checkpoint batch is durable and authoritative.
+    Committed,
+    /// No checkpoint record became durable or remained queued for retry.
+    NotCommitted { error: ThreadStoreError },
+    /// The store cannot determine whether the checkpoint became authoritative.
+    Indeterminate { error: ThreadStoreError },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,14 +217,44 @@ impl FreezeRolloutSegmentParams {
         Self {
             mode: FreezeRolloutSegmentMode::Snapshot,
             initial_items: Vec::new(),
+            certified_checkpoint_start: None,
         }
     }
 
-    /// Rotates the source rollout and writes `initial_items` after its reference.
-    pub fn rotate(initial_items: Vec<RolloutItem>) -> Self {
+    /// Rotates the source rollout and writes a certified current-state checkpoint after its
+    /// predecessor reference.
+    #[cfg(not(test))]
+    pub fn rotate(checkpoint: CertifiedSegmentStateCheckpoint) -> Self {
+        Self {
+            mode: FreezeRolloutSegmentMode::Rotate,
+            initial_items: checkpoint.into_items(),
+            certified_checkpoint_start: Some(0),
+        }
+    }
+
+    /// Rotates the source rollout and atomically installs one rollback marker followed by the
+    /// certified post-rollback state checkpoint in the new active segment.
+    pub fn rotate_after_rollback(
+        rollback: ThreadRolledBackEvent,
+        checkpoint: CertifiedSegmentStateCheckpoint,
+    ) -> Self {
+        let mut initial_items = Vec::with_capacity(checkpoint.items().len() + 1);
+        initial_items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback)));
+        initial_items.extend(checkpoint.into_items());
         Self {
             mode: FreezeRolloutSegmentMode::Rotate,
             initial_items,
+            certified_checkpoint_start: Some(1),
+        }
+    }
+
+    /// Rotates arbitrary records in storage tests that exercise pre-checkpoint compatibility.
+    #[cfg(test)]
+    pub(crate) fn rotate(initial_items: Vec<RolloutItem>) -> Self {
+        Self {
+            mode: FreezeRolloutSegmentMode::Rotate,
+            initial_items,
+            certified_checkpoint_start: None,
         }
     }
 
@@ -211,6 +264,34 @@ impl FreezeRolloutSegmentParams {
 
     pub(crate) fn initial_items(&self) -> &[RolloutItem] {
         self.initial_items.as_slice()
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), codex_rollout::SegmentStateCheckpointError> {
+        if self.is_snapshot() {
+            return Ok(());
+        }
+        if let Some(checkpoint_start) = self.certified_checkpoint_start {
+            let valid_prefix = match checkpoint_start {
+                0 => true,
+                1 => matches!(
+                    self.initial_items.first(),
+                    Some(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)))
+                ),
+                _ => false,
+            };
+            if !valid_prefix {
+                return Err(codex_rollout::SegmentStateCheckpointError::uncertified());
+            }
+            // The type accepted by `rotate` was already validated. Rebuild validation remains at
+            // this storage boundary so future constructors cannot weaken the writer invariant.
+            return codex_rollout::validate_certified_segment_state_checkpoint(
+                &self.initial_items[checkpoint_start..],
+            );
+        }
+        #[cfg(test)]
+        return Ok(());
+        #[cfg(not(test))]
+        Err(codex_rollout::SegmentStateCheckpointError::uncertified())
     }
 }
 
@@ -236,6 +317,13 @@ pub struct FrozenRolloutSegment {
 pub struct LoadThreadHistoryParams {
     /// Thread id to load.
     pub thread_id: ThreadId,
+    /// Exact rollout path selected by a path-addressed caller.
+    ///
+    /// Stores that support path-addressed rollouts must prefer this path over rediscovering the
+    /// thread under their configured storage root. This keeps an explicit external source stable
+    /// across metadata, latest-context, and full-history reads.
+    #[serde(default)]
+    pub rollout_path: Option<PathBuf>,
     /// Whether archived threads are eligible.
     pub include_archived: bool,
 }
@@ -357,6 +445,15 @@ pub struct ReadThreadParams {
     pub include_archived: bool,
     /// Whether persisted rollout items should be included in the response.
     pub include_history: bool,
+}
+
+/// Parameters for reading persisted metadata for a bounded set of threads.
+///
+/// Missing thread IDs are omitted. Implementations must not load thread history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadThreadsParams {
+    /// Thread IDs to look up. Results preserve this order after missing IDs are omitted.
+    pub thread_ids: Vec<ThreadId>,
 }
 
 /// Parameters for reading a local rollout-backed thread by path.
@@ -1027,6 +1124,27 @@ pub struct DeleteThreadParams {
 pub struct DeleteThreadsParams {
     /// Thread ids to delete, in the order their persisted data should be removed.
     pub thread_ids: Vec<ThreadId>,
+}
+
+/// Exact durable result of an ordered multi-thread deletion.
+///
+/// A store reports an error that occurs after earlier deletions inside this outcome so callers can
+/// reconcile those irreversible deletions before returning the error to their client.
+#[derive(Debug)]
+pub struct DeleteThreadsOutcome {
+    /// Thread ids whose persisted data was deleted or was already absent, in request order.
+    pub deleted_thread_ids: Vec<ThreadId>,
+    /// First deletion that failed after the completed prefix.
+    pub failure: Option<DeleteThreadsFailure>,
+}
+
+/// First failed member of an ordered multi-thread deletion.
+#[derive(Debug)]
+pub struct DeleteThreadsFailure {
+    /// Thread id whose deletion failed.
+    pub thread_id: ThreadId,
+    /// Store error returned for `thread_id`.
+    pub error: crate::ThreadStoreError,
 }
 
 #[cfg(test)]

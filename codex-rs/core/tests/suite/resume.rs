@@ -1,6 +1,9 @@
 use anyhow::Result;
+use codex_features::Feature;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
 use codex_protocol::user_input::UserInput;
@@ -16,6 +19,7 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use std::sync::Arc;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -77,6 +81,98 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
         }
         other => panic!("unexpected initial messages after resume: {other:#?}"),
     }
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_clears_inherited_subagent_environment_context() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-resumed"),
+                ev_completed("resp-resumed"),
+            ]),
+        ],
+    )
+    .await;
+    let configure = |config: &mut codex_core::config::Config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    };
+    let mut initial_builder = test_codex().with_config(configure);
+    let initial = initial_builder.build_with_auto_env(&server).await?;
+    initial
+        .submit_turn("persist an initial world state")
+        .await?;
+    initial.codex.ensure_rollout_materialized().await;
+    initial.codex.flush_rollout().await?;
+
+    let home = initial.home.clone();
+    let rollout_path = initial
+        .session_configured
+        .rollout_path
+        .clone()
+        .expect("initial session should have a rollout path");
+    initial.codex.shutdown_and_wait().await?;
+
+    let mut rollout_lines = std::fs::read_to_string(&rollout_path)?
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    let world_state = rollout_lines
+        .iter_mut()
+        .rev()
+        .find_map(|line| match &mut line.item {
+            RolloutItem::WorldState(world_state) => Some(world_state),
+            _ => None,
+        })
+        .expect("initial turn should persist a world state");
+    let state = world_state
+        .state
+        .as_object_mut()
+        .expect("world state should be an object");
+    let environments = state
+        .entry("environments")
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+        .expect("environments world state should be an object");
+    environments.insert(
+        "subagents".to_string(),
+        Value::String("- /root/stale: working".to_string()),
+    );
+    let persisted = rollout_lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<serde_json::Result<Vec<_>>>()?
+        .join("\n");
+    std::fs::write(&rollout_path, format!("{persisted}\n"))?;
+
+    let mut resume_builder = test_codex().with_config(configure);
+    let resumed = resume_builder.resume(&server, home, rollout_path).await?;
+    resumed
+        .submit_turn("confirm current subagent membership")
+        .await?;
+
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains("<subagents />")),
+        "the first resumed request must clear inherited subagent context"
+    );
 
     Ok(())
 }

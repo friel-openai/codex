@@ -64,7 +64,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
 
 use codex_rollout::state_db::StateDbHandle;
 
@@ -82,6 +81,7 @@ pub struct ThreadConfigSnapshot {
     pub environments: TurnEnvironmentSelections,
     pub workspace_roots: Vec<AbsolutePathBuf>,
     pub profile_workspace_roots: Vec<AbsolutePathBuf>,
+    pub windows_sandbox_level: WindowsSandboxLevel,
     pub ephemeral: bool,
     pub reasoning_effort: Option<ReasoningEffort>,
     pub reasoning_summary: Option<ReasoningSummary>,
@@ -168,6 +168,10 @@ impl ThreadConfigSnapshot {
             permission_profile: self.permission_profile,
             active_permission_profile: self.active_permission_profile,
             cwd,
+            environments: Some(self.environments),
+            workspace_roots: Some(self.workspace_roots),
+            profile_workspace_roots: Some(self.profile_workspace_roots),
+            windows_sandbox_level: Some(self.windows_sandbox_level),
             reasoning_effort: self.reasoning_effort,
             reasoning_summary: self.reasoning_summary,
             personality: self.personality,
@@ -205,6 +209,14 @@ pub struct CodexThread {
     rollout_path: Option<PathBuf>,
     out_of_band_elicitations: Mutex<OutOfBandElicitations>,
     _diagnostics_guard: GaugeGuard,
+}
+
+/// Retains this thread's checkpoint admission while a caller-owned mutation completes.
+///
+/// Callers that persist state outside the rollout must hold this value until the external state,
+/// rollout record, and runtime effects have all reached one consistent outcome.
+pub struct ThreadCheckpointMutationAdmission {
+    _checkpoint_admission: crate::session::CheckpointAdmission,
 }
 
 #[derive(Default)]
@@ -640,7 +652,10 @@ impl CodexThread {
     }
 
     /// Records a user-role session-prefix message without creating a new user turn boundary.
-    pub(crate) async fn inject_user_message_without_turn(&self, message: String) {
+    pub(crate) async fn inject_user_message_without_turn(
+        &self,
+        message: String,
+    ) -> CodexResult<()> {
         let item = ResponseItem::Message {
             id: None,
             role: "user".to_string(),
@@ -650,7 +665,25 @@ impl CodexThread {
         };
         self.session
             .inject_no_new_turn(vec![item], /*current_turn_context*/ None)
-            .await;
+            .await
+    }
+
+    /// Durably records one legacy subagent completion before its child queue is acknowledged.
+    pub(crate) async fn record_subagent_completion_notification(
+        &self,
+        item_id: codex_protocol::ResponseItemId,
+        message: String,
+    ) -> CodexResult<()> {
+        let item = ResponseItem::Message {
+            id: Some(item_id),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText { text: message }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        };
+        self.session
+            .record_subagent_completion_notification(item)
+            .await
     }
 
     /// Record raw Responses API items without starting a new turn.
@@ -661,22 +694,7 @@ impl CodexThread {
             ));
         }
 
-        let turn_context = self.session.new_default_turn().await;
-        if self.session.reference_context_item().await.is_none() {
-            // This history-only API runs without run_turn, so it owns its initial step.
-            let step_context = self
-                .session
-                .capture_step_context(Arc::clone(&turn_context), &CancellationToken::new())
-                .await?;
-            self.session
-                .record_context_updates_and_set_reference_context_item(step_context.as_ref())
-                .await?;
-        }
-        self.session
-            .inject_no_new_turn(items, Some(turn_context.as_ref()))
-            .await;
-        self.session.flush_rollout().await?;
-        Ok(())
+        self.session.inject_response_items(items).await
     }
 
     pub fn rollout_path(&self) -> Option<PathBuf> {
@@ -732,24 +750,24 @@ impl CodexThread {
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> ThreadStoreResult<StoredThread> {
-        let live_thread = self
-            .session
-            .live_thread_for_persistence("update thread metadata")
-            .map_err(|err| ThreadStoreError::Internal {
-                message: err.to_string(),
-            })?;
-        live_thread.update_metadata(patch, include_archived).await
+        self.session
+            .update_thread_metadata(patch, include_archived)
+            .await
     }
 
     /// Appends rollout items through the live thread so derived metadata stays in sync.
     pub async fn append_rollout_items(&self, items: &[RolloutItem]) -> ThreadStoreResult<()> {
-        let live_thread = self
-            .session
-            .live_thread_for_persistence("append rollout items")
-            .map_err(|err| ThreadStoreError::Internal {
-                message: err.to_string(),
-            })?;
-        live_thread.append_items(items).await
+        self.session.append_rollout_items(items).await
+    }
+
+    /// Orders a caller-owned mutation before checkpoint capture or after its committed outcome.
+    pub async fn lock_checkpoint_mutation(
+        &self,
+        operation: &str,
+    ) -> anyhow::Result<ThreadCheckpointMutationAdmission> {
+        Ok(ThreadCheckpointMutationAdmission {
+            _checkpoint_admission: self.session.lock_checkpoint_admission(operation).await?,
+        })
     }
 
     pub fn state_db(&self) -> Option<StateDbHandle> {

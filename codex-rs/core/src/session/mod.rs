@@ -3,10 +3,14 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::ops::Deref;
+use std::ops::DerefMut;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -122,6 +126,7 @@ use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -141,11 +146,13 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_rmcp_client::ElicitationResponse;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::materialize_model_context_rollout_items_from;
 use codex_rollout::materialize_recent_rollout_lines_from;
 use codex_rollout::resolve_rollout_reference_path;
 use codex_rollout::state_db;
+use codex_rollout::validated_segment_state_checkpoint;
 use codex_rollout_trace::AgentResultTracePayload;
 use codex_rollout_trace::ThreadStartedTraceMetadata;
 use codex_rollout_trace::ThreadTraceContext;
@@ -159,9 +166,14 @@ use codex_thread_store::LiveThreadInitGuard;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::SegmentCheckpointPersistenceOutcome;
+use codex_thread_store::StoredThread;
+use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadPersistenceMode;
 use codex_thread_store::ThreadStore;
+use codex_thread_store::ThreadStoreError;
+use codex_thread_store::ThreadStoreResult;
 use codex_utils_audio::prepare_response_items as prepare_audio_response_items;
 use codex_utils_path_uri::PathUri;
 use futures::future::BoxFuture;
@@ -170,11 +182,23 @@ use futures::prelude::*;
 use rmcp::model::RequestId;
 use serde_json::Value;
 use tokio::sync::Mutex;
+use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+tokio::task_local! {
+    /// Identifies every session whose checkpoint admission is owned by the current call stack.
+    static CHECKPOINT_ADMISSION_LOCKS: Vec<Arc<Mutex<()>>>;
+}
+
+/// Retains exclusive checkpoint admission until the admitted mutation is complete.
+pub(crate) struct CheckpointAdmission {
+    _guard: Option<OwnedMutexGuard<()>>,
+}
 use toml::Value as TomlValue;
 use tracing::Instrument;
 use tracing::debug;
@@ -191,6 +215,7 @@ use crate::codex_thread::ThreadConfigSnapshot;
 use crate::compact::collect_user_messages;
 use crate::config::Config;
 use crate::config::Constrained;
+use crate::config::ConstraintError;
 use crate::config::ConstraintResult;
 use crate::config::PermissionProfileSnapshot;
 use crate::config::PermissionProfileState;
@@ -209,6 +234,8 @@ use codex_protocol::error::Result as CodexResult;
 #[cfg(test)]
 use codex_protocol::exec_output::StreamOutput;
 
+#[cfg(test)]
+mod checkpoint_rotation_test_support;
 mod code_mode_warning;
 mod config_lock;
 pub(crate) mod context_window;
@@ -239,7 +266,9 @@ use self::config_lock::export_config_lock_if_configured;
 use self::config_lock::validate_config_lock_if_configured;
 #[cfg(test)]
 use self::handlers::submission_dispatch_span;
+#[cfg(test)]
 use self::handlers::submission_loop;
+pub(crate) use self::input_queue::DurableResponseItemPersistence;
 pub(crate) use self::input_queue::InputQueueActivity;
 pub use self::input_queue::TurnInput;
 pub(crate) use self::input_queue::TurnInputQueue;
@@ -369,6 +398,7 @@ pub(crate) async fn load_agent_role_prompt(
 #[derive(Debug, PartialEq)]
 pub enum SteerInputError {
     NoActiveTurn(Vec<UserInput>),
+    RestartRequired(Vec<UserInput>),
     ExpectedTurnMismatch { expected: String, actual: String },
     ActiveTurnNotSteerable { turn_kind: NonSteerableTurnKind },
     EmptyInput,
@@ -380,6 +410,11 @@ impl SteerInputError {
             Self::NoActiveTurn(_) => ErrorEvent {
                 message: "no active turn to steer".to_string(),
                 codex_error_info: Some(CodexErrorInfo::BadRequest),
+            },
+            Self::RestartRequired(_) => ErrorEvent {
+                message: "Thread persistence is in an indeterminate state. Restart this thread before steering input."
+                    .to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
             },
             Self::ExpectedTurnMismatch { expected, actual } => ErrorEvent {
                 message: format!("expected active turn id `{expected}` but found `{actual}`"),
@@ -432,6 +467,7 @@ use crate::shell;
 use crate::state::AutoCompactWindowIds;
 use crate::state::AutoCompactWindowSnapshot;
 use crate::state::PendingRequestPermissions;
+use crate::state::PreparedAutoCompactWindowAdvance;
 use crate::state::SessionServices;
 use crate::state::SessionState;
 #[cfg(test)]
@@ -495,6 +531,8 @@ use codex_protocol::protocol::SessionNetworkProxyRuntime;
 use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -513,6 +551,8 @@ use codex_utils_stream_parser::ProposedPlanSegment;
 /// completion future observes that shutdown.
 pub(crate) struct SessionIo {
     pub(crate) tx_sub: Sender<Submission>,
+    /// Bounded control lane for responses that can unblock checkpoint-admitted work and shutdown.
+    pub(crate) tx_control_sub: Sender<Submission>,
     pub(crate) rx_event: Receiver<Event>,
     // Last known status of the agent.
     pub(crate) agent_status: watch::Receiver<AgentStatus>,
@@ -529,6 +569,95 @@ pub(crate) enum GitEnrichmentPolicy {
     Skip,
 }
 
+#[derive(Clone, Copy)]
+enum EventPersistence {
+    Persist,
+    AlreadyPersisted,
+}
+
+/// Result of installing one segment-state checkpoint through the configured thread store.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SegmentCheckpointPersistence {
+    /// Rotation or its fallback append stored the complete checkpoint.
+    Persisted,
+    /// The session has no durable thread writer, so the transition is intentionally memory-only.
+    InMemoryOnly,
+    /// A durable writer exists, but neither rotation nor fallback append stored the checkpoint.
+    Failed,
+    /// The store cannot prove which checkpoint state is durable. The session must be reloaded.
+    Indeterminate,
+}
+
+/// Whether a detached checkpoint owner left the current session usable.
+enum CheckpointOwnerCompletion {
+    Continue,
+    RestartRequired,
+}
+
+struct SegmentCheckpointPersistenceResult {
+    state: CheckpointMutationGuard,
+    persistence: SegmentCheckpointPersistence,
+}
+
+/// Owns the session mutation fence while a checkpoint commit is unresolved.
+///
+/// A panic sets the restart flag from [`Drop`] before the state mutex is released, so a settings
+/// update already waiting on the mutex cannot mutate state during the supervisor's panic handoff.
+pub(super) struct CheckpointMutationGuard {
+    _admission: OwnedMutexGuard<()>,
+    state: OwnedMutexGuard<SessionState>,
+    session: Arc<Session>,
+    restart_on_drop: bool,
+}
+
+impl CheckpointMutationGuard {
+    pub(super) fn new(
+        admission: OwnedMutexGuard<()>,
+        state: OwnedMutexGuard<SessionState>,
+        session: Arc<Session>,
+    ) -> Self {
+        Self {
+            _admission: admission,
+            state,
+            session,
+            restart_on_drop: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.restart_on_drop = false;
+    }
+}
+
+impl Deref for CheckpointMutationGuard {
+    type Target = SessionState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+
+impl DerefMut for CheckpointMutationGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+
+impl Drop for CheckpointMutationGuard {
+    fn drop(&mut self) {
+        if self.restart_on_drop {
+            self.session
+                .require_restart_after_indeterminate_persistence();
+        }
+    }
+}
+
+/// Selects which auto-compaction window identity full initial context describes.
+enum InitialContextAutoCompactWindow {
+    Current,
+    Prepared(AutoCompactWindowIds),
+}
+
 /// Resume keeps its bounded replay, while a new fork needs complete logical model context.
 enum ForkedHistoryMaterialization {
     Recent,
@@ -542,6 +671,8 @@ pub(crate) struct ForkModelState {
     history: ContextManager,
     /// Settings used for normal turn-to-turn model updates.
     previous_turn_settings: Option<PreviousTurnSettings>,
+    /// Latest provider quota snapshot paired with the shared model history.
+    latest_rate_limits: Option<RateLimitSnapshot>,
     /// Active compaction window identity inherited by the child's model context.
     window_number: u64,
     window_ids: AutoCompactWindowIds,
@@ -805,6 +936,7 @@ impl Session {
             windows_sandbox_proxy_settings_mode,
         } = args;
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
+        let (tx_control_sub, rx_control_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
         let LoadedUserInstructions {
@@ -965,16 +1097,26 @@ impl Session {
         } else {
             dynamic_tools
         };
-        // TODO (aibrahim): Consolidate config.model and config.model_reasoning_effort into config.collaboration_mode
-        // to avoid extracting these fields separately and constructing CollaborationMode here.
-        let collaboration_mode = CollaborationMode {
-            mode: ModeKind::Default,
-            settings: Settings {
-                model: model.clone(),
-                reasoning_effort: config.model_reasoning_effort.clone(),
-                developer_instructions: None,
-            },
-        };
+        // A resumed thread preserves its collaboration mode while the resolved model and effort
+        // reflect explicit resume overrides and current model availability.
+        let collaboration_mode = config
+            .initial_collaboration_mode
+            .as_ref()
+            .map(|mode| {
+                mode.with_updates(
+                    Some(model.clone()),
+                    Some(config.model_reasoning_effort.clone()),
+                    /*developer_instructions*/ None,
+                )
+            })
+            .unwrap_or_else(|| CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: model.clone(),
+                    reasoning_effort: config.model_reasoning_effort.clone(),
+                    developer_instructions: None,
+                },
+            });
         let fast_mode_enabled = config.features.enabled(Feature::FastMode);
         let initial_service_tier_warning = unsupported_service_tier_warning(
             config.service_tier.as_deref(),
@@ -1079,12 +1221,18 @@ impl Session {
         // This task will run until Op::Shutdown is received.
         let session_for_loop = Arc::clone(&session);
         let session_loop_handle = tokio::spawn(async move {
-            submission_loop(session_for_loop, configured_config, rx_sub)
-                .instrument(info_span!("session_loop", thread_id = %thread_id))
-                .await;
+            handlers::submission_loop_with_control(
+                session_for_loop,
+                configured_config,
+                rx_sub,
+                rx_control_sub,
+            )
+            .instrument(info_span!("session_loop", thread_id = %thread_id))
+            .await;
         });
         let io = SessionIo {
             tx_sub,
+            tx_control_sub,
             rx_event,
             agent_status: agent_status_rx,
             session_loop_termination: session_loop_termination_from_handle(session_loop_handle),
@@ -1143,7 +1291,12 @@ impl SessionIo {
         if sub.trace.is_none() {
             sub.trace = current_span_w3c_trace_context();
         }
-        self.tx_sub
+        let sender = if is_checkpoint_control_submission(&sub.op) {
+            &self.tx_control_sub
+        } else {
+            &self.tx_sub
+        };
+        sender
             .send(sub)
             .await
             .map_err(|_| CodexErr::InternalAgentDied)?;
@@ -1173,6 +1326,10 @@ impl SessionIo {
     pub(crate) async fn agent_status(&self) -> AgentStatus {
         self.agent_status.borrow().clone()
     }
+}
+
+fn is_checkpoint_control_submission(op: &Op) -> bool {
+    matches!(op, Op::ResolveElicitation { .. } | Op::Shutdown)
 }
 
 /// Generate a core submission ID. App-server exposes submission IDs that
@@ -1463,8 +1620,185 @@ impl Session {
             .ok_or_else(|| anyhow::anyhow!("Session persistence is disabled; cannot {operation}."))
     }
 
+    pub(crate) fn live_thread_for_mutation(&self, operation: &str) -> anyhow::Result<&LiveThread> {
+        if self.persistence_restart_required() {
+            anyhow::bail!(
+                "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+            );
+        }
+        self.live_thread_for_persistence(operation)
+    }
+
+    /// Serializes a direct thread-store mutation with checkpoint capture and commit.
+    ///
+    /// [`CheckpointMutationGuard`] sets the restart flag before releasing `Session.state`, so a
+    /// caller already queued here cannot pass admission after an indeterminate checkpoint.
+    pub(crate) async fn lock_state_for_persistence_mutation(
+        &self,
+        operation: &str,
+    ) -> anyhow::Result<MutexGuard<'_, SessionState>> {
+        let state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            anyhow::bail!(
+                "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+            );
+        }
+        Ok(state)
+    }
+
+    /// Admits one high-level mutation before a checkpoint starts, or after its outcome is known.
+    ///
+    /// Checkpoint owners retain the exclusive guard through commit classification. A caller that
+    /// was queued before an indeterminate result therefore observes the restart flag here instead
+    /// of reporting success for work the session can no longer accept.
+    pub(crate) async fn lock_checkpoint_admission(
+        &self,
+        operation: &str,
+    ) -> anyhow::Result<CheckpointAdmission> {
+        let checkpoint_admission_lock = Arc::clone(&self.checkpoint_admission_lock);
+        let inherited = CHECKPOINT_ADMISSION_LOCKS
+            .try_with(|locks| {
+                locks
+                    .iter()
+                    .any(|lock| Arc::ptr_eq(lock, &checkpoint_admission_lock))
+            })
+            .unwrap_or(false);
+        if inherited {
+            if self.persistence_restart_required() {
+                anyhow::bail!(
+                    "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+                );
+            }
+            return Ok(CheckpointAdmission { _guard: None });
+        }
+        let admission = checkpoint_admission_lock.lock_owned().await;
+        if self.persistence_restart_required() {
+            anyhow::bail!(
+                "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+            );
+        }
+        Ok(CheckpointAdmission {
+            _guard: Some(admission),
+        })
+    }
+
+    /// Runs one mutation while nested checkpoint-aware calls inherit its admission.
+    pub(crate) async fn with_checkpoint_admission<T, F>(
+        &self,
+        operation: &str,
+        make_future: impl FnOnce() -> F,
+    ) -> anyhow::Result<T>
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let _admission = self.lock_checkpoint_admission(operation).await?;
+        let checkpoint_admission_lock = Arc::clone(&self.checkpoint_admission_lock);
+        let inherited = CHECKPOINT_ADMISSION_LOCKS
+            .try_with(|locks| {
+                locks
+                    .iter()
+                    .any(|lock| Arc::ptr_eq(lock, &checkpoint_admission_lock))
+            })
+            .unwrap_or(false);
+        if inherited {
+            return Ok(make_future().await);
+        }
+        let mut locks = CHECKPOINT_ADMISSION_LOCKS
+            .try_with(Clone::clone)
+            .unwrap_or_default();
+        locks.push(checkpoint_admission_lock);
+        Ok(CHECKPOINT_ADMISSION_LOCKS.scope(locks, make_future()).await)
+    }
+
+    /// Marks a receiver dispatch whose sender transferred checkpoint admission with the request.
+    pub(crate) async fn with_inherited_checkpoint_admission<T>(
+        &self,
+        future: impl std::future::Future<Output = T>,
+    ) -> T {
+        let checkpoint_admission_lock = Arc::clone(&self.checkpoint_admission_lock);
+        let mut locks = CHECKPOINT_ADMISSION_LOCKS
+            .try_with(Clone::clone)
+            .unwrap_or_default();
+        if !locks
+            .iter()
+            .any(|lock| Arc::ptr_eq(lock, &checkpoint_admission_lock))
+        {
+            locks.push(checkpoint_admission_lock);
+        }
+        CHECKPOINT_ADMISSION_LOCKS.scope(locks, future).await
+    }
+
+    pub(crate) fn register_checkpoint_submission_acknowledgement(
+        &self,
+        submission_id: String,
+    ) -> oneshot::Receiver<CodexResult<OwnedMutexGuard<()>>> {
+        let (acknowledgement_sender, acknowledgement_receiver) = oneshot::channel();
+        let previous = self
+            .checkpoint_submission_acknowledgements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(submission_id, acknowledgement_sender);
+        debug_assert!(previous.is_none());
+        acknowledgement_receiver
+    }
+
+    pub(crate) fn take_checkpoint_submission_acknowledgement(
+        &self,
+        submission_id: &str,
+    ) -> Option<oneshot::Sender<CodexResult<OwnedMutexGuard<()>>>> {
+        self.checkpoint_submission_acknowledgements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(submission_id)
+    }
+
+    pub(crate) fn remove_checkpoint_submission_acknowledgement(&self, submission_id: &str) {
+        self.checkpoint_submission_acknowledgements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(submission_id);
+    }
+
+    pub(crate) fn clear_checkpoint_submission_acknowledgements(&self) {
+        self.checkpoint_submission_acknowledgements
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    }
+
     pub(crate) fn live_thread(&self) -> Option<&LiveThread> {
         self.services.live_thread.as_ref()
+    }
+
+    pub(crate) fn persistence_restart_required(&self) -> bool {
+        self.persistence_restart_required.load(Ordering::Acquire)
+    }
+
+    fn require_restart_after_indeterminate_persistence(&self) {
+        self.persistence_restart_required
+            .store(true, Ordering::Release);
+    }
+
+    async fn fence_indeterminate_checkpoint(
+        &self,
+        turn_context: &TurnContext,
+        message: String,
+        codex_error_info: CodexErrorInfo,
+    ) {
+        self.require_restart_after_indeterminate_persistence();
+        if let Some(live_thread) = self.live_thread()
+            && let Err(error) = live_thread.require_restart_and_discard().await
+        {
+            warn!(%error, "failed to discard indeterminate checkpoint writer");
+        }
+        self.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg: EventMsg::Error(ErrorEvent {
+                message,
+                codex_error_info: Some(codex_error_info),
+            }),
+        })
+        .await;
     }
 
     pub(crate) async fn set_thread_memory_mode(
@@ -1472,6 +1806,55 @@ impl Session {
         mode: ThreadMemoryMode,
     ) -> anyhow::Result<()> {
         handlers::persist_thread_memory_mode_update(self, mode).await
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "metadata persistence must remain ordered with checkpoint persistence"
+    )]
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> ThreadStoreResult<StoredThread> {
+        let state = self
+            .lock_state_for_persistence_mutation("update thread metadata")
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: err.to_string(),
+            })?;
+        let live_thread = self
+            .live_thread_for_mutation("update thread metadata")
+            .map_err(|err| ThreadStoreError::Internal {
+                message: err.to_string(),
+            })?;
+        let result = live_thread.update_metadata(patch, include_archived).await;
+        drop(state);
+        result
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "direct rollout persistence must remain ordered with checkpoint persistence"
+    )]
+    pub(crate) async fn append_rollout_items(
+        &self,
+        items: &[RolloutItem],
+    ) -> ThreadStoreResult<()> {
+        let state = self
+            .lock_state_for_persistence_mutation("append rollout items")
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: err.to_string(),
+            })?;
+        let live_thread = self
+            .live_thread_for_mutation("append rollout items")
+            .map_err(|err| ThreadStoreError::Internal {
+                message: err.to_string(),
+            })?;
+        let result = live_thread.append_items(items).await;
+        drop(state);
+        result
     }
 
     pub(crate) fn prompt_cache_key(&self) -> ThreadId {
@@ -1562,6 +1945,22 @@ impl Session {
     pub(crate) async fn total_token_usage(&self) -> Option<TokenUsage> {
         let state = self.state.lock().await;
         state.token_info().map(|info| info.total_token_usage)
+    }
+
+    /// Admits a new task only after any checkpoint mutation holding `Session.state` has resolved.
+    ///
+    /// `CheckpointMutationGuard` sets the restart flag before releasing `Session.state`, so this
+    /// locked check prevents a task queued before an indeterminate checkpoint from starting after
+    /// the checkpoint owner releases the state mutex.
+    pub(crate) async fn token_usage_for_task_admission(&self) -> CodexResult<TokenUsage> {
+        let state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return Err(CodexErr::TurnAborted);
+        }
+        Ok(state
+            .token_info()
+            .map(|info| info.total_token_usage)
+            .unwrap_or_default())
     }
 
     /// Returns the complete token usage snapshot currently cached for this session.
@@ -1712,9 +2111,14 @@ impl Session {
 
                 // Seed usage info from the recorded rollout so UIs can show token counts
                 // immediately on resume/fork.
-                if let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items) {
+                if let Some(token_count) =
+                    Self::restored_token_count_from_rollout(&logical_rollout_items)
+                {
                     let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
+                    state.set_token_info(token_count.info);
+                    if let Some(rate_limits) = token_count.rate_limits {
+                        state.set_rate_limits(rate_limits);
+                    }
                 }
 
                 // Defer seeding the session's initial context until the first turn starts so
@@ -1797,6 +2201,18 @@ impl Session {
                 for item in &mut startup_response_items {
                     Self::assign_missing_response_item_id(item);
                 }
+                if !has_authoritative_model_state
+                    && let Some(token_count) =
+                        Self::restored_token_count_from_rollout(&logical_rollout_items)
+                {
+                    let mut state = self.state.lock().await;
+                    state.set_token_info(token_count.info);
+                    if let Some(rate_limits) = token_count.rate_limits {
+                        state.set_rate_limits(rate_limits);
+                    }
+                }
+                let fork_checkpoint_items =
+                    self.current_segment_state_checkpoint().await.into_items();
                 if !startup_response_items.is_empty() {
                     let mut state = self.state.lock().await;
                     state.record_items(
@@ -1809,21 +2225,10 @@ impl Session {
                     .map(RolloutItem::ResponseItem)
                     .collect::<Vec<_>>();
 
-                // Seed usage info from the recorded rollout so UIs can show token counts
-                // immediately on resume/fork.
-                if !has_authoritative_model_state
-                    && let Some(info) = Self::last_token_info_from_rollout(&logical_rollout_items)
-                {
-                    let mut state = self.state.lock().await;
-                    state.set_token_info(Some(info));
-                }
-
-                let thread_settings_applied =
-                    RolloutItem::EventMsg(handlers::thread_settings_applied_event(self).await);
                 if is_paginated_subagent && !has_rollout_reference {
                     // Paginated subagents persist inherited model context while creating the live
                     // thread so the copied prefix is not observed as child-owned metadata.
-                    let mut persisted_rollout_items = vec![thread_settings_applied];
+                    let mut persisted_rollout_items = fork_checkpoint_items;
                     persisted_rollout_items.append(&mut startup_rollout_items);
                     self.persist_initial_rollout_items(&persisted_rollout_items)
                         .await?;
@@ -1835,7 +2240,7 @@ impl Session {
                         .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
                         .cloned()
                         .collect::<Vec<_>>();
-                    persisted_rollout_items.push(thread_settings_applied);
+                    persisted_rollout_items.extend(fork_checkpoint_items);
                     persisted_rollout_items.append(&mut startup_rollout_items);
                     self.persist_initial_rollout_items(&persisted_rollout_items)
                         .await?;
@@ -1870,13 +2275,13 @@ impl Session {
         {
             return Ok(rollout_items.to_vec());
         }
-        let (codex_home, history_mode) = {
-            let state = self.state.lock().await;
-            (
-                state.session_configuration.codex_home().to_path_buf(),
-                state.session_configuration.history_mode,
-            )
-        };
+        let codex_home = self
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .codex_home()
+            .to_path_buf();
         let lines = rollout_items
             .iter()
             .cloned()
@@ -1886,16 +2291,6 @@ impl Session {
                 item,
             })
             .collect();
-        let bounded_legacy_cutoff = rollout_items.iter().any(|item| {
-            matches!(
-                item,
-                RolloutItem::RolloutReference(reference)
-                    if reference.nth_user_message.is_some()
-                        || reference
-                            .compacted_replacement_history_filter_texts
-                            .is_some()
-            )
-        });
         match materialization {
             ForkedHistoryMaterialization::Recent => Ok(materialize_recent_rollout_lines_from(
                 codex_home.as_path(),
@@ -1905,20 +2300,11 @@ impl Session {
             .into_iter()
             .map(|line| line.item)
             .collect()),
-            ForkedHistoryMaterialization::ModelContext
-                if matches!(history_mode, ThreadHistoryMode::Legacy) && !bounded_legacy_cutoff =>
-            {
+            ForkedHistoryMaterialization::ModelContext => {
                 materialize_model_context_rollout_items_from(codex_home.as_path(), lines)
                     .await
                     .map_err(Into::into)
             }
-            ForkedHistoryMaterialization::ModelContext => Ok(
-                materialize_recent_rollout_lines_from(codex_home.as_path(), lines)
-                    .await?
-                    .into_iter()
-                    .map(|line| line.item)
-                    .collect(),
-            ),
         }
     }
 
@@ -1951,16 +2337,30 @@ impl Session {
         shared_model_response_items: Option<Arc<Vec<ResponseItem>>>,
         shared_model_state: Option<ForkModelState>,
     ) -> Option<PreviousTurnSettings> {
-        let rollout_reconstruction::RolloutReconstruction {
-            mut history,
-            previous_turn_settings,
-            reference_context_item,
-            world_state_baseline,
-            window_number,
-            first_window_id,
-            previous_window_id,
-            window_id,
-        } = self
+        let reconstruction = self
+            .prepare_rollout_reconstruction(
+                turn_context,
+                rollout_items,
+                shared_model_response_items.is_some(),
+            )
+            .await;
+        let mut state = self.state.lock().await;
+        Self::install_rollout_reconstruction_in_state(
+            &mut state,
+            turn_context,
+            reconstruction,
+            shared_model_response_items,
+            shared_model_state,
+        )
+    }
+
+    async fn prepare_rollout_reconstruction(
+        &self,
+        turn_context: &TurnContext,
+        rollout_items: &[RolloutItem],
+        has_shared_model_response_items: bool,
+    ) -> rollout_reconstruction::RolloutReconstruction {
+        let mut reconstruction = self
             .reconstruct_history_from_rollout(turn_context, rollout_items)
             .await;
         // Keep the recorded rollout unchanged. Prepare its reconstructed history before
@@ -1969,86 +2369,103 @@ impl Session {
         // Never backfill resize notices during replay; only newly recorded items may
         // emit them, so the historical model prefix remains unchanged. Shared model
         // response items are already authoritative and require no reconstruction.
-        if shared_model_response_items.is_none() {
+        if !has_shared_model_response_items {
             let _ = prepare_image_response_items(
-                &mut history,
+                &mut reconstruction.history,
                 ImagePreparationMode::DetailBased,
                 ImageResizeNoticeMode::Disabled,
             );
-            prepare_audio_response_items(&mut history);
+            prepare_audio_response_items(&mut reconstruction.history);
         }
-        {
-            let mut state = self.state.lock().await;
-            if let Some(source_model_state) = shared_model_state {
-                state.replace_shared_history_snapshot(&source_model_state.history);
-                state.restore_auto_compact_window(
-                    source_model_state.window_number,
-                    source_model_state.window_ids,
-                );
-                state.set_previous_turn_settings(source_model_state.previous_turn_settings);
-            } else {
-                if let Some(shared_model_response_items) = shared_model_response_items {
-                    state.replace_shared_history(
-                        shared_model_response_items,
-                        reference_context_item,
-                    );
-                } else {
-                    state.replace_history(history, reference_context_item);
-                }
-                if let Some(world_state) = world_state_baseline {
-                    state.history.set_world_state_baseline(world_state);
-                }
-                let fallback_ids = state.auto_compact_window_ids();
-                let window_id = window_id.unwrap_or(fallback_ids.window_id);
-                state.restore_auto_compact_window(
-                    window_number,
-                    AutoCompactWindowIds {
-                        first_window_id: first_window_id.unwrap_or(window_id),
-                        previous_window_id,
-                        window_id,
-                    },
-                );
-                state.set_previous_turn_settings(previous_turn_settings.clone());
+        reconstruction
+    }
+
+    fn install_rollout_reconstruction_in_state(
+        state: &mut SessionState,
+        turn_context: &TurnContext,
+        reconstruction: rollout_reconstruction::RolloutReconstruction,
+        shared_model_response_items: Option<Arc<Vec<ResponseItem>>>,
+        shared_model_state: Option<ForkModelState>,
+    ) -> Option<PreviousTurnSettings> {
+        let rollout_reconstruction::RolloutReconstruction {
+            history,
+            previous_turn_settings,
+            reference_context_item,
+            world_state_baseline,
+            window_number,
+            first_window_id,
+            previous_window_id,
+            window_id,
+        } = reconstruction;
+        if let Some(source_model_state) = shared_model_state {
+            state.replace_shared_history_snapshot(&source_model_state.history);
+            state.restore_auto_compact_window(
+                source_model_state.window_number,
+                source_model_state.window_ids,
+            );
+            state.set_previous_turn_settings(source_model_state.previous_turn_settings);
+            if let Some(rate_limits) = source_model_state.latest_rate_limits {
+                state.set_rate_limits(rate_limits);
             }
+        } else {
+            if let Some(shared_model_response_items) = shared_model_response_items {
+                state.replace_shared_history(shared_model_response_items, reference_context_item);
+            } else {
+                state.replace_history(history, reference_context_item);
+            }
+            if let Some(world_state) = world_state_baseline {
+                state.history.set_world_state_baseline(world_state);
+            }
+            let fallback_ids = state.auto_compact_window_ids();
+            let window_id = window_id.unwrap_or(fallback_ids.window_id);
+            state.restore_auto_compact_window(
+                window_number,
+                AutoCompactWindowIds {
+                    first_window_id: first_window_id.unwrap_or(window_id),
+                    previous_window_id,
+                    window_id,
+                },
+            );
+            state.set_previous_turn_settings(previous_turn_settings.clone());
         }
-        let prefix_tokens = if matches!(
+        if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
             AutoCompactTokenLimitScope::BodyAfterPrefix
         ) {
-            let history = self.clone_history().await;
-            let base_instructions = self.get_base_instructions().await;
-            history.estimate_token_count_with_base_instructions(&base_instructions)
-        } else {
-            None
-        };
-        if let Some(prefix_tokens) = prefix_tokens {
-            self.set_auto_compact_window_estimated_prefill_for_scope(turn_context, prefix_tokens)
-                .await;
+            let base_instructions = BaseInstructions {
+                text: state.session_configuration.base_instructions.clone(),
+                provenance: state.base_instructions_provenance.clone(),
+            };
+            if let Some(prefix_tokens) = state
+                .history
+                .estimate_token_count_with_base_instructions(&base_instructions)
+            {
+                state.set_auto_compact_window_estimated_prefill(prefix_tokens);
+            }
         }
         previous_turn_settings
     }
 
-    async fn set_auto_compact_window_estimated_prefill_for_scope(
-        &self,
-        turn_context: &TurnContext,
-        tokens: i64,
-    ) {
-        if !matches!(
-            turn_context.config.model_auto_compact_token_limit_scope,
-            AutoCompactTokenLimitScope::BodyAfterPrefix
-        ) {
-            return;
+    fn restored_token_count_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenCountEvent> {
+        let mut found_token_count = false;
+        let mut info = None;
+        let mut rate_limits = None;
+        for item in rollout_items.iter().rev() {
+            let RolloutItem::EventMsg(EventMsg::TokenCount(event)) = item else {
+                continue;
+            };
+            found_token_count = true;
+            if info.is_none() {
+                info.clone_from(&event.info);
+            }
+            if rate_limits.is_none() {
+                rate_limits.clone_from(&event.rate_limits);
+            }
+            if info.is_some() && rate_limits.is_some() {
+                break;
+            }
         }
-
-        let mut state = self.state.lock().await;
-        state.set_auto_compact_window_estimated_prefill(tokens);
-    }
-
-    fn last_token_info_from_rollout(rollout_items: &[RolloutItem]) -> Option<TokenUsageInfo> {
-        rollout_items.iter().rev().find_map(|item| match item {
-            RolloutItem::EventMsg(EventMsg::TokenCount(ev)) => ev.info.clone(),
-            _ => None,
-        })
+        found_token_count.then_some(TokenCountEvent { info, rate_limits })
     }
 
     async fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -2072,6 +2489,11 @@ impl Session {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (previous_config, new_config, permission_profile_changed, mcp_inputs_changed) = {
             let mut state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                return Err(ConstraintError::empty_field(
+                    "thread_settings_restart_required",
+                ));
+            }
             let updated = match state.session_configuration.apply(&updates) {
                 Ok(updated) => updated,
                 Err(err) => {
@@ -2213,12 +2635,21 @@ impl Session {
     }
 
     pub(crate) async fn refresh_runtime_config(&self, next_config: Config) {
+        let Ok(_checkpoint_admission) = self
+            .lock_checkpoint_admission("refresh the runtime config")
+            .await
+        else {
+            return;
+        };
         // Refresh only the user layer from the incoming snapshot. Preserve thread-local
         // layers such as request/session overrides that were present when this session
         // was created.
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let (previous_config, new_config, config) = {
             let mut state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                return;
+            }
             let previous_config = notify_config_contributors
                 .then(|| Self::build_effective_session_config(&state.session_configuration));
             let mut config = (*state.session_configuration.original_config_do_not_use).clone();
@@ -2311,6 +2742,9 @@ impl Session {
         .await;
 
         let state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return;
+        }
         // A newer refresh may have updated the config while this hook build was in flight.
         // Only publish hooks derived from the current config snapshot.
         if Arc::ptr_eq(
@@ -2323,7 +2757,16 @@ impl Session {
     }
 
     pub(crate) async fn refresh_mcp_config(&self, next_config: Config) {
+        let Ok(_checkpoint_admission) = self
+            .lock_checkpoint_admission("refresh the MCP config")
+            .await
+        else {
+            return;
+        };
         let mut state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return;
+        }
         let mut config = (*state.session_configuration.original_config_do_not_use).clone();
         config.config_layer_stack = next_config
             .config_layer_stack
@@ -2364,116 +2807,117 @@ impl Session {
     }
 
     pub(crate) async fn reload_user_config_layer(&self) {
-        // Refresh layer-backed runtime state for an existing session, including enabled plugin,
-        // skill, and hook state. Derived config fields such as feature gates and legacy notify
-        // settings remain session-static.
-        //
-        // Prefer `refresh_runtime_config()` when the host can already provide a materialized
-        // config snapshot. This file-based path exists for legacy local reload flows.
-        let config_toml_paths = {
-            let state = self.state.lock().await;
-            let config = &state.session_configuration.original_config_do_not_use;
-            let user_config_paths = config
-                .config_layer_stack
-                .all_layers_low_to_high()
-                .filter_map(|layer| match &layer.name {
-                    ConfigLayerSource::User { file, .. } => Some(file.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if user_config_paths.is_empty() {
-                vec![
-                    state
-                        .session_configuration
-                        .codex_home
-                        .join(CONFIG_TOML_FILE),
-                ]
-            } else {
-                user_config_paths
-            }
-        };
+        let _ = self
+            .with_checkpoint_admission("reload the user config", || async {
+                // Refresh layer-backed runtime state for an existing session, including enabled plugin,
+                // skill, and hook state. Derived config fields such as feature gates and legacy notify
+                // settings remain session-static.
+                //
+                // Prefer `refresh_runtime_config()` when the host can already provide a materialized
+                // config snapshot. This file-based path exists for legacy local reload flows.
+                let config_toml_paths = {
+                    let state = self.state.lock().await;
+                    let config = &state.session_configuration.original_config_do_not_use;
+                    let user_config_paths = config
+                        .config_layer_stack
+                        .all_layers_low_to_high()
+                        .filter_map(|layer| match &layer.name {
+                            ConfigLayerSource::User { file, .. } => Some(file.clone()),
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    if user_config_paths.is_empty() {
+                        vec![
+                            state
+                                .session_configuration
+                                .codex_home
+                                .join(CONFIG_TOML_FILE),
+                        ]
+                    } else {
+                        user_config_paths
+                    }
+                };
 
-        let mut reloaded_user_configs = Vec::with_capacity(config_toml_paths.len());
-        for config_toml_path in config_toml_paths {
-            let user_config = match std::fs::read_to_string(&config_toml_path) {
-                Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
-                    Ok(config) => config,
-                    Err(err) => {
-                        warn!("failed to parse user config while reloading layer: {err}");
-                        return;
-                    }
-                },
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    toml::Value::Table(Default::default())
+                let mut reloaded_user_configs = Vec::with_capacity(config_toml_paths.len());
+                for config_toml_path in config_toml_paths {
+                    let user_config = match std::fs::read_to_string(&config_toml_path) {
+                        Ok(contents) => match toml::from_str::<toml::Value>(&contents) {
+                            Ok(config) => config,
+                            Err(err) => {
+                                warn!("failed to parse user config while reloading layer: {err}");
+                                return;
+                            }
+                        },
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                            toml::Value::Table(Default::default())
+                        }
+                        Err(err) => {
+                            warn!("failed to read user config while reloading layer: {err}");
+                            return;
+                        }
+                    };
+                    reloaded_user_configs.push((config_toml_path, user_config));
                 }
-                Err(err) => {
-                    warn!("failed to read user config while reloading layer: {err}");
-                    return;
-                }
-            };
-            reloaded_user_configs.push((config_toml_path, user_config));
-        }
 
-        let next_config = {
-            let state = self.state.lock().await;
-            let mut config = (*state.session_configuration.original_config_do_not_use).clone();
-            let previous_layer_models =
-                match crate::config::resolve_custom_models_from_config_layer_stack(
-                    &config.config_layer_stack,
-                ) {
-                    Ok(custom_models) => custom_models,
-                    Err(err) => {
-                        warn!(
-                            "failed to resolve existing custom models while reloading user config: {err}"
-                        );
-                        return;
+                let next_config = {
+                    let state = self.state.lock().await;
+                    let mut config =
+                        (*state.session_configuration.original_config_do_not_use).clone();
+                    let previous_layer_models =
+                        match crate::config::resolve_custom_models_from_config_layer_stack(
+                            &config.config_layer_stack,
+                        ) {
+                            Ok(custom_models) => custom_models,
+                            Err(err) => {
+                                warn!(
+                                    "failed to resolve existing custom models while reloading user config: {err}"
+                                );
+                                return;
+                            }
+                        };
+                    let previous_materialized_models = config.custom_models.clone();
+                    for (config_toml_path, user_config) in reloaded_user_configs {
+                        let config_layer_stack = match config
+                            .config_layer_stack
+                            .with_user_config(&config_toml_path, user_config)
+                        {
+                            Ok(config_layer_stack) => config_layer_stack,
+                            Err(err) => {
+                                warn!(
+                                    "failed to validate user config while reloading layer: {err}"
+                                );
+                                return;
+                            }
+                        };
+                        config.config_layer_stack = config_layer_stack;
                     }
+                    config.tool_suggest =
+                        resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
+                    let mut next_layer_models =
+                        match crate::config::resolve_custom_models_from_config_layer_stack(
+                            &config.config_layer_stack,
+                        ) {
+                            Ok(custom_models) => custom_models,
+                            Err(err) => {
+                                warn!(
+                                    "failed to resolve custom models while reloading user config: {err}"
+                                );
+                                return;
+                            }
+                        };
+                    model_alias_refresh::preserve_materialized_custom_model_overrides(
+                        &previous_layer_models,
+                        &previous_materialized_models,
+                        &mut next_layer_models,
+                    );
+                    config.custom_models = next_layer_models;
+                    config
                 };
-            let previous_materialized_models = config.custom_models.clone();
-            for (config_toml_path, user_config) in reloaded_user_configs {
-                let config_layer_stack = match config
-                    .config_layer_stack
-                    .with_user_config(&config_toml_path, user_config)
-                {
-                    Ok(config_layer_stack) => config_layer_stack,
-                    Err(err) => {
-                        warn!("failed to validate user config while reloading layer: {err}");
-                        return;
-                    }
-                };
-                config.config_layer_stack = config_layer_stack;
-            }
-            if config.config_layer_stack
-                == state
-                    .session_configuration
-                    .original_config_do_not_use
-                    .config_layer_stack
-            {
-                return;
-            }
-            config.tool_suggest =
-                resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
-            let mut next_layer_models =
-                match crate::config::resolve_custom_models_from_config_layer_stack(
-                    &config.config_layer_stack,
-                ) {
-                    Ok(custom_models) => custom_models,
-                    Err(err) => {
-                        warn!("failed to resolve custom models while reloading user config: {err}");
-                        return;
-                    }
-                };
-            model_alias_refresh::preserve_materialized_custom_model_overrides(
-                &previous_layer_models,
-                &previous_materialized_models,
-                &mut next_layer_models,
-            );
-            config.custom_models = next_layer_models;
-            config
-        };
-        self.services.skills_service.clear_cache();
-        self.services.plugins_manager.clear_cache();
-        self.refresh_runtime_config(next_config).await;
+                self.services.skills_service.clear_cache();
+                self.services.plugins_manager.clear_cache();
+                self.refresh_runtime_config(next_config).await;
+            })
+            .await;
     }
 
     /// Record a terminal CodexErr before the app-server completion notification is reduced.
@@ -2489,6 +2933,30 @@ impl Session {
 
     /// Persist the event to rollout and send it to clients.
     pub(crate) async fn send_event(&self, turn_context: &TurnContext, msg: EventMsg) {
+        self.send_event_with_persistence(turn_context, msg, EventPersistence::Persist)
+            .await;
+    }
+
+    /// Sends the TokenCount already committed as part of a segment-state checkpoint.
+    pub(crate) async fn emit_persisted_token_count_event(
+        &self,
+        turn_context: &TurnContext,
+        token_count: TokenCountEvent,
+    ) {
+        self.send_event_with_persistence(
+            turn_context,
+            EventMsg::TokenCount(token_count),
+            EventPersistence::AlreadyPersisted,
+        )
+        .await;
+    }
+
+    async fn send_event_with_persistence(
+        &self,
+        turn_context: &TurnContext,
+        msg: EventMsg,
+        persistence: EventPersistence,
+    ) {
         let legacy_source = msg.clone();
         if let EventMsg::Error(error) = &legacy_source
             && error
@@ -2512,7 +2980,11 @@ impl Session {
             id: turn_context.sub_id.clone(),
             msg,
         };
-        self.send_event_raw(event).await;
+        self.send_event_raw_with_persistence(
+            event,
+            matches!(persistence, EventPersistence::Persist),
+        )
+        .await;
         self.maybe_notify_parent_of_terminal_turn(turn_context, &legacy_source)
             .await;
         self.maybe_mirror_event_text_to_realtime(&legacy_source)
@@ -2529,7 +3001,11 @@ impl Session {
                 id: turn_context.sub_id.clone(),
                 msg: legacy,
             };
-            self.send_event_raw(legacy_event).await;
+            self.send_event_raw_with_persistence(
+                legacy_event,
+                matches!(persistence, EventPersistence::Persist),
+            )
+            .await;
         }
     }
 
@@ -2594,10 +3070,13 @@ impl Session {
         child_agent_path: &codex_protocol::AgentPath,
         status: AgentStatus,
     ) {
-        let Some(parent_agent_path) = child_agent_path
-            .as_str()
-            .rsplit_once('/')
-            .and_then(|(parent, _)| codex_protocol::AgentPath::try_from(parent).ok())
+        let Some(parent_agent_path) =
+            child_agent_path
+                .as_str()
+                .rsplit_once('/')
+                .and_then(|(parent, _)| {
+                    codex_protocol::AgentPath::from_persisted_string(parent.to_string()).ok()
+                })
         else {
             return;
         };
@@ -2625,19 +3104,23 @@ impl Session {
         );
         let context =
             AgentCommunicationContext::new(AgentCommunicationKind::Result, self.thread_id);
-        if let Err(err) = self
+        match self
             .services
             .agent_control
-            .send_inter_agent_communication(
+            .deliver_completion_to_registered_parent(
+                self.thread_id,
                 parent_thread_id,
                 communication,
                 context,
-                /*parent_turn_id*/ None,
             )
             .await
         {
-            debug!("failed to notify parent thread {parent_thread_id}: {err}");
-            return;
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                debug!("failed to notify parent thread {parent_thread_id}: {err}");
+                return;
+            }
         }
         if let Some(message) = trace_message {
             self.services
@@ -2741,7 +3224,24 @@ impl Session {
     async fn deliver_event_raw(&self, event: Event) {
         // Record the last known agent status.
         if let Some(status) = agent_status_from_event(&event.msg) {
-            self.agent_status.send_replace(status);
+            if matches!(
+                event.msg,
+                EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_) | EventMsg::ShutdownComplete
+            ) && !matches!(status, AgentStatus::PendingInit | AgentStatus::Running)
+            {
+                let published_status = status.clone();
+                self.services.agent_control.publish_completion_status(
+                    self.thread_id,
+                    event.id.clone(),
+                    status,
+                    self.multi_agent_version(),
+                    || {
+                        self.agent_status.send_replace(published_status);
+                    },
+                );
+            } else {
+                self.agent_status.send_replace(status);
+            }
         }
         if let Err(e) = self.tx_event.send(event).await {
             debug!("dropping event because channel is closed: {e}");
@@ -2929,7 +3429,8 @@ impl Session {
     ) {
         let message: ResponseItem = ContextualUserFragment::into(NetworkRuleSaved::new(amendment));
         let turn_context = self.turn_context_for_sub_id(sub_id).await;
-        self.inject_no_new_turn(vec![message], turn_context.as_deref())
+        let _ = self
+            .inject_no_new_turn(vec![message], turn_context.as_deref())
             .await;
     }
 
@@ -3647,16 +4148,47 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
+        if self
+            .try_record_conversation_items(turn_context, items)
+            .await
+            .is_err()
+        {
+            warn!("refusing to record conversation items until the thread is restarted");
+        }
+    }
+
+    /// Records conversation items only when their state mutation can be ordered before a
+    /// checkpoint or after a determinate checkpoint result.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "history mutation and its rollout append must remain ordered with checkpoint replacement"
+    )]
+    pub(crate) async fn try_record_conversation_items(
+        &self,
+        turn_context: &TurnContext,
+        items: &[ResponseItem],
+    ) -> CodexResult<()> {
         let (items, image_preparations) =
             self.prepare_conversation_items_for_history(turn_context, items);
         let items = items.as_ref();
+        let mut state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return Err(CodexErr::TurnAborted);
+        }
+        state.current_time_reminder.note_recorded_items(items);
+        state.record_items(
+            items.iter(),
+            turn_context.model_info.truncation_policy.into(),
+        );
+        if items
+            .iter()
+            .any(crate::context_manager::is_user_turn_boundary)
         {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info.truncation_policy.into(),
-            );
+            state.set_previous_turn_settings(Some(PreviousTurnSettings {
+                model: turn_context.model_info.slug.clone(),
+                comp_hash: turn_context.model_info.comp_hash.clone(),
+                realtime_active: Some(turn_context.realtime_active),
+            }));
         }
         for image in image_preparations {
             self.services
@@ -3667,7 +4199,9 @@ impl Session {
                 });
         }
         self.persist_rollout_response_items(items).await;
+        drop(state);
         self.send_raw_response_items(turn_context, items).await;
+        Ok(())
     }
 
     async fn persist_initial_rollout_items(&self, items: &[RolloutItem]) -> CodexResult<()> {
@@ -3836,6 +4370,10 @@ impl Session {
         }))
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "inter-agent history mutation and rollout append must remain ordered with checkpoint replacement"
+    )]
     pub(crate) async fn record_inter_agent_communication(
         &self,
         turn_context: &TurnContext,
@@ -3849,14 +4387,15 @@ impl Session {
         );
         let items = items.as_ref();
         let response_item = items[0].clone();
-        {
-            let mut state = self.state.lock().await;
-            state.current_time_reminder.note_recorded_items(items);
-            state.record_items(
-                items.iter(),
-                turn_context.model_info.truncation_policy.into(),
-            );
+        let mut state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return;
         }
+        state.current_time_reminder.note_recorded_items(items);
+        state.record_items(
+            items.iter(),
+            turn_context.model_info.truncation_policy.into(),
+        );
         self.persist_rollout_items(&[
             RolloutItem::InterAgentCommunicationMetadata {
                 trigger_turn: communication.trigger_turn,
@@ -3864,6 +4403,7 @@ impl Session {
             RolloutItem::ResponseItem(response_item),
         ])
         .await;
+        drop(state);
         self.send_raw_response_items(turn_context, items).await;
     }
 
@@ -3938,67 +4478,518 @@ impl Session {
     }
 
     pub(crate) async fn replace_compacted_history(
-        &self,
+        self: &Arc<Self>,
+        turn_context: &Arc<TurnContext>,
         items: Vec<ResponseItem>,
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
-    ) {
+    ) -> CodexResult<()> {
         let items = Self::assign_missing_response_item_ids(Cow::Owned(items)).into_owned();
+        let CompactedHistoryMetadata {
+            message,
+            prepared_window_advance,
+        } = metadata;
+        // Keep the state guard through rotation. A settings update must therefore either be
+        // represented by this checkpoint or append its event to the new active segment.
+        let checkpoint_admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
+        let state = Arc::clone(&self.state).lock_owned().await;
+        if self.persistence_restart_required() {
+            return Err(CodexErr::TurnAborted);
+        }
+        let mut state = CheckpointMutationGuard::new(checkpoint_admission, state, Arc::clone(self));
+        let prior_state = state.checkpoint_mutation_snapshot();
+        let (window_number, window_ids) = state
+            .commit_prepared_auto_compact_window_advance(prepared_window_advance)
+            .ok_or_else(|| {
+                CodexErr::Fatal(
+                    "prepared auto-compaction window does not match the active window".to_string(),
+                )
+            })?;
         let compacted_item = CompactedItem {
-            message: metadata.message,
+            message,
             replacement_history: Some(items.clone()),
-            window_number: Some(metadata.window_number),
-            first_window_id: Some(metadata.window_ids.first_window_id.to_string()),
-            previous_window_id: metadata
-                .window_ids
-                .previous_window_id
-                .map(|id| id.to_string()),
-            window_id: Some(metadata.window_ids.window_id.to_string()),
+            window_number: Some(window_number),
+            first_window_id: Some(window_ids.first_window_id.to_string()),
+            previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+            window_id: Some(window_ids.window_id.to_string()),
+            segment_state_checkpoint: None,
         };
-        // Compaction starts a new history window, so its WorldState baseline must be full.
-        let mut world_state_item = None;
-        {
-            let mut state = self.state.lock().await;
+        let world_state_item = {
             state.replace_history(items, reference_context_item.clone());
             if let Some(world_state) = world_state_baseline {
                 let snapshot = world_state.snapshot();
-                world_state_item = Some(WorldStateItem::full(snapshot.clone().into_value()));
+                let world_state_item = WorldStateItem::full(snapshot.clone().into_value());
                 state.history.set_world_state_baseline(snapshot);
+                Some(world_state_item)
+            } else {
+                None
             }
-        }
-
-        let mut replacement_items = vec![RolloutItem::Compacted(compacted_item)];
-        // Persist the baseline after the replacement history that established it.
-        if let Some(world_state_item) = world_state_item {
-            replacement_items.push(RolloutItem::WorldState(world_state_item));
-        }
-        if let Some(turn_context_item) = reference_context_item {
-            replacement_items.push(RolloutItem::TurnContext(turn_context_item));
-        }
-        let rotated = if let Some(live_thread) = self.live_thread() {
-            match live_thread
-                .freeze_local_segment(FreezeRolloutSegmentParams::rotate(
-                    replacement_items.clone(),
-                ))
-                .await
-            {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(err) => {
-                    warn!("failed to rotate rollout segment after compaction: {err}");
-                    false
+        };
+        let recomputed_token_count =
+            Self::recompute_token_usage_state_in_state(&mut state, turn_context);
+        let (info, rate_limits) = state.token_info_and_rate_limits();
+        let previous_turn_settings =
+            state
+                .previous_turn_settings()
+                .map(|settings| SegmentPreviousTurnSettings {
+                    model: settings.model,
+                    comp_hash: settings.comp_hash,
+                    realtime_active: settings.realtime_active,
+                });
+        let thread_settings = ThreadSettingsAppliedEvent {
+            thread_settings: state
+                .session_configuration
+                .thread_config_snapshot()
+                .into_thread_settings_snapshot(),
+        };
+        let token_count = TokenCountEvent { info, rate_limits };
+        let checkpoint = CertifiedSegmentStateCheckpoint::new(
+            compacted_item,
+            previous_turn_settings,
+            world_state_item,
+            reference_context_item,
+            thread_settings,
+            token_count,
+        )
+        .map_err(|error| {
+            CodexErr::Fatal(format!(
+                "session compaction produced an invalid segment-state checkpoint: {error}"
+            ))
+        })?;
+        #[cfg(test)]
+        let thread_id = self.thread_id;
+        let live_thread = self.live_thread().cloned();
+        let rotation_params = FreezeRolloutSegmentParams::rotate(checkpoint);
+        let session = Arc::clone(self);
+        let failure_turn_context = Arc::clone(turn_context);
+        let turn_context = Arc::clone(turn_context);
+        let supervisor_session = Arc::clone(self);
+        let supervisor_turn_context = Arc::clone(&failure_turn_context);
+        let checkpoint_owner = tokio::spawn(async move {
+            #[cfg(test)]
+            checkpoint_rotation_test_support::pause_after_checkpoint_capture(thread_id).await;
+            let SegmentCheckpointPersistenceResult {
+                mut state,
+                persistence,
+            } = Self::rotate_or_append_segment_state_checkpoint(
+                session.thread_id,
+                state,
+                live_thread,
+                rotation_params,
+            )
+            .await;
+            match persistence {
+                SegmentCheckpointPersistence::Persisted => {
+                    if let Some(token_count) = recomputed_token_count {
+                        // TokenCount delivery does not reacquire Session.state. Retain the guard
+                        // so the client observes it before any turn can consume the Compact hook.
+                        session
+                            .emit_persisted_token_count_event(turn_context.as_ref(), token_count)
+                            .await;
+                    }
+                    state.queue_pending_session_start_source(
+                        codex_hooks::SessionStartSource::Compact,
+                    );
+                    state.disarm();
+                    drop(state);
+                    CheckpointOwnerCompletion::Continue
+                }
+                SegmentCheckpointPersistence::InMemoryOnly => {
+                    if let Some(token_count) = recomputed_token_count {
+                        session
+                            .send_event(turn_context.as_ref(), EventMsg::TokenCount(token_count))
+                            .await;
+                    }
+                    state.queue_pending_session_start_source(
+                        codex_hooks::SessionStartSource::Compact,
+                    );
+                    state.disarm();
+                    drop(state);
+                    CheckpointOwnerCompletion::Continue
+                }
+                SegmentCheckpointPersistence::Failed => {
+                    state.restore_checkpoint_mutation(prior_state);
+                    state.disarm();
+                    drop(state);
+                    session
+                        .send_event(
+                            turn_context.as_ref(),
+                            EventMsg::Warning(WarningEvent {
+                                message: "Failed to persist the compacted current-state checkpoint. The original live context was restored and the Compact hook was not run."
+                                    .to_string(),
+                            }),
+                        )
+                        .await;
+                    CheckpointOwnerCompletion::Continue
+                }
+                SegmentCheckpointPersistence::Indeterminate => {
+                    drop(state);
+                    session
+                        .fence_indeterminate_checkpoint(
+                            turn_context.as_ref(),
+                            "The current-state checkpoint may have committed, but Codex could not verify it. Restart this thread before continuing."
+                                .to_string(),
+                            CodexErrorInfo::Other,
+                        )
+                        .await;
+                    CheckpointOwnerCompletion::RestartRequired
                 }
             }
-        } else {
-            false
-        };
-        if !rotated {
-            self.persist_rollout_items(&replacement_items).await;
+        });
+        let rotation = tokio::spawn(async move {
+            match checkpoint_owner.await {
+                Ok(completion) => completion,
+                Err(error) => {
+                    warn!(%error, "compaction checkpoint owner failed");
+                    supervisor_session
+                        .fence_indeterminate_checkpoint(
+                            supervisor_turn_context.as_ref(),
+                            "The current-state checkpoint owner stopped unexpectedly. Restart this thread before continuing."
+                                .to_string(),
+                            CodexErrorInfo::Other,
+                        )
+                        .await;
+                    CheckpointOwnerCompletion::RestartRequired
+                }
+            }
+        });
+        match rotation.await {
+            Ok(CheckpointOwnerCompletion::Continue) => Ok(()),
+            Ok(CheckpointOwnerCompletion::RestartRequired) => Err(CodexErr::TurnAborted),
+            Err(err) => {
+                warn!(%err, "compaction checkpoint persistence task failed");
+                self.fence_indeterminate_checkpoint(
+                    failure_turn_context.as_ref(),
+                    "The current-state checkpoint owner stopped unexpectedly. Restart this thread before continuing."
+                        .to_string(),
+                    CodexErrorInfo::Other,
+                )
+                .await;
+                Err(CodexErr::TurnAborted)
+            }
         }
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "checkpoint fields are constructed from one locked session-state snapshot"
+    )]
+    fn segment_state_checkpoint_from_state(
+        state: &SessionState,
+    ) -> CertifiedSegmentStateCheckpoint {
+        let (
+            replacement_history,
+            previous_turn_settings,
+            reference_context,
+            world_state,
+            window_number,
+            window_ids,
+            thread_settings,
+            token_count,
+        ) = {
+            let (info, rate_limits) = state.token_info_and_rate_limits();
+            (
+                state.clone_history().raw_items().to_vec(),
+                state
+                    .previous_turn_settings()
+                    .map(|settings| SegmentPreviousTurnSettings {
+                        model: settings.model,
+                        comp_hash: settings.comp_hash,
+                        realtime_active: settings.realtime_active,
+                    }),
+                state.reference_context_item(),
+                state
+                    .history
+                    .world_state_baseline()
+                    .map(|snapshot| WorldStateItem::full(snapshot.into_value())),
+                state.auto_compact_window_number(),
+                state.auto_compact_window_ids(),
+                ThreadSettingsAppliedEvent {
+                    thread_settings: state
+                        .session_configuration
+                        .thread_config_snapshot()
+                        .into_thread_settings_snapshot(),
+                },
+                TokenCountEvent { info, rate_limits },
+            )
+        };
+        CertifiedSegmentStateCheckpoint::new(
+            CompactedItem {
+                message: String::new(),
+                replacement_history: Some(replacement_history),
+                window_number: Some(window_number),
+                first_window_id: Some(window_ids.first_window_id.to_string()),
+                previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
+                window_id: Some(window_ids.window_id.to_string()),
+                segment_state_checkpoint: None,
+            },
+            previous_turn_settings,
+            world_state,
+            reference_context,
+            thread_settings,
+            token_count,
+        )
+        .expect("live session state constructs a complete segment-state checkpoint")
+    }
+
+    async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
+        let state = self.state.lock().await;
+        Self::segment_state_checkpoint_from_state(&state)
+    }
+
+    async fn rotate_or_append_segment_state_checkpoint(
+        thread_id: ThreadId,
+        state: CheckpointMutationGuard,
+        live_thread: Option<LiveThread>,
+        rotation_params: FreezeRolloutSegmentParams,
+    ) -> SegmentCheckpointPersistenceResult {
+        #[cfg(test)]
+        if checkpoint_rotation_test_support::checkpoint_owner_should_panic(thread_id) {
+            panic!("injected checkpoint owner panic");
+        }
+        #[cfg(test)]
+        if checkpoint_rotation_test_support::checkpoint_persistence_should_be_indeterminate(
+            thread_id,
+        ) {
+            return SegmentCheckpointPersistenceResult {
+                state,
+                persistence: SegmentCheckpointPersistence::Indeterminate,
+            };
+        }
+        #[cfg(test)]
+        if checkpoint_rotation_test_support::checkpoint_persistence_should_fail(thread_id) {
+            return SegmentCheckpointPersistenceResult {
+                state,
+                persistence: SegmentCheckpointPersistence::Failed,
+            };
+        }
+        let Some(live_thread) = live_thread.as_ref() else {
+            return SegmentCheckpointPersistenceResult {
+                state,
+                persistence: SegmentCheckpointPersistence::InMemoryOnly,
+            };
+        };
+        match live_thread
+            .persist_segment_checkpoint(rotation_params)
+            .await
         {
-            let mut state = self.state.lock().await;
-            state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
+            SegmentCheckpointPersistenceOutcome::Committed => SegmentCheckpointPersistenceResult {
+                state,
+                persistence: SegmentCheckpointPersistence::Persisted,
+            },
+            SegmentCheckpointPersistenceOutcome::NotCommitted { error } => {
+                error!(%thread_id, %error, "failed to persist segment-state checkpoint without changing durable history");
+                SegmentCheckpointPersistenceResult {
+                    state,
+                    persistence: SegmentCheckpointPersistence::Failed,
+                }
+            }
+            SegmentCheckpointPersistenceOutcome::Indeterminate { error } => {
+                error!(%thread_id, %error, "segment-state checkpoint persistence is indeterminate");
+                SegmentCheckpointPersistenceResult {
+                    state,
+                    persistence: SegmentCheckpointPersistence::Indeterminate,
+                }
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn rotate_current_segment_state_checkpoint(self: &Arc<Self>) {
+        let checkpoint_admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
+        let state = Arc::clone(&self.state).lock_owned().await;
+        let checkpoint = Self::segment_state_checkpoint_from_state(&state);
+        let live_thread = self.live_thread().cloned();
+        let rotation_params = FreezeRolloutSegmentParams::rotate(checkpoint);
+        let state = CheckpointMutationGuard::new(checkpoint_admission, state, Arc::clone(self));
+        #[cfg(test)]
+        let thread_id = self.thread_id;
+        let rotation = tokio::spawn(async move {
+            #[cfg(test)]
+            checkpoint_rotation_test_support::pause_after_checkpoint_capture(thread_id).await;
+            let mut result = Self::rotate_or_append_segment_state_checkpoint(
+                thread_id,
+                state,
+                live_thread,
+                rotation_params,
+            )
+            .await;
+            if !matches!(
+                result.persistence,
+                SegmentCheckpointPersistence::Indeterminate
+            ) {
+                result.state.disarm();
+            }
+            drop(result.state);
+        });
+        if let Err(err) = rotation.await {
+            warn!(%err, "current-state checkpoint persistence task failed");
+            self.require_restart_after_indeterminate_persistence();
+            if let Some(live_thread) = self.live_thread()
+                && let Err(error) = live_thread.require_restart_and_discard().await
+            {
+                warn!(%error, "failed to discard failed current-state checkpoint writer");
+            }
+        }
+    }
+
+    pub(crate) async fn complete_thread_rollback(
+        self: &Arc<Self>,
+        turn_context: Arc<TurnContext>,
+        replay_items: Vec<RolloutItem>,
+        rollback_event: ThreadRolledBackEvent,
+        mut state: CheckpointMutationGuard,
+        history_rewrite: OwnedMutexGuard<()>,
+    ) {
+        let session = Arc::clone(self);
+        let failure_turn_context = Arc::clone(&turn_context);
+        let supervisor_session = Arc::clone(self);
+        let supervisor_turn_context = Arc::clone(&failure_turn_context);
+        let checkpoint_owner = tokio::spawn(async move {
+            let _history_rewrite = history_rewrite;
+            let reconstruction = session
+                .prepare_rollout_reconstruction(
+                    turn_context.as_ref(),
+                    replay_items.as_slice(),
+                    /*has_shared_model_response_items*/ false,
+                )
+                .await;
+            if session.persistence_restart_required() {
+                drop(state);
+                session
+                    .deliver_event_raw(Event {
+                        id: turn_context.sub_id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
+                                .to_string(),
+                            codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        }),
+                    })
+                    .await;
+                return CheckpointOwnerCompletion::RestartRequired;
+            }
+            let prior_state = state.checkpoint_mutation_snapshot();
+            Self::install_rollout_reconstruction_in_state(
+                &mut state,
+                turn_context.as_ref(),
+                reconstruction,
+                /*shared_model_response_items*/ None,
+                /*shared_model_state*/ None,
+            );
+            let recomputed_token_count =
+                Self::recompute_token_usage_state_in_state(&mut state, turn_context.as_ref());
+            let checkpoint = Self::segment_state_checkpoint_from_state(&state);
+            let rotation_params = FreezeRolloutSegmentParams::rotate_after_rollback(
+                rollback_event.clone(),
+                checkpoint,
+            );
+            let live_thread = session.live_thread().cloned();
+            #[cfg(test)]
+            checkpoint_rotation_test_support::pause_after_checkpoint_capture(session.thread_id)
+                .await;
+            let SegmentCheckpointPersistenceResult { state, persistence } =
+                Self::rotate_or_append_segment_state_checkpoint(
+                    session.thread_id,
+                    state,
+                    live_thread,
+                    rotation_params,
+                )
+                .await;
+            let mut state = state;
+            if matches!(
+                persistence,
+                SegmentCheckpointPersistence::Failed | SegmentCheckpointPersistence::InMemoryOnly
+            ) {
+                state.restore_checkpoint_mutation(prior_state);
+                state.disarm();
+                drop(state);
+                session
+                    .send_event_raw(Event {
+                        id: turn_context.sub_id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: "The rollback was not applied because its current-state checkpoint could not be persisted. The original thread state was restored."
+                                .to_string(),
+                            codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        }),
+                    })
+                    .await;
+                return CheckpointOwnerCompletion::Continue;
+            }
+            if matches!(persistence, SegmentCheckpointPersistence::Indeterminate) {
+                drop(state);
+                session
+                    .fence_indeterminate_checkpoint(
+                        turn_context.as_ref(),
+                        "The rollback checkpoint may have committed, but Codex could not verify it. Restart this thread before continuing."
+                            .to_string(),
+                        CodexErrorInfo::ThreadRollbackFailed,
+                    )
+                    .await;
+                return CheckpointOwnerCompletion::RestartRequired;
+            }
+            state.disarm();
+            drop(state);
+            session
+                .services
+                .agent_control
+                .rollout_budget()
+                .rearm_reminder(session.thread_id());
+            if let Err(err) = session.flush_rollout().await {
+                session
+                    .send_event(
+                        turn_context.as_ref(),
+                        EventMsg::Warning(WarningEvent {
+                            message: format!(
+                                "Rolled the thread back, but failed to save its current-state checkpoint. Codex will continue retrying. Error: {err}"
+                            ),
+                        }),
+                    )
+                    .await;
+            }
+            if let Some(token_count) = recomputed_token_count {
+                session
+                    .emit_persisted_token_count_event(turn_context.as_ref(), token_count)
+                    .await;
+            }
+            session
+                .deliver_event_raw(Event {
+                    id: turn_context.sub_id.clone(),
+                    msg: EventMsg::ThreadRolledBack(rollback_event),
+                })
+                .await;
+            CheckpointOwnerCompletion::Continue
+        });
+        let completion = tokio::spawn(async move {
+            match checkpoint_owner.await {
+                Ok(completion) => completion,
+                Err(error) => {
+                    warn!(%error, "rollback checkpoint owner failed");
+                    supervisor_session
+                        .fence_indeterminate_checkpoint(
+                            supervisor_turn_context.as_ref(),
+                            "The rollback checkpoint owner stopped unexpectedly. Restart this thread before continuing."
+                                .to_string(),
+                            CodexErrorInfo::ThreadRollbackFailed,
+                        )
+                        .await;
+                    CheckpointOwnerCompletion::RestartRequired
+                }
+            }
+        });
+        if let Err(err) = completion.await {
+            warn!(%err, "rollback checkpoint persistence task failed");
+            self.fence_indeterminate_checkpoint(
+                failure_turn_context.as_ref(),
+                "The rollback checkpoint owner stopped unexpectedly. Restart this thread before continuing."
+                    .to_string(),
+                CodexErrorInfo::ThreadRollbackFailed,
+            )
+            .await;
         }
     }
 
@@ -4117,14 +5108,46 @@ impl Session {
         turn_context: &TurnContext,
         world_state: &WorldState,
     ) -> Vec<ResponseItem> {
+        self.build_initial_context_with_world_state_inner(
+            turn_context,
+            world_state,
+            InitialContextAutoCompactWindow::Current,
+        )
+        .await
+    }
+
+    pub(crate) async fn build_initial_context_with_world_state_for_auto_compact_window(
+        &self,
+        turn_context: &TurnContext,
+        world_state: &WorldState,
+        prepared_window_advance: &PreparedAutoCompactWindowAdvance,
+    ) -> Vec<ResponseItem> {
+        self.build_initial_context_with_world_state_inner(
+            turn_context,
+            world_state,
+            InitialContextAutoCompactWindow::Prepared(prepared_window_advance.ids()),
+        )
+        .await
+    }
+
+    async fn build_initial_context_with_world_state_inner(
+        &self,
+        turn_context: &TurnContext,
+        world_state: &WorldState,
+        auto_compact_window: InitialContextAutoCompactWindow,
+    ) -> Vec<ResponseItem> {
         let mut developer_sections = Vec::<String>::with_capacity(8);
         let mut contextual_user_sections = Vec::<String>::with_capacity(2);
         let mut separate_developer_sections = Vec::<String>::new();
         let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
+            let auto_compact_window_ids = match auto_compact_window {
+                InitialContextAutoCompactWindow::Current => state.auto_compact_window_ids(),
+                InitialContextAutoCompactWindow::Prepared(ids) => ids,
+            };
             (
                 state.session_configuration.session_source.clone(),
-                state.auto_compact_window_ids(),
+                auto_compact_window_ids,
                 state.history.clone(),
             )
         };
@@ -4321,6 +5344,10 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        if self.persistence_restart_required() {
+            error!("refusing rollout persistence until the thread is restarted");
+            return;
+        }
         if let Some(live_thread) = self.live_thread()
             && let Err(e) = live_thread.append_items(items).await
         {
@@ -4350,6 +5377,7 @@ impl Session {
             ForkModelState {
                 history,
                 previous_turn_settings: state.previous_turn_settings(),
+                latest_rate_limits: state.token_info_and_rate_limits().1,
                 window_number: state.auto_compact_window_number(),
                 window_ids: state.auto_compact_window_ids(),
             }
@@ -4361,6 +5389,7 @@ impl Session {
         let current_history = state.clone_history();
         if !current_history.has_same_fork_metadata(&source_model_state.history)
             || state.previous_turn_settings() != source_model_state.previous_turn_settings
+            || state.token_info_and_rate_limits().1 != source_model_state.latest_rate_limits
             || state.auto_compact_window_number() != source_model_state.window_number
             || state.auto_compact_window_ids() != source_model_state.window_ids
         {
@@ -4376,9 +5405,17 @@ impl Session {
         format!("{thread_id}:{window_number}")
     }
 
+    #[cfg(test)]
     pub(crate) async fn advance_auto_compact_window(&self) -> (u64, AutoCompactWindowIds) {
         let mut state = self.state.lock().await;
         state.advance_auto_compact_window()
+    }
+
+    pub(crate) async fn prepare_auto_compact_window_advance(
+        &self,
+    ) -> PreparedAutoCompactWindowAdvance {
+        let state = self.state.lock().await;
+        state.prepare_auto_compact_window_advance()
     }
 
     pub(crate) async fn request_new_context_window(&self) {
@@ -4392,33 +5429,32 @@ impl Session {
     }
 
     pub(crate) async fn start_new_context_window(
-        &self,
+        self: &Arc<Self>,
         step_context: &StepContext,
         world_state: Arc<WorldState>,
-    ) -> u64 {
-        let turn_context = step_context.turn.as_ref();
-        let window = {
-            let mut state = self.state.lock().await;
-            state.start_new_context_window()
-        };
-        let (window_number, window_ids) = window;
+    ) -> CodexResult<u64> {
+        let turn_context = &step_context.turn;
+        let prepared_window_advance = self.prepare_auto_compact_window_advance().await;
         let context_items = self
-            .build_initial_context_with_world_state(turn_context, world_state.as_ref())
+            .build_initial_context_with_world_state_for_auto_compact_window(
+                turn_context,
+                world_state.as_ref(),
+                &prepared_window_advance,
+            )
             .await;
         let turn_context_item = turn_context.to_turn_context_item();
         self.replace_compacted_history(
+            turn_context,
             context_items,
             Some(turn_context_item),
             Some(world_state),
             CompactedHistoryMetadata {
                 message: String::new(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
             },
         )
-        .await;
-        self.recompute_token_usage(turn_context).await;
-        window_number
+        .await?;
+        Ok(self.state.lock().await.auto_compact_window_number())
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {
@@ -4447,6 +5483,9 @@ impl Session {
         let turn_context = step_context.turn.as_ref();
         let reference_context_item = {
             let state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                return Err(CodexErr::TurnAborted);
+            }
             state.reference_context_item()
         };
         let turn_context_item = turn_context.to_turn_context_item();
@@ -4459,11 +5498,13 @@ impl Session {
                 .build_initial_context_with_world_state(turn_context, world_state.as_ref())
                 .await;
             let snapshot = world_state.snapshot();
-            self.state
-                .lock()
-                .await
-                .history
-                .set_world_state_baseline(snapshot.clone());
+            {
+                let mut state = self.state.lock().await;
+                if self.persistence_restart_required() {
+                    return Err(CodexErr::TurnAborted);
+                }
+                state.history.set_world_state_baseline(snapshot.clone());
+            }
             (
                 context_items,
                 Some(WorldStateItem::full(snapshot.into_value())),
@@ -4471,6 +5512,9 @@ impl Session {
         } else {
             let (world_state_items, world_state_item) = {
                 let mut state = self.state.lock().await;
+                if self.persistence_restart_required() {
+                    return Err(CodexErr::TurnAborted);
+                }
                 let (fragments, rollout_item) =
                     state.history.update_world_state(world_state.as_ref());
                 (
@@ -4492,8 +5536,8 @@ impl Session {
             return Ok(world_state);
         }
         if !context_items.is_empty() {
-            self.record_conversation_items(turn_context, &context_items)
-                .await;
+            self.try_record_conversation_items(turn_context, &context_items)
+                .await?;
         }
         // Persist state only after any model-visible context generated from it.
         if let Some(world_state_item) = world_state_item {
@@ -4513,6 +5557,9 @@ impl Session {
         // Advance the persisted-settings baseline even when this turn emitted no model-visible
         // context items.
         let mut state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return Err(CodexErr::TurnAborted);
+        }
         state.set_reference_context_item(Some(turn_context_item));
         Ok(world_state)
     }
@@ -4565,44 +5612,63 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
-        let history = self.clone_history().await;
-        let base_instructions = self.get_base_instructions().await;
-        let Some(estimated_total_tokens) =
-            history.estimate_token_count_with_base_instructions(&base_instructions)
-        else {
-            return;
+    #[cfg(test)]
+    async fn recompute_token_usage_state(
+        &self,
+        turn_context: &TurnContext,
+    ) -> Option<TokenCountEvent> {
+        let mut state = self.state.lock().await;
+        Self::recompute_token_usage_state_in_state(&mut state, turn_context)
+    }
+
+    fn recompute_token_usage_state_in_state(
+        state: &mut SessionState,
+        turn_context: &TurnContext,
+    ) -> Option<TokenCountEvent> {
+        let base_instructions = BaseInstructions {
+            text: state.session_configuration.base_instructions.clone(),
+            provenance: state.base_instructions_provenance.clone(),
         };
-        {
-            let mut state = self.state.lock().await;
-            let mut info = state.token_info().unwrap_or(TokenUsageInfo {
-                total_token_usage: TokenUsage::default(),
-                last_token_usage: TokenUsage::default(),
-                model_context_window: None,
-            });
+        let estimated_total_tokens = state
+            .history
+            .estimate_token_count_with_base_instructions(&base_instructions)?;
+        let mut info = state.token_info().unwrap_or(TokenUsageInfo {
+            total_token_usage: TokenUsage::default(),
+            last_token_usage: TokenUsage::default(),
+            model_context_window: None,
+        });
 
-            info.last_token_usage = TokenUsage {
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-                total_tokens: estimated_total_tokens.max(0),
-                codex_rollout_budget_units: None,
-            };
+        info.last_token_usage = TokenUsage {
+            input_tokens: 0,
+            cached_input_tokens: 0,
+            cache_write_input_tokens: 0,
+            output_tokens: 0,
+            reasoning_output_tokens: 0,
+            total_tokens: estimated_total_tokens.max(0),
+            codex_rollout_budget_units: None,
+        };
 
-            if let Some(model_context_window) = turn_context.model_context_window() {
-                info.model_context_window = Some(model_context_window);
-            }
-
-            state.set_token_info(Some(info));
+        if let Some(model_context_window) = turn_context.model_context_window() {
+            info.model_context_window = Some(model_context_window);
         }
-        self.set_auto_compact_window_estimated_prefill_for_scope(
-            turn_context,
-            estimated_total_tokens,
-        )
-        .await;
-        self.send_token_count_event(turn_context).await;
+
+        state.set_token_info(Some(info));
+        if matches!(
+            turn_context.config.model_auto_compact_token_limit_scope,
+            AutoCompactTokenLimitScope::BodyAfterPrefix
+        ) {
+            state.set_auto_compact_window_estimated_prefill(estimated_total_tokens);
+        }
+        let (info, rate_limits) = state.token_info_and_rate_limits();
+        Some(TokenCountEvent { info, rate_limits })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
+        if let Some(token_count) = self.recompute_token_usage_state(turn_context).await {
+            self.send_event(turn_context, EventMsg::TokenCount(token_count))
+                .await;
+        }
     }
 
     pub(crate) async fn update_rate_limits(
@@ -4762,10 +5828,11 @@ impl Session {
             return Err(SteerInputError::EmptyInput);
         }
 
-        let additional_context_input = {
-            let mut state = self.state.lock().await;
-            state.additional_context.merge(additional_context)
-        };
+        let mut state = self.state.lock().await;
+        if self.persistence_restart_required() {
+            return Err(SteerInputError::RestartRequired(input));
+        }
+        let additional_context_input = state.additional_context.merge(additional_context);
 
         if let Some(responsesapi_client_metadata) = responsesapi_client_metadata {
             active_task
@@ -4793,6 +5860,7 @@ impl Session {
             self.pending_user_message_admissions
                 .associate_steered_by_client_id(client_id, active_turn_id);
         }
+        drop(state);
         Ok(active_turn_id.clone())
     }
 

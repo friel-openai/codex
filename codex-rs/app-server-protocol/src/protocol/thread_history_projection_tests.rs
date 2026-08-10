@@ -9,6 +9,8 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SegmentStateCheckpoint;
+use codex_protocol::protocol::SegmentStateCheckpointDisposition;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
@@ -17,6 +19,7 @@ use codex_protocol::user_input::UserInput;
 use pretty_assertions::assert_eq;
 
 use super::*;
+use crate::ThreadHistoryBuilder;
 use crate::protocol::v2::ThreadItem;
 use crate::protocol::v2::TurnError;
 
@@ -199,10 +202,70 @@ fn ignores_legacy_abort_without_turn_id_and_context_only_records() {
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        segment_state_checkpoint: None,
     }));
 
     assert!(aborted.is_empty());
     assert!(compacted.is_empty());
+}
+
+#[test]
+fn state_only_checkpoint_does_not_add_a_turn() {
+    let mut builder = ThreadHistoryBuilder::new();
+    builder.handle_rollout_item(&RolloutItem::EventMsg(EventMsg::TurnStarted(
+        TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        },
+    )));
+    builder.handle_rollout_item(&RolloutItem::EventMsg(EventMsg::TurnComplete(
+        TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: None,
+            error: None,
+            started_at: None,
+            completed_at: None,
+            duration_ms: None,
+            time_to_first_token_ms: None,
+        },
+    )));
+    builder.handle_rollout_item(&RolloutItem::Compacted(state_checkpoint_compacted("")));
+
+    let turns = builder.finish();
+    assert_eq!(turns.len(), 1);
+    assert_eq!(turns[0].id, "turn-1");
+}
+
+#[test]
+fn real_compaction_with_checkpoint_preserves_compaction_turn() {
+    let mut builder = ThreadHistoryBuilder::new();
+    builder.handle_rollout_item(&RolloutItem::Compacted(state_checkpoint_compacted(
+        "real compaction summary",
+    )));
+
+    let turns = builder.finish();
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].items.is_empty());
+}
+
+fn state_checkpoint_compacted(message: &str) -> CompactedItem {
+    CompactedItem {
+        message: message.to_string(),
+        replacement_history: Some(Vec::new()),
+        window_number: Some(1),
+        first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
+        previous_window_id: None,
+        window_id: Some("019b3f6e-0000-7000-8000-000000000002".to_string()),
+        segment_state_checkpoint: Some(SegmentStateCheckpoint {
+            version: 1,
+            previous_turn_settings: None,
+            world_state: SegmentStateCheckpointDisposition::Cleared,
+            reference_context: SegmentStateCheckpointDisposition::Cleared,
+        }),
+    }
 }
 
 #[test]

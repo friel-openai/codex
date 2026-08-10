@@ -137,14 +137,14 @@ pub fn strip_user_message_prefix(text: &str) -> &str {
 
 // TODO(anp): Replace `TurnEnvironmentSelection` with `PathUri` once path URIs carry environment
 // identifiers.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct TurnEnvironmentSelection {
     pub environment_id: String,
     pub cwd: PathUri,
     pub workspace_roots: Vec<PathUri>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct TurnEnvironmentSelections {
     pub legacy_fallback_cwd: AbsolutePathBuf,
     pub environments: Vec<TurnEnvironmentSelection>,
@@ -2057,6 +2057,36 @@ pub struct ThreadSettingsSnapshot {
     #[ts(optional)]
     pub active_permission_profile: Option<ActivePermissionProfile>,
     pub cwd: AbsolutePathBuf,
+    /// Sticky environment selections used by future turns.
+    ///
+    /// New records use `Some`. Older rollout records omit this field and readers retain the
+    /// environment selections derived from current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub environments: Option<TurnEnvironmentSelections>,
+    /// Effective workspace roots used to materialize symbolic
+    /// `:workspace_roots` entries in `permission_profile`.
+    ///
+    /// New records use `Some`, including `Some(Vec::new())` for an explicit empty set. Older
+    /// rollout records omit this field; readers should fall back to the latest
+    /// `TurnContextItem::workspace_roots` only when it is `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Workspace roots supplied by the persisted active permission profile.
+    ///
+    /// New checkpoint records use `Some`, including `Some(Vec::new())`. Older rollout records
+    /// omit this field and readers retain roots resolved from current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Effective Windows sandbox mode for future turns.
+    ///
+    /// New checkpoint records use `Some`. Older rollout records omit this field and readers
+    /// retain the mode resolved from current configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub windows_sandbox_level: Option<WindowsSandboxLevel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<ReasoningEffortConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2204,6 +2234,7 @@ impl FromStr for RateLimitReachedType {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct RateLimitWindow {
     /// Percentage (0-100) of the window that has been consumed.
+    #[serde(deserialize_with = "deserialize_json_f64")]
     pub used_percent: f64,
     /// Rolling window duration, in minutes.
     #[ts(type = "number | null")]
@@ -2211,6 +2242,27 @@ pub struct RateLimitWindow {
     /// Unix timestamp (seconds since epoch) when the window resets.
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
+}
+
+/// Deserializes a JSON number after Serde has buffered a flattened or internally tagged value.
+///
+/// When another crate enables serde_json's `arbitrary_precision` feature, decimal numbers
+/// buffered while deserializing `RolloutLine` and `EventMsg` are represented by serde_json's
+/// private number map. Deserializing through `serde_json::Number` accepts both that representation
+/// and ordinary JSON numbers before converting to the protocol's float value.
+fn deserialize_json_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    f64::deserialize(serde_json::Number::deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+fn deserialize_json_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Parse directly as f32 so retained arbitrary-precision text is rounded only once.
+    f32::deserialize(serde_json::Number::deserialize(deserializer)?).map_err(D::Error::custom)
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
@@ -3292,6 +3344,53 @@ pub struct CompactedItem {
     /// UUIDv7 identity of this context window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub window_id: Option<String>,
+    /// Certifies that this compaction and its adjacent state records form a complete
+    /// current-state checkpoint for the active rollout segment.
+    ///
+    /// Older compactions omit this field and continue to require recursive rollout replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_state_checkpoint: Option<SegmentStateCheckpoint>,
+}
+
+/// Versioned state needed in addition to replacement history to resume from one rollout segment.
+///
+/// The full world-state and reference-context payloads remain ordinary adjacent rollout items.
+/// This descriptor records whether each payload is present or intentionally cleared and preserves
+/// the previous-turn settings that are otherwise available only in older segments. The version-1
+/// grammar also requires adjacent `ThreadSettingsApplied` and `TokenCount` events so effective
+/// thread settings, token usage, and rate limits remain available without older segments.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct SegmentStateCheckpoint {
+    /// Checkpoint grammar version interpreted by rollout readers.
+    pub version: u32,
+    /// Settings from the newest completed real user turn, or `None` when no such turn exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_turn_settings: Option<SegmentPreviousTurnSettings>,
+    /// Whether an adjacent full `WorldStateItem` establishes the comparison baseline.
+    pub world_state: SegmentStateCheckpointDisposition,
+    /// Whether an adjacent `TurnContextItem` establishes the reference-context baseline.
+    pub reference_context: SegmentStateCheckpointDisposition,
+}
+
+/// Previous-turn settings required to construct model-visible settings changes after resume.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema, TS)]
+pub struct SegmentPreviousTurnSettings {
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comp_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub realtime_active: Option<bool>,
+}
+
+/// Whether a checkpoint establishes or intentionally clears an adjacent comparison baseline.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(rename_all = "snake_case")]
+pub enum SegmentStateCheckpointDisposition {
+    /// The checkpoint contains the corresponding adjacent full snapshot.
+    Established,
+    /// The checkpoint intentionally has no baseline for the corresponding state.
+    Cleared,
 }
 
 impl From<CompactedItem> for ResponseItem {
@@ -3536,6 +3635,7 @@ pub struct ReviewOutputEvent {
     pub findings: Vec<ReviewFinding>,
     pub overall_correctness: String,
     pub overall_explanation: String,
+    #[serde(deserialize_with = "deserialize_json_f32")]
     pub overall_confidence_score: f32,
 }
 
@@ -3555,6 +3655,7 @@ impl Default for ReviewOutputEvent {
 pub struct ReviewFinding {
     pub title: String,
     pub body: String,
+    #[serde(deserialize_with = "deserialize_json_f32")]
     pub confidence_score: f32,
     pub priority: i32,
     pub code_location: ReviewCodeLocation,

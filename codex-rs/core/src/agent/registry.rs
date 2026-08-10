@@ -8,6 +8,7 @@ use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -41,9 +42,15 @@ struct ActiveAgents {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMetadata {
     pub(crate) agent_id: Option<ThreadId>,
+    /// Immediate owner in the current root-scoped agent tree.
+    pub(crate) parent_thread_id: Option<ThreadId>,
+    /// Depth recorded by the authoritative open ownership path.
+    pub(crate) depth: Option<i32>,
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
+    /// Whether this identity belongs to an ephemeral thread with no persisted ownership edge.
+    pub(crate) ephemeral: bool,
     pub(crate) last_task_message: Option<String>,
     /// Serializes loaded/cold transitions for this addressable agent. The lock lives with the
     /// registry entry so unloading the heavy `CodexThread` does not permit concurrent reloads.
@@ -57,15 +64,77 @@ pub(crate) struct AgentLifecycle {
     transition: Arc<AsyncMutex<()>>,
     /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
     visible_when_cold: AtomicBool,
-    /// Prevents duplicate completion watchers for one registered agent.
-    completion_watcher_active: AtomicBool,
-    /// Wakes input delivery after the active completion watcher finishes its transition.
+    /// Preserves a completed agent's final status after its heavy thread state is unloaded.
+    cold_terminal_status: Mutex<Option<AgentStatus>>,
+    /// Prevents duplicate completion-watcher tasks for one registered agent.
+    completion_watcher_registered: AtomicBool,
+    /// Blocks delivery and residency changes while a terminal status awaits parent notification.
+    completion_transition_pending: AtomicBool,
+    /// Retains terminal status events until parent delivery is acknowledged.
+    completion_statuses: Mutex<CompletionStatusState>,
+    /// Wakes the registered watcher when a terminal status is recorded.
+    completion_status_available: Notify,
+    /// Wakes input delivery after the pending completion transition finishes.
     completion_watcher_finished: Notify,
 }
 
-/// Clears the active-watcher marker even when the watcher exits through an error path.
+/// One terminal status event awaiting delivery to the parent agent.
+#[derive(Clone, Debug)]
+struct CompletionStatusEntry {
+    event_id: String,
+    status: AgentStatus,
+}
+
+/// One terminal status reserved for delivery until its parent mutation succeeds.
+#[derive(Clone, Debug)]
+pub(crate) struct CompletionStatusClaim {
+    entry: CompletionStatusEntry,
+}
+
+impl CompletionStatusClaim {
+    pub(crate) fn event_id(&self) -> &str {
+        &self.entry.event_id
+    }
+
+    pub(crate) fn status(&self) -> &AgentStatus {
+        &self.entry.status
+    }
+}
+
+/// Lossless completion state kept separately from the latest-value `AgentStatus` watch channel.
+#[derive(Debug, Default)]
+struct CompletionStatusState {
+    pending: VecDeque<CompletionStatusEntry>,
+    last_claimed_event_id: Option<String>,
+    publication_generation: u64,
+}
+
+/// Selects whether a terminal can create deferred work without canonical parent metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CompletionRecordMode {
+    #[cfg(test)]
+    Retain,
+    RetainAndRegisterWatcher,
+    RequireRegisteredWatcher,
+}
+
+/// Result of publishing one definitive terminal status into the lifecycle.
+pub(crate) struct CompletionStatusPublication {
+    pub(crate) recorded: bool,
+    pub(crate) registration: Option<CompletionWatcherRegistration>,
+}
+
+/// Why input delivery stopped waiting for an agent's completion watcher.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompletionWatcherWaitOutcome {
+    WatcherRetired,
+    PendingTerminal,
+}
+
+/// Clears completion-watcher ownership even when the watcher exits through an error path.
 pub(crate) struct CompletionWatcherRegistration {
     lifecycle: Arc<AgentLifecycle>,
+    registered: bool,
 }
 
 impl AgentLifecycle {
@@ -74,7 +143,11 @@ impl AgentLifecycle {
     }
 
     pub(crate) fn completion_watcher_active(&self) -> bool {
-        self.completion_watcher_active.load(Ordering::Acquire)
+        self.completion_transition_pending.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn completion_watcher_registered(&self) -> bool {
+        self.completion_watcher_registered.load(Ordering::Acquire)
     }
 
     pub(crate) fn mark_visible_when_cold(&self) {
@@ -88,12 +161,202 @@ impl AgentLifecycle {
     pub(crate) fn try_start_completion_watcher(
         self: &Arc<Self>,
     ) -> Option<CompletionWatcherRegistration> {
-        self.completion_watcher_active
+        let _state = self
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.try_start_completion_watcher_locked()
+    }
+
+    fn try_start_completion_watcher_locked(
+        self: &Arc<Self>,
+    ) -> Option<CompletionWatcherRegistration> {
+        self.completion_watcher_registered
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .ok()
-            .map(|_| CompletionWatcherRegistration {
-                lifecycle: Arc::clone(self),
-            })
+            .ok()?;
+        Some(CompletionWatcherRegistration {
+            lifecycle: Arc::clone(self),
+            registered: true,
+        })
+    }
+
+    /// Records a terminal status before the latest-value status channel can advance again.
+    #[cfg(test)]
+    pub(crate) fn record_completion_status(
+        self: &Arc<Self>,
+        event_id: String,
+        status: AgentStatus,
+    ) -> bool {
+        self.publish_completion_status_inner(event_id, status, CompletionRecordMode::Retain, || {})
+            .recorded
+    }
+
+    /// Publishes a terminal status and reserves its watcher before the status becomes observable.
+    pub(crate) fn publish_completion_status<F>(
+        self: &Arc<Self>,
+        event_id: String,
+        status: AgentStatus,
+        publish_status: F,
+    ) -> CompletionStatusPublication
+    where
+        F: FnOnce(),
+    {
+        self.publish_completion_status_inner(
+            event_id,
+            status,
+            CompletionRecordMode::RetainAndRegisterWatcher,
+            publish_status,
+        )
+    }
+
+    /// Publishes a terminal only while an existing watcher owns incomplete legacy metadata.
+    pub(crate) fn publish_completion_status_for_registered_watcher<F>(
+        self: &Arc<Self>,
+        event_id: String,
+        status: AgentStatus,
+        publish_status: F,
+    ) -> CompletionStatusPublication
+    where
+        F: FnOnce(),
+    {
+        self.publish_completion_status_inner(
+            event_id,
+            status,
+            CompletionRecordMode::RequireRegisteredWatcher,
+            publish_status,
+        )
+    }
+
+    fn publish_completion_status_inner<F>(
+        self: &Arc<Self>,
+        event_id: String,
+        status: AgentStatus,
+        mode: CompletionRecordMode,
+        publish_status: F,
+    ) -> CompletionStatusPublication
+    where
+        F: FnOnce(),
+    {
+        let mut state = self
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if mode == CompletionRecordMode::RequireRegisteredWatcher
+            && !self.completion_watcher_registered.load(Ordering::Acquire)
+        {
+            publish_status();
+            return CompletionStatusPublication {
+                recorded: false,
+                registration: None,
+            };
+        }
+        if state.last_claimed_event_id.as_deref() == Some(event_id.as_str()) {
+            publish_status();
+            return CompletionStatusPublication {
+                recorded: false,
+                registration: None,
+            };
+        }
+        if let Some(existing) = state
+            .pending
+            .iter_mut()
+            .find(|entry| entry.event_id == event_id)
+        {
+            existing.status = status;
+        } else {
+            state
+                .pending
+                .push_back(CompletionStatusEntry { event_id, status });
+        }
+        state.publication_generation = state.publication_generation.wrapping_add(1);
+        self.completion_transition_pending
+            .store(true, Ordering::Release);
+        let registration = (mode == CompletionRecordMode::RetainAndRegisterWatcher)
+            .then(|| self.try_start_completion_watcher_locked())
+            .flatten();
+        publish_status();
+        drop(state);
+        self.completion_status_available.notify_waiters();
+        CompletionStatusPublication {
+            recorded: true,
+            registration,
+        }
+    }
+
+    /// Reserves delivery while an ObserveCurrent watcher checks the existing status.
+    pub(crate) fn begin_completion_transition(&self) {
+        self.completion_transition_pending
+            .store(true, Ordering::Release);
+    }
+
+    pub(crate) fn has_pending_completion_status(&self) -> bool {
+        !self
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .is_empty()
+    }
+
+    /// Returns the oldest terminal without removing it from durable-delivery ownership.
+    pub(crate) fn try_claim_completion_status(&self) -> Option<CompletionStatusClaim> {
+        self.completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pending
+            .front()
+            .cloned()
+            .map(|entry| CompletionStatusClaim { entry })
+    }
+
+    /// Removes a terminal only after the watcher has durably notified its canonical parent.
+    pub(crate) fn acknowledge_completion_status(&self, claim: &CompletionStatusClaim) -> bool {
+        let mut state = self
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.pending.front().map(|entry| entry.event_id.as_str())
+            != Some(claim.entry.event_id.as_str())
+        {
+            return false;
+        }
+        let Some(entry) = state.pending.pop_front() else {
+            return false;
+        };
+        state.last_claimed_event_id = Some(entry.event_id);
+        true
+    }
+
+    pub(crate) async fn wait_for_completion_status_claim(&self) -> CompletionStatusClaim {
+        loop {
+            if let Some(claim) = self.try_claim_completion_status() {
+                return claim;
+            }
+            self.finish_completion_transition();
+            let available = self.completion_status_available.notified();
+            tokio::pin!(available);
+            // `notify_waiters` stores no permit, so enable before the second queue check to cover
+            // a notification delivered between constructing and polling `Notified`.
+            let _ = available.as_mut().enable();
+            if let Some(claim) = self.try_claim_completion_status() {
+                return claim;
+            }
+            available.await;
+        }
+    }
+
+    pub(crate) fn finish_completion_transition(&self) {
+        let state = self
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.pending.is_empty() {
+            return;
+        }
+        self.completion_transition_pending
+            .store(false, Ordering::Release);
+        drop(state);
+        self.completion_watcher_finished.notify_waiters();
     }
 
     pub(crate) async fn wait_for_completion_watcher(&self) {
@@ -109,14 +372,98 @@ impl AgentLifecycle {
             finished.await;
         }
     }
+
+    /// Waits for watcher retirement without missing a terminal published by the watcher target.
+    pub(crate) async fn wait_for_completion_watcher_or_pending_terminal(
+        &self,
+        transition: OwnedMutexGuard<()>,
+    ) -> CompletionWatcherWaitOutcome {
+        let mut transition = Some(transition);
+        let mut initial_publication_generation = None;
+        loop {
+            let status_available = self.completion_status_available.notified();
+            let watcher_finished = self.completion_watcher_finished.notified();
+            tokio::pin!(status_available);
+            tokio::pin!(watcher_finished);
+            let _ = status_available.as_mut().enable();
+            let _ = watcher_finished.as_mut().enable();
+
+            let outcome = {
+                let state = self
+                    .completion_statuses
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let initial_generation =
+                    *initial_publication_generation.get_or_insert(state.publication_generation);
+                if !state.pending.is_empty() || state.publication_generation != initial_generation {
+                    Some(CompletionWatcherWaitOutcome::PendingTerminal)
+                } else if !self.completion_watcher_active() {
+                    Some(CompletionWatcherWaitOutcome::WatcherRetired)
+                } else {
+                    None
+                }
+            };
+            if let Some(outcome) = outcome {
+                return outcome;
+            }
+
+            drop(transition.take());
+            tokio::select! {
+                _ = status_available.as_mut() => {}
+                _ = watcher_finished.as_mut() => {}
+            }
+        }
+    }
+}
+
+impl CompletionWatcherRegistration {
+    /// Retires this watcher only if no terminal status arrived after its quiescence check.
+    pub(crate) fn try_retire(&mut self) -> bool {
+        let state = self
+            .lifecycle
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.pending.is_empty() {
+            return false;
+        }
+        self.registered = false;
+        self.lifecycle
+            .completion_watcher_registered
+            .store(false, Ordering::Release);
+        self.lifecycle
+            .completion_transition_pending
+            .store(false, Ordering::Release);
+        drop(state);
+        self.lifecycle.completion_watcher_finished.notify_waiters();
+        true
+    }
+
+    fn clear_registration(&mut self) {
+        if !self.registered {
+            return;
+        }
+        let mut state = self
+            .lifecycle
+            .completion_statuses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.registered = false;
+        state.pending.clear();
+        self.lifecycle
+            .completion_watcher_registered
+            .store(false, Ordering::Release);
+        self.lifecycle
+            .completion_transition_pending
+            .store(false, Ordering::Release);
+        drop(state);
+        self.lifecycle.completion_watcher_finished.notify_waiters();
+    }
 }
 
 impl Drop for CompletionWatcherRegistration {
     fn drop(&mut self) {
-        self.lifecycle
-            .completion_watcher_active
-            .store(false, Ordering::Release);
-        self.lifecycle.completion_watcher_finished.notify_waiters();
+        self.clear_registration();
     }
 }
 
@@ -163,6 +510,67 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
 }
 
 impl AgentRegistry {
+    pub(crate) fn registered_subtree_thread_ids(&self, root_thread_id: ThreadId) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
+        for metadata in active_agents.agent_tree.values() {
+            let (Some(thread_id), Some(parent_thread_id)) =
+                (metadata.agent_id, metadata.parent_thread_id)
+            else {
+                continue;
+            };
+            children
+                .entry(parent_thread_id)
+                .or_default()
+                .push(thread_id);
+        }
+        let mut subtree = vec![root_thread_id];
+        let mut stack = children.remove(&root_thread_id).unwrap_or_default();
+        while let Some(thread_id) = stack.pop() {
+            subtree.push(thread_id);
+            stack.extend(children.remove(&thread_id).unwrap_or_default());
+        }
+        subtree
+    }
+
+    /// Return registered ephemeral descendants whose parent chain stays within `owned_thread_ids`.
+    pub(crate) fn registered_ephemeral_descendants_within(
+        &self,
+        owned_thread_ids: &HashSet<ThreadId>,
+    ) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut included = owned_thread_ids.clone();
+        let mut descendants = Vec::new();
+        loop {
+            let mut changed = false;
+            for metadata in active_agents.agent_tree.values() {
+                let (Some(thread_id), Some(parent_thread_id)) =
+                    (metadata.agent_id, metadata.parent_thread_id)
+                else {
+                    continue;
+                };
+                if metadata.ephemeral
+                    && included.contains(&parent_thread_id)
+                    && included.insert(thread_id)
+                {
+                    descendants.push(thread_id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        descendants.sort_by_key(ToString::to_string);
+        descendants
+    }
+
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,
@@ -254,6 +662,26 @@ impl AgentRegistry {
             .get(&thread_id)
             .and_then(|path| active_agents.agent_tree.get(path))
             .cloned()
+    }
+
+    pub(crate) fn registered_path_prefix_thread_ids(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active_agents
+            .agent_tree
+            .iter()
+            .filter_map(|(registered_path, metadata)| {
+                let suffix = agent_path.as_str().strip_prefix(registered_path)?;
+                (suffix.is_empty() || suffix.starts_with('/'))
+                    .then_some(metadata.agent_id)
+                    .flatten()
+            })
+            .collect()
     }
 
     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {

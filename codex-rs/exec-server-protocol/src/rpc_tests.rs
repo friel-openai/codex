@@ -1,3 +1,16 @@
+use std::path::PathBuf;
+
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExitedReviewModeEvent;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::ReviewCodeLocation;
+use codex_protocol::protocol::ReviewFinding;
+use codex_protocol::protocol::ReviewLineRange;
+use codex_protocol::protocol::ReviewOutputEvent;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::TokenCountEvent;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -56,6 +69,90 @@ fn round_trips_arbitrary_precision_numbers() -> serde_json::Result<()> {
     let message = serde_json::from_str::<JSONRPCMessage>(encoded)?;
     let actual = serde_json::to_value(message)?;
 
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn rollout_line_round_trips_rate_limit_windows_with_arbitrary_precision() -> serde_json::Result<()>
+{
+    let expected = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("Codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 25.0,
+            window_minutes: Some(300),
+            resets_at: Some(1_700),
+        }),
+        secondary: Some(RateLimitWindow {
+            used_percent: 12.5,
+            window_minutes: Some(10_080),
+            resets_at: Some(2_300),
+        }),
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    let line = RolloutLine {
+        timestamp: "2026-08-09T00:00:00.000Z".to_string(),
+        ordinal: Some(1),
+        item: RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+            info: None,
+            rate_limits: Some(expected.clone()),
+        })),
+    };
+
+    let encoded = serde_json::to_string(&line)?;
+    let decoded = serde_json::from_str::<RolloutLine>(&encoded)?;
+    let RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+        rate_limits: Some(actual),
+        ..
+    })) = decoded.item
+    else {
+        panic!("expected token-count rollout item");
+    };
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[test]
+fn rollout_line_round_trips_review_confidence_with_arbitrary_precision() -> serde_json::Result<()> {
+    let expected = ReviewOutputEvent {
+        findings: vec![ReviewFinding {
+            title: "Finding".to_string(),
+            body: "Body".to_string(),
+            confidence_score: 0.625,
+            priority: 1,
+            code_location: ReviewCodeLocation {
+                absolute_file_path: PathBuf::from("/tmp/example.rs"),
+                line_range: ReviewLineRange { start: 10, end: 12 },
+            },
+        }],
+        overall_correctness: "correct".to_string(),
+        overall_explanation: "Explanation".to_string(),
+        overall_confidence_score: 0.875,
+    };
+    let line = RolloutLine {
+        timestamp: "2026-08-09T00:00:00.000Z".to_string(),
+        ordinal: Some(2),
+        item: RolloutItem::EventMsg(EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
+            turn_id: Some("turn-1".to_string()),
+            item_id: Some("review-1".to_string()),
+            review_output: Some(expected.clone()),
+        })),
+    };
+
+    let encoded = serde_json::to_string(&line)?;
+    let decoded = serde_json::from_str::<RolloutLine>(&encoded)?;
+    let RolloutItem::EventMsg(EventMsg::ExitedReviewMode(ExitedReviewModeEvent {
+        review_output: Some(actual),
+        ..
+    })) = decoded.item
+    else {
+        panic!("expected review-output rollout item");
+    };
     assert_eq!(actual, expected);
     Ok(())
 }

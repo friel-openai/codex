@@ -1,5 +1,14 @@
+#[cfg(test)]
+use std::collections::HashSet;
+use std::panic::AssertUnwindSafe;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -11,6 +20,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutPersistenceTelemetry;
 use codex_rollout::measure_and_filter_rollout_items;
 use codex_rollout::persisted_rollout_items;
+use futures::FutureExt;
 use tokio::sync::Mutex;
 use tracing::warn;
 
@@ -22,6 +32,7 @@ use crate::LoadThreadHistoryParams;
 use crate::LocalThreadStore;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::ThreadMetadataPatch;
@@ -34,6 +45,26 @@ use crate::UpdateThreadMetadataParams;
 use crate::thread_metadata_sync::ThreadMetadataSync;
 
 const BACKGROUND_ROOT_RECENCY_INTERVAL: Duration = Duration::from_secs(60 * 60);
+
+#[cfg(test)]
+static CHECKPOINT_METADATA_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+
+#[cfg(test)]
+pub(crate) fn inject_next_checkpoint_metadata_failure(thread_id: ThreadId) {
+    CHECKPOINT_METADATA_FAILURES
+        .lock()
+        .expect("checkpoint metadata failure mutex")
+        .insert(thread_id);
+}
+
+#[cfg(test)]
+fn take_checkpoint_metadata_failure(thread_id: ThreadId) -> bool {
+    CHECKPOINT_METADATA_FAILURES
+        .lock()
+        .expect("checkpoint metadata failure mutex")
+        .remove(&thread_id)
+}
 
 /// Handle for an active thread's persistence lifecycle.
 ///
@@ -49,7 +80,39 @@ pub struct LiveThread {
     persistence_mode: Arc<Mutex<ThreadPersistenceMode>>,
     pending_root_recency_touch: Arc<Mutex<bool>>,
     next_root_recency_touch_attempt: Arc<Mutex<Option<Instant>>>,
+    /// Prevents any later mutation after checkpoint commit state becomes indeterminate.
+    persistence_restart_required: Arc<AtomicBool>,
     persistence_telemetry: RolloutPersistenceTelemetry,
+}
+
+/// Sets the restart fence before checkpoint ownership releases the persistence-mode mutex.
+///
+/// The guard stays armed across storage and metadata publication. Normal classified returns disarm
+/// it; panic unwinding sets the atomic flag before later live mutations can acquire the mutex.
+struct CheckpointPersistenceRestartGuard {
+    restart_required: Arc<AtomicBool>,
+    armed: bool,
+}
+
+impl CheckpointPersistenceRestartGuard {
+    fn new(restart_required: Arc<AtomicBool>) -> Self {
+        Self {
+            restart_required,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CheckpointPersistenceRestartGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.restart_required.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// Owns a live thread while session initialization is still fallible.
@@ -119,6 +182,7 @@ impl LiveThread {
             persistence_mode: Arc::new(Mutex::new(persistence_mode)),
             pending_root_recency_touch: Arc::new(Mutex::new(false)),
             next_root_recency_touch_attempt: Arc::new(Mutex::new(None)),
+            persistence_restart_required: Arc::new(AtomicBool::new(false)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -194,6 +258,7 @@ impl LiveThread {
             match thread_store
                 .load_history(LoadThreadHistoryParams {
                     thread_id,
+                    rollout_path: None,
                     include_archived,
                 })
                 .await
@@ -217,6 +282,7 @@ impl LiveThread {
             persistence_mode: Arc::new(Mutex::new(ThreadPersistenceMode::Durable)),
             pending_root_recency_touch: Arc::new(Mutex::new(false)),
             next_root_recency_touch_attempt: Arc::new(Mutex::new(None)),
+            persistence_restart_required: Arc::new(AtomicBool::new(false)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -232,6 +298,7 @@ impl LiveThread {
     )]
     pub async fn append_items(&self, raw_items: &[RolloutItem]) -> ThreadStoreResult<()> {
         let persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("append rollout items")?;
         let items = self.persist_appended_items(raw_items).await?;
         if items.is_empty() {
             return Ok(());
@@ -341,6 +408,7 @@ impl LiveThread {
     )]
     pub async fn persist(&self) -> ThreadStoreResult<()> {
         let mut persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("persist the thread")?;
         self.thread_store.persist_thread(self.thread_id).await?;
         *persistence_mode = ThreadPersistenceMode::Durable;
         drop(persistence_mode);
@@ -355,11 +423,11 @@ impl LiveThread {
     )]
     pub async fn flush(&self) -> ThreadStoreResult<()> {
         let persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("flush the thread")?;
         self.thread_store.flush_thread(self.thread_id).await?;
         if matches!(*persistence_mode, ThreadPersistenceMode::Deferred) {
             return Ok(());
         }
-        drop(persistence_mode);
         self.flush_pending_metadata_update_for_existing_history()
             .await?;
         self.flush_pending_root_recency_touch().await;
@@ -386,6 +454,7 @@ impl LiveThread {
         params: FreezeRolloutSegmentParams,
     ) -> ThreadStoreResult<Option<FrozenRolloutSegment>> {
         let mut persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("freeze a rollout segment")?;
         let Some(local_store) = self
             .thread_store
             .as_any()
@@ -403,10 +472,131 @@ impl LiveThread {
             *persistence_mode = ThreadPersistenceMode::Durable;
         }
         let frozen = freeze_result.map(Some)?;
-        drop(persistence_mode);
         self.flush_pending_metadata_update().await?;
         self.flush_pending_root_recency_touch().await;
         Ok(frozen)
+    }
+
+    /// Persists a complete segment-state checkpoint without interpreting an ordinary append error
+    /// as proof that no checkpoint record was written.
+    pub async fn persist_segment_checkpoint(
+        &self,
+        params: FreezeRolloutSegmentParams,
+    ) -> SegmentCheckpointPersistenceOutcome {
+        let live_thread = self.clone();
+        let checkpoint_owner = tokio::spawn(async move {
+            let result = AssertUnwindSafe(live_thread.persist_segment_checkpoint_inner(params))
+                .catch_unwind()
+                .await;
+            match result {
+                Ok(outcome) => outcome,
+                Err(_) => {
+                    let _ = live_thread.require_restart_and_discard().await;
+                    SegmentCheckpointPersistenceOutcome::Indeterminate {
+                        error: ThreadStoreError::Internal {
+                            message: format!(
+                                "checkpoint persistence owner for thread {} panicked at an indeterminate commit point",
+                                live_thread.thread_id
+                            ),
+                        },
+                    }
+                }
+            }
+        });
+        match checkpoint_owner.await {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let _ = self.require_restart_and_discard().await;
+                SegmentCheckpointPersistenceOutcome::Indeterminate {
+                    error: ThreadStoreError::Internal {
+                        message: format!(
+                            "checkpoint persistence owner for thread {} failed: {error}",
+                            self.thread_id
+                        ),
+                    },
+                }
+            }
+        }
+    }
+
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "checkpoint persistence and metadata publication must observe one persistence mode"
+    )]
+    async fn persist_segment_checkpoint_inner(
+        &self,
+        params: FreezeRolloutSegmentParams,
+    ) -> SegmentCheckpointPersistenceOutcome {
+        let mut persistence_mode = self.persistence_mode.lock().await;
+        if let Err(error) = self.ensure_persistence_available("persist a segment checkpoint") {
+            return SegmentCheckpointPersistenceOutcome::Indeterminate { error };
+        }
+        let mut restart_guard =
+            CheckpointPersistenceRestartGuard::new(Arc::clone(&self.persistence_restart_required));
+        let raw_items = params.initial_items().to_vec();
+        let outcome = self
+            .thread_store
+            .persist_segment_checkpoint(self.thread_id, params)
+            .await;
+        if let Some(local_store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()
+            && matches!(
+                local_store.live_persistence_mode(self.thread_id).await,
+                Some(ThreadPersistenceMode::Durable)
+            )
+        {
+            *persistence_mode = ThreadPersistenceMode::Durable;
+        }
+        match &outcome {
+            SegmentCheckpointPersistenceOutcome::Indeterminate { .. } => return outcome,
+            SegmentCheckpointPersistenceOutcome::NotCommitted { .. } => {
+                restart_guard.disarm();
+                return outcome;
+            }
+            SegmentCheckpointPersistenceOutcome::Committed => {}
+        }
+        let (items, measurement) = if self.persistence_telemetry.is_enabled() {
+            let (items, measurement) =
+                measure_and_filter_rollout_items(raw_items.as_slice(), self.history_mode);
+            (items, Some(measurement))
+        } else {
+            (
+                persisted_rollout_items(raw_items.as_slice(), self.history_mode),
+                None,
+            )
+        };
+        if let Some(measurement) = measurement.as_ref() {
+            self.persistence_telemetry
+                .record_batch(raw_items.as_slice(), measurement);
+        }
+        if !items.is_empty() {
+            self.metadata_sync
+                .lock()
+                .await
+                .observe_appended_items(items.as_slice());
+        }
+        if matches!(*persistence_mode, ThreadPersistenceMode::Deferred) {
+            restart_guard.disarm();
+            return outcome;
+        }
+        #[cfg(test)]
+        let injected_metadata_failure = take_checkpoint_metadata_failure(self.thread_id);
+        #[cfg(not(test))]
+        let injected_metadata_failure = false;
+        let metadata_result = if injected_metadata_failure {
+            Err(ThreadStoreError::Internal {
+                message: "injected checkpoint metadata publication failure".to_string(),
+            })
+        } else {
+            self.flush_pending_metadata_update().await
+        };
+        if let Err(error) = metadata_result {
+            warn!(%error, "segment-state checkpoint committed but thread metadata publication failed");
+        }
+        restart_guard.disarm();
+        outcome
     }
 
     #[expect(
@@ -415,6 +605,7 @@ impl LiveThread {
     )]
     pub async fn shutdown(&self) -> ThreadStoreResult<()> {
         let persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("shut down thread persistence")?;
         if matches!(*persistence_mode, ThreadPersistenceMode::Durable) {
             self.flush_pending_metadata_update_for_existing_history()
                 .await?;
@@ -427,6 +618,22 @@ impl LiveThread {
         self.thread_store.discard_thread(self.thread_id).await
     }
 
+    /// Permanently rejects later mutations after persistence may have committed ambiguously.
+    ///
+    /// The atomic flag is set before waiting for the persistence-mode mutex. Operations already
+    /// queued on that mutex therefore fail their availability check instead of running after the
+    /// recorder is discarded.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "poisoning and discarding the writer must exclude concurrent persistence"
+    )]
+    pub async fn require_restart_and_discard(&self) -> ThreadStoreResult<()> {
+        self.persistence_restart_required
+            .store(true, Ordering::Release);
+        let _persistence_mode = self.persistence_mode.lock().await;
+        self.thread_store.discard_thread(self.thread_id).await
+    }
+
     pub async fn load_history(
         &self,
         include_archived: bool,
@@ -434,6 +641,7 @@ impl LiveThread {
         self.thread_store
             .load_history(LoadThreadHistoryParams {
                 thread_id: self.thread_id,
+                rollout_path: None,
                 include_archived,
             })
             .await
@@ -453,11 +661,17 @@ impl LiveThread {
             .await
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "memory-mode metadata updates must serialize with persistence-mode transitions"
+    )]
     pub async fn update_memory_mode(
         &self,
         mode: ThreadMemoryMode,
         include_archived: bool,
     ) -> ThreadStoreResult<()> {
+        let _persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("update thread memory mode")?;
         self.flush_pending_metadata_update().await?;
         self.thread_store
             .update_thread_metadata(UpdateThreadMetadataParams {
@@ -472,11 +686,17 @@ impl LiveThread {
         Ok(())
     }
 
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "metadata updates must serialize with persistence-mode transitions"
+    )]
     pub async fn update_metadata(
         &self,
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> ThreadStoreResult<StoredThread> {
+        let _persistence_mode = self.persistence_mode.lock().await;
+        self.ensure_persistence_available("update thread metadata")?;
         self.flush_pending_metadata_update().await?;
         self.thread_store
             .update_thread_metadata(UpdateThreadMetadataParams {
@@ -485,6 +705,18 @@ impl LiveThread {
                 include_archived,
             })
             .await
+    }
+
+    fn ensure_persistence_available(&self, operation: &str) -> ThreadStoreResult<()> {
+        if self.persistence_restart_required.load(Ordering::Acquire) {
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "checkpoint persistence for thread {} is indeterminate; restart before attempting to {operation}",
+                    self.thread_id
+                ),
+            });
+        }
+        Ok(())
     }
 
     /// Returns the live local rollout path for legacy local-only callers.

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crate::AgentGraphStore;
 use crate::AgentGraphStoreError;
 use crate::AgentGraphStoreFuture;
+use crate::ThreadSpawnEdge;
 use crate::ThreadSpawnEdgeStatus;
 
 /// SQLite-backed implementation of [`AgentGraphStore`] using an existing state runtime.
@@ -29,6 +30,125 @@ impl LocalAgentGraphStore {
 }
 
 impl AgentGraphStore for LocalAgentGraphStore {
+    fn find_open_thread_spawn_descendant_by_id(
+        &self,
+        root_thread_id: ThreadId,
+        descendant_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ThreadSpawnDescendantIdentity>> {
+        Box::pin(async move {
+            self.state_db
+                .find_open_thread_spawn_descendant_by_id(root_thread_id, descendant_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn find_open_thread_spawn_descendant_by_path(
+        &self,
+        root_thread_id: ThreadId,
+        agent_path: &str,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ThreadSpawnDescendantIdentity>> {
+        let agent_path = agent_path.to_string();
+        Box::pin(async move {
+            self.state_db
+                .find_open_thread_spawn_descendant_by_path(root_thread_id, &agent_path)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn list_permanent_close_thread_spawn_descendants(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        Box::pin(async move {
+            self.state_db
+                .list_permanent_close_thread_spawn_descendants(target_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn close_open_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .close_open_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn close_open_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .close_open_thread_spawn_subtree_with_current_only_descendants(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    current_only_descendant_edges,
+                )
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn close_current_only_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_ownership_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .close_current_only_thread_spawn_subtree(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    current_only_ownership_edges,
+                )
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn get_permanently_closed_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .get_permanently_closed_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn extend_permanently_closed_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .extend_permanently_closed_thread_spawn_subtree_with_current_only_descendants(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    current_only_descendant_edges,
+                )
+                .await
+                .map_err(internal_error)
+        })
+    }
+
     fn upsert_thread_spawn_edge(
         &self,
         parent_thread_id: ThreadId,
@@ -55,6 +175,18 @@ impl AgentGraphStore for LocalAgentGraphStore {
         Box::pin(async move {
             self.state_db
                 .set_thread_spawn_edge_status(child_thread_id, to_state_status(status))
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn transition_open_thread_spawn_edge_to_closed(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        Box::pin(async move {
+            self.state_db
+                .transition_open_thread_spawn_edge_to_closed(child_thread_id)
                 .await
                 .map_err(internal_error)
         })
@@ -108,6 +240,29 @@ impl AgentGraphStore for LocalAgentGraphStore {
         })
     }
 
+    fn list_thread_spawn_edges_by_child_ids(
+        &self,
+        child_thread_ids: &[ThreadId],
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadSpawnEdge>> {
+        let child_thread_ids = child_thread_ids.to_vec();
+        Box::pin(async move {
+            self.state_db
+                .list_thread_spawn_edges_by_child_ids(&child_thread_ids)
+                .await
+                .map(|edges| {
+                    edges
+                        .into_iter()
+                        .map(|edge| ThreadSpawnEdge {
+                            parent_thread_id: edge.parent_thread_id,
+                            child_thread_id: edge.child_thread_id,
+                            status: from_state_status(edge.status),
+                        })
+                        .collect()
+                })
+                .map_err(internal_error)
+        })
+    }
+
     fn list_open_thread_spawn_descendant_identities(
         &self,
         root_thread_id: ThreadId,
@@ -119,12 +274,65 @@ impl AgentGraphStore for LocalAgentGraphStore {
                 .map_err(internal_error)
         }))
     }
+
+    fn repair_legacy_closed_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        expected_parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .repair_legacy_closed_thread_spawn_subtree(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    expected_parent_thread_id,
+                )
+                .await
+                .map_err(internal_error)
+        })
+    }
+
+    fn repair_legacy_closed_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        expected_parent_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            self.state_db
+                .repair_legacy_closed_thread_spawn_subtree_with_current_only_descendants(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    expected_parent_thread_id,
+                    current_only_descendant_edges,
+                )
+                .await
+                .map_err(internal_error)
+        })
+    }
 }
 
 fn to_state_status(status: ThreadSpawnEdgeStatus) -> codex_state::DirectionalThreadSpawnEdgeStatus {
     match status {
         ThreadSpawnEdgeStatus::Open => codex_state::DirectionalThreadSpawnEdgeStatus::Open,
         ThreadSpawnEdgeStatus::Closed => codex_state::DirectionalThreadSpawnEdgeStatus::Closed,
+        ThreadSpawnEdgeStatus::PermanentlyClosed => {
+            codex_state::DirectionalThreadSpawnEdgeStatus::PermanentlyClosed
+        }
+    }
+}
+
+fn from_state_status(
+    status: codex_state::DirectionalThreadSpawnEdgeStatus,
+) -> ThreadSpawnEdgeStatus {
+    match status {
+        codex_state::DirectionalThreadSpawnEdgeStatus::Open => ThreadSpawnEdgeStatus::Open,
+        codex_state::DirectionalThreadSpawnEdgeStatus::Closed => ThreadSpawnEdgeStatus::Closed,
+        codex_state::DirectionalThreadSpawnEdgeStatus::PermanentlyClosed => {
+            ThreadSpawnEdgeStatus::PermanentlyClosed
+        }
     }
 }
 

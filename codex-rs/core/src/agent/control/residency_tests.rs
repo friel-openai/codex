@@ -61,6 +61,279 @@ async fn residency_slot_reservation_unloads_oldest_idle_v1_agent() {
     assert_residency_slot_unloads_oldest_idle_agent(MultiAgentVersion::V1).await;
 }
 
+#[tokio::test]
+async fn completion_parent_gets_one_temporary_slot_above_equal_capacity() {
+    let mut config = test_config().await;
+    let _ = config.features.disable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Collab);
+    config.agent_max_threads = Some(1);
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let child_thread_id = ThreadId::new();
+    let parent_thread_id = ThreadId::new();
+
+    let child_slot = control
+        .reserve_agent_residency_slot(
+            &state,
+            &config,
+            MultiAgentVersion::V1,
+            /*protected_thread_id*/ None,
+        )
+        .await
+        .expect("first resident slot");
+    child_slot.commit(child_thread_id);
+    let ordinary_err = match control
+        .reserve_agent_residency_slot(
+            &state,
+            &config,
+            MultiAgentVersion::V1,
+            Some(child_thread_id),
+        )
+        .await
+    {
+        Ok(_) => panic!("ordinary reload must remain bounded by execution capacity"),
+        Err(err) => err,
+    };
+    assert!(matches!(
+        ordinary_err.details(),
+        CodexErrorDetails::AgentLimitReached { max_threads: 1 }
+    ));
+
+    let parent_slot = control
+        .reserve_agent_residency_slot_for_completion_parent(
+            &state,
+            &config,
+            MultiAgentVersion::V1,
+            parent_thread_id,
+            child_thread_id,
+        )
+        .await
+        .expect("completion delivery needs one temporary slot beyond equal capacity");
+    parent_slot.commit(parent_thread_id);
+    assert_eq!(control.agent_residency.resident_count(), 2);
+}
+
+#[tokio::test]
+async fn idle_residency_is_bounded_below_v2_execution_capacity() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 33;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let mut first_thread_id = None;
+
+    for index in 0..9 {
+        let slot = control
+            .reserve_agent_residency_slot(
+                &state,
+                &config,
+                MultiAgentVersion::V2,
+                /*protected_thread_id*/ None,
+            )
+            .await
+            .expect("idle residents must not consume execution capacity");
+        let thread = spawn_subagent(
+            &control,
+            &state,
+            config.clone(),
+            root.thread_id,
+            &format!("worker-{index}"),
+        )
+        .await;
+        first_thread_id.get_or_insert(thread.thread_id);
+        slot.commit(thread.thread_id);
+        mark_thread_completed(thread.thread.as_ref()).await;
+    }
+
+    assert!(
+        manager
+            .get_thread(first_thread_id.expect("first child exists"))
+            .await
+            .is_err(),
+        "the oldest idle child should be evicted before reaching the 32-agent execution limit"
+    );
+}
+
+#[tokio::test]
+async fn active_agents_can_exceed_idle_residency_limit() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 33;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let mut thread_ids = Vec::new();
+
+    for index in 0..9 {
+        let slot = control
+            .reserve_agent_residency_slot(
+                &state,
+                &config,
+                MultiAgentVersion::V2,
+                /*protected_thread_id*/ None,
+            )
+            .await
+            .expect("active children may exceed the idle-resident target");
+        let thread = spawn_subagent(
+            &control,
+            &state,
+            config.clone(),
+            root.thread_id,
+            &format!("active-worker-{index}"),
+        )
+        .await;
+        slot.commit(thread.thread_id);
+        thread_ids.push(thread.thread_id);
+    }
+
+    for thread_id in thread_ids {
+        assert!(
+            manager.get_thread(thread_id).await.is_ok(),
+            "nonterminal children must not be evicted to enforce the idle-resident target"
+        );
+    }
+}
+
+#[tokio::test]
+async fn completed_v2_agents_are_trimmed_after_parallel_work() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 33;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+    let mut agents = Vec::new();
+
+    for index in 0..12 {
+        let slot = control
+            .reserve_agent_residency_slot(
+                &state,
+                &config,
+                MultiAgentVersion::V2,
+                /*protected_thread_id*/ None,
+            )
+            .await
+            .expect("active children may exceed the idle-resident target");
+        let thread = spawn_subagent(
+            &control,
+            &state,
+            config.clone(),
+            root.thread_id,
+            &format!("parallel-worker-{index}"),
+        )
+        .await;
+        let agent_path = AgentPath::root()
+            .join(&format!("parallel_worker_{index}"))
+            .expect("create child agent path");
+        let metadata_slot = control
+            .state
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("reserve child metadata");
+        metadata_slot.commit(AgentMetadata {
+            agent_id: Some(thread.thread_id),
+            parent_thread_id: Some(root.thread_id),
+            agent_path: Some(agent_path),
+            ..Default::default()
+        });
+        slot.commit(thread.thread_id);
+        agents.push(thread);
+    }
+
+    let first_thread_id = agents[0].thread_id;
+    for agent in &agents {
+        mark_thread_completed(agent.thread.as_ref()).await;
+        control.schedule_agent_residency_trim(
+            &config,
+            MultiAgentVersion::V2,
+            &agent.thread.session_source,
+        );
+    }
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let loaded_children = manager
+                .list_thread_ids()
+                .await
+                .into_iter()
+                .filter(|thread_id| *thread_id != root.thread_id)
+                .count();
+            if loaded_children <= 8 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("completed v2 children should be trimmed without another spawn");
+
+    assert_eq!(
+        control.get_status(first_thread_id).await,
+        crate::agent::AgentStatus::Completed(Some("done".to_string()))
+    );
+    let status_rx = control
+        .subscribe_status(first_thread_id)
+        .await
+        .expect("wait_agent must receive the completed cold status");
+    assert_eq!(
+        status_rx.borrow().clone(),
+        crate::agent::AgentStatus::Completed(Some("done".to_string()))
+    );
+    let listed = control
+        .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+        .await
+        .expect("list cold agents");
+    assert!(listed.iter().any(|agent| {
+        agent.agent_name == "/root/parallel_worker_0"
+            && agent.agent_status == crate::agent::AgentStatus::Completed(Some("done".to_string()))
+    }));
+}
+
 async fn assert_residency_slot_unloads_oldest_idle_agent(multi_agent_version: MultiAgentVersion) {
     let mut config = test_config().await;
     match multi_agent_version {
@@ -202,7 +475,7 @@ async fn interrupted_v2_agent_is_lost_after_residency_eviction() {
 }
 
 #[tokio::test]
-async fn pathless_v2_interrupted_watcher_does_not_block_residency_eviction() {
+async fn interrupted_v2_agent_remains_addressable_after_residency_eviction() {
     let mut config = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
     config.multi_agent_v2.max_concurrent_threads_per_session = 2;
@@ -220,6 +493,118 @@ async fn pathless_v2_interrupted_watcher_does_not_block_residency_eviction() {
         .await
         .expect("start root thread");
     let control = manager.agent_control();
+    let state = control.upgrade().expect("thread manager should be live");
+
+    let first_slot = control
+        .reserve_agent_residency_slot(
+            &state,
+            &config,
+            MultiAgentVersion::V2,
+            /*protected_thread_id*/ None,
+        )
+        .await
+        .expect("first resident slot");
+    let first = spawn_subagent(
+        &control,
+        &state,
+        config.clone(),
+        root.thread_id,
+        "interruptible",
+    )
+    .await;
+    let agent_path = AgentPath::root()
+        .join("interruptible")
+        .expect("create child path");
+    let metadata_slot = control
+        .state
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("reserve interrupted child metadata");
+    metadata_slot.commit(AgentMetadata {
+        agent_id: Some(first.thread_id),
+        parent_thread_id: Some(root.thread_id),
+        agent_path: Some(agent_path),
+        ..Default::default()
+    });
+    first_slot.commit(first.thread_id);
+    mark_thread_interrupted(first.thread.as_ref()).await;
+
+    let second_slot = control
+        .reserve_agent_residency_slot(
+            &state,
+            &config,
+            MultiAgentVersion::V2,
+            /*protected_thread_id*/ None,
+        )
+        .await
+        .expect("second child should evict the interrupted resident");
+    let second = spawn_subagent(
+        &control,
+        &state,
+        config.clone(),
+        root.thread_id,
+        "replacement",
+    )
+    .await;
+    second_slot.commit(second.thread_id);
+    mark_thread_completed(second.thread.as_ref()).await;
+
+    assert_eq!(
+        control.get_status(first.thread_id).await,
+        crate::agent::AgentStatus::Interrupted
+    );
+    let listed = control
+        .list_agents(&SessionSource::Cli, /*path_prefix*/ None)
+        .await
+        .expect("list interrupted cold agent");
+    assert!(listed.iter().any(|agent| {
+        agent.agent_name == "/root/interruptible"
+            && agent.agent_status == crate::agent::AgentStatus::Interrupted
+    }));
+    control
+        .ensure_agent_loaded(config.clone(), first.thread_id)
+        .await
+        .expect("interrupted cold agent must remain reusable");
+    assert!(manager.get_thread(first.thread_id).await.is_ok());
+    control
+        .deliver_inter_agent_communication_to_agent(
+            config,
+            first.thread_id,
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root()
+                    .join("interruptible")
+                    .expect("create recipient path"),
+                Vec::new(),
+                "follow-up after interrupt".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Followup, root.thread_id),
+            AgentInputDelivery::Queue,
+            /*parent_turn_id*/ None,
+        )
+        .await
+        .expect("interrupted cold agent must accept a follow-up message");
+}
+
+#[tokio::test]
+async fn pathless_v2_interrupted_watcher_does_not_block_residency_eviction() {
+    let mut config = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    let temp_home = tempfile::tempdir().expect("create temp home");
+    config.codex_home = temp_home.path().to_path_buf().try_into().unwrap();
+    config.cwd = temp_home.path().to_path_buf().try_into().unwrap();
+    let manager = ThreadManager::with_models_provider_and_home_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config.clone()))
+        .await
+        .expect("start root thread");
+    let control = root.thread.session.services.agent_control.clone();
     let state = control.upgrade().expect("thread manager should be live");
     let source = pathless_thread_spawn_source(root.thread_id);
     let first_slot = control
@@ -263,6 +648,7 @@ async fn pathless_v2_interrupted_watcher_does_not_block_residency_eviction() {
         Some(source),
         first.thread_id.to_string(),
         /*child_agent_path*/ None,
+        MultiAgentVersion::V2,
     ));
     mark_thread_interrupted(first.thread.as_ref()).await;
     timeout(Duration::from_secs(5), async {

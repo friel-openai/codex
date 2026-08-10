@@ -90,7 +90,12 @@ async fn cold_root_config_preserves_original_provider_model_reasoning_and_permis
     let restored = restore_cold_root_config(
         config,
         &stored_thread,
-        Some(original_workspace_roots.clone()),
+        PersistedOwnershipConfig {
+            baseline: Some(PersistedThreadSettingsBaseline {
+                workspace_roots: Some(original_workspace_roots.clone()),
+                ..Default::default()
+            }),
+        },
     )
     .await
     .expect("a persisted root should restore its original configuration");
@@ -123,9 +128,13 @@ async fn cold_root_config_rejects_an_unavailable_original_provider() {
     let mut stored_thread = stored_root(&config);
     stored_thread.model_provider = "unavailable-provider".to_string();
 
-    let error = restore_cold_root_config(config, &stored_thread, /*workspace_roots*/ None)
-        .await
-        .expect_err("adoption must not silently replace the original provider");
+    let error = restore_cold_root_config(
+        config,
+        &stored_thread,
+        PersistedOwnershipConfig { baseline: None },
+    )
+    .await
+    .expect_err("adoption must not silently replace the original provider");
 
     assert!(matches!(
         error.details(),
@@ -133,6 +142,50 @@ async fn cold_root_config_rejects_an_unavailable_original_provider() {
             if message.contains("unavailable-provider")
                 && message.contains(&stored_thread.thread_id.to_string())
     ));
+}
+
+#[test]
+fn legacy_turn_context_supplies_cold_ownership_roots_and_reviewer() {
+    let cwd = codex_utils_absolute_path::AbsolutePathBuf::try_from(
+        std::env::current_dir().expect("current directory"),
+    )
+    .expect("current directory should be absolute");
+    let workspace_roots = vec![cwd.clone()];
+    let history = vec![RolloutItem::TurnContext(
+        codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("legacy-turn".to_string()),
+            cwd,
+            workspace_roots: Some(workspace_roots.clone()),
+            current_date: None,
+            timezone: None,
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: Some(codex_protocol::config_types::ApprovalsReviewer::AutoReview),
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "legacy-model".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            service_tier: None,
+            model_profile: None,
+            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        },
+    )];
+
+    assert_eq!(
+        super::super::resume::persisted_thread_settings_baseline(&history),
+        Some(PersistedThreadSettingsBaseline {
+            workspace_roots: Some(workspace_roots),
+            approvals_reviewer: Some(codex_protocol::config_types::ApprovalsReviewer::AutoReview,),
+            ..Default::default()
+        })
+    );
 }
 
 #[test]

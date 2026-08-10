@@ -143,6 +143,113 @@ async fn deleting_a_thread_removes_its_queue() {
 }
 
 #[tokio::test]
+async fn deleting_one_thread_queue_is_idempotent_and_preserves_other_threads() {
+    let (runtime, thread_id) = runtime_with_thread().await;
+    let other_thread_id = ThreadId::new();
+    let queue = runtime.thread_queue();
+    queue
+        .enqueue(thread_id, r#"{"thread":"target"}"#)
+        .await
+        .unwrap();
+    let other_item = queue
+        .enqueue(other_thread_id, r#"{"thread":"other"}"#)
+        .await
+        .unwrap();
+
+    assert!(queue.delete_thread_queue(thread_id).await.unwrap());
+    assert!(!queue.delete_thread_queue(thread_id).await.unwrap());
+    assert_eq!(
+        queue
+            .list_page(other_thread_id, /*offset*/ 0, /*limit*/ 1)
+            .await
+            .unwrap(),
+        vec![other_item]
+    );
+}
+
+#[tokio::test]
+async fn deleting_thread_queues_in_batches_handles_4097_threads() {
+    const THREAD_COUNT: usize = 4_097;
+    let (runtime, _) = runtime_with_thread().await;
+    let queue = runtime.thread_queue();
+    let thread_ids = (1..=THREAD_COUNT)
+        .map(|index| {
+            ThreadId::from_string(&Uuid::from_u128(index as u128).to_string())
+                .expect("generated UUID should be a valid thread ID")
+        })
+        .collect::<Vec<_>>();
+    let preserved_thread_id = ThreadId::from_string(
+        &Uuid::from_u128(u128::try_from(THREAD_COUNT).unwrap() + 1).to_string(),
+    )
+    .expect("generated UUID should be a valid thread ID");
+    let mut transaction = queue
+        .pool
+        .begin()
+        .await
+        .expect("queue transaction should start");
+    for thread_id in thread_ids
+        .iter()
+        .copied()
+        .chain(std::iter::once(preserved_thread_id))
+    {
+        let thread_id = thread_id.to_string();
+        sqlx::query(
+            r#"
+INSERT INTO queued_items (
+    id, thread_id, payload_json, queue_order, created_at_ms, updated_at_ms
+) VALUES (?, ?, '{"close":true}', 0, 1, 1)
+            "#,
+        )
+        .bind(format!("item-{thread_id}"))
+        .bind(thread_id)
+        .execute(transaction.as_mut())
+        .await
+        .expect("queued item should be inserted");
+    }
+    let first_thread_id = thread_ids[0].to_string();
+    sqlx::query(
+        r#"
+INSERT INTO queued_items (
+    id, thread_id, payload_json, queue_order, created_at_ms, updated_at_ms
+) VALUES ('second-item', ?, '{"close":true}', 1, 1, 1)
+        "#,
+    )
+    .bind(first_thread_id)
+    .execute(transaction.as_mut())
+    .await
+    .expect("second queued item should be inserted");
+    transaction
+        .commit()
+        .await
+        .expect("queue setup should commit");
+
+    let mut cleanup_ids = thread_ids.clone();
+    cleanup_ids.extend_from_slice(&thread_ids[..2]);
+    assert_eq!(
+        THREAD_COUNT,
+        queue
+            .delete_thread_queues(&cleanup_ids)
+            .await
+            .expect("batched queue cleanup should succeed")
+    );
+    assert_eq!(
+        0,
+        queue
+            .delete_thread_queues(&thread_ids)
+            .await
+            .expect("repeated batched queue cleanup should succeed")
+    );
+    assert_eq!(
+        1,
+        queue
+            .list_page(preserved_thread_id, /*offset*/ 0, /*limit*/ 2)
+            .await
+            .expect("preserved queue should load")
+            .len()
+    );
+}
+
+#[tokio::test]
 async fn concurrent_inserts_enforce_the_queue_limit() {
     let (runtime, thread_id) = runtime_with_thread().await;
     let other = StateRuntime::init(runtime.sqlite().clone(), "test-provider".to_string())

@@ -1,4 +1,4 @@
-use super::ownership::persisted_thread_workspace_roots;
+use super::ownership::persisted_thread_ownership_config;
 use super::ownership::restore_cold_root_config;
 use super::ownership::wait_for_adoptable_root;
 use super::residency::is_unloadable;
@@ -82,7 +82,6 @@ impl AgentControl {
                 .or_default()
                 .push(child_thread_id);
         }
-
         let graph_store = state.agent_graph_store();
         let mut visited = HashSet::from([root_thread_id]);
         let mut queue = VecDeque::from([root_thread_id]);
@@ -171,15 +170,15 @@ impl AgentControl {
                         )
                     }
                     None => {
-                        let workspace_roots =
-                            persisted_thread_workspace_roots(&state, &original_metadata).await?;
+                        let persisted_config =
+                            persisted_thread_ownership_config(&state, &original_metadata).await?;
                         (
                             original_metadata.source.clone(),
                             self.clone(),
                             restore_cold_root_config(
                                 root_config.clone(),
                                 &original_metadata,
-                                workspace_roots,
+                                persisted_config,
                             )
                             .await?,
                             false,
@@ -219,7 +218,7 @@ impl AgentControl {
                 continue;
             };
             let transition = metadata.lifecycle.lock_transition().await;
-            if metadata.lifecycle.completion_watcher_active() {
+            if metadata.lifecycle.completion_watcher_registered() {
                 return Err(CodexErr::InvalidRequest(format!(
                     "descendant thread {} has an active completion watcher",
                     descendant.thread_id
@@ -263,7 +262,7 @@ impl AgentControl {
                 .original_metadata
                 .agent_path
                 .as_deref()
-                .map(AgentPath::try_from)
+                .map(|path| AgentPath::from_persisted_string(path.to_string()))
                 .transpose()
                 .map_err(|err| {
                     CodexErr::InvalidRequest(format!(
@@ -365,6 +364,28 @@ impl AgentControl {
             return Err(CodexErr::Fatal(format!(
                 "descendant reservation count does not match thread {}",
                 tree.root_thread_id
+            )));
+        }
+
+        let _lifecycle_mutation = self.lock_lifecycle_mutation().await?;
+        if let Some(parent_thread_id) = prepared.descendants.iter().find_map(|descendant| {
+            descendant
+                .metadata
+                .parent_thread_id
+                .filter(|parent_thread_id| state.is_thread_closing(*parent_thread_id))
+        }) {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "cannot transfer descendants while agent {parent_thread_id} is closing"
+            )));
+        }
+        if let Some(thread_id) = tree
+            .descendants
+            .iter()
+            .map(|descendant| descendant.thread_id)
+            .find(|thread_id| state.is_thread_closing(*thread_id))
+        {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "cannot transfer agent {thread_id} while it is closing"
             )));
         }
 
@@ -495,7 +516,7 @@ impl AgentControl {
                     .original_metadata
                     .agent_path
                     .as_deref()
-                    .map(AgentPath::try_from)
+                    .map(|path| AgentPath::from_persisted_string(path.to_string()))
                     .transpose()
                     .map_err(CodexErr::InvalidRequest)?;
                 let (_, mut metadata) = descendant.original_control.prepare_thread_spawn(
@@ -532,7 +553,8 @@ fn rebase_owned_agent_path(
                 "agent path `{original}` is not a descendant of `{original_root}`"
             ))
         })?;
-    AgentPath::try_from(format!("{destination_root}{suffix}")).map_err(CodexErr::InvalidRequest)
+    AgentPath::from_persisted_string(format!("{destination_root}{suffix}"))
+        .map_err(CodexErr::InvalidRequest)
 }
 
 fn descendant_metadata_patch(

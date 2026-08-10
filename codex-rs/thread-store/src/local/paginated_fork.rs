@@ -5,6 +5,7 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::ModelContextScan;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -628,27 +629,20 @@ async fn try_prepare_indexed_latest_fork(
             return Ok(None);
         }
     }
+    let has_reference = !references.is_empty();
+    drop(references);
 
     if !store.has_history_projection(thread_id).await? {
         return Ok(None);
     }
 
     let (model_context, shared_model_response_items) = if let Some((items, _)) = supplied_context {
-        if active_lines.iter().any(|line| {
-            matches!(
-                line.item,
-                RolloutItem::Compacted(_)
-                    | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::ThreadRolledBack(
-                        _
-                    ))
-            )
-        }) {
+        let Some(model_context) =
+            authoritative_model_metadata(session_meta.clone(), active_lines, has_reference)
+        else {
             return Ok(None);
-        }
-        (
-            authoritative_model_metadata(session_meta, active_lines.as_slice()),
-            Some(items),
-        )
+        };
+        (model_context, Some(items))
     } else {
         let Some(items) = model_context::scan_projected_active_model_context(
             store,
@@ -747,36 +741,55 @@ fn canonical_same_thread_reference(
 }
 
 fn authoritative_model_metadata(
-    session_meta: &SessionMetaLine,
-    active_lines: &[RolloutLine],
-) -> Arc<Vec<RolloutItem>> {
-    let mut items = Vec::with_capacity(active_lines.len() + 1);
-    items.push(RolloutItem::SessionMeta(session_meta.clone()));
-    let latest_user_ordinal = active_lines.iter().rev().find_map(|line| match &line.item {
-        RolloutItem::ResponseItem(ResponseItem::Message { role, .. }) if role == "user" => {
-            line.ordinal
+    session_meta: SessionMetaLine,
+    active_lines: Vec<RolloutLine>,
+    has_reference: bool,
+) -> Option<Arc<Vec<RolloutItem>>> {
+    let mut scan = ModelContextScan::default();
+    for line in active_lines.into_iter().rev() {
+        if matches!(line.item, RolloutItem::RolloutReference(_)) {
+            continue;
         }
-        _ => None,
+        if scan.push(line.item).is_complete() {
+            return Some(metadata_only_model_context(scan.finish(session_meta)));
+        }
+    }
+
+    // Without a bounded cutoff, a referenced active segment cannot establish settings,
+    // comparison-state baselines, or rollback survival independently of its predecessor.
+    if has_reference {
+        None
+    } else {
+        Some(metadata_only_model_context(scan.finish(session_meta)))
+    }
+}
+
+fn metadata_only_model_context(items: Vec<RolloutItem>) -> Arc<Vec<RolloutItem>> {
+    let latest_user_index = items.iter().rposition(|item| {
+        matches!(item, RolloutItem::ResponseItem(ResponseItem::Message { role, .. }) if role == "user")
     });
-    items.extend(active_lines.iter().filter_map(|line| match &line.item {
-        RolloutItem::ResponseItem(ResponseItem::Message { role, .. })
-            if role == "user" && line.ordinal == latest_user_ordinal =>
-        {
-            Some(line.item.clone())
-        }
-        RolloutItem::TurnContext(_)
-        | RolloutItem::WorldState(_)
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TokenCount(_))
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::UserMessage(_))
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TurnStarted(_))
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::TurnComplete(_))
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::ItemCompleted(_))
-        | RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::ThreadSettingsApplied(_)) => {
-            Some(line.item.clone())
-        }
-        _ => None,
-    }));
-    Arc::new(items)
+    let metadata = items
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, mut item)| match &mut item {
+            RolloutItem::Compacted(compacted) => {
+                if compacted.replacement_history.is_some() {
+                    compacted.replacement_history = Some(Vec::new());
+                }
+                Some(item)
+            }
+            RolloutItem::ResponseItem(_) if Some(index) == latest_user_index => Some(item),
+            RolloutItem::ResponseItem(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. } => None,
+            RolloutItem::EventMsg(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::SessionMeta(_)
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_) => Some(item),
+        })
+        .collect();
+    Arc::new(metadata)
 }
 
 async fn load_projected_response_turns(

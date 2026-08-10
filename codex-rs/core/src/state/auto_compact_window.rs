@@ -19,6 +19,26 @@ impl AutoCompactWindowIds {
     }
 }
 
+/// A proposed auto-compaction window transition that has not mutated session state.
+///
+/// Initial context is rendered before checkpoint persistence acquires `SessionState`. Keeping the
+/// prior and next window values together lets that rendering use the exact IDs that checkpoint
+/// persistence will later validate and commit.
+#[derive(Debug, PartialEq, Eq)]
+#[must_use = "the prepared transition must be committed with the rendered compaction history"]
+pub(crate) struct PreparedAutoCompactWindowAdvance {
+    prior_window_number: u64,
+    prior_ids: AutoCompactWindowIds,
+    window_number: u64,
+    ids: AutoCompactWindowIds,
+}
+
+impl PreparedAutoCompactWindowAdvance {
+    pub(crate) fn ids(&self) -> AutoCompactWindowIds {
+        self.ids
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AutoCompactWindowSnapshot {
     pub(crate) prefill_input_tokens: Option<i64>,
@@ -74,14 +94,39 @@ impl AutoCompactWindow {
         self.ids = ids;
     }
 
-    pub(super) fn advance(&mut self) -> (u64, AutoCompactWindowIds) {
-        self.window_number = self.window_number.saturating_add(1);
-        self.ids.previous_window_id = Some(self.ids.window_id);
-        self.ids.window_id = Uuid::now_v7();
+    pub(super) fn prepare_advance(&self) -> PreparedAutoCompactWindowAdvance {
+        let mut ids = self.ids;
+        ids.previous_window_id = Some(ids.window_id);
+        ids.window_id = Uuid::now_v7();
+        PreparedAutoCompactWindowAdvance {
+            prior_window_number: self.window_number,
+            prior_ids: self.ids,
+            window_number: self.window_number.saturating_add(1),
+            ids,
+        }
+    }
+
+    pub(super) fn commit_prepared_advance(
+        &mut self,
+        prepared: PreparedAutoCompactWindowAdvance,
+    ) -> Option<(u64, AutoCompactWindowIds)> {
+        if self.window_number != prepared.prior_window_number || self.ids != prepared.prior_ids {
+            return None;
+        }
+
+        self.window_number = prepared.window_number;
+        self.ids = prepared.ids;
         self.new_context_window_requested = false;
         self.token_budget_reminder_delivered = false;
         self.auto_compact_fallback_delivered = false;
-        (self.window_number, self.ids)
+        Some((self.window_number, self.ids))
+    }
+
+    #[cfg(test)]
+    pub(super) fn advance(&mut self) -> (u64, AutoCompactWindowIds) {
+        let prepared = self.prepare_advance();
+        self.commit_prepared_advance(prepared)
+            .expect("freshly prepared auto-compaction window transition must commit")
     }
 
     pub(super) fn claim_token_budget_reminder(&mut self) -> bool {
@@ -182,7 +227,16 @@ mod tests {
         assert!(window.take_new_context_window_request());
         assert!(!window.take_new_context_window_request());
         window.request_new_context_window();
-        let (window_number, ids) = window.advance();
+        let before_advance = window;
+        let prepared = window.prepare_advance();
+        assert_eq!(window, before_advance);
+        assert_eq!(prepared.ids().first_window_id, first_window_id);
+        assert_eq!(prepared.ids().previous_window_id, Some(restored_window_id));
+        assert_ne!(prepared.ids().window_id, restored_window_id);
+        let stale_prepared = window.prepare_advance();
+        let (window_number, ids) = window
+            .commit_prepared_advance(prepared)
+            .expect("prepared transition should match current window");
         assert_eq!(window_number, 4);
         assert_eq!(window.window_number(), 4);
         assert_eq!(window.ids(), ids);
@@ -193,6 +247,10 @@ mod tests {
         assert!(!window.take_new_context_window_request());
         assert!(window.claim_token_budget_reminder());
         assert!(window.claim_auto_compact_fallback());
+
+        let committed_window = window;
+        assert_eq!(window.commit_prepared_advance(stale_prepared), None);
+        assert_eq!(window, committed_window);
 
         assert_eq!(
             window.snapshot(),

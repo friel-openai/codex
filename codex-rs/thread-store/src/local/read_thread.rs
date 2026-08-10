@@ -107,6 +107,45 @@ pub(super) async fn read_thread(
     Ok(thread)
 }
 
+pub(super) async fn read_threads(
+    store: &LocalThreadStore,
+    thread_ids: Vec<codex_protocol::ThreadId>,
+) -> ThreadStoreResult<Vec<StoredThread>> {
+    let Some(state_db) = store.state_db().await else {
+        let mut threads = Vec::new();
+        for thread_id in thread_ids {
+            match read_thread(
+                store,
+                ReadThreadParams {
+                    thread_id,
+                    include_archived: true,
+                    include_history: false,
+                },
+            )
+            .await
+            {
+                Ok(thread) => threads.push(thread),
+                Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                Err(ThreadStoreError::InvalidRequest { message })
+                    if message == format!("no rollout found for thread id {thread_id}") => {}
+                Err(err) => return Err(err),
+            }
+        }
+        return Ok(threads);
+    };
+    let mut metadata_by_id = state_db
+        .get_threads_valid(&thread_ids)
+        .await
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to read thread metadata batch: {err}"),
+        })?;
+    Ok(thread_ids
+        .into_iter()
+        .filter_map(|thread_id| metadata_by_id.remove(&thread_id))
+        .map(|metadata| stored_thread_from_state_metadata(store, metadata, None))
+        .collect())
+}
+
 async fn sqlite_rollout_path_can_load_history_for_thread(
     store: &LocalThreadStore,
     path: &std::path::Path,
@@ -180,7 +219,7 @@ pub(super) async fn read_thread_by_rollout_path(
     Ok(thread)
 }
 
-async fn resolve_requested_rollout_path(
+pub(super) async fn resolve_requested_rollout_path(
     store: &LocalThreadStore,
     rollout_path: std::path::PathBuf,
 ) -> ThreadStoreResult<std::path::PathBuf> {
@@ -380,7 +419,7 @@ pub(super) async fn load_history_items(
                 ),
             });
         }
-        return codex_rollout::materialize_recent_rollout_lines_from(codex_home, lines)
+        return codex_rollout::materialize_rollout_lines_from(codex_home, lines)
             .await
             .map(|lines| lines.into_iter().map(|line| line.item).collect())
             .map_err(|err| ThreadStoreError::Internal {
@@ -686,12 +725,14 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::Utc;
+    use codex_protocol::SegmentId;
     use codex_protocol::ThreadId;
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::RolloutLine;
     use codex_protocol::protocol::RolloutReferenceItem;
     use codex_protocol::protocol::SandboxPolicy;
     use codex_protocol::protocol::SessionSource;
@@ -875,6 +916,99 @@ mod tests {
             .expect_err("referenced source records must remain strictly validated");
 
         assert!(error.to_string().contains("invalid record"));
+    }
+
+    #[tokio::test]
+    async fn explicit_history_load_expands_more_than_two_same_thread_predecessors() {
+        let home = TempDir::new().expect("temp dir");
+        let uuid = Uuid::from_u128(20_530);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+        let mut predecessor =
+            write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("oldest rollout");
+        let oldest_message = "message from the oldest segment";
+        let mut oldest_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&predecessor)
+            .expect("open oldest rollout");
+        writeln!(
+            oldest_file,
+            "{}",
+            serde_json::json!({
+                "timestamp": "2025-01-03T12:00:01Z",
+                "type": "event_msg",
+                "payload": {
+                    "type": "user_message",
+                    "message": oldest_message,
+                    "kind": "plain",
+                },
+            })
+        )
+        .expect("write oldest message");
+        drop(oldest_file);
+
+        let mut predecessor_segment_id = None;
+        for (index, timestamp) in [
+            "2025-01-03T12-00-02",
+            "2025-01-03T12-00-03",
+            "2025-01-03T12-00-04",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let active = write_session_file(home.path(), timestamp, uuid).expect("active rollout");
+            let segment_id = SegmentId::new();
+            let contents = std::fs::read_to_string(&active).expect("read active rollout");
+            let (meta, suffix) = contents
+                .split_once('\n')
+                .expect("active rollout session metadata");
+            let mut meta: RolloutLine =
+                serde_json::from_str(meta).expect("decode active session metadata");
+            let RolloutItem::SessionMeta(session_meta) = &mut meta.item else {
+                panic!("active rollout must start with session metadata");
+            };
+            session_meta.meta.segment_id = Some(segment_id);
+            std::fs::write(
+                &active,
+                format!(
+                    "{}\n{suffix}",
+                    serde_json::to_string(&meta).expect("encode active session metadata")
+                ),
+            )
+            .expect("write active session metadata");
+            let mut active_file = std::fs::OpenOptions::new()
+                .append(true)
+                .open(&active)
+                .expect("open active rollout");
+            writeln!(
+                active_file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": format!("2025-01-03T12:00:0{}Z", index + 2),
+                    "type": "rollout_reference",
+                    "payload": RolloutReferenceItem {
+                        rollout_path: predecessor,
+                        thread_id: Some(thread_id),
+                        rollout_timestamp: None,
+                        segment_id: predecessor_segment_id,
+                        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                        nth_user_message: None,
+                        compacted_replacement_history_filter_texts: None,
+                    },
+                })
+            )
+            .expect("write predecessor reference");
+            predecessor = active;
+            predecessor_segment_id = Some(segment_id);
+        }
+
+        let history = load_history_items(home.path(), predecessor.as_path())
+            .await
+            .expect("load complete explicit history");
+        assert!(history.iter().any(|item| matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::UserMessage(message))
+                if message.message == oldest_message
+        )));
     }
 
     #[tokio::test]
@@ -1994,6 +2128,146 @@ mod tests {
         assert_eq!(thread.thread_id, thread_id);
         assert_eq!(thread.preview, "Archived SQLite preview");
         assert!(thread.archived_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn read_threads_without_sqlite_falls_back_to_rollout_reads() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = Uuid::from_u128(19_999);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        write_session_file(home.path(), "2025-01-03T12-00-00", uuid).expect("session file");
+
+        let threads = store
+            .read_threads(crate::ReadThreadsParams {
+                thread_ids: vec![thread_id, ThreadId::new()],
+            })
+            .await
+            .expect("rollout-only batch read");
+
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|thread| thread.thread_id)
+                .collect::<Vec<_>>(),
+            vec![thread_id]
+        );
+    }
+
+    #[tokio::test]
+    async fn read_threads_batches_sqlite_metadata_without_opening_rollouts() {
+        let home = TempDir::new().expect("temp dir");
+        let external = TempDir::new().expect("external temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let thread_ids = (0_u128..64)
+            .map(|index| {
+                let thread_id = ThreadId::from_string(&Uuid::from_u128(10_000 + index).to_string())
+                    .expect("valid thread id");
+                let mut builder = ThreadMetadataBuilder::new(
+                    thread_id,
+                    external.path().join(format!("missing-{index}.jsonl")),
+                    Utc::now(),
+                    SessionSource::Cli,
+                );
+                builder.model_provider = Some("sqlite-provider".to_string());
+                builder.cwd = external.path().join("workspace");
+                builder.cli_version = Some("sqlite-cli".to_string());
+                (thread_id, builder.build("sqlite-provider"))
+            })
+            .collect::<Vec<_>>();
+        for (_, metadata) in &thread_ids {
+            runtime
+                .upsert_thread(metadata)
+                .await
+                .expect("state db upsert should succeed");
+        }
+
+        let threads = store
+            .read_threads(crate::ReadThreadsParams {
+                thread_ids: thread_ids.iter().map(|(thread_id, _)| *thread_id).collect(),
+            })
+            .await
+            .expect("batch metadata read should not require rollout files");
+
+        assert_eq!(
+            threads
+                .iter()
+                .map(|thread| thread.thread_id)
+                .collect::<Vec<_>>(),
+            thread_ids
+                .iter()
+                .map(|(thread_id, _)| *thread_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            threads
+                .iter()
+                .all(|thread| thread.model_provider == "sqlite-provider")
+        );
+    }
+
+    #[tokio::test]
+    async fn read_threads_omits_one_corrupt_sqlite_row_without_losing_valid_rows() {
+        let home = TempDir::new().expect("temp dir");
+        let config = test_config(home.path());
+        let runtime = codex_state::StateRuntime::init(
+            config.sqlite.clone(),
+            config.default_model_provider_id.clone(),
+        )
+        .await
+        .expect("state db should initialize");
+        let store = LocalThreadStore::new(config.clone(), Some(runtime.clone()));
+        let valid_thread_id =
+            ThreadId::from_string(&Uuid::from_u128(20_000).to_string()).expect("valid thread id");
+        let corrupt_thread_id =
+            ThreadId::from_string(&Uuid::from_u128(20_001).to_string()).expect("valid thread id");
+        for thread_id in [valid_thread_id, corrupt_thread_id] {
+            let mut builder = ThreadMetadataBuilder::new(
+                thread_id,
+                home.path().join(format!("missing-{thread_id}.jsonl")),
+                Utc::now(),
+                SessionSource::Cli,
+            );
+            builder.model_provider = Some("sqlite-provider".to_string());
+            builder.cwd = home.path().join("workspace");
+            builder.cli_version = Some("sqlite-cli".to_string());
+            runtime
+                .upsert_thread(&builder.build("sqlite-provider"))
+                .await
+                .expect("state db upsert should succeed");
+        }
+        let pool = runtime
+            .sqlite()
+            .open_read_write_pool(&config.sqlite.state_db_path())
+            .await
+            .expect("open state db directly");
+        sqlx::query("UPDATE threads SET history_mode = 'corrupt' WHERE id = ?")
+            .bind(corrupt_thread_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("corrupt one batch row");
+
+        let threads = store
+            .read_threads(crate::ReadThreadsParams {
+                thread_ids: vec![valid_thread_id, corrupt_thread_id],
+            })
+            .await
+            .expect("one invalid row must not fail the batch");
+
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|thread| thread.thread_id)
+                .collect::<Vec<_>>(),
+            vec![valid_thread_id]
+        );
     }
 
     #[tokio::test]

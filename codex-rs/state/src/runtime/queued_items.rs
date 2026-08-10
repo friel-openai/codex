@@ -144,13 +144,50 @@ impl SqliteQueueStore {
         Ok(())
     }
 
-    pub(crate) async fn delete_thread_queue(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
+    /// Delete every durable queued submission for one thread.
+    pub async fn delete_thread_queue(&self, thread_id: ThreadId) -> anyhow::Result<bool> {
         Ok(sqlx::query("DELETE FROM queued_items WHERE thread_id = ?")
             .bind(thread_id.to_string())
             .execute(self.pool.as_ref())
             .await?
             .rows_affected()
             > 0)
+    }
+
+    /// Delete durable queued submissions for a set of closed threads.
+    ///
+    /// The input is deduplicated and split into bounded SQL statements inside one transaction.
+    /// The return value counts distinct thread queues that contained at least one item.
+    pub async fn delete_thread_queues(&self, thread_ids: &[ThreadId]) -> anyhow::Result<usize> {
+        let thread_ids = thread_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        if thread_ids.is_empty() {
+            return Ok(0);
+        }
+
+        let mut transaction = self.pool.begin().await?;
+        let mut deleted_thread_ids = BTreeSet::new();
+        for chunk in thread_ids.chunks(THREAD_CLEANUP_BATCH_SIZE) {
+            let mut delete =
+                QueryBuilder::<Sqlite>::new("DELETE FROM queued_items WHERE thread_id IN (");
+            let mut separated = delete.separated(", ");
+            for thread_id in chunk {
+                separated.push_bind(thread_id);
+            }
+            separated.push_unseparated(") RETURNING thread_id");
+            deleted_thread_ids.extend(
+                delete
+                    .build_query_scalar::<String>()
+                    .fetch_all(transaction.as_mut())
+                    .await?,
+            );
+        }
+        transaction.commit().await?;
+        Ok(deleted_thread_ids.len())
     }
 }
 

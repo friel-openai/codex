@@ -13,6 +13,11 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
@@ -20,8 +25,11 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
@@ -30,20 +38,28 @@ use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
 use codex_utils_absolute_path::test_support::PathExt;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 use super::super::LocalThreadStore;
 use super::super::LocalThreadStoreConfig;
@@ -1693,7 +1709,13 @@ async fn indexed_latest_fork_preserves_authoritative_context_and_projected_paren
                 let immutable = store
                     .freeze_thread_segment(
                         thread_id,
-                        FreezeRolloutSegmentParams::rotate(Vec::new()),
+                        FreezeRolloutSegmentParams::rotate(
+                            certified_projection_checkpoint(
+                                source_context.clone(),
+                                u64::try_from(index + 1).expect("test window number"),
+                            )
+                            .into_items(),
+                        ),
                     )
                     .await
                     .expect("rotate projected source segment");
@@ -1899,12 +1921,50 @@ async fn indexed_latest_fork_rejects_stale_authoritative_model_snapshot() {
         .await
         .expect("read projected source position")
         .expect("projected source position");
+    let later_cwd = home.path().join("later-environment").abs();
+    let later_settings = ThreadSettingsSnapshot {
+        model: "later-model".to_string(),
+        model_provider_id: "later-provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::AutoReview,
+        permission_profile: PermissionProfile::workspace_write(),
+        active_permission_profile: None,
+        cwd: later_cwd.clone(),
+        environments: Some(TurnEnvironmentSelections::new(
+            later_cwd.clone(),
+            vec![TurnEnvironmentSelection {
+                environment_id: "later-environment".to_string(),
+                cwd: PathUri::from_abs_path(&later_cwd),
+                workspace_roots: vec![PathUri::from_abs_path(&later_cwd)],
+            }],
+        )),
+        workspace_roots: Some(vec![later_cwd]),
+        profile_workspace_roots: Some(Vec::new()),
+        windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+        reasoning_effort: None,
+        reasoning_summary: None,
+        personality: None,
+        collaboration_mode: CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "later-model".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        },
+    };
     store
         .append_items(AppendThreadItemsParams {
             thread_id,
             items: vec![
                 turn_started("later-turn"),
                 user_message("later source message"),
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+                    ThreadSettingsAppliedEvent {
+                        thread_settings: later_settings.clone(),
+                    },
+                )),
                 turn_completed("later-turn"),
             ],
         })
@@ -1932,6 +1992,104 @@ async fn indexed_latest_fork_rejects_stale_authoritative_model_snapshot() {
         prepared.model_context.as_slice(),
         "later source message"
     ));
+    assert_eq!(
+        prepared
+            .latest_model_context
+            .iter()
+            .rev()
+            .find_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                    Some(&event.thread_settings)
+                }
+                _ => None,
+            }),
+        Some(&later_settings)
+    );
+}
+
+#[tokio::test]
+async fn indexed_latest_fork_replays_referenced_metadata_after_rollback() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist paginated source metadata");
+
+    for (turn_id, message) in [
+        ("retained-turn", "retained"),
+        ("rolled-back-turn", "removed"),
+    ] {
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id),
+                    user_message(message),
+                    completed_item(
+                        thread_id,
+                        turn_id,
+                        TurnItem::UserMessage(UserMessageItem {
+                            id: format!("{turn_id}-item"),
+                            client_id: None,
+                            content: Vec::new(),
+                        }),
+                    ),
+                    turn_completed(turn_id),
+                ],
+            })
+            .await
+            .expect("append source turn");
+        if turn_id == "retained-turn" {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate retained source turn");
+        }
+    }
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+                ThreadRolledBackEvent { num_turns: 1 },
+            ))],
+        })
+        .await
+        .expect("append rollback marker");
+    index_paginated_source_metadata(&store, thread_id).await;
+    let expected_position = store
+        .projected_history_position(thread_id)
+        .await
+        .expect("read projected source position")
+        .expect("projected source position");
+    let retained_context = Arc::new(vec![match user_message("retained") {
+        RolloutItem::ResponseItem(item) => item,
+        _ => panic!("expected canonical retained response item"),
+    }]);
+
+    let prepared = store
+        .prepare_fork_with_model_context(
+            PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            },
+            retained_context,
+            expected_position,
+        )
+        .await
+        .expect("replay referenced metadata after rollback");
+
+    assert!(prepared.shared_model_response_items.is_none());
+    assert!(prepared.model_context.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                num_turns: 1,
+            }))
+        )
+    }));
 }
 
 #[tokio::test]
@@ -4097,6 +4255,66 @@ fn user_message(message: &str) -> RolloutItem {
         phase: None,
         internal_chat_message_metadata_passthrough: None,
     })
+}
+
+fn certified_projection_checkpoint(
+    replacement_history: Vec<ResponseItem>,
+    window_number: u64,
+) -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: String::new(),
+            replacement_history: Some(replacement_history),
+            window_number: Some(window_number),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        Some(SegmentPreviousTurnSettings {
+            model: "test-model".to_string(),
+            comp_hash: None,
+            realtime_active: None,
+        }),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+                environments: Some(TurnEnvironmentSelections::new(
+                    serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+                    Vec::new(),
+                )),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid projected checkpoint")
 }
 
 fn contains_user_message(items: &[RolloutItem], expected: &str) -> bool {

@@ -230,6 +230,7 @@ impl Session {
     pub(crate) async fn hard_refresh_latest_codex_apps_tools(
         self: &Arc<Self>,
     ) -> anyhow::Result<Vec<codex_mcp::ToolInfo>> {
+        self.with_checkpoint_admission("hard refresh Codex Apps tools", || async {
         self.refresh_mcp_if_dirty().await;
         let _refresh = self
             .mcp_refresh
@@ -280,6 +281,8 @@ impl Session {
             "unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"
         );
         self.services.mcp_runtime.replace_fresh(input).await
+        })
+        .await?
     }
 
     pub(super) fn mark_mcp_runtime_dirty(&self) {

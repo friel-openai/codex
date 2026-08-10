@@ -1,12 +1,19 @@
 use anyhow::Result;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::GitInfo;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -17,6 +24,37 @@ use std::fs::FileTimes;
 use std::path::Path;
 use std::path::PathBuf;
 use uuid::Uuid;
+
+pub fn test_thread_settings_snapshot() -> ThreadSettingsSnapshot {
+    ThreadSettingsSnapshot {
+        model: "mock-model".to_string(),
+        model_provider_id: "mock_provider".to_string(),
+        service_tier: None,
+        approval_policy: AskForApproval::Never,
+        approvals_reviewer: ApprovalsReviewer::User,
+        permission_profile: PermissionProfile::workspace_write(),
+        active_permission_profile: None,
+        cwd: serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+        environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
+            serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+            Vec::new(),
+        )),
+        workspace_roots: Some(Vec::new()),
+        profile_workspace_roots: Some(Vec::new()),
+        windows_sandbox_level: Some(codex_protocol::config_types::WindowsSandboxLevel::Disabled),
+        reasoning_effort: None,
+        reasoning_summary: None,
+        personality: None,
+        collaboration_mode: CollaborationMode {
+            mode: ModeKind::Default,
+            settings: Settings {
+                model: "mock-model".to_string(),
+                reasoning_effort: None,
+                developer_instructions: None,
+            },
+        },
+    }
+}
 
 pub fn rollout_path(codex_home: &Path, filename_ts: &str, thread_id: &str) -> PathBuf {
     let year = &filename_ts[0..4];

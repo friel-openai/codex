@@ -124,6 +124,12 @@ pub(crate) fn is_goal_supervisor_helper_source(session_source: &SessionSource) -
 }
 
 pub(crate) async fn restart_active_helper_for_execution_settings_change(session: &Arc<Session>) {
+    let Ok(_checkpoint_admission) = session
+        .lock_checkpoint_admission("restart the Goal Supervisor for new execution settings")
+        .await
+    else {
+        return;
+    };
     let transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -226,6 +232,9 @@ pub(crate) async fn maybe_start_supervisor_checkin(
     goal_id: &str,
     goal: &ThreadGoal,
 ) -> anyhow::Result<()> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("start a Goal Supervisor check-in")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -307,6 +316,9 @@ pub(crate) async fn maybe_start_supervisor_checkin_after_goal_resume(
     goal_id: &str,
     goal: &ThreadGoal,
 ) -> anyhow::Result<()> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("resume a Goal Supervisor check-in")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -350,6 +362,9 @@ pub(crate) async fn defer_failed_supervisor_helper(
     helper_thread_id: ThreadId,
     terminal_status: AgentStatus,
 ) -> anyhow::Result<bool> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("defer a Goal Supervisor helper")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -457,6 +472,9 @@ pub(crate) async fn finish_supervisor_helper(
     session: &Arc<Session>,
     helper_thread_id: ThreadId,
 ) -> anyhow::Result<bool> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("finish a Goal Supervisor helper")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -467,6 +485,9 @@ pub(crate) async fn finish_supervisor_helper_after_followup(
     session: &Arc<Session>,
     helper_thread_id: ThreadId,
 ) -> anyhow::Result<bool> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("finish a Goal Supervisor helper after follow-up")
+        .await?;
     let transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
@@ -613,15 +634,23 @@ pub(crate) async fn has_running_supervisor_helper(session: &Arc<Session>) -> boo
     )
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "the persisted snooze message and Goal/runtime mutation must remain ordered with checkpoint persistence"
+)]
 pub(crate) async fn snooze_supervisor_helper(
     session: &Arc<Session>,
     helper_thread_id: ThreadId,
     delay_seconds: u64,
     reason: Option<&str>,
 ) -> anyhow::Result<Option<u64>> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("snooze the Goal Supervisor")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;
+    let history_rewrite = session.history_rewrite_lock.lock().await;
     let active_helper_id = *session
         .goal_supervisor_runtime
         .active_helper_id
@@ -646,25 +675,11 @@ pub(crate) async fn snooze_supervisor_helper(
             .thread_goals()
             .get_thread_goal(session.thread_id)
             .await?
+        && goal.goal_id != active_goal_id
     {
-        if goal.goal_id != active_goal_id {
-            let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
-            return Ok(None);
-        }
-        state_db
-            .thread_goals()
-            .set_thread_goal_supervisor_snoozed_until_ms(
-                session.thread_id,
-                &active_goal_id,
-                Some(Utc::now().timestamp_millis() + (delay_seconds as i64 * 1000)),
-            )
-            .await?;
+        let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
+        return Ok(None);
     }
-    let wake = SupervisorWakeDeadline {
-        goal_id: active_goal_id.clone(),
-        deadline: Instant::now() + Duration::from_secs(delay_seconds),
-    };
-    *session.goal_supervisor_runtime.snoozed_until.lock().await = Some(wake.clone());
     let parent_path = session
         .session_source()
         .await
@@ -700,12 +715,32 @@ pub(crate) async fn snooze_supervisor_helper(
     );
     let turn_context = session
         .new_default_turn_with_sub_id(format!("goal-supervisor-snooze-{helper_thread_id}"))
-        .await;
+        .await?;
     let response_item: ResponseItem = communication.to_response_input_item().into();
     session
-        .record_conversation_items(&turn_context, &[response_item])
-        .await;
+        .try_record_conversation_items(&turn_context, &[response_item])
+        .await?;
+    let state = session
+        .lock_state_for_persistence_mutation("snooze the supervisor")
+        .await?;
+    if let Some(state_db) = session.services.state_db.as_ref() {
+        state_db
+            .thread_goals()
+            .set_thread_goal_supervisor_snoozed_until_ms(
+                session.thread_id,
+                &active_goal_id,
+                Some(Utc::now().timestamp_millis() + (delay_seconds as i64 * 1000)),
+            )
+            .await?;
+    }
+    let wake = SupervisorWakeDeadline {
+        goal_id: active_goal_id.clone(),
+        deadline: Instant::now() + Duration::from_secs(delay_seconds),
+    };
+    *session.goal_supervisor_runtime.snoozed_until.lock().await = Some(wake.clone());
     record_snooze_action(session, &active_goal_id, delay_seconds).await;
+    drop(state);
+    drop(history_rewrite);
     let _ = finish_supervisor_helper_locked(session, helper_thread_id).await?;
     schedule_supervisor_wakeup(session, wake).await;
     Ok(Some(delay_seconds))
@@ -714,7 +749,10 @@ pub(crate) async fn snooze_supervisor_helper(
 pub(crate) async fn record_followup_action(
     session: &Arc<Session>,
     delivered_parent_message: &InterAgentCommunication,
-) {
+) -> anyhow::Result<()> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("record a Goal Supervisor follow-up")
+        .await?;
     let goal_id = session
         .goal_supervisor_runtime
         .active_goal_id
@@ -732,9 +770,15 @@ pub(crate) async fn record_followup_action(
         },
     )
     .await;
+    Ok(())
 }
 
-pub(crate) async fn record_compact_parent_context_action(session: &Arc<Session>) {
+pub(crate) async fn record_compact_parent_context_action(
+    session: &Arc<Session>,
+) -> anyhow::Result<()> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("record Goal Supervisor parent compaction")
+        .await?;
     let goal_id = session
         .goal_supervisor_runtime
         .active_goal_id
@@ -752,6 +796,7 @@ pub(crate) async fn record_compact_parent_context_action(session: &Arc<Session>)
         },
     )
     .await;
+    Ok(())
 }
 
 async fn record_snooze_action(session: &Arc<Session>, goal_id: &str, snoozed_seconds: u64) {
@@ -787,6 +832,9 @@ pub(crate) async fn complete_supervised_goal(
     session: &Arc<Session>,
     helper_thread_id: ThreadId,
 ) -> anyhow::Result<Option<ThreadGoal>> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("complete the supervised Goal")
+        .await?;
     let _transition = Arc::clone(&session.goal_supervisor_runtime.transition_lock)
         .lock_owned()
         .await;

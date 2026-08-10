@@ -99,6 +99,7 @@ use crate::user_message_admission::UserMessageAdmissionError;
 use codex_config::config_toml::ConfigToml;
 use codex_config::config_toml::ProjectConfig;
 use codex_config::permissions_toml::FilesystemPermissionToml;
+
 use codex_config::permissions_toml::FilesystemPermissionsToml;
 use codex_config::permissions_toml::NetworkToml;
 use codex_config::permissions_toml::PermissionProfileToml;
@@ -197,6 +198,73 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration as StdDuration;
+
+fn cleared_segment_checkpoint(
+    replacement_history: Vec<ResponseItem>,
+    window_number: u64,
+) -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: String::new(),
+            replacement_history: Some(replacement_history),
+            window_number: Some(window_number),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        test_thread_settings_applied(),
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid cleared test checkpoint")
+}
+
+#[path = "checkpoint_derived_state_tests.rs"]
+mod checkpoint_derived_state_tests;
+#[path = "checkpoint_failure_recovery_tests.rs"]
+mod checkpoint_failure_recovery_tests;
+
+pub(super) fn test_thread_settings_applied() -> ThreadSettingsAppliedEvent {
+    ThreadSettingsAppliedEvent {
+        thread_settings: codex_protocol::protocol::ThreadSettingsSnapshot {
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            permission_profile: PermissionProfile::workspace_write(),
+            active_permission_profile: None,
+            cwd: serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+            environments: Some(codex_protocol::protocol::TurnEnvironmentSelections::new(
+                serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+                Vec::new(),
+            )),
+            workspace_roots: Some(Vec::new()),
+            profile_workspace_roots: Some(Vec::new()),
+            windows_sandbox_level: Some(
+                codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+            ),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            personality: None,
+            collaboration_mode: codex_protocol::config_types::CollaborationMode {
+                mode: codex_protocol::config_types::ModeKind::Default,
+                settings: codex_protocol::config_types::Settings {
+                    model: "test-model".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+        },
+    }
+}
 
 pub(crate) fn mcp_config_for_test(config: &crate::config::Config) -> Arc<codex_mcp::McpConfig> {
     Arc::new(config.to_mcp_config_with_loaded_plugins(
@@ -2205,6 +2273,7 @@ async fn reconstruct_history_uses_replacement_history_verbatim() {
         first_window_id: Some(first_window_id.to_string()),
         previous_window_id: Some(previous_window_id.to_string()),
         window_id: Some(window_id.to_string()),
+        segment_state_checkpoint: None,
     })];
 
     let reconstructed = session
@@ -2810,92 +2879,6 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
 }
 
 #[tokio::test]
-async fn record_initial_history_seeds_token_info_from_rollout() {
-    let (session, turn_context) = make_session_and_context().await;
-    let (mut rollout_items, _expected) = sample_rollout(&session, &turn_context).await;
-
-    let info1 = TokenUsageInfo {
-        total_token_usage: TokenUsage {
-            input_tokens: 10,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 20,
-            reasoning_output_tokens: 0,
-            total_tokens: 30,
-            codex_rollout_budget_units: None,
-        },
-        last_token_usage: TokenUsage {
-            input_tokens: 3,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 4,
-            reasoning_output_tokens: 0,
-            total_tokens: 7,
-            codex_rollout_budget_units: None,
-        },
-        model_context_window: Some(1_000),
-    };
-    let info2 = TokenUsageInfo {
-        total_token_usage: TokenUsage {
-            input_tokens: 100,
-            cached_input_tokens: 50,
-            cache_write_input_tokens: 0,
-            output_tokens: 200,
-            reasoning_output_tokens: 25,
-            total_tokens: 375,
-            codex_rollout_budget_units: None,
-        },
-        last_token_usage: TokenUsage {
-            input_tokens: 10,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 20,
-            reasoning_output_tokens: 5,
-            total_tokens: 35,
-            codex_rollout_budget_units: None,
-        },
-        model_context_window: Some(2_000),
-    };
-
-    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
-        TokenCountEvent {
-            info: Some(info1),
-            rate_limits: None,
-        },
-    )));
-    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
-        TokenCountEvent {
-            info: None,
-            rate_limits: None,
-        },
-    )));
-    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
-        TokenCountEvent {
-            info: Some(info2.clone()),
-            rate_limits: None,
-        },
-    )));
-    rollout_items.push(RolloutItem::EventMsg(EventMsg::TokenCount(
-        TokenCountEvent {
-            info: None,
-            rate_limits: None,
-        },
-    )));
-
-    session
-        .record_initial_history(InitialHistory::Resumed(ResumedHistory {
-            conversation_id: ThreadId::default(),
-            history: Arc::new(rollout_items),
-            rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
-        }))
-        .await
-        .expect("record initial history");
-
-    let actual = session.state.lock().await.token_info();
-    assert_eq!(actual, Some(info2));
-}
-
-#[tokio::test]
 async fn recompute_token_usage_uses_session_base_instructions() {
     let (session, turn_context) = make_session_and_context().await;
 
@@ -3424,14 +3407,16 @@ async fn record_initial_history_reconstructs_forked_transcript() {
 async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messages() {
     let (mut session, _turn_context) = make_session_and_context().await;
     attach_thread_persistence(&mut session).await;
+    let mut replacement_history = Vec::new();
 
     for index in 0..6 {
+        let user = user_message(&format!("legacy-parent-user-{index}"));
+        let assistant = assistant_message(&format!("legacy-parent-assistant-{index}"));
+        replacement_history.extend([user.clone(), assistant.clone()]);
         session
             .persist_rollout_items(&[
-                RolloutItem::ResponseItem(user_message(&format!("legacy-parent-user-{index}"))),
-                RolloutItem::ResponseItem(assistant_message(&format!(
-                    "legacy-parent-assistant-{index}"
-                ))),
+                RolloutItem::ResponseItem(user),
+                RolloutItem::ResponseItem(assistant),
             ])
             .await;
         session.flush_rollout().await.expect("flush parent segment");
@@ -3441,7 +3426,12 @@ async fn record_initial_history_preserves_all_segmented_legacy_fork_model_messag
                 .live_thread
                 .as_ref()
                 .expect("live parent persistence")
-                .freeze_local_segment(FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .freeze_local_segment(FreezeRolloutSegmentParams::rotate(
+                    cleared_segment_checkpoint(
+                        replacement_history.clone(),
+                        u64::try_from(index + 1).expect("test window number"),
+                    ),
+                ))
                 .await
                 .expect("rotate parent segment")
                 .expect("local parent segment");
@@ -3798,11 +3788,11 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         let mut child_state = child.thread.session.state.lock().await;
         assert_eq!(
             child_state.reference_context_item(),
-            Some(reference_context_item)
+            Some(reference_context_item.clone())
         );
         assert_eq!(
             child_state.previous_turn_settings(),
-            Some(previous_turn_settings)
+            Some(previous_turn_settings.clone())
         );
         assert_eq!(child_state.token_info(), Some(token_info));
         assert_eq!(child_state.auto_compact_window_number(), 7);
@@ -3820,6 +3810,38 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
     let child_rollout_items = RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
         .await?
         .0;
+    let reconstruction_turn = child.thread.session.new_default_turn().await;
+    let reconstructed = child
+        .thread
+        .session
+        .reconstruct_history_from_rollout(reconstruction_turn.as_ref(), &child_rollout_items)
+        .await;
+    assert_eq!(
+        strip_response_item_ids(&reconstructed.history),
+        strip_response_item_ids(child_items.as_ref())
+    );
+    assert_eq!(
+        reconstructed.previous_turn_settings,
+        Some(previous_turn_settings.clone())
+    );
+    assert_eq!(
+        reconstructed.reference_context_item,
+        Some(reference_context_item.clone())
+    );
+    assert_eq!(
+        reconstructed.world_state_baseline,
+        Some(world_state.snapshot())
+    );
+    assert_eq!(reconstructed.window_number, 7);
+    assert_eq!(
+        reconstructed.first_window_id,
+        Some(window_ids.first_window_id)
+    );
+    assert_eq!(
+        reconstructed.previous_window_id,
+        window_ids.previous_window_id
+    );
+    assert_eq!(reconstructed.window_id, Some(window_ids.window_id));
     assert_eq!(
         child_rollout_items
             .iter()
@@ -3854,6 +3876,68 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
                 ))
         )),
         "the child rollout must not copy parent response rows"
+    );
+
+    let referenced_source_path = child_rollout_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::RolloutReference(reference) => Some(reference.rollout_path.clone()),
+            _ => None,
+        })
+        .expect("prepared fork should reference its source rollout");
+    child.thread.flush_rollout().await?;
+    source.thread.shutdown_and_wait().await?;
+    child.thread.shutdown_and_wait().await?;
+    manager.remove_thread(&source_thread_id).await;
+    manager.remove_thread(&child.thread_id).await;
+    let missing_source_path = referenced_source_path.with_extension("jsonl.missing");
+    std::fs::rename(&referenced_source_path, &missing_source_path)?;
+
+    let checkpoint_context = codex_thread_store::ThreadStore::load_latest_model_context(
+        store.as_ref(),
+        codex_thread_store::LoadThreadHistoryParams {
+            thread_id: child.thread_id,
+            rollout_path: None,
+            include_archived: false,
+        },
+    )
+    .await?;
+    let checkpoint_reconstructed = child
+        .thread
+        .session
+        .reconstruct_history_from_rollout(
+            reconstruction_turn.as_ref(),
+            checkpoint_context.items.as_slice(),
+        )
+        .await;
+    assert_eq!(
+        strip_response_item_ids(&checkpoint_reconstructed.history),
+        strip_response_item_ids(child_items.as_ref())
+    );
+    assert_eq!(
+        checkpoint_reconstructed.previous_turn_settings,
+        Some(previous_turn_settings)
+    );
+    assert_eq!(
+        checkpoint_reconstructed.reference_context_item,
+        Some(reference_context_item)
+    );
+    assert_eq!(
+        checkpoint_reconstructed.world_state_baseline,
+        Some(world_state.snapshot())
+    );
+    assert_eq!(checkpoint_reconstructed.window_number, 7);
+    assert_eq!(
+        checkpoint_reconstructed.first_window_id,
+        Some(window_ids.first_window_id)
+    );
+    assert_eq!(
+        checkpoint_reconstructed.previous_window_id,
+        window_ids.previous_window_id
+    );
+    assert_eq!(
+        checkpoint_reconstructed.window_id,
+        Some(window_ids.window_id)
     );
 
     Ok(())
@@ -3907,6 +3991,23 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
         .await?;
     source_store.persist_thread(source_thread_id).await?;
     let mut source_model_history = Vec::new();
+    let (_, checkpoint_turn_context) = make_session_and_context().await;
+    let checkpoint_reference_context = checkpoint_turn_context.to_turn_context_item();
+    let checkpoint_previous_turn_settings = SegmentPreviousTurnSettings {
+        model: checkpoint_reference_context.model.clone(),
+        comp_hash: checkpoint_reference_context.comp_hash.clone(),
+        realtime_active: checkpoint_reference_context.realtime_active,
+    };
+    let checkpoint_world_state_value = json!({
+        "checkpoint_test": {
+            "generation": 5,
+        },
+    });
+    let checkpoint_window_ids = AutoCompactWindowIds {
+        first_window_id: Uuid::now_v7(),
+        previous_window_id: Some(Uuid::now_v7()),
+        window_id: Uuid::now_v7(),
+    };
 
     for index in 0..6 {
         let turn_id = format!("paginated-parent-turn-{index}");
@@ -3951,10 +4052,38 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             })
             .await?;
         if index < 5 {
+            let checkpoint = if index == 4 {
+                CertifiedSegmentStateCheckpoint::new(
+                    CompactedItem {
+                        message: String::new(),
+                        replacement_history: Some(source_model_history.clone()),
+                        window_number: Some(55),
+                        first_window_id: Some(checkpoint_window_ids.first_window_id.to_string()),
+                        previous_window_id: checkpoint_window_ids
+                            .previous_window_id
+                            .map(|id| id.to_string()),
+                        window_id: Some(checkpoint_window_ids.window_id.to_string()),
+                        segment_state_checkpoint: None,
+                    },
+                    Some(checkpoint_previous_turn_settings.clone()),
+                    Some(WorldStateItem::full(checkpoint_world_state_value.clone())),
+                    Some(checkpoint_reference_context.clone()),
+                    test_thread_settings_applied(),
+                    TokenCountEvent {
+                        info: None,
+                        rate_limits: None,
+                    },
+                )?
+            } else {
+                cleared_segment_checkpoint(
+                    source_model_history.clone(),
+                    u64::try_from(index + 1).expect("test window number"),
+                )
+            };
             source_store
                 .freeze_thread_segment(
                     source_thread_id,
-                    FreezeRolloutSegmentParams::rotate(Vec::new()),
+                    FreezeRolloutSegmentParams::rotate(checkpoint),
                 )
                 .await?;
         }
@@ -4007,13 +4136,22 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
     } else {
         source_store.prepare_fork(params).await?
     };
-    let prepared_user_messages = prepared
-        .model_context
-        .iter()
+    let prepared_response_items = prepared.model_context.iter().flat_map(|item| match item {
+        RolloutItem::Compacted(compacted) => {
+            compacted.replacement_history.as_deref().unwrap_or_default()
+        }
+        RolloutItem::ResponseItem(item) => std::slice::from_ref(item),
+        RolloutItem::SessionMeta(_)
+        | RolloutItem::RolloutReference(_)
+        | RolloutItem::InterAgentCommunication(_)
+        | RolloutItem::InterAgentCommunicationMetadata { .. }
+        | RolloutItem::TurnContext(_)
+        | RolloutItem::WorldState(_)
+        | RolloutItem::EventMsg(_) => &[],
+    });
+    let prepared_user_messages = prepared_response_items
         .filter_map(|item| match item {
-            RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. })
-                if role == "user" =>
-            {
+            ResponseItem::Message { role, content, .. } if role == "user" => {
                 let [ContentItem::InputText { text }] = content.as_slice() else {
                     return None;
                 };
@@ -4043,24 +4181,53 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             ClientMcpExtensions::default(),
         )
         .await?;
-    if use_shared_model_history {
-        assert!(
-            Arc::ptr_eq(
-                &child
-                    .thread
-                    .model_history_snapshot()
-                    .await
-                    .expect("complete prepared fork model history"),
-                &shared_model_history,
-            ),
-            "the parent and idle child must share the same immutable model history Arc"
-        );
-    }
     let child_rollout_path = child.thread.rollout_path().expect("child rollout path");
     let child_rollout_items = std::fs::read_to_string(&child_rollout_path)?
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
+    let child_checkpoint = child_rollout_items
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::Compacted(compacted) => Some(compacted),
+            _ => None,
+        })
+        .expect("child-local segment checkpoint");
+    assert_eq!(child_checkpoint.window_number, Some(55));
+    assert_eq!(
+        child_checkpoint.first_window_id,
+        Some(checkpoint_window_ids.first_window_id.to_string())
+    );
+    assert_eq!(
+        child_checkpoint.previous_window_id,
+        checkpoint_window_ids
+            .previous_window_id
+            .map(|id| id.to_string())
+    );
+    assert_eq!(
+        child_checkpoint.window_id,
+        Some(checkpoint_window_ids.window_id.to_string())
+    );
+    assert_eq!(
+        child_checkpoint
+            .segment_state_checkpoint
+            .as_ref()
+            .and_then(|checkpoint| checkpoint.previous_turn_settings.as_ref()),
+        Some(&checkpoint_previous_turn_settings)
+    );
+    assert!(child_rollout_items.iter().any(|line| {
+        matches!(
+            &line.item,
+            RolloutItem::WorldState(world_state)
+                if world_state.full && world_state.state == checkpoint_world_state_value
+        )
+    }));
+    assert!(child_rollout_items.iter().any(|line| {
+        matches!(
+            &line.item,
+            RolloutItem::TurnContext(context) if context == &checkpoint_reference_context
+        )
+    }));
     assert!(
         child_rollout_items
             .iter()
@@ -4072,7 +4239,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             .all(|line| !matches!(line.item, RolloutItem::ResponseItem(_)))
     );
 
-    child
+    let child_turn_id = child
         .thread
         .submit(Op::UserInput {
             items: vec![UserInput::Text {
@@ -4085,9 +4252,10 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             thread_settings: Default::default(),
         })
         .await?;
-    wait_for_event(&child.thread, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+    wait_for_event(
+        &child.thread,
+        |event| matches!(event, EventMsg::TurnComplete(event) if event.turn_id == child_turn_id),
+    )
     .await;
 
     let model_user_messages = response_mock
@@ -4129,7 +4297,8 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
 
     session
         .start_new_context_window(&step_context, world_state)
-        .await;
+        .await
+        .expect("new context checkpoint should persist");
 
     let live_history = session.clone_history().await;
     assert!(!live_history.raw_items().is_empty());
@@ -4493,7 +4662,26 @@ async fn thread_rollback_drops_last_turn_from_history() {
     {
         let mut state = sess.state.lock().await;
         state.set_reference_context_item(Some(tc.to_turn_context_item()));
+        state.session_configuration.approvals_reviewer =
+            codex_protocol::config_types::ApprovalsReviewer::AutoReview;
     }
+    let expected_rate_limits = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: Some("Codex".to_string()),
+        primary: Some(RateLimitWindow {
+            used_percent: 30.0,
+            window_minutes: Some(300),
+            resets_at: Some(1_700),
+        }),
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
+    sess.record_rate_limits_info(expected_rate_limits.clone())
+        .await;
 
     handlers::thread_rollback(&sess, "sub-1".to_string(), /*num_turns*/ 1).await;
 
@@ -4509,19 +4697,314 @@ async fn thread_rollback_drops_last_turn_from_history() {
     assert_eq!(sess.previous_turn_settings().await, None);
     assert!(sess.reference_context_item().await.is_none());
 
-    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
-        .await
-        .expect("read rollout history")
-    else {
-        panic!("expected resumed rollout history");
-    };
-    assert!(resumed.history.iter().any(|item| {
+    let (active_lines, active_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_lines(&rollout_path)
+            .await
+            .expect("load active rollout after rollback");
+    assert_eq!(active_thread_id, Some(sess.thread_id));
+    assert_eq!(parse_errors, 0);
+    assert!(active_lines.iter().any(|line| {
         matches!(
-            item,
-            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(rollback))
-            if rollback.num_turns == 1
+            &line.item,
+            RolloutItem::Compacted(CompactedItem {
+                segment_state_checkpoint: Some(_),
+                ..
+            })
         )
     }));
+    let rollback_marker_index = active_lines
+        .iter()
+        .position(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                    num_turns: 1
+                }))
+            )
+        })
+        .expect("rollback marker in active segment");
+    let checkpoint_index = active_lines
+        .iter()
+        .position(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::Compacted(CompactedItem {
+                    segment_state_checkpoint: Some(_),
+                    ..
+                })
+            )
+        })
+        .expect("rollback checkpoint in active segment");
+    assert_eq!(checkpoint_index, rollback_marker_index + 1);
+    let predecessor_path = active_lines
+        .iter()
+        .find_map(|line| match &line.item {
+            RolloutItem::RolloutReference(reference) => Some(reference.rollout_path.clone()),
+            _ => None,
+        })
+        .expect("rollback checkpoint predecessor");
+    let checkpoint_items = codex_rollout::materialize_model_context_rollout_items_from(
+        sess.codex_home().await.as_path(),
+        active_lines,
+    )
+    .await
+    .expect("materialize rollback checkpoint");
+    assert_eq!(
+        checkpoint_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+                )
+            })
+            .count(),
+        1
+    );
+    assert_eq!(
+        checkpoint_items
+            .iter()
+            .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(_))))
+            .count(),
+        1
+    );
+    assert!(checkpoint_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                if event.thread_settings.approvals_reviewer
+                    == codex_protocol::config_types::ApprovalsReviewer::AutoReview
+        )
+    }));
+    assert!(checkpoint_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TokenCount(event))
+                if event.info.is_some()
+                    && event.rate_limits.as_ref() == Some(&expected_rate_limits)
+        )
+    }));
+    let reconstruction_turn = sess.new_default_turn().await;
+    let reconstructed = sess
+        .reconstruct_history_from_rollout(reconstruction_turn.as_ref(), &checkpoint_items)
+        .await;
+    assert_eq!(reconstructed.history, expected);
+    assert_eq!(reconstructed.previous_turn_settings, None);
+    assert_eq!(reconstructed.reference_context_item, None);
+
+    let (predecessor_items, _, predecessor_parse_errors) =
+        RolloutRecorder::load_rollout_items(predecessor_path.as_path())
+            .await
+            .expect("read rollback predecessor");
+    assert_eq!(predecessor_parse_errors, 0);
+    assert!(
+        !predecessor_items
+            .iter()
+            .any(|item| { matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))) })
+    );
+}
+
+#[tokio::test]
+async fn cancelled_thread_rollback_atomically_installs_marker_and_checkpoint() {
+    let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+    let rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut sess).expect("session should not have additional references"),
+    )
+    .await;
+    let turn_1 = vec![
+        user_message("turn 1 user"),
+        assistant_message("turn 1 assistant"),
+    ];
+    let turn_2 = [
+        user_message("turn 2 user"),
+        assistant_message("turn 2 assistant"),
+    ];
+    let full_history = turn_1
+        .iter()
+        .chain(turn_2.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    sess.replace_history(full_history.clone(), Some(tc.to_turn_context_item()))
+        .await;
+    sess.persist_rollout_items(
+        full_history
+            .iter()
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect::<Vec<_>>()
+            .as_slice(),
+    )
+    .await;
+    sess.flush_rollout().await.expect("flush rollback history");
+
+    let pause =
+        super::checkpoint_rotation_test_support::CheckpointCapturePause::install(sess.thread_id);
+    let rollback_session = Arc::clone(&sess);
+    let rollback = tokio::spawn(async move {
+        handlers::thread_rollback(
+            &rollback_session,
+            "cancelled-rollback".to_string(),
+            /*num_turns*/ 1,
+        )
+        .await;
+    });
+    pause.wait_until_reached().await;
+    rollback.abort();
+    assert!(
+        rollback
+            .await
+            .expect_err("rollback caller should be cancelled")
+            .is_cancelled()
+    );
+
+    let (before_release, _, before_release_errors) =
+        RolloutRecorder::load_rollout_items(&rollout_path)
+            .await
+            .expect("load rollout before detached rollback persistence");
+    assert_eq!(before_release_errors, 0);
+    assert!(!before_release.iter().any(|item| matches!(
+        item,
+        RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
+            | RolloutItem::Compacted(CompactedItem {
+                segment_state_checkpoint: Some(_),
+                ..
+            })
+    )));
+
+    pause.release();
+    drop(sess.state.lock().await);
+    sess.flush_rollout()
+        .await
+        .expect("flush detached rollback completion");
+
+    let mut token_count_events = 0;
+    let rollback_event = loop {
+        let event = rx.recv().await.expect("rollback completion event");
+        match event.msg {
+            EventMsg::TokenCount(_) => token_count_events += 1,
+            EventMsg::ThreadRolledBack(event) => break event,
+            _ => {}
+        }
+    };
+    while let Ok(event) = rx.try_recv() {
+        if matches!(event.msg, EventMsg::TokenCount(_)) {
+            token_count_events += 1;
+        }
+    }
+    assert_eq!(rollback_event.num_turns, 1);
+    assert_eq!(token_count_events, 1);
+
+    let (active_items, _, parse_errors) = RolloutRecorder::load_rollout_items(&rollout_path)
+        .await
+        .expect("load atomically rotated rollback segment");
+    assert_eq!(parse_errors, 0);
+    let marker_index = active_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
+                    num_turns: 1
+                }))
+            )
+        })
+        .expect("rollback marker");
+    assert!(matches!(
+        active_items.get(marker_index + 1),
+        Some(RolloutItem::Compacted(CompactedItem {
+            segment_state_checkpoint: Some(_),
+            ..
+        }))
+    ));
+    let predecessor_path = active_items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::RolloutReference(reference) => Some(reference.rollout_path.clone()),
+            _ => None,
+        })
+        .expect("rollback predecessor");
+    let missing_predecessor = predecessor_path.with_extension("jsonl.missing");
+    std::fs::rename(&predecessor_path, &missing_predecessor)
+        .expect("make rollback predecessor unavailable");
+    let latest = codex_thread_store::ThreadStore::load_latest_model_context(
+        sess.services.thread_store.as_ref(),
+        codex_thread_store::LoadThreadHistoryParams {
+            thread_id: sess.thread_id,
+            rollout_path: None,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect("load rollback checkpoint without predecessor");
+    let reconstructed = sess
+        .reconstruct_history_from_rollout(tc.as_ref(), latest.items.as_slice())
+        .await;
+    assert_eq!(reconstructed.history, turn_1);
+}
+
+#[tokio::test]
+async fn failed_rollback_checkpoint_persistence_does_not_report_completion() {
+    let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+    let store = attach_in_memory_thread_store(
+        Arc::get_mut(&mut sess).expect("session should not have additional references"),
+    )
+    .await;
+    let full_history = vec![
+        user_message("turn 1 user"),
+        assistant_message("turn 1 assistant"),
+        user_message("turn 2 user"),
+        assistant_message("turn 2 assistant"),
+    ];
+    sess.replace_history(full_history.clone(), Some(tc.to_turn_context_item()))
+        .await;
+    sess.persist_rollout_items(
+        full_history
+            .iter()
+            .cloned()
+            .map(RolloutItem::ResponseItem)
+            .collect::<Vec<_>>()
+            .as_slice(),
+    )
+    .await;
+    sess.flush_rollout().await.expect("flush rollback history");
+    let state_before_rollback = sess.state.lock().await.checkpoint_mutation_snapshot();
+    store.fail_appends().await;
+
+    handlers::thread_rollback(&sess, "failed-rollback".to_string(), /*num_turns*/ 1).await;
+
+    let events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+    assert!(events.iter().any(|event| {
+        matches!(
+            &event.msg,
+            EventMsg::Error(ErrorEvent {
+                codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                ..
+            })
+        )
+    }));
+    assert!(!events.iter().any(|event| matches!(
+        &event.msg,
+        EventMsg::TokenCount(_) | EventMsg::ThreadRolledBack(_)
+    )));
+    assert!(
+        sess.state
+            .lock()
+            .await
+            .has_same_checkpoint_mutation_state(&state_before_rollback),
+        "failed rollback persistence must restore the exact pre-rollback model state"
+    );
+    let persisted = sess
+        .live_thread()
+        .expect("live rollback thread")
+        .load_history(/*include_archived*/ false)
+        .await
+        .expect("load unchanged persisted history");
+    assert!(
+        !persisted
+            .items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))))
+    );
 }
 
 #[tokio::test]
@@ -4775,6 +5258,7 @@ async fn thread_rollback_restores_cleared_reference_context_item_after_compactio
             first_window_id: Some(first_window_id.to_string()),
             previous_window_id: Some(previous_window_id.to_string()),
             window_id: Some(compacted_window_id.to_string()),
+            segment_state_checkpoint: None,
         }),
         RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
             turn_id: compact_turn_id,
@@ -4970,16 +5454,26 @@ async fn thread_rollback_persists_marker_and_replays_cumulatively() {
         ]
     );
 
-    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
-        .await
-        .expect("read rollout history")
-    else {
-        panic!("expected resumed rollout history");
-    };
-    let rollback_markers = resumed
-        .history
+    let (active_lines, active_thread_id, parse_errors) =
+        RolloutRecorder::load_rollout_lines(&rollout_path)
+            .await
+            .expect("read active rollout history");
+    assert_eq!(active_thread_id, Some(sess.thread_id));
+    assert_eq!(parse_errors, 0);
+    let full_history = codex_rollout::materialize_rollout_lines_from(
+        sess.codex_home().await.as_path(),
+        active_lines,
+    )
+    .await
+    .expect("materialize complete rollback history");
+    let rollback_markers = full_history
         .iter()
-        .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))))
+        .filter(|line| {
+            matches!(
+                &line.item,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
+            )
+        })
         .count();
     assert_eq!(rollback_markers, 2);
 }
@@ -5491,8 +5985,10 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
     let (mut session, turn_context, _) = make_session_and_context_with_rx().await;
     let world_state = Arc::new(build_world_state_from_turn_context(&session, &turn_context).await);
     let expected_world_state = world_state.snapshot();
-    let session = Arc::get_mut(&mut session).expect("session should have one owner");
-    let stable_path = attach_thread_persistence(session).await;
+    let stable_path = {
+        let session = Arc::get_mut(&mut session).expect("session should have one owner");
+        attach_thread_persistence(session).await
+    };
     session
         .persist_rollout_items(&[
             RolloutItem::ResponseItem(user_message("before compaction")),
@@ -5514,23 +6010,24 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         })
         .expect("pre-compaction segment id");
     let replacement_history = vec![user_message("compacted summary")];
-    let (window_number, window_ids) = {
-        let mut state = session.state.lock().await;
-        state.start_new_context_window()
-    };
-
+    let expected_thread_settings = session
+        .thread_config_snapshot()
+        .await
+        .into_thread_settings_snapshot();
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     session
         .replace_compacted_history(
+            &turn_context,
             replacement_history.clone(),
             Some(turn_context.to_turn_context_item()),
             Some(world_state),
             CompactedHistoryMetadata {
                 message: "compacted summary".to_string(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
             },
         )
-        .await;
+        .await
+        .expect("compacted checkpoint should persist");
 
     let current_path = session
         .current_rollout_path()
@@ -5559,6 +6056,40 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
                 if reference.rollout_path.as_path() == immutable_path.as_path()
                     && reference.thread_id == Some(session.thread_id)
                     && reference.segment_id == Some(old_segment_id)
+        )
+    }));
+    assert_eq!(
+        replacement_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+                )
+            })
+            .count(),
+        1
+    );
+    assert!(replacement_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event))
+                if event.thread_settings == expected_thread_settings
+        )
+    }));
+    let expected_token_count = session.state.lock().await.token_info_and_rate_limits();
+    assert_eq!(
+        replacement_items
+            .iter()
+            .filter(|item| matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(_))))
+            .count(),
+        1
+    );
+    assert!(replacement_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TokenCount(event))
+                if (event.info.clone(), event.rate_limits.clone()) == expected_token_count
         )
     }));
     assert!(replacement_items.iter().any(|item| {
@@ -6301,7 +6832,8 @@ enabled = false
 
     let child_turn = session
         .new_default_turn_with_sub_id("role-skill-turn".to_string())
-        .await;
+        .await
+        .expect("default turn");
     let skills_snapshot = child_turn.skills_snapshot();
     let child_skill = skills_snapshot
         .outcome()
@@ -6961,7 +7493,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
-        state: Mutex::new(state),
+        state: Arc::new(Mutex::new(state)),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
         windows_sandbox_proxy_settings_mode:
@@ -6976,6 +7508,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         async_hook_results,
+        checkpoint_admission_lock: Arc::new(Mutex::new(())),
+        checkpoint_submission_acknowledgements: std::sync::Mutex::new(HashMap::new()),
+        history_rewrite_lock: Arc::new(Mutex::new(())),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -6983,6 +7518,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
+        persistence_restart_required: AtomicBool::new(false),
     };
 
     session.mark_mcp_runtime_dirty();
@@ -7933,6 +8469,7 @@ async fn submit_with_id_captures_current_span_trace_context() {
     let (tx_sub, rx_sub) = async_channel::bounded(1);
     let (_tx_event, rx_event) = async_channel::unbounded();
     let io = SessionIo {
+        tx_control_sub: tx_sub.clone(),
         tx_sub,
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8755,6 +9292,7 @@ async fn shutdown_and_wait_allows_multiple_waiters() {
         tokio::time::sleep(StdDuration::from_millis(50)).await;
     });
     let io = Arc::new(SessionIo {
+        tx_control_sub: tx_sub.clone(),
         tx_sub,
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8791,6 +9329,7 @@ async fn shutdown_and_wait_waits_when_shutdown_is_already_in_progress() {
         let _ = shutdown_complete_rx.await;
     });
     let io = Arc::new(SessionIo {
+        tx_control_sub: tx_sub.clone(),
         tx_sub,
         rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8827,6 +9366,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
         submission_loop(parent_session_for_loop, parent_config, parent_rx_sub).await;
     });
     let parent_io = SessionIo {
+        tx_control_sub: parent_tx_sub.clone(),
         tx_sub: parent_tx_sub,
         rx_event: parent_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8849,6 +9389,7 @@ async fn shutdown_and_wait_shuts_down_cached_guardian_subagent() {
     });
     let child_session = Arc::new(child_session);
     let child_io = SessionIo {
+        tx_control_sub: child_tx_sub.clone(),
         tx_sub: child_tx_sub,
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8881,6 +9422,7 @@ async fn cached_guardian_subagent_exposes_its_rollout_path() {
     let child_session_loop_handle = tokio::spawn(async {});
     let child_session = Arc::new(child_session);
     let child_io = SessionIo {
+        tx_control_sub: child_tx_sub.clone(),
         tx_sub: child_tx_sub,
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8912,6 +9454,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
         submission_loop(parent_session_for_loop, parent_config, parent_rx_sub).await;
     });
     let parent_io = SessionIo {
+        tx_control_sub: parent_tx_sub.clone(),
         tx_sub: parent_tx_sub,
         rx_event: parent_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -8934,6 +9477,7 @@ async fn shutdown_and_wait_shuts_down_tracked_ephemeral_guardian_review() {
     });
     let child_session = Arc::new(child_session);
     let child_io = SessionIo {
+        tx_control_sub: child_tx_sub.clone(),
         tx_sub: child_tx_sub,
         rx_event: child_rx_event,
         agent_status: watch::channel(AgentStatus::PendingInit).1,
@@ -9227,7 +9771,7 @@ where
         installation_id: "11111111-1111-4111-8111-111111111111".to_string(),
         tx_event,
         agent_status: agent_status_tx,
-        state: Mutex::new(state),
+        state: Arc::new(Mutex::new(state)),
         managed_network_proxy_refresh_lock: Semaphore::new(/*permits*/ 1),
         features: config.features.clone(),
         windows_sandbox_proxy_settings_mode:
@@ -9242,6 +9786,9 @@ where
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
         async_hook_results,
+        checkpoint_admission_lock: Arc::new(Mutex::new(())),
+        checkpoint_submission_acknowledgements: std::sync::Mutex::new(HashMap::new()),
+        history_rewrite_lock: Arc::new(Mutex::new(())),
         pending_user_message_admissions: Default::default(),
         input_queue: super::input_queue::InputQueue::new(),
         guardian_review_session: crate::guardian::GuardianReviewSessionManager::default(),
@@ -9249,6 +9796,7 @@ where
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
+        persistence_restart_required: AtomicBool::new(false),
     });
 
     session.mark_mcp_runtime_dirty();
@@ -11046,6 +11594,13 @@ enum TerminalEventKind {
 async fn attach_in_memory_thread_store(
     session: &mut Session,
 ) -> Arc<codex_thread_store::InMemoryThreadStore> {
+    attach_in_memory_thread_store_with_mode(session, ThreadPersistenceMode::Durable).await
+}
+
+async fn attach_in_memory_thread_store_with_mode(
+    session: &mut Session,
+    persistence_mode: ThreadPersistenceMode,
+) -> Arc<codex_thread_store::InMemoryThreadStore> {
     let store = Arc::new(codex_thread_store::InMemoryThreadStore::default());
     let thread_store: Arc<dyn codex_thread_store::ThreadStore> = store.clone();
     let config = session.get_config().await;
@@ -11067,7 +11622,7 @@ async fn attach_in_memory_thread_store(
             history_mode: Default::default(),
             subagent_history_start_ordinal: None,
             history_base: None,
-            persistence_mode: ThreadPersistenceMode::Durable,
+            persistence_mode,
             initial_rollout_ordinal: 0,
             initial_window_id: Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {
@@ -11790,6 +12345,535 @@ async fn task_finish_continues_late_input() {
     assert!(session.active_turn.lock().await.is_none());
 }
 
+#[tokio::test]
+async fn deferred_parent_completion_materializes_before_receipt() {
+    let (mut session, _) = make_session_and_context().await;
+    let store =
+        attach_in_memory_thread_store_with_mode(&mut session, ThreadPersistenceMode::Deferred)
+            .await;
+    assert!(
+        session
+            .live_thread()
+            .expect("thread persistence")
+            .is_persistence_deferred()
+            .await
+    );
+
+    let item_id = ResponseItemId::with_suffix("msg", "deferred-subagent-completion");
+    session
+        .record_subagent_completion_notification(ResponseItem::Message {
+            id: Some(item_id.clone()),
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "deferred child complete".to_string(),
+            }],
+            phase: None,
+            internal_chat_message_metadata_passthrough: None,
+        })
+        .await
+        .expect("completion receipt requires materialized persistence");
+
+    assert!(
+        !session
+            .live_thread()
+            .expect("thread persistence")
+            .is_persistence_deferred()
+            .await
+    );
+    let latest = codex_thread_store::ThreadStore::load_latest_model_context(
+        store.as_ref(),
+        codex_thread_store::LoadThreadHistoryParams {
+            thread_id: session.thread_id,
+            rollout_path: None,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect("materialized completion should be reloadable");
+    let persisted_count = latest
+        .items
+        .iter()
+        .flat_map(|item| match item {
+            RolloutItem::ResponseItem(item) => vec![item],
+            RolloutItem::Compacted(compacted) => compacted
+                .replacement_history
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .collect(),
+            RolloutItem::SessionMeta(_)
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::InterAgentCommunication(_)
+            | RolloutItem::InterAgentCommunicationMetadata { .. }
+            | RolloutItem::TurnContext(_)
+            | RolloutItem::WorldState(_)
+            | RolloutItem::EventMsg(_) => Vec::new(),
+        })
+        .filter(|item| item.id() == Some(&item_id))
+        .count();
+    assert_eq!(persisted_count, 1);
+    assert_eq!(
+        session
+            .clone_history()
+            .await
+            .raw_items()
+            .iter()
+            .filter(|item| item.id() == Some(&item_id))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn completion_during_review_is_recorded_after_review_output() {
+    struct PausedReviewTask {
+        review_exit_recorded: Arc<tokio::sync::Notify>,
+        allow_review_output: Arc<tokio::sync::Notify>,
+        review_exit: ResponseItem,
+        review_output: ResponseItem,
+    }
+
+    impl SessionTask for PausedReviewTask {
+        fn kind(&self) -> TaskKind {
+            TaskKind::Review
+        }
+
+        fn span_name(&self) -> &'static str {
+            "session_task.paused_review_completion_order"
+        }
+
+        async fn run(
+            self: Arc<Self>,
+            session: Arc<Session>,
+            ctx: Arc<TurnContext>,
+            _input: Vec<TurnInput>,
+            _cancellation_token: CancellationToken,
+        ) -> SessionTaskResult {
+            session
+                .record_conversation_items(ctx.as_ref(), std::slice::from_ref(&self.review_exit))
+                .await;
+            self.review_exit_recorded.notify_one();
+            self.allow_review_output.notified().await;
+            session
+                .record_conversation_items(ctx.as_ref(), std::slice::from_ref(&self.review_output))
+                .await;
+            Ok(None)
+        }
+    }
+
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_in_memory_thread_store(&mut session).await;
+    let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context);
+    let review_exit_id = ResponseItemId::with_suffix("msg", "review-exit-before-completion");
+    let review_output_id = ResponseItemId::with_suffix("msg", "review-output-before-completion");
+    let completion_id = ResponseItemId::with_suffix("msg", "completion-after-review-output");
+    let review_exit_recorded = Arc::new(tokio::sync::Notify::new());
+    let allow_review_output = Arc::new(tokio::sync::Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            PausedReviewTask {
+                review_exit_recorded: Arc::clone(&review_exit_recorded),
+                allow_review_output: Arc::clone(&allow_review_output),
+                review_exit: ResponseItem::Message {
+                    id: Some(review_exit_id.clone()),
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "review mode exited".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+                review_output: ResponseItem::Message {
+                    id: Some(review_output_id.clone()),
+                    role: "assistant".to_string(),
+                    content: vec![ContentItem::OutputText {
+                        text: "review findings".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                },
+            },
+        )
+        .await;
+    timeout(StdDuration::from_secs(2), review_exit_recorded.notified())
+        .await
+        .expect("review should pause after recording its exit item");
+
+    let completion_session = Arc::clone(&session);
+    let task_completion_id = completion_id.clone();
+    let completion_task = tokio::spawn(async move {
+        completion_session
+            .record_subagent_completion_notification(ResponseItem::Message {
+                id: Some(task_completion_id),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "review child completed".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+            .await
+    });
+    timeout(StdDuration::from_secs(2), async {
+        while !session
+            .input_queue
+            .has_durable_response_item_waiter(&completion_id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completion should queue behind the active review");
+    assert!(
+        session
+            .clone_history()
+            .await
+            .raw_items()
+            .iter()
+            .all(|item| item.id() != Some(&completion_id))
+    );
+
+    allow_review_output.notify_one();
+    timeout(StdDuration::from_secs(10), completion_task)
+        .await
+        .expect("review completion persistence should finish")
+        .expect("completion task should remain live")
+        .expect("completion should become durable after review output");
+    timeout(StdDuration::from_secs(2), async {
+        while session.active_turn.lock().await.is_some() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("review task should finish");
+
+    let history = session.clone_history().await;
+    let item_ids = history
+        .raw_items()
+        .iter()
+        .filter_map(ResponseItem::id)
+        .collect::<Vec<_>>();
+    let review_exit_index = item_ids
+        .iter()
+        .position(|id| *id == &review_exit_id)
+        .expect("review exit item");
+    let review_output_index = item_ids
+        .iter()
+        .position(|id| *id == &review_output_id)
+        .expect("review output item");
+    let completion_index = item_ids
+        .iter()
+        .position(|id| *id == &completion_id)
+        .expect("completion item");
+    assert!(review_exit_index < review_output_index && review_output_index < completion_index);
+}
+
+#[test]
+fn persisted_completion_recorded_after_task_check_forces_model_follow_up_once() {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_stack_size(16 * 1024 * 1024)
+        .enable_all()
+        .build()
+        .expect("build test runtime");
+    runtime.block_on(persisted_completion_continues_active_parent());
+}
+
+async fn persisted_completion_continues_active_parent() {
+    let server = start_mock_server().await;
+    let response_mock = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("completion-follow-up"),
+            ev_completed("completion-follow-up"),
+        ]),
+    )
+    .await;
+    let base_url = server.uri();
+    let (mut session, turn_context, rx) = make_session_and_context_with_auth_and_config_and_rx(
+        CodexAuth::from_api_key("Test API Key"),
+        Vec::new(),
+        move |config| config.model_provider.base_url = Some(base_url),
+    )
+    .await;
+    attach_in_memory_thread_store(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+    let final_pending_input_check_reached = Arc::new(tokio::sync::Notify::new());
+    let allow_initial_run_to_finish = Arc::new(tokio::sync::Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            PendingInputContinuationTask {
+                final_pending_input_check_reached: Arc::clone(&final_pending_input_check_reached),
+                allow_initial_run_to_finish: Arc::clone(&allow_initial_run_to_finish),
+            },
+        )
+        .await;
+    timeout(
+        StdDuration::from_secs(2),
+        final_pending_input_check_reached.notified(),
+    )
+    .await
+    .expect("task should reach its final pending-input check");
+
+    let assistant_item_id = ResponseItemId::with_suffix("msg", "prior-assistant-output");
+    let assistant_text = "assistant output before child completion";
+    session
+        .record_conversation_items(
+            turn_context.as_ref(),
+            &[ResponseItem::Message {
+                id: Some(assistant_item_id.clone()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: assistant_text.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }],
+        )
+        .await;
+    let item_id = ResponseItemId::with_suffix("msg", "durable-subagent-completion");
+    let completion_text = "<subagent_notification>worker completed</subagent_notification>";
+    let completion_session = Arc::clone(&session);
+    let task_item_id = item_id.clone();
+    let task_completion_text = completion_text.to_string();
+    let completion_task = tokio::spawn(async move {
+        completion_session
+            .record_subagent_completion_notification(ResponseItem::Message {
+                id: Some(task_item_id),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: task_completion_text,
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+            .await
+    });
+    timeout(StdDuration::from_secs(2), async {
+        while !session
+            .input_queue
+            .has_durable_response_item_waiter(&item_id)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completion should enter the active turn queue");
+    assert!(
+        !completion_task.is_finished(),
+        "child terminal remains claimed until the active turn reaches its history boundary"
+    );
+    allow_initial_run_to_finish.notify_one();
+    timeout(StdDuration::from_secs(15), completion_task)
+        .await
+        .expect("completion persistence should finish")
+        .expect("completion persistence task should remain live")
+        .expect("completion notification should become durable");
+
+    timeout(StdDuration::from_secs(15), async {
+        loop {
+            let event = rx.recv().await.expect("event channel should remain open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("persisted completion should continue and finish the active task");
+
+    let request = response_mock.single_request();
+    assert_eq!(
+        request
+            .message_input_texts("user")
+            .into_iter()
+            .filter(|text| text == completion_text)
+            .count(),
+        1
+    );
+    let history = session.clone_history().await;
+    let assistant_index = history
+        .raw_items()
+        .iter()
+        .position(|item| item.id() == Some(&assistant_item_id))
+        .expect("assistant output should be recorded");
+    let completion_index = history
+        .raw_items()
+        .iter()
+        .position(|item| item.id() == Some(&item_id))
+        .expect("completion should be recorded");
+    assert!(assistant_index < completion_index);
+    assert_eq!(
+        history
+            .raw_items()
+            .iter()
+            .filter(|item| item.id() == Some(&item_id))
+            .count(),
+        1
+    );
+    assert!(session.active_turn.lock().await.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn interrupted_boundary_releases_every_drained_completion_receipt_for_retry() {
+    let (mut session, turn_context) = make_session_and_context().await;
+    let store = attach_in_memory_thread_store(&mut session).await;
+    let session = Arc::new(session);
+    let turn_context = Arc::new(turn_context);
+    let final_pending_input_check_reached = Arc::new(tokio::sync::Notify::new());
+    let allow_initial_run_to_finish = Arc::new(tokio::sync::Notify::new());
+    session
+        .spawn_task(
+            Arc::clone(&turn_context),
+            Vec::new(),
+            PendingInputContinuationTask {
+                final_pending_input_check_reached: Arc::clone(&final_pending_input_check_reached),
+                allow_initial_run_to_finish: Arc::clone(&allow_initial_run_to_finish),
+            },
+        )
+        .await;
+    final_pending_input_check_reached.notified().await;
+    let history_rewrite = Arc::clone(&session.history_rewrite_lock).lock_owned().await;
+
+    let item_ids = [
+        ResponseItemId::with_suffix("msg", "cancelled-completion-one"),
+        ResponseItemId::with_suffix("msg", "cancelled-completion-two"),
+    ];
+    let completion_tasks = item_ids
+        .iter()
+        .enumerate()
+        .map(|(index, item_id)| {
+            let session = Arc::clone(&session);
+            let item_id = item_id.clone();
+            tokio::spawn(async move {
+                session
+                    .record_subagent_completion_notification(ResponseItem::Message {
+                        id: Some(item_id),
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: format!("cancelled completion {index}"),
+                        }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    })
+                    .await
+            })
+        })
+        .collect::<Vec<_>>();
+    timeout(StdDuration::from_secs(2), async {
+        loop {
+            if item_ids.iter().all(|item_id| {
+                session
+                    .input_queue
+                    .has_durable_response_item_waiter(item_id)
+            }) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("both completions should queue into the active turn");
+    allow_initial_run_to_finish.notify_one();
+    timeout(StdDuration::from_secs(2), async {
+        loop {
+            match session.checkpoint_admission_lock.try_lock() {
+                Ok(admission) => drop(admission),
+                Err(_) => break,
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("first completion should block at the history rewrite boundary");
+
+    timeout(
+        StdDuration::from_secs(5),
+        session.abort_all_tasks(TurnAbortReason::Interrupted),
+    )
+    .await
+    .expect("interrupt should cancel blocked completion persistence");
+    for completion_task in completion_tasks {
+        let result = timeout(StdDuration::from_secs(2), completion_task)
+            .await
+            .expect("cancelled completion receipt should resolve")
+            .expect("completion caller should remain live");
+        assert!(result.is_err());
+    }
+    assert!(item_ids.iter().all(|item_id| {
+        !session
+            .input_queue
+            .has_durable_response_item_waiter(item_id)
+    }));
+    drop(history_rewrite);
+
+    for (index, item_id) in item_ids.iter().enumerate() {
+        session
+            .record_subagent_completion_notification(ResponseItem::Message {
+                id: Some(item_id.clone()),
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: format!("cancelled completion {index}"),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            })
+            .await
+            .expect("idle retry should persist the same stable completion");
+    }
+
+    let history = session.clone_history().await;
+    let live_counts = item_ids
+        .iter()
+        .map(|item_id| {
+            history
+                .raw_items()
+                .iter()
+                .filter(|item| item.id() == Some(item_id))
+                .count()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(live_counts, vec![1, 1]);
+    let latest = codex_thread_store::ThreadStore::load_latest_model_context(
+        store.as_ref(),
+        codex_thread_store::LoadThreadHistoryParams {
+            thread_id: session.thread_id,
+            rollout_path: None,
+            include_archived: false,
+        },
+    )
+    .await
+    .expect("retried completions should be reloadable");
+    let persisted_counts = item_ids
+        .iter()
+        .map(|item_id| {
+            latest
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutItem::ResponseItem(item) => Some(item),
+                    RolloutItem::SessionMeta(_)
+                    | RolloutItem::RolloutReference(_)
+                    | RolloutItem::Compacted(_)
+                    | RolloutItem::InterAgentCommunication(_)
+                    | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::WorldState(_)
+                    | RolloutItem::EventMsg(_) => None,
+                })
+                .filter(|item| item.id() == Some(item_id))
+                .count()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(persisted_counts, vec![1, 1]);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_steer_continues_before_thread_idle_lifecycle() {
     struct OrderingTask {
@@ -12332,7 +13416,10 @@ async fn steer_input_rejects_non_regular_turns() {
             }],
             client_id: None,
         }];
-        let turn_context = sess.new_default_turn_with_sub_id("turn".to_string()).await;
+        let turn_context = sess
+            .new_default_turn_with_sub_id("turn".to_string())
+            .await
+            .expect("default turn");
         sess.spawn_task(
             turn_context,
             input,
@@ -12914,6 +14001,7 @@ async fn sample_rollout(
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        segment_state_checkpoint: None,
     }));
 
     let user2 = ResponseItem::Message {
@@ -12961,6 +14049,7 @@ async fn sample_rollout(
         first_window_id: Some(window_ids.first_window_id.to_string()),
         previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
         window_id: Some(window_ids.window_id.to_string()),
+        segment_state_checkpoint: None,
     }));
 
     let user3 = ResponseItem::Message {

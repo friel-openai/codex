@@ -39,6 +39,30 @@ fn json_schema_serializes_encrypted_marker() {
 }
 
 #[test]
+fn json_schema_serializes_and_parses_max_length() {
+    let schema = JsonSchema::string(Some("Bounded name".to_string())).with_max_length(255);
+    let value = serde_json::json!({
+        "type": "string",
+        "description": "Bounded name",
+        "maxLength": 255,
+    });
+
+    assert_eq!(
+        serde_json::to_value(&schema).expect("serialize schema"),
+        value
+    );
+    assert_eq!(
+        parse_tool_input_schema(&value).expect("parse schema"),
+        schema
+    );
+    assert_eq!(
+        parse_tool_input_schema(&serde_json::json!({"maxLength": 255}))
+            .expect("infer string schema"),
+        JsonSchema::string(/*description*/ None).with_max_length(255)
+    );
+}
+
+#[test]
 fn parse_tool_input_schema_infers_object_shape_and_defaults_properties() {
     // Example schema shape:
     // {

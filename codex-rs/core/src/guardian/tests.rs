@@ -2155,6 +2155,14 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
         .committed_fork_rollout_items_for_test()
         .await
         .expect("committed guardian fork snapshot");
+    assert!(matches!(
+        committed_rollout_items.as_slice(),
+        [
+            RolloutItem::SessionMeta(_),
+            RolloutItem::RolloutReference(_),
+            ..
+        ]
+    ));
     assert_eq!(
         committed_rollout_items
             .iter()
@@ -2163,8 +2171,37 @@ async fn guardian_reuses_prompt_cache_key_and_appends_prior_reviews() -> anyhow:
                 "Use prior reviews as context, not binding precedent."
             ))
             .count(),
+        0,
+        "guardian forks should not copy the follow-up reminder"
+    );
+    let codex_home = session.get_config().await.codex_home.clone();
+    let materialized_rollout_items = codex_rollout::materialize_rollout_lines_from(
+        codex_home.as_path(),
+        committed_rollout_items
+            .iter()
+            .cloned()
+            .map(|item| codex_protocol::protocol::RolloutLine {
+                timestamp: String::new(),
+                ordinal: None,
+                item,
+            })
+            .collect(),
+    )
+    .await
+    .expect("materialize committed guardian fork snapshot")
+    .into_iter()
+    .map(|line| line.item)
+    .collect::<Vec<_>>();
+    assert_eq!(
+        materialized_rollout_items
+            .iter()
+            .filter(|item| rollout_item_contains_message_text(
+                item,
+                "Use prior reviews as context, not binding precedent."
+            ))
+            .count(),
         1,
-        "follow-up reminder should be persisted for guardian forks"
+        "follow-up reminder should be persisted through the guardian fork reference"
     );
     session
         .replace_history(
@@ -2915,7 +2952,7 @@ async fn guardian_review_does_not_retry_valid_denial() -> anyhow::Result<()> {
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
 
     let handle =
         std::thread::Builder::new()

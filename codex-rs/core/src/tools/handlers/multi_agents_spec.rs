@@ -1,5 +1,6 @@
 use super::multi_agents_common::MAX_SPAWN_AGENT_MODEL_OVERRIDES;
 use super::multi_agents_common::model_supports_multi_agent_backend;
+use codex_protocol::AgentPath;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::JsonSchema;
@@ -123,7 +124,8 @@ pub fn create_spawn_agent_tool_v2(options: SpawnAgentToolOptions) -> ToolSpec {
         JsonSchema::string(Some(
             "Task name for the new agent. Use lowercase letters, digits, and underscores."
                 .to_string(),
-        )),
+        ))
+        .with_max_length(AgentPath::MAX_SEGMENT_BYTES),
     );
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_agent".to_string(),
@@ -156,7 +158,8 @@ pub fn create_adopt_agent_tool(hide_agent_metadata: bool) -> ToolSpec {
             JsonSchema::string(Some(
                 "Task name for the adopted agent. Use lowercase letters, digits, and underscores."
                     .to_string(),
-            )),
+            ))
+            .with_max_length(AgentPath::MAX_SEGMENT_BYTES),
         ),
         (
             "message".to_string(),
@@ -316,7 +319,7 @@ pub fn create_resume_agent_tool() -> ToolSpec {
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "resume_agent".to_string(),
             description:
-                "Resume a previously closed agent by id so it can receive send_input and wait_agent calls."
+                "Reload an owned open agent by id so it can receive send_input and wait_agent calls. Permanently closed agents cannot be resumed."
                     .to_string(),
             strict: false,
             defer_loading: None,
@@ -355,18 +358,32 @@ pub fn create_wait_agent_tool_v2(options: WaitAgentTimeoutOptions) -> ToolSpec {
 }
 
 pub fn create_list_agents_tool() -> ToolSpec {
-    let properties = BTreeMap::from([(
-        "path_prefix".to_string(),
-        JsonSchema::string(Some(
-            "Task-path prefix filter without a trailing slash. Omit to list all live agents."
-                .to_string(),
-        )),
-    )]);
+    let properties = BTreeMap::from([
+        (
+            "path_prefix".to_string(),
+            JsonSchema::string(Some(
+                "Task-path prefix filter without a trailing slash. Omit to list all current subagents."
+                    .to_string(),
+            )),
+        ),
+        (
+            "cursor".to_string(),
+            JsonSchema::string(Some(
+                "Opaque cursor returned by a previous list_agents call.".to_string(),
+            )),
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::number(Some(
+                "Maximum agents to return. Values above 25 are clamped to 25.".to_string(),
+            )),
+        ),
+    ]);
 
     ToolSpec::Function(ResponsesApiTool {
         name: "list_agents".to_string(),
         description:
-            "List live agents in the current root thread tree. Optionally filter by task-path prefix."
+            "List subagents currently registered in this root's membership. This includes registered ephemeral agents and excludes the root thread, cold historical persisted-open descendants, permanently closed agents, and unrelated fork history. Optionally filter by task-path prefix."
                 .to_string(),
         strict: false,
         defer_loading: None,
@@ -386,11 +403,11 @@ pub fn create_close_agent_tool_v1() -> ToolSpec {
         description: MULTI_AGENT_V1_NAMESPACE_DESCRIPTION.to_string(),
         tools: vec![ResponsesApiNamespaceTool::Function(ResponsesApiTool {
             name: "close_agent".to_string(),
-            description: "Close an agent and any open descendants when they are no longer needed, and return the target agent's previous status before shutdown was requested. Completed agents remain open and count toward the concurrency limit until closed. Don't keep agents open for too long if they are not needed anymore.".to_string(),
+            description: "Permanently close an owned descendant subtree and return the target agent's previous status. This closes persisted descendant edges, stops loaded runtimes, pauses Goals, clears queued input, and prevents the subtree from being resumed.".to_string(),
             strict: false,
             defer_loading: None,
             parameters: JsonSchema::object(properties, Some(vec!["target".to_string()]), Some(false.into())),
-            output_schema: Some(agent_previous_status_output_schema(
+            output_schema: Some(close_agent_output_schema(
                 "The agent status observed before shutdown was requested.",
             )),
         })],
@@ -542,7 +559,7 @@ pub fn create_close_agent_tool_v2() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "close_agent".to_string(),
-        description: "Close an owned descendant agent and its live descendants, then return its previous status.".to_string(),
+        description: "Permanently close an owned descendant subtree. This closes persisted descendant edges, stops loaded runtimes, pauses Goals, clears queued input, evicts current identities, and returns bounded cleanup counts.".to_string(),
         strict: false,
         defer_loading: None,
         parameters: JsonSchema::object(
@@ -550,7 +567,7 @@ pub fn create_close_agent_tool_v2() -> ToolSpec {
             Some(vec!["target".to_string()]),
             Some(false.into()),
         ),
-        output_schema: Some(agent_previous_status_output_schema(
+        output_schema: Some(close_agent_output_schema(
             "The agent status observed before shutdown was requested.",
         )),
     })
@@ -664,18 +681,44 @@ fn list_agents_output_schema() -> Value {
                             "type": "string",
                             "description": "Canonical task name for the agent when available, otherwise the agent id."
                         },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "Thread id for the agent."
+                        },
+                        "parent_agent_id": {
+                            "type": ["string", "null"],
+                            "description": "Immediate owner thread id."
+                        },
                         "agent_status": {
                             "description": "Last known status of the agent.",
                             "allOf": [agent_status_output_schema()]
+                        },
+                        "last_task_message": {
+                            "type": ["string", "null"],
+                            "description": "Bounded preview of the agent's latest assigned task."
                         }
                     },
-                    "required": ["agent_name", "agent_status"],
+                    "required": [
+                        "agent_id",
+                        "parent_agent_id",
+                        "agent_name",
+                        "agent_status",
+                        "last_task_message"
+                    ],
                     "additionalProperties": false
                 },
-                "description": "Live agents visible in the current root thread tree."
+                "description": "Subagents currently registered in the root membership, including registered ephemeral agents and excluding the root thread and cold historical persisted-open descendants."
+            },
+            "next_cursor": {
+                "type": ["string", "null"],
+                "description": "Cursor for the next page, or null when this is the final page."
+            },
+            "total_count": {
+                "type": "integer",
+                "description": "Total current subagents matching the request."
             }
         },
-        "required": ["agents"],
+        "required": ["agents", "next_cursor", "total_count"],
         "additionalProperties": false
     })
 }
@@ -738,6 +781,36 @@ fn agent_previous_status_output_schema(previous_status_description: &str) -> Val
             }
         },
         "required": ["previous_status"],
+        "additionalProperties": false
+    })
+}
+
+fn close_agent_output_schema(previous_status_description: &str) -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "previous_status": {
+                "description": previous_status_description,
+                "allOf": [agent_status_output_schema()]
+            },
+            "closed_agents": { "type": "integer", "minimum": 0 },
+            "closed_edges": { "type": "integer", "minimum": 0 },
+            "newly_closed_edges": { "type": "integer", "minimum": 0 },
+            "stopped_runtimes": { "type": "integer", "minimum": 0 },
+            "paused_goals": { "type": "integer", "minimum": 0 },
+            "cleared_queued_items": { "type": "integer", "minimum": 0 },
+            "evicted_identities": { "type": "integer", "minimum": 0 }
+        },
+        "required": [
+            "previous_status",
+            "closed_agents",
+            "closed_edges",
+            "newly_closed_edges",
+            "stopped_runtimes",
+            "paused_goals",
+            "cleared_queued_items",
+            "evicted_identities"
+        ],
         "additionalProperties": false
     })
 }

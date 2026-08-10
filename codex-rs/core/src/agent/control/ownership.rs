@@ -1,9 +1,11 @@
 use super::ownership_tree::OwnedDescendantTree;
 use super::residency::is_unloadable;
 use super::resume::load_agent_model_context;
+use super::resume::persisted_thread_settings_baseline;
+use super::resume::restore_agent_config_from_baseline;
 use super::*;
 use crate::codex_thread::CodexThread;
-use codex_agent_graph_store::ThreadSpawnEdgeStatus;
+use crate::config::PersistedThreadSettingsBaseline;
 use codex_thread_store::StoredThread;
 use codex_thread_store::ThreadMetadataPatch;
 use std::time::Duration;
@@ -13,6 +15,7 @@ const ACTIVE_ADOPTION_IDLE_RECHECK: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ResumedThreadOwnership {
+    #[cfg_attr(not(test), allow(dead_code))]
     Preserve,
     Transfer,
 }
@@ -30,6 +33,12 @@ struct OriginalRoot {
     config: Config,
     source: SessionSource,
     residency: OriginalRootResidency,
+}
+
+/// Persisted settings needed to make cold ownership transfer match loaded ownership transfer.
+pub(super) struct PersistedOwnershipConfig {
+    /// Complete persisted settings from the canonical latest model context.
+    pub(super) baseline: Option<PersistedThreadSettingsBaseline>,
 }
 
 impl AgentControl {
@@ -127,12 +136,13 @@ impl AgentControl {
                 )
             }
             None => {
-                let workspace_roots =
-                    persisted_thread_workspace_roots(&state, &stored_thread).await?;
+                let persisted_config =
+                    persisted_thread_ownership_config(&state, &stored_thread).await?;
                 let original_config =
-                    restore_cold_root_config(config, &stored_thread, workspace_roots).await?;
+                    restore_cold_root_config(config, &stored_thread, persisted_config).await?;
                 let original_control = AgentControl::new(
                     Arc::downgrade(&state),
+                    state.clone_thread_id_generator(),
                     original_config.rollout_budget.clone(),
                 );
                 (
@@ -156,7 +166,9 @@ impl AgentControl {
                             .to_string(),
                     ));
                 }
-                if lifecycle.completion_watcher_active() || !is_unloadable(thread.as_ref()).await {
+                if lifecycle.completion_watcher_registered()
+                    || !is_unloadable(thread.as_ref()).await
+                {
                     return Err(CodexErr::InvalidRequest(
                         "the root thread started another turn or completion watcher during adoption"
                             .to_string(),
@@ -194,7 +206,7 @@ impl AgentControl {
             if state.get_thread(thread_id).await.is_err()
                 && let Err(rollback_err) = original
                     .control
-                    .resume_root_from_rollout(
+                    .resume_root_from_rollout_with_transferred_config(
                         original.config.clone(),
                         thread_id,
                         original.source.clone(),
@@ -289,21 +301,47 @@ impl AgentControl {
             self.unload_agent_thread(state, thread_id).await?;
         }
         if let Some(graph_store) = state.agent_graph_store() {
-            graph_store
-                .set_thread_spawn_edge_status(thread_id, ThreadSpawnEdgeStatus::Closed)
+            let lifecycle_mutation = state.lock_lifecycle_mutation().await;
+            if state.is_thread_closing(thread_id) {
+                return Err(CodexErr::UnsupportedOperation(format!(
+                    "cannot restore thread {thread_id} while it is closing"
+                )));
+            }
+            let transitioned = graph_store
+                .transition_open_thread_spawn_edge_to_closed(thread_id)
                 .await
                 .map_err(|err| {
                     CodexErr::Fatal(format!(
                         "failed to close the unsuccessful adoption edge for {thread_id}: {err}"
                     ))
                 })?;
+            if !transitioned {
+                return Err(CodexErr::UnsupportedOperation(format!(
+                    "cannot restore thread {thread_id} because its ownership edge is not open"
+                )));
+            }
+            original
+                .control
+                .resume_root_from_rollout_inner(
+                    original.config.clone(),
+                    thread_id,
+                    original.source.clone(),
+                    /*restore_persisted_settings*/ false,
+                )
+                .await?;
+            drop(lifecycle_mutation);
+        } else {
+            original
+                .control
+                .resume_root_from_rollout_with_transferred_config(
+                    original.config.clone(),
+                    thread_id,
+                    original.source.clone(),
+                )
+                .await?;
         }
         self.forget_agent_residency(thread_id);
         self.state.release_spawned_thread(thread_id);
-        original
-            .control
-            .resume_root_from_rollout(original.config.clone(), thread_id, original.source.clone())
-            .await?;
         self.restore_owned_descendants(state, tree).await?;
         if original.residency == OriginalRootResidency::Cold {
             original
@@ -343,7 +381,9 @@ impl AgentControl {
                 "the subagent was promoted or replaced before ownership could transfer".to_string(),
             ));
         }
-        if !is_unloadable(thread.as_ref()).await || metadata.lifecycle.completion_watcher_active() {
+        if !is_unloadable(thread.as_ref()).await
+            || metadata.lifecycle.completion_watcher_registered()
+        {
             return Err(CodexErr::InvalidRequest(
                 "the subagent started another turn or completion watcher during promotion"
                     .to_string(),
@@ -360,27 +400,30 @@ impl AgentControl {
                 include_history: false,
             })
             .await?;
-        let promoted_root_source =
-            load_agent_model_context(&state, thread_id, stored_thread.history_mode)
-                .await?
-                .into_iter()
-                .flatten()
-                .find_map(|item| match item {
-                    RolloutItem::SessionMeta(line) if !line.meta.source.is_non_root_agent() => {
-                        Some(line.meta.source)
-                    }
-                    RolloutItem::SessionMeta(_)
-                    | RolloutItem::RolloutReference(_)
-                    | RolloutItem::ResponseItem(_)
-                    | RolloutItem::InterAgentCommunication(_)
-                    | RolloutItem::InterAgentCommunicationMetadata { .. }
-                    | RolloutItem::Compacted(_)
-                    | RolloutItem::TurnContext(_)
-                    | RolloutItem::WorldState(_)
-                    | RolloutItem::EventMsg(_) => None,
-                })
-                .unwrap_or(SessionSource::Cli);
-        let root_control = AgentControl::new(Arc::downgrade(&state), config.rollout_budget.clone());
+        let promoted_root_source = load_agent_model_context(&state, &stored_thread)
+            .await?
+            .into_iter()
+            .flatten()
+            .find_map(|item| match item {
+                RolloutItem::SessionMeta(line) if !line.meta.source.is_non_root_agent() => {
+                    Some(line.meta.source)
+                }
+                RolloutItem::SessionMeta(_)
+                | RolloutItem::RolloutReference(_)
+                | RolloutItem::ResponseItem(_)
+                | RolloutItem::InterAgentCommunication(_)
+                | RolloutItem::InterAgentCommunicationMetadata { .. }
+                | RolloutItem::Compacted(_)
+                | RolloutItem::TurnContext(_)
+                | RolloutItem::WorldState(_)
+                | RolloutItem::EventMsg(_) => None,
+            })
+            .unwrap_or(SessionSource::Cli);
+        let root_control = AgentControl::new(
+            Arc::downgrade(&state),
+            state.clone_thread_id_generator(),
+            config.rollout_budget.clone(),
+        );
         let tree = self
             .snapshot_idle_owned_descendants(thread_id, &original_source, &config)
             .await?;
@@ -417,7 +460,11 @@ impl AgentControl {
             return Err(err);
         }
         if let Err(err) = root_control
-            .resume_root_from_rollout(config.clone(), thread_id, promoted_root_source)
+            .resume_root_from_rollout_with_transferred_config(
+                config.clone(),
+                thread_id,
+                promoted_root_source,
+            )
             .await
         {
             if state.get_thread(thread_id).await.is_ok()
@@ -480,11 +527,24 @@ impl AgentControl {
             }
             return Err(err);
         }
-        if let Some(graph_store) = state.agent_graph_store()
-            && let Err(err) = graph_store
-                .set_thread_spawn_edge_status(thread_id, ThreadSpawnEdgeStatus::Closed)
-                .await
-        {
+        let close_promoted_edge_result = if let Some(graph_store) = state.agent_graph_store() {
+            let _lifecycle_mutation = state.lock_lifecycle_mutation().await;
+            if state.is_thread_closing(thread_id) {
+                Err(format!("agent {thread_id} is closing"))
+            } else {
+                match graph_store
+                    .transition_open_thread_spawn_edge_to_closed(thread_id)
+                    .await
+                {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(format!("agent {thread_id} no longer has an open edge")),
+                    Err(err) => Err(err.to_string()),
+                }
+            }
+        } else {
+            Ok(())
+        };
+        if let Err(err) = close_promoted_edge_result {
             if let Err(rollback_err) = root_control.unload_agent_thread(&state, thread_id).await {
                 return Err(CodexErr::Fatal(format!(
                     "failed to close the promoted subagent edge for {thread_id}: {err}; stopping the promoted root also failed: {rollback_err}"
@@ -519,11 +579,66 @@ impl AgentControl {
         Ok(thread_id)
     }
 
-    async fn resume_root_from_rollout(
+    #[cfg(test)]
+    pub(super) async fn resume_root_from_rollout(
         &self,
         config: Config,
         thread_id: ThreadId,
         session_source: SessionSource,
+    ) -> CodexResult<ThreadId> {
+        self.resume_root_from_rollout_with_settings_mode(
+            config,
+            thread_id,
+            session_source,
+            /*restore_persisted_settings*/ true,
+        )
+        .await
+    }
+
+    async fn resume_root_from_rollout_with_transferred_config(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+    ) -> CodexResult<ThreadId> {
+        self.resume_root_from_rollout_with_settings_mode(
+            config,
+            thread_id,
+            session_source,
+            /*restore_persisted_settings*/ false,
+        )
+        .await
+    }
+
+    async fn resume_root_from_rollout_with_settings_mode(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        restore_persisted_settings: bool,
+    ) -> CodexResult<ThreadId> {
+        let state = self.upgrade()?;
+        let _lifecycle_mutation = state.lock_lifecycle_mutation().await;
+        if state.is_thread_closing(thread_id) {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "cannot restore thread {thread_id} while it is closing"
+            )));
+        }
+        self.resume_root_from_rollout_inner(
+            config,
+            thread_id,
+            session_source,
+            restore_persisted_settings,
+        )
+        .await
+    }
+
+    async fn resume_root_from_rollout_inner(
+        &self,
+        config: Config,
+        thread_id: ThreadId,
+        session_source: SessionSource,
+        restore_persisted_settings: bool,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
         let stored_thread = state
@@ -533,9 +648,20 @@ impl AgentControl {
                 include_history: false,
             })
             .await?;
-        let mut history = load_agent_model_context(&state, thread_id, stored_thread.history_mode)
+        let mut history = load_agent_model_context(&state, &stored_thread)
             .await?
             .ok_or(CodexErr::ThreadNotFound(thread_id))?;
+        let config = if restore_persisted_settings {
+            restore_agent_config_from_baseline(
+                config,
+                &stored_thread,
+                persisted_thread_settings_baseline(&history),
+            )?
+        } else {
+            // Ownership transfer passes the exact config captured before unloading the thread.
+            // Indexed metadata can still describe the pre-transfer owner and must not replace it.
+            config
+        };
         normalize_resumed_session_metadata(
             &mut history,
             thread_id,
@@ -652,93 +778,68 @@ pub(super) async fn wait_for_adoptable_root(thread: &CodexThread) -> CodexResult
     })?
 }
 
-/// Reconstruct a persisted root without replacing its model, provider, or permissions.
+/// Reconstruct a persisted root from its latest complete settings record.
 pub(super) async fn restore_cold_root_config(
     mut config: Config,
     stored_thread: &StoredThread,
-    workspace_roots: Option<Vec<codex_utils_absolute_path::AbsolutePathBuf>>,
+    persisted_config: PersistedOwnershipConfig,
 ) -> CodexResult<Config> {
-    config.ephemeral = false;
     if let Some(role) = stored_thread.agent_role.as_deref() {
         crate::agent::role::apply_role_to_config(&mut config, Some(role))
             .await
             .map_err(CodexErr::InvalidRequest)?;
     }
-
-    config.model_provider = config
-        .model_providers
-        .get(&stored_thread.model_provider)
-        .cloned()
-        .ok_or_else(|| {
-            CodexErr::InvalidRequest(format!(
-                "cannot adopt thread {} because its original model provider `{}` is unavailable",
-                stored_thread.thread_id, stored_thread.model_provider
-            ))
-        })?;
-    config.model_provider_id = stored_thread.model_provider.clone();
-    if let Some(model) = &stored_thread.model {
-        config.model = Some(model.clone());
-    }
-    config.model_reasoning_effort = stored_thread.reasoning_effort.clone();
-    config.cwd = stored_thread.cwd.clone().try_into().map_err(|err| {
-        CodexErr::InvalidRequest(format!(
-            "cannot restore the original working directory for thread {}: {err}",
-            stored_thread.thread_id
-        ))
-    })?;
-    config.workspace_roots_explicit = workspace_roots.is_some();
-    config.workspace_roots = workspace_roots.unwrap_or_else(|| vec![config.cwd.clone()]);
-    config
-        .permissions
-        .set_workspace_roots(config.workspace_roots.clone());
-    config
-        .permissions
-        .approval_policy
-        .set(stored_thread.approval_mode)
-        .map_err(|err| {
-            CodexErr::InvalidRequest(format!(
-                "cannot restore the original approval policy for thread {}: {err}",
-                stored_thread.thread_id
-            ))
-        })?;
-    config
-        .permissions
-        .set_permission_profile_from_session_snapshot(
-            crate::config::PermissionProfileSnapshot::legacy(
-                stored_thread.permission_profile.clone(),
-            ),
-        )
-        .map_err(|err| {
-            CodexErr::InvalidRequest(format!(
-                "cannot restore the original permission profile for thread {}: {err}",
-                stored_thread.thread_id
-            ))
-        })?;
+    config = restore_agent_config_from_baseline(config, stored_thread, persisted_config.baseline)?;
+    config.ephemeral = false;
     Ok(config)
 }
 
-/// Restore the latest recorded workspace roots without importing another thread's permissions.
-pub(super) async fn persisted_thread_workspace_roots(
+/// Restore settings that are not present in indexed thread metadata from one model-context read.
+pub(super) async fn persisted_thread_ownership_config(
     state: &ThreadManagerState,
     stored_thread: &StoredThread,
-) -> CodexResult<Option<Vec<codex_utils_absolute_path::AbsolutePathBuf>>> {
-    Ok(
-        load_agent_model_context(state, stored_thread.thread_id, stored_thread.history_mode)
-            .await?
-            .into_iter()
-            .flatten()
-            .rev()
-            .find_map(|item| match item {
-                RolloutItem::TurnContext(context) => context.workspace_roots,
-                RolloutItem::SessionMeta(_)
-                | RolloutItem::RolloutReference(_)
-                | RolloutItem::ResponseItem(_)
-                | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::Compacted(_)
-                | RolloutItem::WorldState(_)
-                | RolloutItem::EventMsg(_) => None,
-            }),
+) -> CodexResult<PersistedOwnershipConfig> {
+    let history = load_agent_model_context(state, stored_thread)
+        .await?
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    Ok(PersistedOwnershipConfig {
+        baseline: persisted_ownership_settings_baseline(&history),
+    })
+}
+
+fn persisted_ownership_settings_baseline(
+    history: &[RolloutItem],
+) -> Option<PersistedThreadSettingsBaseline> {
+    let baseline = persisted_thread_settings_baseline(history);
+    if baseline
+        .as_ref()
+        .is_some_and(|baseline| baseline.approval_policy.is_some())
+    {
+        return baseline;
+    }
+    let legacy = history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(context) => Some(context),
+        _ => None,
+    })?;
+    let legacy_baseline = PersistedThreadSettingsBaseline {
+        model: Some(legacy.model.clone()),
+        service_tier: Some(legacy.service_tier.clone()),
+        cwd: Some(legacy.cwd.to_path_buf()),
+        workspace_roots: legacy.workspace_roots.clone(),
+        approval_policy: Some(legacy.approval_policy),
+        approvals_reviewer: legacy.approvals_reviewer,
+        permission_profile: Some(legacy.permission_profile()),
+        reasoning_effort: Some(legacy.effort.clone()),
+        personality: Some(legacy.personality),
+        collaboration_mode: legacy.collaboration_mode.clone(),
+        ..Default::default()
+    };
+    Some(
+        baseline
+            .unwrap_or_default()
+            .fill_missing_from(legacy_baseline),
     )
 }
 

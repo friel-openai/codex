@@ -1,3 +1,4 @@
+use super::checkpoint_test_support::test_segment_state_checkpoint;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::MockResponsesConfig;
@@ -8,6 +9,7 @@ use app_test_support::create_fake_rollout_with_token_usage;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::rollout_path;
+use app_test_support::test_thread_settings_snapshot;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use codex_app_server_protocol::ApprovalsReviewer;
@@ -48,6 +50,7 @@ use codex_config::types::AuthCredentialsStoreMode;
 use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer as ProtocolApprovalsReviewer;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
@@ -63,20 +66,31 @@ use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
+use codex_protocol::protocol::RateLimitSnapshot;
+use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SegmentStateCheckpointDisposition;
 use codex_protocol::protocol::SessionSource as ProtocolSessionSource;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TokenUsage;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_protocol::protocol::WorldStateItem;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::append_rollout_item_to_path;
 use codex_rollout::append_thread_name;
 use codex_rollout::materialize_rollout_items;
 use codex_rollout::read_session_meta_line;
+use codex_rollout::validate_certified_segment_state_checkpoint;
 use codex_state::StateRuntime;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
@@ -90,6 +104,9 @@ use core_test_support::responses;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
+use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
 use tempfile::TempDir;
 use tokio::time::timeout;
 use uuid::Uuid;
@@ -98,6 +115,7 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+use wiremock::matchers::path_regex;
 
 use super::analytics::assert_basic_thread_initialized_event;
 use super::analytics::mount_analytics_capture;
@@ -108,6 +126,52 @@ use super::analytics::wait_for_analytics_payload;
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn assert_reference_backed_fork_checkpoint(
+    physical_items: &[RolloutItem],
+) -> (&RolloutReferenceItem, &CompactedItem) {
+    assert!(
+        matches!(physical_items.first(), Some(RolloutItem::SessionMeta(_))),
+        "fork rollout must start with session metadata"
+    );
+    let (reference_index, reference) = physical_items
+        .iter()
+        .enumerate()
+        .find_map(|(index, item)| match item {
+            RolloutItem::RolloutReference(reference) => Some((index, reference)),
+            _ => None,
+        })
+        .expect("fork rollout must contain one reference");
+    let (checkpoint_index, compacted) = physical_items
+        .iter()
+        .enumerate()
+        .skip(reference_index + 1)
+        .find_map(|(index, item)| match item {
+            RolloutItem::Compacted(compacted) if compacted.segment_state_checkpoint.is_some() => {
+                Some((index, compacted))
+            }
+            _ => None,
+        })
+        .expect("fork rollout must contain a local checkpoint");
+    let descriptor = compacted
+        .segment_state_checkpoint
+        .as_ref()
+        .expect("marked checkpoint descriptor");
+    let checkpoint_len =
+        3 + usize::from(matches!(
+            descriptor.world_state,
+            SegmentStateCheckpointDisposition::Established
+        )) + usize::from(matches!(
+            descriptor.reference_context,
+            SegmentStateCheckpointDisposition::Established
+        ));
+    let checkpoint = physical_items
+        .get(checkpoint_index..checkpoint_index + checkpoint_len)
+        .expect("fork rollout must contain the complete local checkpoint");
+    validate_certified_segment_state_checkpoint(checkpoint)
+        .expect("fork-local records must form a certified segment-state checkpoint");
+    (reference, compacted)
+}
 
 async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
     let list_id = mcp
@@ -228,23 +292,19 @@ async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let physical_items = RolloutRecorder::load_rollout_items(thread_path.as_path())
         .await?
         .0;
-    assert!(matches!(
-        physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
-    let RolloutItem::RolloutReference(reference) = &physical_items[1] else {
-        unreachable!("physical fork layout checked above")
-    };
+    let (reference, compacted) = assert_reference_backed_fork_checkpoint(physical_items.as_slice());
     assert_eq!(reference.nth_user_message, None);
-    assert_eq!(thread.preview, preview);
     assert!(
-        !std::fs::read_to_string(thread_path.as_path())?.contains(preview),
-        "forked rollout must not copy inherited source messages"
+        serde_json::to_string(
+            compacted
+                .replacement_history
+                .as_ref()
+                .expect("fork checkpoint replacement history"),
+        )?
+        .contains(preview),
+        "fork-local checkpoint must contain the current model history"
     );
+    assert_eq!(thread.preview, preview);
     assert!(thread.cwd.as_path().is_absolute());
     assert_eq!(thread.source, SessionSource::VsCode);
     assert_eq!(thread.thread_source, Some(ThreadSource::User));
@@ -559,17 +619,7 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
         .await?
         .0;
-    assert!(matches!(
-        forked_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
-        ]
-    ));
-    let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
-        unreachable!("physical fork layout checked above")
-    };
+    let (reference, _) = assert_reference_backed_fork_checkpoint(forked_physical_items.as_slice());
     assert_eq!(
         reference.nth_user_message,
         (history_mode == ThreadHistoryMode::Legacy).then_some(2)
@@ -1161,24 +1211,39 @@ async fn thread_fork_emits_restored_token_usage_before_next_turn() -> Result<()>
 
 #[tokio::test]
 async fn live_paginated_fork_preserves_model_history_and_token_usage() -> Result<()> {
-    let server = create_mock_responses_server_sequence_unchecked(vec![
-        responses::sse(vec![
+    let server = responses::start_mock_server().await;
+    let response_templates = Arc::new(vec![
+        responses::sse_response(responses::sse(vec![
             responses::ev_response_created("live-parent-first"),
             responses::ev_assistant_message("live-parent-first-message", "first parent answer"),
             responses::ev_completed_with_tokens("live-parent-first", /*total_tokens*/ 120),
-        ]),
-        responses::sse(vec![
+        ])),
+        responses::sse_response(responses::sse(vec![
             responses::ev_response_created("live-parent-second"),
             responses::ev_assistant_message("live-parent-second-message", "second parent answer"),
             responses::ev_completed_with_tokens("live-parent-second", /*total_tokens*/ 30),
-        ]),
-        responses::sse(vec![
+        ]))
+        .insert_header("x-codex-primary-used-percent", "25.0")
+        .insert_header("x-codex-primary-window-minutes", "300")
+        .insert_header("x-codex-primary-reset-at", "1700"),
+        responses::sse_response(responses::sse(vec![
             responses::ev_response_created("live-fork-child"),
             responses::ev_assistant_message("live-fork-child-message", "child answer"),
             responses::ev_completed_with_tokens("live-fork-child", /*total_tokens*/ 5),
-        ]),
-    ])
-    .await;
+        ])),
+    ]);
+    let response_index = Arc::new(AtomicUsize::new(0));
+    Mock::given(method("POST"))
+        .and(path_regex(".*/responses$"))
+        .respond_with({
+            let response_templates = Arc::clone(&response_templates);
+            let response_index = Arc::clone(&response_index);
+            move |_: &wiremock::Request| {
+                response_templates[response_index.fetch_add(1, Ordering::SeqCst)].clone()
+            }
+        })
+        .mount(&server)
+        .await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
 
@@ -1237,6 +1302,21 @@ async fn live_paginated_fork_preserves_model_history_and_token_usage() -> Result
     let parent_token_usage = parent_token_usage.expect("completed live parent token usage");
     assert_eq!(parent_token_usage.total.total_tokens, 150);
     assert_eq!(parent_token_usage.last.total_tokens, 30);
+    let expected_rate_limits = RateLimitSnapshot {
+        limit_id: Some("codex".to_string()),
+        limit_name: None,
+        primary: Some(RateLimitWindow {
+            used_percent: 25.0,
+            window_minutes: Some(300),
+            resets_at: Some(1_700),
+        }),
+        secondary: None,
+        credits: None,
+        individual_limit: None,
+        spend_control_reached: None,
+        plan_type: None,
+        rate_limit_reached_type: None,
+    };
 
     let fork_id = mcp
         .send_thread_fork_request(ThreadForkParams {
@@ -1286,6 +1366,13 @@ async fn live_paginated_fork_preserves_model_history_and_token_usage() -> Result
         }),
         "live fork must not copy inherited model or visible parent messages into child storage"
     );
+    assert!(child_rollout_items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TokenCount(event))
+                if event.rate_limits.as_ref() == Some(&expected_rate_limits)
+        )
+    }));
 
     let child_turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -1474,6 +1561,9 @@ async fn thread_fork_rejects_unmaterialized_thread() -> Result<()> {
     Ok(())
 }
 
+#[path = "thread_fork_checkpoint_tests.rs"]
+mod checkpoint_tests;
+
 #[tokio::test]
 async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
@@ -1533,7 +1623,6 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     assert_eq!(forked_thread.turns.len(), 1);
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
-    assert!(!std::fs::read_to_string(forked_path.as_path())?.contains("Saved user message"));
     let meta = read_session_meta_line(forked_path.as_path()).await?;
     assert_eq!(
         meta.meta.history_base, None,
@@ -1542,14 +1631,17 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
         .await?
         .0;
-    assert!(matches!(
-        forked_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
+    let (_, compacted) = assert_reference_backed_fork_checkpoint(forked_physical_items.as_slice());
+    assert!(
+        serde_json::to_string(
+            compacted
+                .replacement_history
+                .as_ref()
+                .expect("fork checkpoint replacement history"),
+        )?
+        .contains("Saved user message"),
+        "fork-local checkpoint must contain the current model history"
+    );
 
     let turn_id = mcp
         .send_turn_start_request(TurnStartParams {
@@ -1600,14 +1692,7 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
         RolloutRecorder::load_rollout_items(excluded_turns_path.as_path())
             .await?
             .0;
-    assert!(matches!(
-        excluded_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
+    assert_reference_backed_fork_checkpoint(excluded_physical_items.as_slice());
 
     let ThreadForkResponse {
         thread: nested_thread,
@@ -1631,14 +1716,7 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     let nested_physical_items = RolloutRecorder::load_rollout_items(nested_path.as_path())
         .await?
         .0;
-    assert!(matches!(
-        nested_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
+    assert_reference_backed_fork_checkpoint(nested_physical_items.as_slice());
     Ok(())
 }
 
@@ -1890,6 +1968,25 @@ async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
     Ok(())
 }
 
+fn empty_segment_state_checkpoint() -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    test_segment_state_checkpoint(
+        CompactedItem {
+            message: String::new(),
+            replacement_history: Some(Vec::new()),
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+    )
+    .expect("test segment-state checkpoint")
+}
+
 async fn paginated_fork_rollout_file_open_count(
     segment_count: usize,
     source: IndexedForkSource,
@@ -1967,46 +2064,55 @@ async fn paginated_fork_rollout_file_open_count(
             },
         ))];
         if source == IndexedForkSource::ColdCompacted && index + 1 == segment_count {
-            items.extend([
-                RolloutItem::Compacted(CompactedItem {
-                    message: "latest indexed parent checkpoint".to_string(),
-                    replacement_history: Some(vec![ResponseItem::Message {
-                        id: None,
-                        role: "user".to_string(),
-                        content: vec![ContentItem::InputText {
-                            text: "checkpoint replacement history".to_string(),
-                        }],
-                        phase: None,
-                        internal_chat_message_metadata_passthrough: None,
-                    }]),
-                    window_number: Some(1),
-                    first_window_id: None,
-                    previous_window_id: None,
-                    window_id: None,
-                }),
-                RolloutItem::TurnContext(TurnContextItem {
-                    turn_id: Some(turn_id.clone()),
-                    cwd: codex_home.path().abs(),
-                    workspace_roots: None,
-                    current_date: None,
-                    timezone: None,
-                    approval_policy: AskForApproval::Never,
-                    approvals_reviewer: None,
-                    sandbox_policy: SandboxPolicy::new_read_only_policy(),
-                    permission_profile: None,
-                    network: None,
-                    file_system_sandbox_policy: None,
-                    model: "mock-model".to_string(),
-                    comp_hash: None,
-                    personality: None,
-                    collaboration_mode: None,
-                    multi_agent_version: None,
-                    multi_agent_mode: None,
-                    realtime_active: None,
-                    effort: None,
-                    summary: ReasoningSummary::Auto,
-                }),
-            ]);
+            let window_id = Uuid::now_v7();
+            items.extend(
+                test_segment_state_checkpoint(
+                    CompactedItem {
+                        message: "latest indexed parent checkpoint".to_string(),
+                        replacement_history: Some(vec![ResponseItem::Message {
+                            id: None,
+                            role: "user".to_string(),
+                            content: vec![ContentItem::InputText {
+                                text: "checkpoint replacement history".to_string(),
+                            }],
+                            phase: None,
+                            internal_chat_message_metadata_passthrough: None,
+                        }]),
+                        window_number: Some(1),
+                        first_window_id: Some(window_id.to_string()),
+                        previous_window_id: None,
+                        window_id: Some(window_id.to_string()),
+                        segment_state_checkpoint: None,
+                    },
+                    /*previous_turn_settings*/ None,
+                    /*world_state*/ None,
+                    Some(TurnContextItem {
+                        turn_id: Some(turn_id.clone()),
+                        cwd: codex_home.path().abs(),
+                        workspace_roots: None,
+                        current_date: None,
+                        timezone: None,
+                        approval_policy: AskForApproval::Never,
+                        approvals_reviewer: None,
+                        sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                        permission_profile: None,
+                        network: None,
+                        file_system_sandbox_policy: None,
+                        model: "mock-model".to_string(),
+                        comp_hash: None,
+                        personality: None,
+                        collaboration_mode: None,
+                        multi_agent_version: None,
+                        multi_agent_mode: None,
+                        realtime_active: None,
+                        effort: None,
+                        service_tier: None,
+                        model_profile: None,
+                        summary: ReasoningSummary::Auto,
+                    }),
+                )?
+                .into_items(),
+            );
         }
         for (item_index, item) in [user_item, agent_item].into_iter().enumerate() {
             items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
@@ -2040,7 +2146,7 @@ async fn paginated_fork_rollout_file_open_count(
             store
                 .freeze_thread_segment(
                     source_thread_id,
-                    FreezeRolloutSegmentParams::rotate(Vec::new()),
+                    FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
                 )
                 .await?;
         }

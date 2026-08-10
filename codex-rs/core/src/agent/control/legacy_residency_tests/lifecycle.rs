@@ -1,8 +1,11 @@
 use super::*;
 use crate::session_prefix::format_subagent_notification_message;
+use crate::tasks::SessionTask;
+use crate::tasks::SessionTaskResult;
 use assert_matches::assert_matches;
 use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
+use tokio_util::sync::CancellationToken;
 
 async fn apply_legacy_lru_pressure(
     harness: &AgentControlHarness,
@@ -10,21 +13,25 @@ async fn apply_legacy_lru_pressure(
     parent_thread: &Arc<CodexThread>,
     first_child_index: usize,
     notifications_before_pressure: usize,
-) {
+) -> Vec<ThreadId> {
+    let mut child_thread_ids = Vec::with_capacity(LEGACY_TEST_MAX_THREADS);
     for offset in 0..LEGACY_TEST_MAX_THREADS {
-        spawn_completed_legacy_child(
-            harness,
-            parent_thread_id,
-            first_child_index + offset,
-            4 * 1024,
-        )
-        .await;
+        child_thread_ids.push(
+            spawn_completed_legacy_child(
+                harness,
+                parent_thread_id,
+                first_child_index + offset,
+                4 * 1024,
+            )
+            .await,
+        );
     }
     wait_for_notification_count(
         parent_thread,
         notifications_before_pressure + LEGACY_TEST_MAX_THREADS,
     )
     .await;
+    child_thread_ids
 }
 
 async fn wait_for_legacy_completion_watcher(
@@ -274,7 +281,7 @@ async fn explicitly_closed_cold_legacy_subagent_cannot_reload() {
         state_db
             .list_thread_spawn_children_with_status(
                 parent_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Closed,
+                DirectionalThreadSpawnEdgeStatus::PermanentlyClosed,
             )
             .await
             .expect("list closed edges"),
@@ -342,11 +349,25 @@ async fn legacy_completion_and_followup_are_serialized_without_loss() {
         .await
         .expect("delivery task should reach the transition");
     tokio::task::yield_now().await;
+    let second_turn = child_thread.session.new_default_turn().await;
     child_thread
         .session
         .send_event(
             first_turn.as_ref(),
             LegacyTerminalStatus::Completed.event(&first_turn.sub_id, /*child_index*/ 0),
+        )
+        .await;
+    child_thread
+        .session
+        .send_event(
+            second_turn.as_ref(),
+            EventMsg::TurnStarted(TurnStartedEvent {
+                turn_id: second_turn.sub_id.clone(),
+                trace_id: None,
+                started_at: None,
+                model_context_window: None,
+                collaboration_mode_kind: ModeKind::Default,
+            }),
         )
         .await;
     drop(transition);
@@ -380,7 +401,6 @@ async fn legacy_completion_and_followup_are_serialized_without_loss() {
         .await;
     assert_eq!(parent_turn_id, None);
     assert_eq!(followup_items.len(), 1);
-    let second_turn = reloaded_child.session.new_default_turn().await;
     reloaded_child
         .session
         .send_event(
@@ -389,7 +409,7 @@ async fn legacy_completion_and_followup_are_serialized_without_loss() {
         )
         .await;
     wait_for_notification_count(&parent_thread, /*expected*/ 2).await;
-    apply_legacy_lru_pressure(
+    let pressure_child_ids = apply_legacy_lru_pressure(
         &harness,
         parent_thread_id,
         &parent_thread,
@@ -398,9 +418,183 @@ async fn legacy_completion_and_followup_are_serialized_without_loss() {
     )
     .await;
     assert!(harness.manager.get_thread(child_thread_id).await.is_err());
+    let parent_history = parent_thread.session.clone_history().await;
+    let mut actual = subagent_notifications(parent_history.raw_items());
+    let mut expected = vec![
+        format_subagent_notification_message(
+            &child_thread_id.to_string(),
+            &LegacyTerminalStatus::Completed.agent_status(/*child_index*/ 0),
+        ),
+        format_subagent_notification_message(
+            &child_thread_id.to_string(),
+            &LegacyTerminalStatus::Completed.agent_status(/*child_index*/ 1),
+        ),
+    ];
+    expected.extend(
+        pressure_child_ids
+            .into_iter()
+            .enumerate()
+            .map(|(offset, child_thread_id)| {
+                format_subagent_notification_message(
+                    &child_thread_id.to_string(),
+                    &LegacyTerminalStatus::Completed.agent_status(/*child_index*/ 2 + offset),
+                )
+            }),
+    );
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+#[tokio::test]
+async fn parent_tool_delivery_does_not_wait_for_its_queued_child_completion() {
+    struct BlockingParentTask {
+        started: Arc<Notify>,
+        finish: Arc<Notify>,
+    }
+
+    impl SessionTask for BlockingParentTask {
+        fn kind(&self) -> crate::state::TaskKind {
+            crate::state::TaskKind::Regular
+        }
+
+        fn span_name(&self) -> &'static str {
+            "session_task.blocking_parent_completion_delivery"
+        }
+
+        async fn run(
+            self: Arc<Self>,
+            _session: Arc<crate::session::session::Session>,
+            _ctx: Arc<crate::TurnContext>,
+            _input: Vec<crate::session::TurnInput>,
+            _cancellation_token: CancellationToken,
+        ) -> SessionTaskResult {
+            self.started.notify_one();
+            self.finish.notified().await;
+            Ok(None)
+        }
+    }
+
+    let harness = legacy_harness(/*network_proxy_enabled*/ false).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let (child_thread_id, child_thread, child_turn) =
+        spawn_quiescent_legacy_child(&harness, parent_thread_id, /*child_index*/ 0, 4 * 1024).await;
+    let parent_turn = parent_thread.session.new_default_turn().await;
+    let parent_started = Arc::new(Notify::new());
+    let finish_parent = Arc::new(Notify::new());
+    parent_thread
+        .session
+        .spawn_task(
+            Arc::clone(&parent_turn),
+            Vec::new(),
+            BlockingParentTask {
+                started: Arc::clone(&parent_started),
+                finish: Arc::clone(&finish_parent),
+            },
+        )
+        .await;
+    parent_started.notified().await;
+
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            LegacyTerminalStatus::Completed.event(&child_turn.sub_id, /*child_index*/ 0),
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        while !parent_thread
+            .session
+            .input_queue
+            .has_pending_input(&parent_thread.session.active_turn)
+            .await
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("completion should queue into the active parent turn");
+
+    let err = timeout(
+        Duration::from_secs(2),
+        harness.control.deliver_inter_agent_communication_to_agent(
+            harness.config.clone(),
+            child_thread_id,
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "follow-up racing completion".to_string(),
+                /*trigger_turn*/ true,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Followup, parent_thread_id),
+            AgentInputDelivery::Queue,
+            Some(parent_turn.sub_id.clone()),
+        ),
+    )
+    .await
+    .expect("parent delivery must not wait for its own completion receipt")
+    .expect_err("parent should process the queued completion before retrying");
+    assert_matches!(
+        err.details(),
+        CodexErrorDetails::UnsupportedOperation(message)
+            if message.contains("process its completion notification")
+    );
+
+    finish_parent.notify_one();
+    wait_for_notification_count(&parent_thread, /*expected*/ 1).await;
+    wait_for_legacy_completion_watcher(&harness, child_thread_id).await;
+    harness
+        .control
+        .deliver_inter_agent_communication_to_agent(
+            harness.config.clone(),
+            child_thread_id,
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "follow-up after completion".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Followup, parent_thread_id),
+            AgentInputDelivery::Queue,
+            /*parent_turn_id*/ None,
+        )
+        .await
+        .expect("follow-up retry should succeed after completion delivery");
+    timeout(Duration::from_secs(2), async {
+        while !child_thread
+            .session
+            .input_queue
+            .has_pending_mailbox_items()
+            .await
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retried follow-up should reach the child mailbox");
+    let (queued, parent_turn_id) = child_thread
+        .session
+        .input_queue
+        .drain_mailbox_input_items()
+        .await;
+    assert_eq!(parent_turn_id, None);
+    assert_eq!(
+        queued,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "follow-up after completion".to_string(),
+                /*trigger_turn*/ false,
+            )
+        )]
+    );
     assert_eq!(
         subagent_notification_count(parent_thread.session.clone_history().await.raw_items()),
-        4
+        1
     );
 }
 

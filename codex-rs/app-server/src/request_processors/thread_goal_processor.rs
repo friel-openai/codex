@@ -4,6 +4,7 @@ use codex_goal_extension::GoalService;
 use codex_goal_extension::GoalServiceError;
 use codex_goal_extension::GoalSetRequest;
 use codex_goal_extension::GoalTokenBudgetUpdate;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 
@@ -15,6 +16,16 @@ pub(crate) struct ThreadGoalRequestProcessor {
     thread_state_manager: ThreadStateManager,
     state_db: Option<StateDbHandle>,
     goal_service: Arc<GoalService>,
+}
+
+/// Holds a stable loaded-thread identity while one Goal mutation is serialized with checkpoints
+/// and permanent close.
+///
+/// Checkpoint admission is acquired before lifecycle admission to match Goal Supervisor startup.
+struct ThreadGoalMutationAdmission {
+    running_thread: Option<Arc<CodexThread>>,
+    checkpoint_admission: Option<codex_core::ThreadCheckpointMutationAdmission>,
+    lifecycle_admission: codex_core::ThreadLifecycleMutationAdmission,
 }
 
 impl ThreadGoalRequestProcessor {
@@ -127,6 +138,13 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let ThreadGoalMutationAdmission {
+            running_thread,
+            checkpoint_admission,
+            lifecycle_admission,
+        } = self
+            .lock_goal_mutation(thread_id, "set its Goal", "set the thread Goal")
+            .await?;
         let state_db = self.state_db_for_materialized_thread(thread_id).await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
@@ -159,8 +177,8 @@ impl ThreadGoalRequestProcessor {
             .map_err(goal_service_error)?;
         let goal = ThreadGoal::from(outcome.goal.clone());
 
-        let persist_result = match self.thread_manager.get_thread(thread_id).await {
-            Ok(thread) => match thread.rollout_path() {
+        let persist_result = match running_thread {
+            Some(thread) => match thread.rollout_path() {
                 Some(path) if codex_rollout::existing_rollout_path(&path).await.is_none() => {
                     // Goal-first threads need their settings captured when the goal creates the
                     // rollout. Once materialized, normal settings updates own this event.
@@ -198,11 +216,15 @@ impl ThreadGoalRequestProcessor {
                         .await
                 }
             },
-            Err(_) => Ok(()),
+            None => Ok(()),
         };
         if let Err(err) = persist_result {
             warn!("failed to persist goal update for live thread {thread_id}: {err}");
         }
+        // Goal runtime continuation reacquires checkpoint and lifecycle admission. The durable
+        // mutation above is complete, so release both admissions before applying runtime effects.
+        drop(checkpoint_admission);
+        drop(lifecycle_admission);
 
         self.outgoing
             .send_response(
@@ -245,6 +267,13 @@ impl ThreadGoalRequestProcessor {
         }
 
         let thread_id = parse_thread_id_for_request(params.thread_id.as_str())?;
+        let ThreadGoalMutationAdmission {
+            running_thread: _,
+            checkpoint_admission,
+            lifecycle_admission,
+        } = self
+            .lock_goal_mutation(thread_id, "clear its Goal", "clear the thread Goal")
+            .await?;
         let state_db = self.state_db_for_materialized_thread(thread_id).await?;
         self.reconcile_thread_goal_rollout(thread_id, &state_db)
             .await?;
@@ -259,6 +288,8 @@ impl ThreadGoalRequestProcessor {
             .clear_thread_goal(&state_db, thread_id)
             .await
             .map_err(goal_service_error)?;
+        drop(checkpoint_admission);
+        drop(lifecycle_admission);
 
         self.outgoing
             .send_response(request_id, ThreadGoalClearResponse { cleared })
@@ -268,6 +299,46 @@ impl ThreadGoalRequestProcessor {
                 .await;
         }
         Ok(())
+    }
+
+    async fn lock_goal_mutation(
+        &self,
+        thread_id: ThreadId,
+        lifecycle_operation: &str,
+        checkpoint_operation: &str,
+    ) -> Result<ThreadGoalMutationAdmission, JSONRPCErrorError> {
+        loop {
+            let observed_thread = self.thread_manager.get_thread(thread_id).await.ok();
+            let checkpoint_admission = match observed_thread.as_ref() {
+                Some(thread) => Some(
+                    thread
+                        .lock_checkpoint_mutation(checkpoint_operation)
+                        .await
+                        .map_err(|err| invalid_request(err.to_string()))?,
+                ),
+                None => None,
+            };
+            let lifecycle_admission = self
+                .thread_manager
+                .lock_thread_lifecycle_mutation(thread_id, lifecycle_operation)
+                .await
+                .map_err(thread_lifecycle_mutation_error)?;
+            let current_thread = self.thread_manager.get_thread(thread_id).await.ok();
+            let stable = match (&observed_thread, &current_thread) {
+                (Some(observed), Some(current)) => Arc::ptr_eq(observed, current),
+                (None, None) => true,
+                (Some(_), None) | (None, Some(_)) => false,
+            };
+            if stable {
+                return Ok(ThreadGoalMutationAdmission {
+                    running_thread: current_thread,
+                    checkpoint_admission,
+                    lifecycle_admission,
+                });
+            }
+            drop(lifecycle_admission);
+            drop(checkpoint_admission);
+        }
     }
 
     async fn state_db_for_materialized_thread(
@@ -430,6 +501,13 @@ impl ThreadGoalRequestProcessor {
                 },
             ))
             .await;
+    }
+}
+
+pub(crate) fn thread_lifecycle_mutation_error(err: CodexErr) -> JSONRPCErrorError {
+    match err.details() {
+        CodexErrorDetails::InvalidRequest(message) => invalid_request(message.clone()),
+        _ => internal_error(format!("failed to validate thread lifecycle: {err}")),
     }
 }
 

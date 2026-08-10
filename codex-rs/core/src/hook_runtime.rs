@@ -46,6 +46,7 @@ use crate::codex_thread::TryStartTurnIfIdleRejectionReason;
 use crate::context::ContextualUserFragment;
 use crate::context::HookAdditionalContext;
 use crate::event_mapping::parse_turn_item;
+use crate::session::DurableResponseItemPersistence;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn_context::TurnContext;
@@ -582,6 +583,7 @@ pub(crate) async fn record_pending_input(
     turn_context: &Arc<TurnContext>,
     pending_input: TurnInput,
     additional_contexts: Vec<String>,
+    durable_persistence: Option<DurableResponseItemPersistence<'_>>,
 ) -> Result<(), TryStartTurnIfIdleRejectionReason> {
     match pending_input {
         TurnInput::UserInput { content, client_id } => {
@@ -644,8 +646,22 @@ pub(crate) async fn record_pending_input(
             .await;
         }
         TurnInput::ResponseItem(item) => {
-            sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
-                .await;
+            if let Some(durable_persistence) = durable_persistence {
+                let result = sess
+                    .record_subagent_completion_notification_at_history_boundary(
+                        Arc::clone(turn_context),
+                        item,
+                    )
+                    .await;
+                let receipt = result.as_ref().map(|_| ()).map_err(ToString::to_string);
+                durable_persistence.complete(receipt);
+                if result.is_err() {
+                    return Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed);
+                }
+            } else {
+                sess.record_conversation_items(turn_context, std::slice::from_ref(&item))
+                    .await;
+            }
         }
         TurnInput::InterAgentCommunication(communication) => {
             sess.record_inter_agent_communication(turn_context, communication)

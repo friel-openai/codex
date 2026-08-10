@@ -53,6 +53,15 @@ mod rollout_migration;
 pub(crate) mod test_support;
 mod thread_section_order;
 mod thread_sections;
+mod thread_spawn_close;
+mod thread_spawn_close_repair;
+#[cfg(test)]
+#[path = "runtime/thread_spawn_current_only_close_tests.rs"]
+mod thread_spawn_current_only_close_tests;
+mod thread_spawn_graph;
+#[cfg(test)]
+#[path = "runtime/thread_spawn_graph_tests.rs"]
+mod thread_spawn_graph_tests;
 mod threads;
 
 pub use external_agent_config_imports::ExternalAgentConfigImportDetailsRecord;
@@ -66,6 +75,7 @@ pub use goals::GoalAccountingOutcome;
 pub use goals::GoalStore;
 pub use goals::GoalUpdate;
 pub use goals::ListActiveGoalSupervisorSchedulesParams;
+pub use goals::ThreadGoalCleanupCounts;
 pub use memories::MemoryStore;
 pub use queued_items::SqliteQueueStore;
 pub use recovery::RuntimeDbBackup;
@@ -88,6 +98,7 @@ const LOG_PARTITION_SIZE_LIMIT_BYTES: i64 = 10 * 1024 * 1024;
 const LOG_PARTITION_ROW_LIMIT: i64 = 1_000;
 const FRODEX_THREAD_GOAL_SUPERVISOR_STATE_MIGRATION_DESCRIPTION: &str =
     "thread goal supervisor state";
+const THREAD_CLEANUP_BATCH_SIZE: usize = 256;
 
 #[derive(Clone)]
 pub struct StateRuntime {

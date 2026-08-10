@@ -49,6 +49,7 @@ pub use rollout::create_fake_rollout_with_source;
 pub use rollout::create_fake_rollout_with_text_elements;
 pub use rollout::create_fake_rollout_with_token_usage;
 pub use rollout::rollout_path;
+pub use rollout::test_thread_settings_snapshot;
 use serde::de::DeserializeOwned;
 pub use test_app_server::DEFAULT_CLIENT_NAME;
 pub use test_app_server::DISABLE_PLUGIN_STARTUP_TASKS_ARG;

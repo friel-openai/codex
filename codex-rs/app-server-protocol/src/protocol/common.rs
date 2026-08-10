@@ -2888,6 +2888,7 @@ mod tests {
                     updated_at: 2,
                     recency_at: Some(3),
                     status: v2::ThreadStatus::Idle,
+                    agent_status: None,
                     path: None,
                     cwd: cwd.clone(),
                     cli_version: "0.0.0".to_string(),
@@ -2944,6 +2945,7 @@ mod tests {
                         "status": {
                             "type": "idle"
                         },
+                        "agentStatus": null,
                         "path": null,
                         "cwd": absolute_path_string("tmp"),
                         "cliVersion": "0.0.0",

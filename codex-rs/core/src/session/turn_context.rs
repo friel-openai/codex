@@ -791,6 +791,20 @@ impl Session {
         let notify_config_contributors = !self.services.extensions.config_contributors().is_empty();
         let update_result: CodexResult<_> = {
             let mut state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                drop(state);
+                let message = "Thread persistence is in an indeterminate state. Restart this thread before starting another turn."
+                    .to_string();
+                self.deliver_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message,
+                        codex_error_info: Some(CodexErrorInfo::Other),
+                    }),
+                })
+                .await;
+                return Err(CodexErr::TurnAborted);
+            }
             match state.session_configuration.clone().apply(&updates) {
                 Ok(next) => {
                     let mcp_inputs_changed = state.session_configuration.mcp_inputs_differ(&next);
@@ -1075,18 +1089,43 @@ impl Session {
     }
 
     pub(crate) async fn new_default_turn(&self) -> Arc<TurnContext> {
-        self.new_default_turn_with_sub_id(self.next_internal_sub_id())
-            .await
-    }
-
-    pub(crate) async fn new_default_turn_with_sub_id(&self, sub_id: String) -> Arc<TurnContext> {
         let session_configuration = self.default_turn_configuration().await;
         self.new_turn_from_configuration(
-            sub_id,
+            self.next_internal_sub_id(),
             session_configuration,
             /*final_output_json_schema*/ None,
         )
         .await
+    }
+
+    pub(crate) async fn new_default_turn_with_sub_id(
+        &self,
+        sub_id: String,
+    ) -> CodexResult<Arc<TurnContext>> {
+        let session_configuration = {
+            let state = self.state.lock().await;
+            if self.persistence_restart_required() {
+                drop(state);
+                self.deliver_event_raw(Event {
+                    id: sub_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: "Thread persistence is in an indeterminate state. Restart this thread before starting another turn."
+                            .to_string(),
+                        codex_error_info: Some(CodexErrorInfo::Other),
+                    }),
+                })
+                .await;
+                return Err(CodexErr::TurnAborted);
+            }
+            state.session_configuration.clone()
+        };
+        Ok(self
+            .new_turn_from_configuration(
+                sub_id,
+                session_configuration,
+                /*final_output_json_schema*/ None,
+            )
+            .await)
     }
 
     /// Rebuilds request configuration after a tool changes the active thread's workspace.

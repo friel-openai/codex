@@ -3,14 +3,18 @@ use crate::state::MailboxDeliveryPhase;
 use crate::state::TurnState;
 use codex_diagnostics::Gauge;
 use codex_diagnostics::GaugeGuard;
+use codex_protocol::ResponseItemId;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::user_input::UserInput;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::sync::watch;
 
 static PENDING_MAILBOX_MESSAGES: Gauge = Gauge::new("core.mailbox.pending");
@@ -42,6 +46,12 @@ pub(crate) struct TurnInputQueue {
 pub(crate) struct InputQueue {
     activity_tx: watch::Sender<InputQueueActivity>,
     mailbox_pending_mails: Mutex<VecDeque<PendingMailboxCommunication>>,
+    /// Completion receipts keyed by the stable response item ID queued in an active turn.
+    ///
+    /// A child terminal remains claimed until the turn records the queued item and reports its
+    /// durable readback through this map.
+    durable_response_item_waiters:
+        StdMutex<HashMap<ResponseItemId, oneshot::Sender<Result<(), String>>>>,
 }
 
 struct PendingMailboxCommunication {
@@ -50,12 +60,39 @@ struct PendingMailboxCommunication {
     _diagnostics_guard: GaugeGuard,
 }
 
+/// Resolves one drained response item's durable receipt, including on task cancellation.
+pub(crate) struct DurableResponseItemPersistence<'a> {
+    input_queue: &'a InputQueue,
+    item_id: ResponseItemId,
+    completed: bool,
+}
+
+impl DurableResponseItemPersistence<'_> {
+    pub(crate) fn complete(mut self, result: Result<(), String>) {
+        self.completed = true;
+        self.input_queue
+            .complete_durable_response_item(&self.item_id, result);
+    }
+}
+
+impl Drop for DurableResponseItemPersistence<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.input_queue.complete_durable_response_item(
+                &self.item_id,
+                Err("active task ended during durable response item persistence".to_string()),
+            );
+        }
+    }
+}
+
 impl InputQueue {
     pub(crate) fn new() -> Self {
         let (activity_tx, _) = watch::channel(InputQueueActivity::Mailbox);
         Self {
             activity_tx,
             mailbox_pending_mails: Mutex::new(VecDeque::new()),
+            durable_response_item_waiters: StdMutex::new(HashMap::new()),
         }
     }
 
@@ -68,7 +105,7 @@ impl InputQueue {
     ) {
         let activity_rx = self.activity_tx.subscribe();
         let has_pending_steer = if let Some(turn_state) = turn_state {
-            turn_state.lock().await.pending_input.has_user_input()
+            turn_state.lock().await.pending_input.has_steer_input()
         } else {
             false
         };
@@ -110,13 +147,16 @@ impl InputQueue {
             .any(|mail| mail.communication.trigger_turn)
     }
 
+    #[cfg(test)]
     pub(crate) async fn drain_mailbox_input_items(&self) -> (Vec<TurnInput>, Option<String>) {
-        let pending_mails = self
-            .mailbox_pending_mails
-            .lock()
-            .await
-            .drain(..)
-            .collect::<Vec<_>>();
+        let mut pending_mails = self.mailbox_pending_mails.lock().await;
+        Self::drain_mailbox_input_items_locked(&mut pending_mails)
+    }
+
+    fn drain_mailbox_input_items_locked(
+        pending_mails: &mut VecDeque<PendingMailboxCommunication>,
+    ) -> (Vec<TurnInput>, Option<String>) {
+        let pending_mails = pending_mails.drain(..).collect::<Vec<_>>();
         let parent_turn_id = pending_mails
             .iter()
             .filter(|mail| mail.communication.trigger_turn)
@@ -149,7 +189,23 @@ impl InputQueue {
     pub(crate) async fn clear_pending(&self, active_turn: &ActiveTurn) {
         let mut turn_state = active_turn.turn_state.lock().await;
         turn_state.clear_pending_waiters();
+        let durable_item_ids = turn_state
+            .pending_input
+            .items
+            .iter()
+            .filter_map(|input| match input {
+                TurnInput::ResponseItem(item) => item.id().cloned(),
+                TurnInput::UserInput { .. } | TurnInput::InterAgentCommunication(_) => None,
+            })
+            .collect::<Vec<_>>();
         turn_state.pending_input.items.clear();
+        drop(turn_state);
+        for item_id in durable_item_ids {
+            self.complete_durable_response_item(
+                &item_id,
+                Err("active turn cleared before durable response item persistence".to_string()),
+            );
+        }
     }
 
     pub(crate) async fn defer_mailbox_delivery_to_next_turn(
@@ -226,6 +282,83 @@ impl InputQueue {
         turn_state.lock().await.pending_input.items.split_off(0)
     }
 
+    /// Queues a response item at the next active-turn history boundary and returns its receipt.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "durable item admission atomically binds the active turn, turn state, and receipt waiter"
+    )]
+    pub(crate) async fn enqueue_durable_response_item_for_active_turn(
+        &self,
+        active_turn: &Mutex<Option<ActiveTurn>>,
+        item: ResponseItem,
+    ) -> Result<oneshot::Receiver<Result<(), String>>, ResponseItem> {
+        let Some(item_id) = item.id().cloned() else {
+            return Err(item);
+        };
+        let mut active = active_turn.lock().await;
+        let Some(active_turn) = active
+            .as_mut()
+            .filter(|active_turn| active_turn.task.is_some())
+        else {
+            return Err(item);
+        };
+        let mut turn_state = active_turn.turn_state.lock().await;
+        let mut waiters = self
+            .durable_response_item_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if waiters.contains_key(&item_id) {
+            return Err(item);
+        }
+        let (tx, rx) = oneshot::channel();
+        waiters.insert(item_id, tx);
+        turn_state
+            .pending_input
+            .items
+            .push(TurnInput::ResponseItem(item));
+        turn_state.accept_mailbox_delivery_for_current_turn();
+        drop(waiters);
+        drop(turn_state);
+        self.activity_tx.send_replace(InputQueueActivity::Steer);
+        Ok(rx)
+    }
+
+    pub(crate) fn durable_response_item_persistence(
+        &self,
+        item_id: ResponseItemId,
+    ) -> Option<DurableResponseItemPersistence<'_>> {
+        self.durable_response_item_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&item_id)
+            .then_some(DurableResponseItemPersistence {
+                input_queue: self,
+                item_id,
+                completed: false,
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_durable_response_item_waiter(&self, item_id: &ResponseItemId) -> bool {
+        self.durable_response_item_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(item_id)
+    }
+
+    pub(crate) fn complete_durable_response_item(
+        &self,
+        item_id: &ResponseItemId,
+        result: Result<(), String>,
+    ) -> bool {
+        let sender = self
+            .durable_response_item_waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(item_id);
+        sender.is_some_and(|sender| sender.send(result).is_ok())
+    }
+
     #[expect(
         clippy::await_holding_invalid_type,
         reason = "active turn checks and turn state updates must remain atomic"
@@ -234,27 +367,27 @@ impl InputQueue {
         &self,
         active_turn: &Mutex<Option<ActiveTurn>>,
     ) -> (Vec<TurnInput>, Option<String>) {
-        let (pending_input, accepts_mailbox_delivery) = {
-            let mut active = active_turn.lock().await;
-            match active.as_mut() {
-                Some(active_turn) => {
-                    let mut turn_state = active_turn.turn_state.lock().await;
-                    let accepts_mailbox_delivery =
-                        turn_state.accepts_mailbox_delivery_for_current_turn();
-                    let pending_input = if accepts_mailbox_delivery {
-                        turn_state.pending_input.items.split_off(0)
-                    } else {
-                        Vec::new()
-                    };
-                    (pending_input, accepts_mailbox_delivery)
-                }
-                None => (Vec::new(), true),
-            }
+        let mut active = active_turn.lock().await;
+        let mut turn_state = match active.as_mut() {
+            Some(active_turn) => Some(active_turn.turn_state.lock().await),
+            None => None,
         };
+        let accepts_mailbox_delivery = turn_state
+            .as_ref()
+            .is_none_or(|turn_state| turn_state.accepts_mailbox_delivery_for_current_turn());
         if !accepts_mailbox_delivery {
-            return (pending_input, None);
+            return (Vec::new(), None);
         }
-        let (mailbox_items, parent_turn_id) = self.drain_mailbox_input_items().await;
+        // Wait for the mailbox before removing durable turn input. Cancellation before this lock
+        // leaves every response item discoverable by clear_pending; after removal there is no
+        // await before the caller preclaims every durable receipt.
+        let mut pending_mails = self.mailbox_pending_mails.lock().await;
+        let pending_input = turn_state
+            .as_mut()
+            .map(|turn_state| turn_state.pending_input.items.split_off(0))
+            .unwrap_or_default();
+        let (mailbox_items, parent_turn_id) =
+            Self::drain_mailbox_input_items_locked(&mut pending_mails);
         if pending_input.is_empty() {
             (mailbox_items, parent_turn_id)
         } else {
@@ -297,10 +430,13 @@ impl TurnInputQueue {
         self.items.is_empty()
     }
 
-    fn has_user_input(&self) -> bool {
-        self.items
-            .iter()
-            .any(|input| matches!(input, TurnInput::UserInput { .. }))
+    fn has_steer_input(&self) -> bool {
+        self.items.iter().any(|input| {
+            !matches!(
+                input,
+                TurnInput::InterAgentCommunication(communication) if !communication.trigger_turn
+            )
+        })
     }
 }
 
@@ -308,7 +444,10 @@ impl TurnInputQueue {
 mod tests {
     use super::*;
     use codex_protocol::AgentPath;
+    use codex_protocol::models::ContentItem;
     use pretty_assertions::assert_eq;
+    use std::time::Duration;
+    use tokio::time::timeout;
 
     fn make_mail(
         author: AgentPath,
@@ -491,5 +630,118 @@ mod tests {
             .enqueue_mailbox_communication(trigger_mail, /*parent_turn_id*/ None)
             .await;
         assert!(input_queue.has_trigger_turn_mailbox_items().await);
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "the test holds the mailbox lock to prove a cancelled drain releases durable receipts"
+    )]
+    async fn cancelled_mailbox_wait_keeps_durable_items_clearable() {
+        let input_queue = Arc::new(InputQueue::new());
+        let active_turn = Arc::new(Mutex::new(Some(ActiveTurn::default())));
+        let item_ids = [
+            ResponseItemId::with_suffix("msg", "mailbox-wait-one"),
+            ResponseItemId::with_suffix("msg", "mailbox-wait-two"),
+        ];
+        let mut receipts = Vec::new();
+        {
+            let active = Arc::clone(&active_turn).lock_owned().await;
+            let turn_state = &active.as_ref().expect("active turn").turn_state;
+            let mut turn_state = turn_state.lock().await;
+            let mut waiters = input_queue
+                .durable_response_item_waiters
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for (index, item_id) in item_ids.iter().enumerate() {
+                let (sender, receiver) = oneshot::channel();
+                waiters.insert(item_id.clone(), sender);
+                receipts.push(receiver);
+                turn_state.pending_input.items.push(TurnInput::ResponseItem(
+                    ResponseItem::Message {
+                        id: Some(item_id.clone()),
+                        role: "user".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: format!("completion {index}"),
+                        }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    },
+                ));
+            }
+            turn_state.accept_mailbox_delivery_for_current_turn();
+        }
+
+        let mailbox_lock = input_queue.mailbox_pending_mails.lock().await;
+        let mut drain = tokio::spawn({
+            let input_queue = Arc::clone(&input_queue);
+            let active_turn = Arc::clone(&active_turn);
+            async move { input_queue.get_pending_input(&active_turn).await }
+        });
+        assert!(
+            timeout(Duration::from_millis(50), &mut drain)
+                .await
+                .is_err(),
+            "pending-input drain should wait for the mailbox lock"
+        );
+
+        drain.abort();
+        drop(mailbox_lock);
+        assert!(
+            drain
+                .await
+                .expect_err("drain should be cancelled")
+                .is_cancelled()
+        );
+        let active = Arc::clone(&active_turn).lock_owned().await;
+        input_queue
+            .clear_pending(active.as_ref().expect("active turn"))
+            .await;
+        drop(active);
+        for receipt in receipts {
+            assert!(
+                receipt
+                    .await
+                    .expect("clear_pending should resolve each durable receipt")
+                    .is_err()
+            );
+        }
+        assert!(
+            item_ids
+                .iter()
+                .all(|item_id| !input_queue.has_durable_response_item_waiter(item_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_input_drain_does_not_invert_active_mailbox_lock_order() {
+        let input_queue = Arc::new(InputQueue::new());
+        let active_turn = Arc::new(Mutex::new(Some(ActiveTurn::default())));
+        let active_lock = Arc::clone(&active_turn).lock_owned().await;
+        let started = Arc::new(tokio::sync::Notify::new());
+        let drain = tokio::spawn({
+            let input_queue = Arc::clone(&input_queue);
+            let active_turn = Arc::clone(&active_turn);
+            let started = Arc::clone(&started);
+            async move {
+                started.notify_one();
+                input_queue.get_pending_input(&active_turn).await
+            }
+        });
+        started.notified().await;
+        tokio::task::yield_now().await;
+
+        assert!(
+            input_queue.mailbox_pending_mails.try_lock().is_ok(),
+            "a pending-input drain waiting for active_turn must not hold the mailbox lock"
+        );
+        drain.abort();
+        drop(active_lock);
+        assert!(
+            drain
+                .await
+                .expect_err("drain should be cancelled")
+                .is_cancelled()
+        );
     }
 }

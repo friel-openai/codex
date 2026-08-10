@@ -63,6 +63,68 @@ WHERE threads.id = ?
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// Load complete thread metadata in bounded batches without issuing one query per thread.
+    pub async fn get_threads(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> anyhow::Result<std::collections::HashMap<ThreadId, crate::ThreadMetadata>> {
+        const MAX_THREAD_IDS_PER_QUERY: usize = 256;
+
+        let mut threads = std::collections::HashMap::with_capacity(thread_ids.len());
+        for thread_ids in thread_ids.chunks(MAX_THREAD_IDS_PER_QUERY) {
+            let mut builder = QueryBuilder::<Sqlite>::new("");
+            push_thread_select_columns(&mut builder);
+            builder.push(" FROM threads WHERE threads.id IN (");
+            let mut separated = builder.separated(", ");
+            for thread_id in thread_ids {
+                separated.push_bind(thread_id.to_string());
+            }
+            separated.push_unseparated(")");
+
+            let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+            for row in rows {
+                let thread = ThreadRow::try_from_row(&row).and_then(ThreadMetadata::try_from)?;
+                threads.insert(thread.id, thread);
+            }
+        }
+        Ok(threads)
+    }
+
+    /// Load valid thread metadata while omitting individually corrupt rows.
+    ///
+    /// Query failures remain fatal. This variant is for current-membership projection, where one
+    /// corrupt persisted identity must not hide otherwise valid registered members.
+    pub async fn get_threads_valid(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> anyhow::Result<std::collections::HashMap<ThreadId, crate::ThreadMetadata>> {
+        const MAX_THREAD_IDS_PER_QUERY: usize = 256;
+
+        let mut threads = std::collections::HashMap::with_capacity(thread_ids.len());
+        for thread_ids in thread_ids.chunks(MAX_THREAD_IDS_PER_QUERY) {
+            let mut builder = QueryBuilder::<Sqlite>::new("");
+            push_thread_select_columns(&mut builder);
+            builder.push(" FROM threads WHERE threads.id IN (");
+            let mut separated = builder.separated(", ");
+            for thread_id in thread_ids {
+                separated.push_bind(thread_id.to_string());
+            }
+            separated.push_unseparated(")");
+
+            let rows = builder.build().fetch_all(self.pool.as_ref()).await?;
+            for row in rows {
+                match ThreadRow::try_from_row(&row).and_then(ThreadMetadata::try_from) {
+                    Ok(thread) => {
+                        threads.insert(thread.id, thread);
+                    }
+                    Err(err) => warn!("omitting corrupt thread metadata from batch read: {err}"),
+                }
+            }
+        }
+        Ok(threads)
+    }
+
     pub async fn get_thread_memory_mode(&self, id: ThreadId) -> anyhow::Result<Option<String>> {
         let row = sqlx::query("SELECT memory_mode FROM threads WHERE id = ?")
             .bind(id.to_string())
@@ -101,23 +163,46 @@ WHERE id = ? AND preview = ''
         child_thread_id: ThreadId,
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
+WITH RECURSIVE ownership_ancestors(child_thread_id, parent_thread_id, status) AS (
+    SELECT child_thread_id, parent_thread_id, status
+    FROM thread_spawn_edges
+    WHERE child_thread_id = ? AND status != 'closed'
+    UNION
+    SELECT edge.child_thread_id, edge.parent_thread_id, edge.status
+    FROM thread_spawn_edges AS edge
+    JOIN ownership_ancestors AS ancestor
+      ON edge.child_thread_id = ancestor.parent_thread_id
+    WHERE edge.status != 'closed'
+)
 INSERT INTO thread_spawn_edges (
     parent_thread_id,
     child_thread_id,
     status
-) VALUES (?, ?, ?)
+) SELECT ?, ?, ?
+WHERE NOT EXISTS (
+    SELECT 1
+    FROM ownership_ancestors
+    WHERE status = 'permanently_closed'
+)
 ON CONFLICT(child_thread_id) DO UPDATE SET
     parent_thread_id = excluded.parent_thread_id,
     status = excluded.status
+WHERE thread_spawn_edges.status != 'permanently_closed'
             "#,
         )
+        .bind(parent_thread_id.to_string())
         .bind(parent_thread_id.to_string())
         .bind(child_thread_id.to_string())
         .bind(status.as_ref())
         .execute(self.pool.as_ref())
         .await?;
+        if result.rows_affected() == 0 {
+            anyhow::bail!(
+                "thread {child_thread_id} or its parent {parent_thread_id} is permanently closed"
+            );
+        }
         Ok(())
     }
 
@@ -127,11 +212,14 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
         child_thread_id: ThreadId,
         status: crate::DirectionalThreadSpawnEdgeStatus,
     ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ?")
-            .bind(status.as_ref())
-            .bind(child_thread_id.to_string())
-            .execute(self.pool.as_ref())
-            .await?;
+        sqlx::query(
+            "UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ? AND status != ?",
+        )
+        .bind(status.as_ref())
+        .bind(child_thread_id.to_string())
+        .bind(crate::DirectionalThreadSpawnEdgeStatus::PermanentlyClosed.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
         Ok(())
     }
 
@@ -184,18 +272,26 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
     ) -> anyhow::Result<Vec<crate::ThreadSpawnDescendantIdentity>> {
         let rows = sqlx::query(
             r#"
-WITH RECURSIVE subtree(child_thread_id, depth) AS (
-    SELECT child_thread_id, 1
+WITH RECURSIVE subtree(child_thread_id, parent_thread_id, depth, visited) AS (
+    SELECT child_thread_id, parent_thread_id, 1, '|' || ? || '|' || child_thread_id || '|'
     FROM thread_spawn_edges
     WHERE parent_thread_id = ? AND status = ? AND child_thread_id != ?
     UNION ALL
-    SELECT edge.child_thread_id, subtree.depth + 1
+    SELECT
+        edge.child_thread_id,
+        edge.parent_thread_id,
+        subtree.depth + 1,
+        subtree.visited || edge.child_thread_id || '|'
     FROM thread_spawn_edges AS edge
     JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
-    WHERE edge.status = ? AND edge.child_thread_id != ?
+    WHERE edge.status = ?
+      AND edge.child_thread_id != ?
+      AND instr(subtree.visited, '|' || edge.child_thread_id || '|') = 0
 )
 SELECT
     subtree.child_thread_id,
+    subtree.parent_thread_id,
+    subtree.depth,
     threads.source,
     threads.agent_path,
     threads.agent_role,
@@ -205,6 +301,7 @@ LEFT JOIN threads ON threads.id = subtree.child_thread_id
 ORDER BY subtree.depth ASC, subtree.child_thread_id ASC
             "#,
         )
+        .bind(root_thread_id.to_string())
         .bind(root_thread_id.to_string())
         .bind(crate::DirectionalThreadSpawnEdgeStatus::Open.as_ref())
         .bind(root_thread_id.to_string())
@@ -217,6 +314,10 @@ ORDER BY subtree.depth ASC, subtree.child_thread_id ASC
             .map(|row| {
                 Ok(crate::ThreadSpawnDescendantIdentity {
                     thread_id: ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?)?,
+                    parent_thread_id: ThreadId::try_from(
+                        row.try_get::<String, _>("parent_thread_id")?,
+                    )?,
+                    depth: u32::try_from(row.try_get::<i64, _>("depth")?)?,
                     source: row.try_get("source")?,
                     agent_path: row.try_get("agent_path")?,
                     agent_role: row.try_get("agent_role")?,
@@ -224,6 +325,116 @@ ORDER BY subtree.depth ASC, subtree.child_thread_id ASC
                 })
             })
             .collect()
+    }
+
+    /// Close one persisted ownership subtree and return its members deepest-first.
+    ///
+    /// Traversal intentionally ignores current edge status so this operation repairs descendants
+    /// beneath an already-closed intermediate edge. The visited path makes corrupt cycles finite.
+    pub async fn close_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> anyhow::Result<Option<crate::ClosedThreadSpawnSubtree>> {
+        let owner_root_thread_id = owner_root_thread_id.to_string();
+        let target_thread_id = target_thread_id.to_string();
+        let closed = crate::DirectionalThreadSpawnEdgeStatus::Closed.as_ref();
+        let mut transaction = self.pool.begin().await?;
+        let newly_closed_rows = sqlx::query(
+            r#"
+WITH RECURSIVE owned_descendants(child_thread_id) AS (
+    SELECT child_thread_id
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ? AND child_thread_id != ?
+    UNION
+    SELECT edge.child_thread_id
+    FROM thread_spawn_edges AS edge
+    JOIN owned_descendants ON edge.parent_thread_id = owned_descendants.child_thread_id
+    WHERE edge.child_thread_id != ?
+),
+subtree(child_thread_id, visited) AS (
+    SELECT child_thread_id, '|' || child_thread_id || '|'
+    FROM thread_spawn_edges
+    WHERE child_thread_id = ?
+      AND child_thread_id IN (SELECT child_thread_id FROM owned_descendants)
+    UNION ALL
+    SELECT edge.child_thread_id, subtree.visited || edge.child_thread_id || '|'
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.visited, '|' || edge.child_thread_id || '|') = 0
+)
+UPDATE thread_spawn_edges
+SET status = ?
+WHERE status != ?
+  AND child_thread_id IN (SELECT child_thread_id FROM subtree)
+RETURNING child_thread_id
+            "#,
+        )
+        .bind(&owner_root_thread_id)
+        .bind(&owner_root_thread_id)
+        .bind(&owner_root_thread_id)
+        .bind(&target_thread_id)
+        .bind(closed)
+        .bind(closed)
+        .fetch_all(transaction.as_mut())
+        .await?;
+
+        let member_rows = sqlx::query(
+            r#"
+WITH RECURSIVE owned_descendants(child_thread_id) AS (
+    SELECT child_thread_id
+    FROM thread_spawn_edges
+    WHERE parent_thread_id = ? AND child_thread_id != ?
+    UNION
+    SELECT edge.child_thread_id
+    FROM thread_spawn_edges AS edge
+    JOIN owned_descendants ON edge.parent_thread_id = owned_descendants.child_thread_id
+    WHERE edge.child_thread_id != ?
+),
+subtree(child_thread_id, depth, visited) AS (
+    SELECT child_thread_id, 0, '|' || child_thread_id || '|'
+    FROM thread_spawn_edges
+    WHERE child_thread_id = ?
+      AND child_thread_id IN (SELECT child_thread_id FROM owned_descendants)
+    UNION ALL
+    SELECT
+        edge.child_thread_id,
+        subtree.depth + 1,
+        subtree.visited || edge.child_thread_id || '|'
+    FROM thread_spawn_edges AS edge
+    JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE instr(subtree.visited, '|' || edge.child_thread_id || '|') = 0
+)
+SELECT child_thread_id, depth
+FROM subtree
+ORDER BY depth DESC, child_thread_id ASC
+            "#,
+        )
+        .bind(&owner_root_thread_id)
+        .bind(&owner_root_thread_id)
+        .bind(&owner_root_thread_id)
+        .bind(&target_thread_id)
+        .fetch_all(transaction.as_mut())
+        .await?;
+        transaction.commit().await?;
+
+        let members = member_rows
+            .into_iter()
+            .map(|row| {
+                let depth = row.try_get::<i64, _>("depth")?;
+                Ok(crate::ClosedThreadSpawnSubtreeMember {
+                    thread_id: ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?)?,
+                    depth: u32::try_from(depth)?,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        if members.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(crate::ClosedThreadSpawnSubtree {
+            members,
+            newly_closed_edge_count: newly_closed_rows.len(),
+        }))
     }
 
     /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
@@ -311,12 +522,19 @@ LIMIT 2
     ) -> anyhow::Result<Vec<ThreadId>> {
         let mut builder = QueryBuilder::<Sqlite>::new(
             r#"
-WITH RECURSIVE subtree(child_thread_id, depth) AS (
-    SELECT child_thread_id, 1
+WITH RECURSIVE subtree(child_thread_id, depth, visited) AS (
+    SELECT child_thread_id, 1, '|' ||
+            "#,
+        );
+        builder.push_bind(root_thread_id.to_string());
+        builder.push(
+            r#" || '|' || child_thread_id || '|'
     FROM thread_spawn_edges
     WHERE parent_thread_id =
             "#,
         );
+        builder.push_bind(root_thread_id.to_string());
+        builder.push(" AND child_thread_id != ");
         builder.push_bind(root_thread_id.to_string());
         if let Some(status) = status {
             let status = status.to_string();
@@ -324,22 +542,34 @@ WITH RECURSIVE subtree(child_thread_id, depth) AS (
             builder.push(
                 r#"
     UNION ALL
-    SELECT edge.child_thread_id, subtree.depth + 1
+    SELECT
+        edge.child_thread_id,
+        subtree.depth + 1,
+        subtree.visited || edge.child_thread_id || '|'
     FROM thread_spawn_edges AS edge
     JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
-    WHERE status =
+    WHERE edge.child_thread_id !=
                 "#,
             );
+            builder.push_bind(root_thread_id.to_string());
+            builder.push(" AND edge.status = ");
             builder.push_bind(status);
+            builder.push(" AND instr(subtree.visited, '|' || edge.child_thread_id || '|') = 0");
         } else {
             builder.push(
                 r#"
     UNION ALL
-    SELECT edge.child_thread_id, subtree.depth + 1
+    SELECT
+        edge.child_thread_id,
+        subtree.depth + 1,
+        subtree.visited || edge.child_thread_id || '|'
     FROM thread_spawn_edges AS edge
     JOIN subtree ON edge.parent_thread_id = subtree.child_thread_id
+    WHERE edge.child_thread_id !=
                 "#,
             );
+            builder.push_bind(root_thread_id.to_string());
+            builder.push(" AND instr(subtree.visited, '|' || edge.child_thread_id || '|') = 0");
         }
         builder.push(
             r#"
@@ -1631,6 +1861,7 @@ mod tests {
     use std::path::PathBuf;
 
     const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
+
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();

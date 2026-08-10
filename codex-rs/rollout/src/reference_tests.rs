@@ -6,8 +6,14 @@ use std::path::PathBuf;
 
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
 use codex_protocol::protocol::AskForApproval;
@@ -22,8 +28,12 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use pretty_assertions::assert_eq;
@@ -43,6 +53,7 @@ use super::materialize_recent_rollout_lines;
 use super::materialize_rollout_lines;
 use super::resolve_rollout_reference_path;
 use crate::ARCHIVED_SESSIONS_SUBDIR;
+use crate::CertifiedSegmentStateCheckpoint;
 use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 
 fn meta_line(thread_id: ThreadId, segment_id: SegmentId, ordinal: u64) -> RolloutLine {
@@ -171,6 +182,8 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
             multi_agent_mode: None,
             realtime_active: None,
             effort: None,
+            service_tier: None,
+            model_profile: None,
             summary: ReasoningSummary::Auto,
         }),
     }
@@ -187,6 +200,7 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
             first_window_id: None,
             previous_window_id: None,
             window_id: None,
+            segment_state_checkpoint: None,
         }),
     }
 }
@@ -552,7 +566,7 @@ async fn model_context_materialization_recovers_all_uncompacted_legacy_segments(
 }
 
 #[tokio::test]
-async fn model_context_checkpoint_does_not_open_obsolete_legacy_predecessor() -> io::Result<()> {
+async fn unmarked_compaction_requires_legacy_predecessor() -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
     let current_segment = SegmentId::new();
@@ -573,11 +587,115 @@ async fn model_context_checkpoint_does_not_open_obsolete_legacy_predecessor() ->
         turn_complete_line("recent-turn", /*ordinal*/ 6),
     ];
 
+    let error = materialize_model_context_rollout_items_from(home.path(), lines)
+        .await
+        .expect_err("unmarked compaction cannot hide a missing predecessor");
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    Ok(())
+}
+
+#[tokio::test]
+async fn certified_root_checkpoint_precedes_constrained_missing_reference() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let child_thread = ThreadId::new();
+    let child_segment = SegmentId::new();
+    let parent_thread = ThreadId::new();
+    let missing_segment = SegmentId::new();
+    let missing_path = home
+        .path()
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(parent_thread.to_string())
+        .join(missing_segment.to_string())
+        .join("missing.jsonl");
+    let mut reference = reference_line(
+        missing_path,
+        parent_thread,
+        missing_segment,
+        /*ordinal*/ 1,
+    );
+    let RolloutItem::RolloutReference(reference_item) = &mut reference.item else {
+        unreachable!("fixture is a rollout reference");
+    };
+    reference_item.nth_user_message = Some(1);
+
+    let first_window_id = uuid::Uuid::now_v7();
+    let window_id = uuid::Uuid::now_v7();
+    let checkpoint = CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: "child-local checkpoint".to_string(),
+            replacement_history: Some(Vec::new()),
+            window_number: Some(1),
+            first_window_id: Some(first_window_id.to_string()),
+            previous_window_id: Some(first_window_id.to_string()),
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+                environments: Some(TurnEnvironmentSelections::new(
+                    serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+                    Vec::new(),
+                )),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid child-local checkpoint");
+    let mut lines = vec![
+        meta_line(child_thread, child_segment, /*ordinal*/ 0),
+        reference,
+    ];
+    lines.extend(
+        checkpoint
+            .into_items()
+            .into_iter()
+            .enumerate()
+            .map(|(index, item)| RolloutLine {
+                timestamp: "2026-07-13T00:00:03Z".to_string(),
+                ordinal: Some(u64::try_from(index).expect("small checkpoint") + 2),
+                item,
+            }),
+    );
+
     let items = materialize_model_context_rollout_items_from(home.path(), lines).await?;
 
-    assert!(matches!(items.first(), Some(RolloutItem::SessionMeta(_))));
+    assert!(matches!(
+        items.first(),
+        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == child_thread
+    ));
     assert!(items.iter().any(|item| {
-        matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "latest checkpoint")
+        matches!(item, RolloutItem::Compacted(compacted)
+            if compacted.message == "child-local checkpoint"
+                && compacted.segment_state_checkpoint.is_some())
     }));
     Ok(())
 }
@@ -603,6 +721,59 @@ async fn model_context_missing_immediate_legacy_predecessor_remains_an_error() -
     let error = materialize_model_context_rollout_items_from(home.path(), lines)
         .await
         .expect_err("an immediately referenced immutable segment cannot be ignored");
+
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unmarked_compaction_requires_missing_predecessor_beyond_three_segments() -> io::Result<()>
+{
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let missing_segment = SegmentId::new();
+    let older_segment = SegmentId::new();
+    let newer_segment = SegmentId::new();
+    let root_segment = SegmentId::new();
+    let segment_path = |segment_id: SegmentId| {
+        home.path()
+            .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            .join(thread_id.to_string())
+            .join(segment_id.to_string())
+            .join("segment.jsonl")
+    };
+    let missing_path = segment_path(missing_segment);
+    let older_path = segment_path(older_segment);
+    let newer_path = segment_path(newer_segment);
+    write_rollout(
+        older_path.as_path(),
+        &[
+            meta_line(thread_id, older_segment, /*ordinal*/ 2),
+            reference_line(missing_path, thread_id, missing_segment, /*ordinal*/ 3),
+            agent_line("older", /*ordinal*/ 4),
+        ],
+    )?;
+    write_rollout(
+        newer_path.as_path(),
+        &[
+            meta_line(thread_id, newer_segment, /*ordinal*/ 5),
+            reference_line(older_path, thread_id, older_segment, /*ordinal*/ 6),
+            agent_line("newer", /*ordinal*/ 7),
+        ],
+    )?;
+    let lines = vec![
+        meta_line(thread_id, root_segment, /*ordinal*/ 8),
+        reference_line(newer_path, thread_id, newer_segment, /*ordinal*/ 9),
+        turn_started_line("recent-turn", /*ordinal*/ 10),
+        user_event_line("recent user", /*ordinal*/ 11),
+        turn_context_line(home.path(), "recent-turn", /*ordinal*/ 12),
+        compacted_line("unmarked checkpoint", /*ordinal*/ 13),
+        turn_complete_line("recent-turn", /*ordinal*/ 14),
+    ];
+
+    let error = materialize_model_context_rollout_items_from(home.path(), lines)
+        .await
+        .expect_err("unmarked compaction must resolve the complete compatibility lineage");
 
     assert_eq!(error.kind(), io::ErrorKind::NotFound);
     Ok(())
@@ -693,7 +864,7 @@ async fn model_context_nested_fork_cutoff_cannot_accept_partial_checkpoint() -> 
 }
 
 #[tokio::test]
-async fn model_context_cross_thread_checkpoint_does_not_open_obsolete_parent() -> io::Result<()> {
+async fn cross_thread_unmarked_compaction_requires_parent_predecessor() -> io::Result<()> {
     let home = TempDir::new()?;
     let child_thread = ThreadId::new();
     let parent_thread = ThreadId::new();
@@ -736,15 +907,11 @@ async fn model_context_cross_thread_checkpoint_does_not_open_obsolete_parent() -
         ),
     ];
 
-    let items = materialize_model_context_rollout_items_from(home.path(), lines).await?;
+    let error = materialize_model_context_rollout_items_from(home.path(), lines)
+        .await
+        .expect_err("unmarked parent compaction cannot hide a missing predecessor");
 
-    assert!(matches!(
-        items.first(),
-        Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == child_thread
-    ));
-    assert!(items.iter().any(|item| {
-        matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "parent checkpoint")
-    }));
+    assert_eq!(error.kind(), io::ErrorKind::NotFound);
     Ok(())
 }
 

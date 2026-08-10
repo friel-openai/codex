@@ -28,6 +28,8 @@ use tokio::io::AsyncWriteExt;
 
 use super::super::LocalThreadStore;
 use super::super::test_support::test_config;
+use super::inject_next_reopen_failure;
+use super::install_committed_replace_pause;
 use super::install_immutable_segment;
 use super::snapshot_segment_id;
 use super::stabilize_rollout_reference;
@@ -242,6 +244,115 @@ async fn live_freeze_installs_immutable_prefix_and_isolates_later_appends() {
         .expect("materialize logical history");
     assert!(has_message(&logical_items, "before freeze"));
     assert!(has_message(&logical_items, "after freeze"));
+}
+
+#[tokio::test]
+async fn committed_rotation_reopen_failure_recovers_on_next_write() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Legacy))
+        .await
+        .expect("create thread");
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist session metadata");
+    inject_next_reopen_failure(thread_id);
+
+    store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+        .await
+        .expect("committed rotation survives eager reopen failure");
+    append_message(&store, thread_id, "append after lazy reopen").await;
+    store
+        .flush_thread(thread_id)
+        .await
+        .expect("flush recovered writer");
+
+    let active_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("active path");
+    let active_items = RolloutRecorder::load_rollout_items(active_path.as_path())
+        .await
+        .expect("read recovered active rollout")
+        .0;
+    assert_eq!(
+        active_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                        if event.message == "append after lazy reopen"
+                )
+            })
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancelling_rotation_caller_after_commit_does_not_cancel_writer_recovery() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let thread_id = ThreadId::default();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Legacy))
+        .await
+        .expect("create thread");
+    store
+        .persist_thread(thread_id)
+        .await
+        .expect("persist session metadata");
+    let pause = install_committed_replace_pause(thread_id);
+    let rotation = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+        }
+    });
+    pause.reached.notified().await;
+
+    rotation.abort();
+    assert!(
+        rotation
+            .await
+            .expect_err("rotation caller should be cancelled")
+            .is_cancelled()
+    );
+    pause.release.notify_one();
+    append_message(&store, thread_id, "append after cancelled caller").await;
+    store
+        .flush_thread(thread_id)
+        .await
+        .expect("flush recovered writer");
+
+    let active_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("active path");
+    let active_items = RolloutRecorder::load_rollout_items(active_path.as_path())
+        .await
+        .expect("read active rollout after cancellation")
+        .0;
+    assert_eq!(
+        active_items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::UserMessage(event))
+                        if event.message == "append after cancelled caller"
+                )
+            })
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -1357,6 +1468,7 @@ async fn missing_immutable_segment_fails_strict_history_read() {
     let err = store
         .load_history(crate::LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await

@@ -26,6 +26,7 @@ impl<'de> Deserialize<'de> for CompactedItem {
             first_window_id: serialized.first_window_id,
             previous_window_id: serialized.previous_window_id,
             window_id,
+            segment_state_checkpoint: serialized.segment_state_checkpoint,
         })
     }
 }
@@ -43,6 +44,8 @@ struct SerializedCompactedItem {
     previous_window_id: Option<String>,
     #[serde(default)]
     window_id: Option<SerializedWindowId>,
+    #[serde(default)]
+    segment_state_checkpoint: Option<crate::protocol::SegmentStateCheckpoint>,
 }
 
 #[derive(Deserialize)]
@@ -68,6 +71,7 @@ mod tests {
             first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
             previous_window_id: Some("019b3f6e-0000-7000-8000-000000000002".to_string()),
             window_id: Some("019b3f6e-7a10-7cc3-8b6e-1d09e2f7a001".to_string()),
+            segment_state_checkpoint: None,
         };
 
         assert_eq!(
@@ -99,8 +103,34 @@ mod tests {
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }
         );
+        Ok(())
+    }
+
+    #[test]
+    fn round_trips_segment_state_checkpoint() -> Result<()> {
+        let value = json!({
+            "message": "summary",
+            "replacement_history": [],
+            "window_number": 3,
+            "first_window_id": "019b3f6e-0000-7000-8000-000000000001",
+            "window_id": "019b3f6e-7a10-7cc3-8b6e-1d09e2f7a001",
+            "segment_state_checkpoint": {
+                "version": 1,
+                "previous_turn_settings": {
+                    "model": "gpt-test",
+                    "comp_hash": "settings-hash",
+                    "realtime_active": false
+                },
+                "world_state": "established",
+                "reference_context": "cleared"
+            }
+        });
+
+        let item = serde_json::from_value::<CompactedItem>(value.clone())?;
+        assert_eq!(serde_json::to_value(item)?, value);
         Ok(())
     }
 }

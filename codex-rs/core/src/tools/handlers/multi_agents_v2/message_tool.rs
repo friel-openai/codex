@@ -152,8 +152,10 @@ pub(crate) async fn handle_message_string_tool(
         MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
     };
     let context = AgentCommunicationContext::new(kind, session.thread_id);
-    let parent_turn_id =
-        matches!(mode, MessageDeliveryMode::TriggerTurn).then(|| turn.sub_id.clone());
+    // AgentControl needs the caller turn even for queue-only delivery to avoid waiting on a
+    // completion receipt queued into that same turn. Canonical mailbox submission removes the
+    // turn ID again when the communication does not trigger a turn.
+    let parent_turn_id = Some(turn.sub_id.clone());
     let delivered_communication = communication;
     let result = match resume_config {
         Some(resume_config) => {
@@ -197,16 +199,18 @@ pub(crate) async fn handle_message_string_tool(
     )
     .await;
     if mode == MessageDeliveryMode::TriggerTurn && is_goal_supervisor_parent {
-        let _ = session
+        session
             .services
             .agent_control
             .record_goal_supervisor_followup_action(receiver_thread_id, &delivered_communication)
-            .await;
-        let _ = session
+            .await
+            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
+        session
             .services
             .agent_control
             .finish_goal_supervisor_helper_after_followup(session.thread_id)
-            .await;
+            .await
+            .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
     }
 
     let output = FunctionToolOutput::from_text(String::new(), Some(true));
@@ -245,5 +249,5 @@ fn direct_parent_path(session_source: &SessionSource) -> Option<AgentPath> {
     if parent.is_empty() {
         return None;
     }
-    AgentPath::try_from(parent).ok()
+    AgentPath::from_persisted_string(parent.to_string()).ok()
 }

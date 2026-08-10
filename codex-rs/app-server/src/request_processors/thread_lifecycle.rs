@@ -626,9 +626,9 @@ pub(super) async fn handle_pending_thread_resume_request(
     } else {
         None
     };
-    let token_usage_turn_id = pending
-        .include_turns
-        .then(|| restored_token_usage_turn_id(&pending.history_items, thread.turns.as_slice()));
+    let token_usage_turn_id = (pending.include_turns
+        || has_segment_local_token_usage(&pending.history_items))
+    .then(|| restored_token_usage_turn_id(&pending.history_items, thread.turns.as_slice()));
     if pending.initial_turns_page.is_none() {
         initial_turns_page = None;
     }

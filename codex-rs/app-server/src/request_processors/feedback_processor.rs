@@ -116,7 +116,7 @@ impl FeedbackRequestProcessor {
             let feedback_thread_ids = match conversation_id {
                 Some(conversation_id) => match self
                     .thread_manager
-                    .list_agent_subtree_thread_ids(conversation_id)
+                    .list_open_agent_subtree_thread_ids(conversation_id)
                     .await
                 {
                     Ok(thread_ids) => thread_ids,

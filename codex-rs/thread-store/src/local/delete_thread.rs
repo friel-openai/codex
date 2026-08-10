@@ -20,6 +20,8 @@ use super::LocalThreadStore;
 use super::helpers::matching_rollout_file_name;
 use super::helpers::scoped_rollout_path;
 use crate::DeleteThreadParams;
+use crate::DeleteThreadsFailure;
+use crate::DeleteThreadsOutcome;
 use crate::DeleteThreadsParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
@@ -36,16 +38,32 @@ pub(super) async fn delete_thread(
         return Err(referenced_thread_error(thread_id));
     }
     let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
-    delete_thread_after_reference_check(store, thread_id, &mut writer_guards).await
+    delete_thread_after_reference_check(store, thread_id, &mut writer_guards)
+        .await
+        .map_err(|failure| failure.error)
 }
 
 pub(super) async fn delete_threads(
     store: &LocalThreadStore,
     params: DeleteThreadsParams,
-) -> ThreadStoreResult<()> {
+) -> ThreadStoreResult<DeleteThreadsOutcome> {
+    delete_threads_with_pre_delete(store, params, |_| Ok(())).await
+}
+
+async fn delete_threads_with_pre_delete<F>(
+    store: &LocalThreadStore,
+    params: DeleteThreadsParams,
+    mut pre_delete: F,
+) -> ThreadStoreResult<DeleteThreadsOutcome>
+where
+    F: FnMut(codex_protocol::ThreadId) -> ThreadStoreResult<()>,
+{
     let thread_ids = params.thread_ids;
     if thread_ids.is_empty() {
-        return Ok(());
+        return Ok(DeleteThreadsOutcome {
+            deleted_thread_ids: Vec::new(),
+            failure: None,
+        });
     }
 
     let deletion_set: HashSet<_> = thread_ids.iter().copied().collect();
@@ -85,13 +103,39 @@ pub(super) async fn delete_threads(
     }
 
     let mut writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
+    let mut deleted_thread_ids = Vec::new();
     for thread_id in thread_ids {
+        if let Err(error) = pre_delete(thread_id) {
+            return Ok(DeleteThreadsOutcome {
+                deleted_thread_ids,
+                failure: Some(DeleteThreadsFailure { thread_id, error }),
+            });
+        }
         match delete_thread_after_reference_check(store, thread_id, &mut writer_guards).await {
-            Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
-            Err(err) => return Err(err),
+            Ok(()) => {
+                deleted_thread_ids.push(thread_id);
+            }
+            Err(failure) if matches!(failure.error, ThreadStoreError::ThreadNotFound { .. }) => {
+                deleted_thread_ids.push(thread_id);
+            }
+            Err(failure) => {
+                if failure.thread_unavailable {
+                    deleted_thread_ids.push(thread_id);
+                }
+                return Ok(DeleteThreadsOutcome {
+                    deleted_thread_ids,
+                    failure: Some(DeleteThreadsFailure {
+                        thread_id,
+                        error: failure.error,
+                    }),
+                });
+            }
         }
     }
-    Ok(())
+    Ok(DeleteThreadsOutcome {
+        deleted_thread_ids,
+        failure: None,
+    })
 }
 
 async fn scan_reference_index(
@@ -114,7 +158,7 @@ async fn delete_thread_after_reference_check(
     store: &LocalThreadStore,
     thread_id: codex_protocol::ThreadId,
     writer_guards: &mut Vec<super::writer_lock::WriterLockGuard>,
-) -> ThreadStoreResult<()> {
+) -> Result<(), DeleteThreadFailure> {
     let thread_id_str = thread_id.to_string();
     let state_db_ctx = store.state_db().await;
     let mut rollout_paths = Vec::new();
@@ -128,9 +172,11 @@ async fn delete_thread_after_reference_check(
         Ok(Some(path)) => rollout_paths.push(path),
         Ok(None) => {}
         Err(err) => {
-            return Err(ThreadStoreError::InvalidRequest {
-                message: format!("failed to locate thread id {thread_id}: {err}"),
-            });
+            return Err(DeleteThreadFailure::before_mutation(
+                ThreadStoreError::InvalidRequest {
+                    message: format!("failed to locate thread id {thread_id}: {err}"),
+                },
+            ));
         }
     }
     match find_archived_thread_path_by_id_str(
@@ -147,32 +193,81 @@ async fn delete_thread_after_reference_check(
         }
         Ok(None) => {}
         Err(err) => {
-            return Err(ThreadStoreError::InvalidRequest {
-                message: format!("failed to locate archived thread id {thread_id}: {err}"),
-            });
+            return Err(DeleteThreadFailure::before_mutation(
+                ThreadStoreError::InvalidRequest {
+                    message: format!("failed to locate archived thread id {thread_id}: {err}"),
+                },
+            ));
         }
     }
-    super::thread_history::delete_thread(store, thread_id).await?;
-
+    super::thread_history::preflight_delete_thread(store)
+        .await
+        .map_err(DeleteThreadFailure::before_mutation)?;
     // Drop the recorder before removing files, but retain its writer lock until cleanup finishes.
     if let Some(entry) = store.live_recorders.lock().await.remove(&thread_id) {
         writer_guards.push(entry.writer_lock);
     }
     let found_rollout_path = !rollout_paths.is_empty();
-    for rollout_path in rollout_paths {
-        delete_rollout_file(store, rollout_path.as_path(), thread_id)?;
+    for rollout_path in &rollout_paths {
+        if let Err(error) = delete_rollout_file(store, rollout_path.as_path(), thread_id) {
+            let mut thread_unavailable = true;
+            for remaining_path in &rollout_paths {
+                if codex_rollout::existing_rollout_path(remaining_path)
+                    .await
+                    .is_some()
+                {
+                    thread_unavailable = false;
+                    break;
+                }
+            }
+            return Err(DeleteThreadFailure {
+                error,
+                thread_unavailable,
+            });
+        }
     }
+    super::thread_history::delete_thread(store, thread_id)
+        .await
+        .map_err(DeleteThreadFailure::after_rollout_removal)?;
     remove_thread_name_entries(store.config.codex_home.as_path(), thread_id)
         .await
-        .map_err(|err| ThreadStoreError::Internal {
-            message: format!("failed to delete thread name index entries for {thread_id}: {err}"),
+        .map_err(|err| {
+            DeleteThreadFailure::after_rollout_removal(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to delete thread name index entries for {thread_id}: {err}"
+                ),
+            })
         })?;
 
     if !found_rollout_path {
-        return Err(ThreadStoreError::ThreadNotFound { thread_id });
+        return Err(DeleteThreadFailure {
+            error: ThreadStoreError::ThreadNotFound { thread_id },
+            thread_unavailable: true,
+        });
     }
 
     Ok(())
+}
+
+struct DeleteThreadFailure {
+    error: ThreadStoreError,
+    thread_unavailable: bool,
+}
+
+impl DeleteThreadFailure {
+    fn before_mutation(error: ThreadStoreError) -> Self {
+        Self {
+            error,
+            thread_unavailable: false,
+        }
+    }
+
+    fn after_rollout_removal(error: ThreadStoreError) -> Self {
+        Self {
+            error,
+            thread_unavailable: true,
+        }
+    }
 }
 
 fn delete_rollout_file(
@@ -397,6 +492,52 @@ mod tests {
 
         assert!(!source_path.exists());
         assert!(!child_path.exists());
+    }
+
+    #[tokio::test]
+    async fn delete_threads_reports_exact_prefix_before_injected_member_failure() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let first_uuid = Uuid::from_u128(320);
+        let first_thread_id =
+            ThreadId::from_string(&first_uuid.to_string()).expect("valid first thread id");
+        let first_path = write_session_file(home.path(), "2025-01-03T12-00-00", first_uuid)
+            .expect("first session file");
+        let failed_uuid = Uuid::from_u128(321);
+        let failed_thread_id =
+            ThreadId::from_string(&failed_uuid.to_string()).expect("valid failed thread id");
+        let failed_path = write_session_file(home.path(), "2025-01-03T12-00-01", failed_uuid)
+            .expect("failed session file");
+        let suffix_uuid = Uuid::from_u128(322);
+        let suffix_thread_id =
+            ThreadId::from_string(&suffix_uuid.to_string()).expect("valid suffix thread id");
+        let suffix_path = write_session_file(home.path(), "2025-01-03T12-00-02", suffix_uuid)
+            .expect("suffix session file");
+
+        let outcome = delete_threads_with_pre_delete(
+            &store,
+            DeleteThreadsParams {
+                thread_ids: vec![first_thread_id, failed_thread_id, suffix_thread_id],
+            },
+            |thread_id| {
+                if thread_id == failed_thread_id {
+                    return Err(ThreadStoreError::Internal {
+                        message: "injected second-member failure".to_string(),
+                    });
+                }
+                Ok(())
+            },
+        )
+        .await
+        .expect("batch outcome");
+
+        assert_eq!(outcome.deleted_thread_ids, vec![first_thread_id]);
+        let failure = outcome.failure.expect("injected failure");
+        assert_eq!(failure.thread_id, failed_thread_id);
+        assert!(matches!(failure.error, ThreadStoreError::Internal { .. }));
+        assert!(!first_path.exists());
+        assert!(failed_path.exists());
+        assert!(suffix_path.exists());
     }
 
     #[tokio::test]

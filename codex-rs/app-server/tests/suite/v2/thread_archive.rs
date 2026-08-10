@@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadArchiveParams;
 use codex_app_server_protocol::ThreadArchiveResponse;
 use codex_app_server_protocol::ThreadArchivedNotification;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -21,11 +23,14 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::UserInput;
 use codex_core::ARCHIVED_SESSIONS_SUBDIR;
+use codex_core::TurnInput;
 use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_path_by_id_str;
 use codex_protocol::ThreadId;
+use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::StateRuntime;
+use codex_state::ThreadGoalStatus;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
@@ -76,7 +81,6 @@ async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> R
             DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
-
     let mut other = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -274,7 +278,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
         .upsert_thread_spawn_edge(
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
     state_db
@@ -338,6 +342,164 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
 }
 
 #[tokio::test]
+async fn thread_archive_preserves_promoted_subtree_beyond_closed_edge() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let former_parent_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-01T00-00-00",
+        "2025-01-01T00:00:00Z",
+        "former parent",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let promoted_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-01T00-01-00",
+        "2025-01-01T00:01:00Z",
+        "promoted root",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let descendant_id = create_fake_rollout(
+        codex_home.path(),
+        "2025-01-01T00-02-00",
+        "2025-01-01T00:02:00Z",
+        "promoted descendant",
+        Some("mock_provider"),
+        /*git_info*/ None,
+    )?;
+    let former_parent_thread_id = ThreadId::from_string(&former_parent_id)?;
+    let promoted_thread_id = ThreadId::from_string(&promoted_id)?;
+    let descendant_thread_id = ThreadId::from_string(&descendant_id)?;
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    state_db
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await?;
+    state_db
+        .upsert_thread_spawn_edge(
+            former_parent_thread_id,
+            promoted_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
+    state_db
+        .upsert_thread_spawn_edge(
+            promoted_thread_id,
+            descendant_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let _: ThreadResumeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: promoted_id.clone(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+        })
+        .await?;
+    let promoted_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            promoted_thread_id,
+            "preserve promoted goal",
+            ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let promoted_queue_payload = serde_json::to_string(&TurnInput::UserInput {
+        content: vec![CoreUserInput::Text {
+            text: "preserve promoted queue".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    })?;
+    let promoted_queue_item = state_db
+        .thread_queue()
+        .enqueue(promoted_thread_id, promoted_queue_payload.as_str())
+        .await?;
+    let _: ThreadArchiveResponse = mcp
+        .request(|request_id| ClientRequest::ThreadArchive {
+            request_id,
+            params: ThreadArchiveParams {
+                thread_id: former_parent_id.clone(),
+            },
+        })
+        .await?;
+    let archived_notification: ThreadArchivedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/archived"),
+    )
+    .await??;
+    assert_eq!(archived_notification.thread_id, former_parent_id);
+
+    for preserved_id in [&promoted_id, &descendant_id] {
+        assert!(
+            find_thread_path_by_id_str(codex_home.path(), preserved_id, /*state_db_ctx*/ None,)
+                .await?
+                .is_some(),
+            "promoted subtree thread {preserved_id} must remain active"
+        );
+        assert!(
+            find_archived_thread_path_by_id_str(
+                codex_home.path(),
+                preserved_id,
+                /*state_db_ctx*/ None,
+            )
+            .await?
+            .is_none(),
+            "promoted subtree thread {preserved_id} must not be archived"
+        );
+    }
+    assert_eq!(
+        state_db
+            .list_thread_spawn_descendants(promoted_thread_id)
+            .await?,
+        vec![descendant_thread_id]
+    );
+    let loaded: ThreadLoadedListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadLoadedList {
+            request_id,
+            params: ThreadLoadedListParams::default(),
+        })
+        .await?;
+    assert!(loaded.data.contains(&promoted_id));
+    assert_eq!(
+        state_db
+            .thread_goals()
+            .get_thread_goal(promoted_thread_id)
+            .await?
+            .map(|goal| goal.goal_id),
+        Some(promoted_goal.goal_id)
+    );
+    assert_eq!(
+        state_db
+            .thread_queue()
+            .list_page(promoted_thread_id, 0, 10)
+            .await?
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![promoted_queue_item.id]
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
@@ -386,7 +548,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
         .upsert_thread_spawn_edge(
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
     state_db
@@ -587,7 +749,7 @@ async fn thread_archive_succeeds_when_spawned_descendant_is_missing() -> Result<
         .upsert_thread_spawn_edge(
             parent_thread_id,
             missing_child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         )
         .await?;
 

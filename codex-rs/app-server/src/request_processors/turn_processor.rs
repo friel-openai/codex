@@ -961,6 +961,12 @@ impl TurnRequestProcessor {
                             TurnSteerRequestError::NoActiveTurn,
                         )),
                     ),
+                    SteerInputError::RestartRequired(_) => (
+                        "thread persistence is indeterminate; restart the thread before steering"
+                            .to_string(),
+                        None,
+                        None,
+                    ),
                     SteerInputError::ExpectedTurnMismatch { expected, actual } => (
                         format!("expected active turn id `{expected}` but found `{actual}`"),
                         None,

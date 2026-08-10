@@ -58,6 +58,20 @@ impl LocalThreadStore {
         )
         .await?
         .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
+        self.resolve_rollout_lineage_from_path(requested_thread_id, rollout_path)
+            .await
+    }
+
+    /// Resolves lineage from a caller-selected root without rediscovering that root by thread id.
+    ///
+    /// References inside the selected rollout retain their normal immutable-identity validation.
+    /// This entrypoint only preserves the authority of an explicit root path across compatibility
+    /// fallback for rollouts that predate segment-state checkpoints.
+    pub(super) async fn resolve_rollout_lineage_from_path(
+        &self,
+        requested_thread_id: ThreadId,
+        rollout_path: PathBuf,
+    ) -> ThreadStoreResult<RolloutLineage> {
         let mut active_paths = HashSet::new();
         let segments = resolve_path(
             self,

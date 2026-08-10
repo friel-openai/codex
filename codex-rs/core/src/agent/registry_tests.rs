@@ -4,6 +4,8 @@ use codex_protocol::error::CodexErrorDetails;
 use pretty_assertions::assert_eq;
 use std::collections::HashSet;
 use std::time::Duration;
+use tokio::sync::Barrier;
+use tokio::sync::watch;
 use tokio::time::timeout;
 
 fn agent_path(path: &str) -> AgentPath {
@@ -31,6 +33,14 @@ async fn completion_watcher_finish_wakes_all_waiters() {
     let registration = lifecycle
         .try_start_completion_watcher()
         .expect("completion watcher should register");
+    lifecycle.record_completion_status(
+        "turn-1".to_string(),
+        AgentStatus::Errored("transient".to_string()),
+    );
+    lifecycle.record_completion_status(
+        "turn-1".to_string(),
+        AgentStatus::Completed(Some("done".to_string())),
+    );
     let first_waiter = tokio::spawn({
         let lifecycle = Arc::clone(&lifecycle);
         async move { lifecycle.wait_for_completion_watcher().await }
@@ -41,7 +51,15 @@ async fn completion_watcher_finish_wakes_all_waiters() {
     });
     tokio::task::yield_now().await;
 
-    drop(registration);
+    let claim = lifecycle
+        .try_claim_completion_status()
+        .expect("terminal status should remain queued");
+    assert_eq!(
+        claim.status(),
+        &AgentStatus::Completed(Some("done".to_string()))
+    );
+    assert!(lifecycle.acknowledge_completion_status(&claim));
+    lifecycle.finish_completion_transition();
 
     timeout(Duration::from_secs(1), async {
         first_waiter.await.expect("first waiter should finish");
@@ -49,6 +67,125 @@ async fn completion_watcher_finish_wakes_all_waiters() {
     })
     .await
     .expect("completion watcher should wake every waiter");
+    drop(registration);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_published_in_former_check_wait_gap_returns_pending() {
+    let lifecycle = Arc::new(AgentLifecycle::default());
+    let mut registration = lifecycle
+        .try_start_completion_watcher()
+        .expect("completion watcher should register");
+    lifecycle.begin_completion_transition();
+    let transition = lifecycle.lock_transition().await;
+    assert!(lifecycle.completion_watcher_active());
+    assert!(!lifecycle.has_pending_completion_status());
+
+    let checked_empty = Arc::new(Barrier::new(2));
+    let published = Arc::new(Barrier::new(2));
+    let publisher = tokio::spawn({
+        let lifecycle = Arc::clone(&lifecycle);
+        let checked_empty = Arc::clone(&checked_empty);
+        let published = Arc::clone(&published);
+        async move {
+            checked_empty.wait().await;
+            assert!(lifecycle.record_completion_status(
+                "turn-in-former-gap".to_string(),
+                AgentStatus::Completed(Some("done".to_string())),
+            ));
+            published.wait().await;
+        }
+    });
+    checked_empty.wait().await;
+    published.wait().await;
+
+    assert_eq!(
+        timeout(
+            Duration::from_secs(1),
+            lifecycle.wait_for_completion_watcher_or_pending_terminal(transition)
+        )
+        .await
+        .expect("pending terminal must win instead of waiting for its own receipt"),
+        CompletionWatcherWaitOutcome::PendingTerminal
+    );
+    publisher.await.expect("terminal publisher should finish");
+
+    let claim = lifecycle
+        .try_claim_completion_status()
+        .expect("terminal status should remain queued");
+    assert!(lifecycle.acknowledge_completion_status(&claim));
+    lifecycle.finish_completion_transition();
+    assert!(registration.try_retire());
+}
+
+#[test]
+fn terminal_status_survives_watcher_retirement_and_restarts_delivery() {
+    let lifecycle = Arc::new(AgentLifecycle::default());
+    lifecycle.record_completion_status(
+        "turn-after-retirement".to_string(),
+        AgentStatus::Completed(Some("done".to_string())),
+    );
+
+    let mut registration = lifecycle
+        .try_start_completion_watcher()
+        .expect("terminal status should permit a replacement watcher");
+    assert!(!registration.try_retire());
+    let claim = lifecycle
+        .try_claim_completion_status()
+        .expect("terminal status should remain queued");
+    assert_eq!(
+        claim.status(),
+        &AgentStatus::Completed(Some("done".to_string()))
+    );
+    assert!(lifecycle.acknowledge_completion_status(&claim));
+    lifecycle.finish_completion_transition();
+    assert!(registration.try_retire());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn terminal_publication_queues_before_status_is_observable_and_deduplicates() {
+    let lifecycle = Arc::new(AgentLifecycle::default());
+    let (status_tx, mut status_rx) = watch::channel(AgentStatus::Running);
+    let observed_lifecycle = Arc::clone(&lifecycle);
+    let observer = tokio::spawn(async move {
+        status_rx
+            .changed()
+            .await
+            .expect("status sender should remain open");
+        let claim = observed_lifecycle.try_claim_completion_status()?;
+        let status = claim.status().clone();
+        observed_lifecycle
+            .acknowledge_completion_status(&claim)
+            .then_some(status)
+    });
+
+    let terminal = AgentStatus::Completed(Some("done".to_string()));
+    let published_terminal = terminal.clone();
+    let publication =
+        lifecycle.publish_completion_status("turn-1".to_string(), terminal.clone(), || {
+            assert!(lifecycle.completion_watcher_registered());
+            status_tx.send_replace(published_terminal);
+        });
+    assert!(publication.recorded);
+    let registration = publication
+        .registration
+        .expect("terminal publication should reserve its watcher");
+    assert_eq!(
+        observer.await.expect("observer should finish"),
+        Some(terminal)
+    );
+
+    let duplicate = lifecycle.publish_completion_status(
+        "turn-1".to_string(),
+        AgentStatus::Completed(Some("duplicate".to_string())),
+        || {
+            status_tx.send_replace(AgentStatus::Completed(Some("duplicate".to_string())));
+        },
+    );
+    assert!(!duplicate.recorded);
+    assert!(duplicate.registration.is_none());
+    assert!(lifecycle.try_claim_completion_status().is_none());
+    drop(registration);
 }
 
 #[test]

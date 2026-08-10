@@ -5,6 +5,7 @@ use crate::ThreadManager;
 use crate::agent::agent_status_from_event;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
+use crate::compact::CompactedHistoryMetadata;
 use crate::config::AgentRoleConfig;
 use crate::config::Config;
 use crate::config::ConfigBuilder;
@@ -14,6 +15,11 @@ use crate::init_state_db;
 use crate::state::ActiveTurn;
 use crate::thread_manager::StartThreadOptions;
 use assert_matches::assert_matches;
+use codex_agent_graph_store::AgentGraphStore;
+use codex_agent_graph_store::AgentGraphStoreFuture;
+use codex_agent_graph_store::LocalAgentGraphStore;
+use codex_agent_graph_store::ThreadSpawnEdge;
+use codex_agent_graph_store::ThreadSpawnEdgeStatus;
 use codex_config::types::McpServerConfig;
 use codex_config::types::McpServerTransportConfig;
 use codex_extension_api::ExtensionDataInit;
@@ -71,6 +77,7 @@ use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
+use codex_thread_store::ThreadMetadataPatch;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
 use core_test_support::responses::ev_assistant_message;
@@ -91,6 +98,7 @@ use serial_test::serial;
 use std::ffi::OsStr;
 use std::ffi::OsString;
 use tempfile::TempDir;
+use tokio::sync::Notify;
 use tokio::time::Duration;
 use tokio::time::Instant;
 use tokio::time::sleep;
@@ -315,6 +323,80 @@ async fn goal_supervisor_continuity_text_for_test(
         .expect("continuity should contain text")
 }
 
+#[tokio::test]
+async fn archived_open_agent_identity_requires_explicit_unarchive_before_lazy_selection() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+    let child_path = AgentPath::root()
+        .join("archived_worker")
+        .expect("archived worker path");
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("archive me"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(child_path.clone()),
+                agent_nickname: None,
+                agent_role: None,
+            })),
+        )
+        .await
+        .expect("archived worker should spawn");
+    let child = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("archived worker should load");
+    persist_thread_for_tree_resume(&child, "persist archived worker").await;
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("archived worker should stop");
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&harness.config),
+        harness.state_db.clone(),
+    );
+    store
+        .archive_thread(ArchiveThreadParams {
+            thread_id: child_thread_id,
+        })
+        .await
+        .expect("worker should archive");
+
+    let archived_err = harness
+        .control
+        .ensure_open_agent_known_by_id(root_thread_id, child_thread_id)
+        .await
+        .expect_err("an archived open edge must not restore current membership");
+    assert_matches!(archived_err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_thread_id);
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
+
+    store
+        .unarchive_thread(ArchiveThreadParams {
+            thread_id: child_thread_id,
+        })
+        .await
+        .expect("worker should unarchive");
+    let restored = harness
+        .control
+        .ensure_open_agent_known_by_id(root_thread_id, child_thread_id)
+        .await
+        .expect("explicit unarchive should permit lazy selection");
+    assert_eq!(restored.agent_path, Some(child_path));
+}
+
 #[test]
 fn register_session_root_skips_threads_with_explicit_parent() {
     let control = AgentControl::default();
@@ -350,6 +432,314 @@ fn spawn_agent_call(call_id: &str) -> ResponseItem {
         call_id: call_id.to_string(),
         encrypted_function_args: None,
         internal_chat_message_metadata_passthrough: None,
+    }
+}
+
+struct BlockingCloseAgentGraphStore {
+    inner: LocalAgentGraphStore,
+    close_entered: Arc<Notify>,
+    release_close: Arc<Notify>,
+    blocked_target_thread_id: std::sync::Mutex<Option<ThreadId>>,
+    fail_close: std::sync::atomic::AtomicBool,
+    commit_before_release: std::sync::atomic::AtomicBool,
+}
+
+impl AgentGraphStore for BlockingCloseAgentGraphStore {
+    fn upsert_thread_spawn_edge(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        status: ThreadSpawnEdgeStatus,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        self.inner
+            .upsert_thread_spawn_edge(parent_thread_id, child_thread_id, status)
+    }
+
+    fn set_thread_spawn_edge_status(
+        &self,
+        child_thread_id: ThreadId,
+        status: ThreadSpawnEdgeStatus,
+    ) -> AgentGraphStoreFuture<'_, ()> {
+        self.inner
+            .set_thread_spawn_edge_status(child_thread_id, status)
+    }
+
+    fn transition_open_thread_spawn_edge_to_closed(
+        &self,
+        child_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, bool> {
+        self.inner
+            .transition_open_thread_spawn_edge_to_closed(child_thread_id)
+    }
+
+    fn list_thread_spawn_children(
+        &self,
+        parent_thread_id: ThreadId,
+        status_filter: Option<ThreadSpawnEdgeStatus>,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        self.inner
+            .list_thread_spawn_children(parent_thread_id, status_filter)
+    }
+
+    fn list_thread_spawn_descendants(
+        &self,
+        root_thread_id: ThreadId,
+        status_filter: Option<ThreadSpawnEdgeStatus>,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        self.inner
+            .list_thread_spawn_descendants(root_thread_id, status_filter)
+    }
+
+    fn list_thread_spawn_edges_by_child_ids(
+        &self,
+        child_thread_ids: &[ThreadId],
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadSpawnEdge>> {
+        self.inner
+            .list_thread_spawn_edges_by_child_ids(child_thread_ids)
+    }
+
+    fn list_open_thread_spawn_descendant_identities(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> Option<AgentGraphStoreFuture<'_, Vec<codex_state::ThreadSpawnDescendantIdentity>>> {
+        self.inner
+            .list_open_thread_spawn_descendant_identities(root_thread_id)
+    }
+
+    fn find_open_thread_spawn_descendant_by_id(
+        &self,
+        root_thread_id: ThreadId,
+        descendant_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ThreadSpawnDescendantIdentity>> {
+        self.inner
+            .find_open_thread_spawn_descendant_by_id(root_thread_id, descendant_thread_id)
+    }
+
+    fn find_open_thread_spawn_descendant_by_path(
+        &self,
+        root_thread_id: ThreadId,
+        agent_path: &str,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ThreadSpawnDescendantIdentity>> {
+        self.inner
+            .find_open_thread_spawn_descendant_by_path(root_thread_id, agent_path)
+    }
+
+    fn list_permanent_close_thread_spawn_descendants(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Vec<ThreadId>> {
+        self.inner
+            .list_permanent_close_thread_spawn_descendants(target_thread_id)
+    }
+
+    fn close_open_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            let should_block = self
+                .blocked_target_thread_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none_or(|blocked_target_thread_id| {
+                    blocked_target_thread_id == target_thread_id
+                });
+            if !should_block {
+                return self
+                    .inner
+                    .close_open_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+                    .await;
+            }
+            if self
+                .commit_before_release
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let result = self
+                    .inner
+                    .close_open_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+                    .await;
+                self.close_entered.notify_one();
+                self.release_close.notified().await;
+                return result;
+            }
+            self.close_entered.notify_one();
+            self.release_close.notified().await;
+            if self.fail_close.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(codex_agent_graph_store::AgentGraphStoreError::Internal {
+                    message: "forced close failure".to_string(),
+                });
+            }
+            self.inner
+                .close_open_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+                .await
+        })
+    }
+
+    fn close_open_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            let should_block = self
+                .blocked_target_thread_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none_or(|blocked_target_thread_id| {
+                    blocked_target_thread_id == target_thread_id
+                });
+            if !should_block {
+                return self
+                    .inner
+                    .close_open_thread_spawn_subtree_with_current_only_descendants(
+                        owner_root_thread_id,
+                        target_thread_id,
+                        current_only_descendant_edges,
+                    )
+                    .await;
+            }
+            if self
+                .commit_before_release
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let result = self
+                    .inner
+                    .close_open_thread_spawn_subtree_with_current_only_descendants(
+                        owner_root_thread_id,
+                        target_thread_id,
+                        current_only_descendant_edges,
+                    )
+                    .await;
+                self.close_entered.notify_one();
+                self.release_close.notified().await;
+                return result;
+            }
+            self.close_entered.notify_one();
+            self.release_close.notified().await;
+            if self.fail_close.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(codex_agent_graph_store::AgentGraphStoreError::Internal {
+                    message: "forced close failure".to_string(),
+                });
+            }
+            self.inner
+                .close_open_thread_spawn_subtree_with_current_only_descendants(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    current_only_descendant_edges,
+                )
+                .await
+        })
+    }
+
+    fn close_current_only_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_ownership_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        Box::pin(async move {
+            let should_block = self
+                .blocked_target_thread_id
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none_or(|blocked_target_thread_id| {
+                    blocked_target_thread_id == target_thread_id
+                });
+            if !should_block {
+                return self
+                    .inner
+                    .close_current_only_thread_spawn_subtree(
+                        owner_root_thread_id,
+                        target_thread_id,
+                        current_only_ownership_edges,
+                    )
+                    .await;
+            }
+            if self
+                .commit_before_release
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                let result = self
+                    .inner
+                    .close_current_only_thread_spawn_subtree(
+                        owner_root_thread_id,
+                        target_thread_id,
+                        current_only_ownership_edges,
+                    )
+                    .await;
+                self.close_entered.notify_one();
+                self.release_close.notified().await;
+                return result;
+            }
+            self.close_entered.notify_one();
+            self.release_close.notified().await;
+            if self.fail_close.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(codex_agent_graph_store::AgentGraphStoreError::Internal {
+                    message: "forced close failure".to_string(),
+                });
+            }
+            self.inner
+                .close_current_only_thread_spawn_subtree(
+                    owner_root_thread_id,
+                    target_thread_id,
+                    current_only_ownership_edges,
+                )
+                .await
+        })
+    }
+
+    fn get_permanently_closed_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        self.inner
+            .get_permanently_closed_thread_spawn_subtree(owner_root_thread_id, target_thread_id)
+    }
+
+    fn extend_permanently_closed_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        self.inner
+            .extend_permanently_closed_thread_spawn_subtree_with_current_only_descendants(
+                owner_root_thread_id,
+                target_thread_id,
+                current_only_descendant_edges,
+            )
+    }
+
+    fn repair_legacy_closed_thread_spawn_subtree(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        expected_parent_thread_id: ThreadId,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        self.inner.repair_legacy_closed_thread_spawn_subtree(
+            owner_root_thread_id,
+            target_thread_id,
+            expected_parent_thread_id,
+        )
+    }
+
+    fn repair_legacy_closed_thread_spawn_subtree_with_current_only_descendants(
+        &self,
+        owner_root_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        expected_parent_thread_id: ThreadId,
+        current_only_descendant_edges: Vec<codex_state::CurrentOnlyThreadSpawnEdge>,
+    ) -> AgentGraphStoreFuture<'_, Option<codex_state::ClosedThreadSpawnSubtree>> {
+        self.inner
+            .repair_legacy_closed_thread_spawn_subtree_with_current_only_descendants(
+                owner_root_thread_id,
+                target_thread_id,
+                expected_parent_thread_id,
+                current_only_descendant_edges,
+            )
     }
 }
 
@@ -390,6 +780,47 @@ impl AgentControlHarness {
             manager,
             control,
         }
+    }
+
+    async fn new_with_blocking_close_store() -> (Self, Arc<BlockingCloseAgentGraphStore>) {
+        let (home, config) = test_config_with_cli_overrides(vec![(
+            "features.multi_agent_v2".to_string(),
+            TomlValue::Boolean(false),
+        )])
+        .await;
+        let state_db = init_state_db(&config).await;
+        let blocking_store = Arc::new(BlockingCloseAgentGraphStore {
+            inner: LocalAgentGraphStore::new(
+                state_db
+                    .as_ref()
+                    .expect("state db should initialize")
+                    .clone(),
+            ),
+            close_entered: Arc::new(Notify::new()),
+            release_close: Arc::new(Notify::new()),
+            blocked_target_thread_id: std::sync::Mutex::new(None),
+            fail_close: std::sync::atomic::AtomicBool::new(false),
+            commit_before_release: std::sync::atomic::AtomicBool::new(false),
+        });
+        let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.to_path_buf(),
+            std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+            state_db.clone(),
+        )
+        .with_agent_graph_store_for_tests(blocking_store.clone());
+        let control = manager.agent_control();
+        (
+            Self {
+                _home: home,
+                config,
+                state_db,
+                manager,
+                control,
+            },
+            blocking_store,
+        )
     }
 
     async fn start_thread(&self) -> (ThreadId, Arc<CodexThread>) {
@@ -435,6 +866,64 @@ impl AgentControlHarness {
             .await
             .expect("child spawn should succeed")
             .thread_id
+    }
+
+    async fn spawn_quiescent_pathless_v1_child(
+        &self,
+        parent_thread_id: ThreadId,
+        message: &str,
+    ) -> (ThreadId, Arc<CodexThread>) {
+        let child_thread_id = self
+            .control
+            .spawn_agent_with_communication(
+                self.config.clone(),
+                InterAgentCommunication::new(
+                    AgentPath::root(),
+                    AgentPath::root(),
+                    Vec::new(),
+                    message.to_string(),
+                    /*trigger_turn*/ false,
+                ),
+                AgentCommunicationContext::new(AgentCommunicationKind::Spawn, parent_thread_id),
+                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    parent_thread_id,
+                    depth: 1,
+                    agent_path: None,
+                    agent_nickname: None,
+                    agent_role: Some("explorer".to_string()),
+                })),
+                SpawnAgentOptions::default(),
+            )
+            .await
+            .expect("pathless V1 child should start")
+            .thread_id;
+        let child_thread = self
+            .manager
+            .get_thread(child_thread_id)
+            .await
+            .expect("pathless V1 child should be loaded");
+        timeout(Duration::from_secs(5), async {
+            while !child_thread
+                .session
+                .input_queue
+                .has_pending_mailbox_items()
+                .await
+            {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("initial child communication should reach the mailbox");
+        let _ = child_thread
+            .session
+            .input_queue
+            .drain_mailbox_input_items()
+            .await;
+        assert_ne!(
+            child_thread.multi_agent_version(),
+            Some(MultiAgentVersion::V2)
+        );
+        (child_thread_id, child_thread)
     }
 }
 
@@ -611,8 +1100,21 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
 }
 
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
+    let turn = thread.session.new_default_turn().await;
     thread
-        .inject_user_message_without_turn(message.to_string())
+        .session
+        .record_conversation_items(
+            turn.as_ref(),
+            std::slice::from_ref(&ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: message.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }),
+        )
         .await;
     thread.session.ensure_rollout_materialized().await;
     thread
@@ -680,11 +1182,254 @@ async fn send_input_errors_when_manager_dropped() {
     );
 }
 
+#[path = "control/completion_lifecycle_tests.rs"]
+mod completion_lifecycle_tests;
+#[path = "control/membership_eviction_tests.rs"]
+mod membership_eviction_tests;
+#[path = "control/permanent_close_persistence_tests.rs"]
+mod permanent_close_persistence_tests;
+#[path = "control/permanent_close_race_tests.rs"]
+mod permanent_close_race_tests;
+#[path = "control/permanent_close_restart_tests.rs"]
+mod permanent_close_restart_tests;
+
 #[tokio::test]
 async fn get_status_returns_not_found_without_manager() {
     let control = AgentControl::default();
     let got = control.get_status(ThreadId::new()).await;
     assert_eq!(got, AgentStatus::NotFound);
+}
+
+#[tokio::test]
+async fn list_agents_pages_are_byte_bounded_and_complete() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+
+    let mut expected_ids = Vec::new();
+    for index in 0..60 {
+        let thread_id = ThreadId::new();
+        expected_ids.push(thread_id);
+        let agent_path = if index == 0 {
+            Some(
+                AgentPath::from_persisted_string(format!(
+                    "/root/{}",
+                    "legacy".repeat(LIST_AGENTS_MAX_SERIALIZED_BYTES)
+                ))
+                .expect("legacy overlong path"),
+            )
+        } else {
+            Some(
+                AgentPath::root()
+                    .join(format!("worker_{index:02}").as_str())
+                    .expect("agent path"),
+            )
+        };
+        let metadata = AgentMetadata {
+            agent_id: Some(thread_id),
+            parent_thread_id: Some(root_thread_id),
+            agent_path,
+            last_task_message: Some("x".repeat(4096)),
+            ..Default::default()
+        };
+        metadata.lifecycle.remember_cold_terminal_status(
+            if index % 2 == 0 {
+                AgentStatus::Completed(Some("done".repeat(4096)))
+            } else {
+                AgentStatus::Errored("error".repeat(4096))
+            },
+            true,
+        );
+        harness
+            .control
+            .state
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("spawn slot")
+            .commit(metadata);
+    }
+
+    let mut cursor = None;
+    let mut actual_ids = Vec::new();
+    let mut first_page = None;
+    loop {
+        let page = harness
+            .control
+            .list_agents_page(
+                &SessionSource::Cli,
+                /*path_prefix*/ None,
+                cursor.as_deref(),
+                Some(LIST_AGENTS_MAX_LIMIT),
+            )
+            .await
+            .expect("list_agents page");
+        assert!(
+            serde_json::to_vec(&page).expect("serialize page").len()
+                <= LIST_AGENTS_MAX_SERIALIZED_BYTES
+        );
+        assert_eq!(page.total_count, expected_ids.len());
+        assert!(page.agents.iter().all(|agent| {
+            agent
+                .last_task_message
+                .as_ref()
+                .is_none_or(|message| message.len() <= LIST_AGENTS_TASK_PREVIEW_BYTES)
+        }));
+        assert!(page.agents.iter().all(|agent| match &agent.agent_status {
+            AgentStatus::Completed(Some(message)) | AgentStatus::Errored(message) => {
+                message.len() <= 1024
+            }
+            AgentStatus::Completed(None)
+            | AgentStatus::PendingInit
+            | AgentStatus::Running
+            | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
+            | AgentStatus::NotFound => true,
+        }));
+        first_page.get_or_insert_with(|| page.clone());
+        actual_ids.extend(page.agents.into_iter().map(|agent| agent.agent_id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    expected_ids.sort_by_key(ToString::to_string);
+    actual_ids.sort_by_key(ToString::to_string);
+    assert_eq!(actual_ids, expected_ids);
+
+    let page = first_page.expect("list_agents should return a first page");
+    let synthetic_items = synthetic_supervisor_list_agents_items(page.clone());
+    let [
+        RolloutItem::ResponseItem(ResponseItem::FunctionCall { arguments, .. }),
+        RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { output, .. }),
+    ] = synthetic_items.as_slice()
+    else {
+        panic!("supervisor boot context should contain one list_agents call and output");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(arguments.as_str())
+            .expect("list_agents arguments"),
+        serde_json::json!({ "limit": LIST_AGENTS_MAX_LIMIT })
+    );
+    let output = output
+        .text_content()
+        .expect("synthetic list_agents output should be text");
+    assert!(output.len() <= LIST_AGENTS_MAX_SERIALIZED_BYTES);
+    let synthetic_page: ListedAgentsPage =
+        serde_json::from_str(output).expect("synthetic list_agents page");
+    assert_eq!(synthetic_page, page);
+    assert!(!synthetic_page.agents.is_empty());
+    assert!(synthetic_page.agents.len() <= LIST_AGENTS_MAX_LIMIT);
+    assert!(synthetic_page.next_cursor.is_some());
+    assert_eq!(synthetic_page.total_count, expected_ids.len());
+}
+
+#[tokio::test]
+async fn environment_subagents_are_current_direct_stable_and_bounded() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+
+    let mut first_worker_id = None;
+    for index in 0..60 {
+        let thread_id = ThreadId::new();
+        first_worker_id.get_or_insert(thread_id);
+        let metadata = AgentMetadata {
+            agent_id: Some(thread_id),
+            parent_thread_id: Some(root_thread_id),
+            depth: Some(1),
+            agent_path: Some(
+                AgentPath::root()
+                    .join(format!("worker_{index:02}").as_str())
+                    .expect("worker path"),
+            ),
+            ..Default::default()
+        };
+        metadata
+            .lifecycle
+            .remember_cold_terminal_status(AgentStatus::Completed(None), true);
+        harness
+            .control
+            .state
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("worker slot")
+            .commit(metadata);
+    }
+    let grandchild = AgentMetadata {
+        agent_id: Some(ThreadId::new()),
+        parent_thread_id: first_worker_id,
+        depth: Some(2),
+        agent_path: Some(
+            AgentPath::root()
+                .join("worker_00")
+                .and_then(|path| path.join("grandchild"))
+                .expect("grandchild path"),
+        ),
+        ..Default::default()
+    };
+    grandchild
+        .lifecycle
+        .remember_cold_terminal_status(AgentStatus::Completed(None), true);
+    harness
+        .control
+        .state
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("grandchild slot")
+        .commit(grandchild);
+
+    let rendered = harness
+        .control
+        .format_environment_context_subagents(root_thread_id)
+        .await;
+    let lines = rendered.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), ENVIRONMENT_SUBAGENTS_MAX_RECORDS + 1);
+    assert_eq!(lines[0], "- worker_00");
+    assert_eq!(lines[ENVIRONMENT_SUBAGENTS_MAX_RECORDS - 1], "- worker_24");
+    assert_eq!(
+        lines[ENVIRONMENT_SUBAGENTS_MAX_RECORDS],
+        "[35 additional current subagents omitted; use list_agents to inspect them]"
+    );
+    assert!(!rendered.contains("grandchild"));
+    assert!(rendered.len() <= ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES);
+}
+
+#[tokio::test]
+async fn environment_subagents_use_suffix_only_when_one_record_exceeds_byte_cap() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+    let metadata = AgentMetadata {
+        agent_id: Some(ThreadId::new()),
+        parent_thread_id: Some(root_thread_id),
+        depth: Some(1),
+        agent_path: Some(AgentPath::root().join("oversized").expect("oversized path")),
+        agent_nickname: Some("x".repeat(ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES * 2)),
+        ..Default::default()
+    };
+    metadata
+        .lifecycle
+        .remember_cold_terminal_status(AgentStatus::Completed(None), true);
+    harness
+        .control
+        .state
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("oversized slot")
+        .commit(metadata);
+
+    let rendered = harness
+        .control
+        .format_environment_context_subagents(root_thread_id)
+        .await;
+    assert_eq!(
+        rendered,
+        "[1 additional current subagents omitted; use list_agents to inspect them]"
+    );
+    assert!(rendered.len() <= ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES);
 }
 
 #[tokio::test]
@@ -1132,6 +1877,234 @@ async fn send_inter_agent_communication_without_turn_queues_message_without_trig
 }
 
 #[tokio::test]
+async fn cancelled_admitted_communication_finishes_target_and_registry_bookkeeping() {
+    let harness = AgentControlHarness::new().await;
+    let (thread_id, thread) = harness.start_thread().await;
+    let agent_path = AgentPath::try_from("/root/worker").expect("agent path");
+    harness
+        .control
+        .state
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("agent slot")
+        .commit(AgentMetadata {
+            agent_id: Some(thread_id),
+            agent_path: Some(agent_path.clone()),
+            ..Default::default()
+        });
+    let checkpoint_admission = Arc::clone(&thread.session.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        agent_path,
+        Vec::new(),
+        "cancellation-safe follow-up".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let sending = {
+        let control = harness.control.clone();
+        let communication = communication.clone();
+        tokio::spawn(async move {
+            control
+                .send_inter_agent_communication(
+                    thread_id,
+                    communication,
+                    AgentCommunicationContext::new(
+                        AgentCommunicationKind::Message,
+                        ThreadId::new(),
+                    ),
+                    /*parent_turn_id*/ None,
+                )
+                .await
+        })
+    };
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if !thread
+                .session
+                .checkpoint_submission_acknowledgements
+                .lock()
+                .expect("checkpoint submission acknowledgements")
+                .is_empty()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("communication should enqueue before cancellation");
+    sending.abort();
+    sending
+        .await
+        .expect_err("test should cancel the communication waiter");
+    drop(checkpoint_admission);
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let metadata_updated = harness
+                .control
+                .state
+                .agent_metadata_for_thread(thread_id)
+                .and_then(|metadata| metadata.last_task_message)
+                .as_deref()
+                == Some("cancellation-safe follow-up");
+            if metadata_updated && thread.session.input_queue.has_pending_mailbox_items().await {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cancelled waiter must not split target delivery from registry bookkeeping");
+    let (mailbox, parent_turn_id) = thread.session.input_queue.drain_mailbox_input_items().await;
+    assert_eq!(
+        mailbox,
+        vec![crate::session::TurnInput::InterAgentCommunication(
+            communication
+        )]
+    );
+    assert_eq!(parent_turn_id, None);
+}
+
+#[tokio::test]
+async fn cancelled_admitted_delivery_retains_terminal_completion_watcher() {
+    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let (child_thread_id, child_thread) = harness
+        .spawn_quiescent_pathless_v1_child(parent_thread_id, "initial cancellation fixture")
+        .await;
+    let lifecycle = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("child metadata")
+        .lifecycle;
+    let baseline_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            baseline_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: baseline_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("initial cancellation fixture complete".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        while lifecycle.completion_watcher_registered() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial child watcher should retire");
+
+    let checkpoint_admission = Arc::clone(&child_thread.session.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::root(),
+        Vec::new(),
+        "cancellation-safe watcher".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let sending = {
+        let control = harness.control.clone();
+        let config = harness.config.clone();
+        tokio::spawn(async move {
+            control
+                .deliver_inter_agent_communication_to_agent(
+                    config,
+                    child_thread_id,
+                    communication,
+                    AgentCommunicationContext::new(
+                        AgentCommunicationKind::Message,
+                        parent_thread_id,
+                    ),
+                    AgentInputDelivery::Interrupt,
+                    /*parent_turn_id*/ None,
+                )
+                .await
+        })
+    };
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if !child_thread
+                .session
+                .checkpoint_submission_acknowledgements
+                .lock()
+                .expect("checkpoint submission acknowledgements")
+                .is_empty()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("communication should wait behind checkpoint admission");
+    assert!(lifecycle.completion_watcher_registered());
+
+    sending.abort();
+    sending
+        .await
+        .expect_err("test should cancel only the delivery waiter");
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("completion after cancellation".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    assert!(lifecycle.completion_watcher_registered());
+    drop(checkpoint_admission);
+
+    let delivered = timeout(Duration::from_secs(5), async {
+        loop {
+            let history = parent_thread.session.clone_history().await;
+            if history_text_match_count(history.raw_items(), "completion after cancellation") == 1
+                && !lifecycle.has_pending_completion_status()
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        delivered.is_ok(),
+        "detached delivery owner should hand the terminal to exactly one watcher; registered={}, \
+         pending={}, status={:?}, parent_history={:#?}",
+        lifecycle.completion_watcher_registered(),
+        lifecycle.has_pending_completion_status(),
+        child_thread.agent_status().await,
+        parent_thread.session.clone_history().await.raw_items(),
+    );
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        history_text_match_count(
+            parent_thread.session.clone_history().await.raw_items(),
+            "completion after cancellation"
+        ),
+        1
+    );
+}
+
+#[tokio::test]
 async fn ensure_agent_loaded_reloads_registered_unloaded_agent() {
     let (home, mut config) = test_config().await;
     let _ = config.features.enable(Feature::MultiAgentV2);
@@ -1166,13 +2139,27 @@ async fn ensure_agent_loaded_reloads_registered_unloaded_agent() {
         .get_thread(spawned_agent.thread_id)
         .await
         .expect("child thread should exist");
-    child_thread
-        .inject_response_items(vec![assistant_message(
-            "child persisted",
-            Some(MessagePhase::FinalAnswer),
-        )])
+    harness
+        .control
+        .upgrade_for_tools()
+        .expect("thread manager should remain available")
+        .send_op(
+            spawned_agent.thread_id,
+            Op::ThreadSettings {
+                thread_settings: ThreadSettingsOverrides {
+                    model: Some("gpt-5.6-luna".to_string()),
+                    ..Default::default()
+                },
+            },
+            /*parent_turn_id*/ None,
+        )
         .await
-        .expect("child rollout should persist with v2 metadata");
+        .expect("child model setting should be persisted before reload");
+    child_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush before reload");
     child_thread
         .shutdown_and_wait()
         .await
@@ -1184,6 +2171,7 @@ async fn ensure_agent_loaded_reloads_registered_unloaded_agent() {
         .await
         .expect("child metadata should be readable");
     assert_eq!(stored_child.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(stored_child.model.as_deref(), Some("gpt-5.6-luna"));
 
     assert!(
         harness
@@ -1271,9 +2259,12 @@ async fn ensure_agent_loaded_reloads_registered_unloaded_agent() {
 }
 
 #[tokio::test]
-async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout() {
+async fn selected_v2_agent_identity_uses_index_without_reading_rollout() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     let state_db = harness
         .state_db
         .as_ref()
@@ -1350,16 +2341,28 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
         .await
         .expect("anonymous spawn edge should persist");
 
-    harness
-        .control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
+    assert!(
+        harness
+            .control
+            .state
+            .agent_metadata_for_thread(indexed_thread_id)
+            .is_none()
+    );
+    assert!(
+        harness
+            .control
+            .state
+            .agent_metadata_for_thread(anonymous_thread_id)
+            .is_none()
+    );
 
     let indexed_metadata = harness
         .control
-        .state
-        .agent_metadata_for_thread(indexed_thread_id)
-        .expect("indexed agent should be restored without reading its malformed rollout");
+        .ensure_open_agent_known_by_id(parent_thread_id, indexed_thread_id)
+        .await
+        .expect("selected indexed agent should register without reading its malformed rollout");
+    assert_eq!(indexed_metadata.parent_thread_id, Some(parent_thread_id));
+    assert_eq!(indexed_metadata.depth, Some(1));
     assert_eq!(indexed_metadata.agent_path, Some(indexed_path));
     assert_eq!(indexed_metadata.agent_role.as_deref(), Some("indexed-role"));
     assert_eq!(
@@ -1367,11 +2370,21 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
         Some("indexed-name")
     );
 
+    assert!(
+        harness
+            .control
+            .state
+            .agent_metadata_for_thread(anonymous_thread_id)
+            .is_none(),
+        "selecting one identity must not eagerly register its sibling"
+    );
     let anonymous_metadata = harness
         .control
-        .state
-        .agent_metadata_for_thread(anonymous_thread_id)
-        .expect("missing optional path and role should not require reading the rollout");
+        .ensure_open_agent_known_by_id(parent_thread_id, anonymous_thread_id)
+        .await
+        .expect("selected anonymous identity should not require reading its malformed rollout");
+    assert_eq!(anonymous_metadata.parent_thread_id, Some(parent_thread_id));
+    assert_eq!(anonymous_metadata.depth, Some(1));
     assert_eq!(anonymous_metadata.agent_path, None);
     assert_eq!(anonymous_metadata.agent_role, None);
     assert_eq!(
@@ -1383,14 +2396,14 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 }
 
 #[test]
-fn restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid() {
+fn selected_v2_agent_identity_falls_back_when_indexed_identity_is_invalid() {
     run_goal_supervisor_test(
-        "restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid",
-        restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid_inner(),
+        "selected_v2_agent_identity_falls_back_when_indexed_identity_is_invalid",
+        selected_v2_agent_identity_falls_back_when_indexed_identity_is_invalid_inner(),
     );
 }
 
-async fn restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid_inner() {
+async fn selected_v2_agent_identity_falls_back_when_indexed_identity_is_invalid_inner() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _) = harness.start_thread().await;
     let child_path = AgentPath::root()
@@ -1431,6 +2444,11 @@ async fn restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid_i
         .state
         .agent_metadata_for_thread(child_thread_id)
         .expect("fallback worker should have registered metadata");
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("fallback worker should become cold");
 
     for corrupt_source in [true, false] {
         let mut invalid_metadata = indexed_metadata.clone();
@@ -1444,22 +2462,13 @@ async fn restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid_i
             .await
             .expect("invalid indexed identity should persist");
 
-        let resumed_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-            CodexAuth::from_api_key("dummy"),
-            harness.config.model_provider.clone(),
-            harness.config.codex_home.to_path_buf(),
-            std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-            harness.state_db.clone(),
-        );
-        let resumed_control = resumed_manager.agent_control();
-        resumed_control
-            .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-            .await;
-
-        let restored_metadata = resumed_control
-            .state
-            .agent_metadata_for_thread(child_thread_id)
-            .expect("invalid indexed identity should fall back to rollout metadata");
+        let restored_metadata = harness
+            .control
+            .ensure_open_agent_known_by_id(parent_thread_id, child_thread_id)
+            .await
+            .expect("selected invalid indexed identity should fall back to rollout metadata");
+        assert_eq!(restored_metadata.parent_thread_id, Some(parent_thread_id));
+        assert_eq!(restored_metadata.depth, Some(1));
         assert_eq!(restored_metadata.agent_path, Some(child_path.clone()));
         assert_eq!(
             restored_metadata.agent_nickname,
@@ -1469,7 +2478,11 @@ async fn restore_v2_agent_metadata_falls_back_when_indexed_identity_is_invalid_i
             restored_metadata.agent_role,
             original_agent_metadata.agent_role
         );
-        assert_thread_not_loaded(&resumed_manager, child_thread_id).await;
+        assert_thread_not_loaded(&harness.manager, child_thread_id).await;
+        harness
+            .control
+            .state
+            .release_spawned_thread(child_thread_id);
     }
 }
 
@@ -1550,7 +2563,6 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
         .await;
     assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
     assert_eq!(report.timed_out, Vec::<ThreadId>::new());
-
     let resumed_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
         CodexAuth::from_api_key("dummy"),
         harness.config.model_provider.clone(),
@@ -1560,7 +2572,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     );
     let resumed_control = resumed_manager.agent_control();
     let resumed_parent_thread_id = resumed_control
-        .resume_agent_from_rollout(
+        .resume_root_from_rollout(
             harness.config.clone(),
             parent_thread_id,
             SessionSource::Exec,
@@ -1568,6 +2580,14 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
         .await
         .expect("v2 root resume should succeed");
     assert_eq!(resumed_parent_thread_id, parent_thread_id);
+    resumed_control.register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    assert_eq!(
+        resumed_control
+            .ensure_agent_known(parent_thread_id)
+            .expect("resumed root should register itself")
+            .agent_path,
+        Some(AgentPath::root())
+    );
     assert_ne!(
         resumed_control.get_status(parent_thread_id).await,
         AgentStatus::NotFound
@@ -1575,23 +2595,143 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
     assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
-    resumed_control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
-    for thread_id in [worker_thread_id, sibling_thread_id] {
-        assert!(resumed_control.ensure_agent_known(thread_id).is_ok());
+    assert!(
+        resumed_control
+            .current_agent_members()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        resumed_control
+            .format_environment_context_subagents(parent_thread_id)
+            .await,
+        "",
+        "persisted open edges must not become current environment members after resume"
+    );
+    for thread_id in [worker_thread_id, reviewer_thread_id, sibling_thread_id] {
+        assert!(resumed_control.get_agent_metadata(thread_id).is_none());
     }
+    assert!(
+        resumed_control
+            .ensure_new_agent_path_available(parent_thread_id, 1, Some(&worker_path))
+            .await
+            .is_err(),
+        "an unloaded persisted-open path must remain reserved"
+    );
+
+    let reviewer_metadata = resumed_control
+        .ensure_open_agent_known_by_id(parent_thread_id, reviewer_thread_id)
+        .await
+        .expect("one selected open descendant should resolve lazily");
+    assert_eq!(reviewer_metadata.parent_thread_id, Some(worker_thread_id));
+    assert_eq!(reviewer_metadata.agent_path, Some(reviewer_path));
+    assert!(
+        resumed_control
+            .get_agent_metadata(worker_thread_id)
+            .is_none()
+    );
+    assert!(
+        resumed_control
+            .get_agent_metadata(sibling_thread_id)
+            .is_none()
+    );
+    assert!(
+        resumed_control
+            .current_agent_members()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        resumed_control
+            .format_environment_context_subagents(parent_thread_id)
+            .await,
+        "",
+        "lazily selected cold identities must not become current environment members"
+    );
+
+    resumed_control
+        .ensure_open_agent_known_by_id(parent_thread_id, worker_thread_id)
+        .await
+        .expect("selected worker should resolve lazily");
 
     resumed_control
         .close_agent(worker_thread_id)
         .await
-        .expect("closing a restored sibling should succeed");
+        .expect("closing a selected subtree should succeed");
 
-    let closed_worker = resumed_control.ensure_agent_known(worker_thread_id);
-    let surviving_sibling = resumed_control.ensure_agent_known(sibling_thread_id);
-    assert!(closed_worker.is_err());
-    assert!(surviving_sibling.is_ok());
+    assert!(
+        resumed_control
+            .current_agent_members()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for thread_id in [worker_thread_id, reviewer_thread_id] {
+        assert!(
+            resumed_control
+                .ensure_open_agent_known_by_id(parent_thread_id, thread_id)
+                .await
+                .is_err()
+        );
+    }
+    assert!(
+        resumed_control
+            .ensure_open_agent_known_by_id(parent_thread_id, sibling_thread_id)
+            .await
+            .is_ok()
+    );
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
+    resumed_control
+        .ensure_new_agent_path_available(parent_thread_id, 1, Some(&worker_path))
+        .await
+        .expect("closing a subtree should release its canonical paths");
+
+    let report = resumed_manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
+    assert_eq!(report.timed_out, Vec::<ThreadId>::new());
+    let restarted_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        harness.config.model_provider.clone(),
+        harness.config.codex_home.to_path_buf(),
+        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        harness.state_db.clone(),
+    );
+    let restarted_control = restarted_manager.agent_control();
+    restarted_control
+        .resume_root_from_rollout(
+            harness.config.clone(),
+            parent_thread_id,
+            SessionSource::Exec,
+        )
+        .await
+        .expect("root should resume after closing one subtree");
+    assert!(
+        restarted_control
+            .current_agent_members()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    for thread_id in [worker_thread_id, reviewer_thread_id] {
+        assert!(
+            restarted_control
+                .ensure_open_agent_known_by_id(parent_thread_id, thread_id)
+                .await
+                .is_err(),
+            "closed descendants must remain closed after restart"
+        );
+    }
+    assert!(
+        restarted_control
+            .ensure_open_agent_known_by_id(parent_thread_id, sibling_thread_id)
+            .await
+            .is_ok(),
+        "closing one subtree must preserve unrelated branches"
+    );
 }
 
 #[tokio::test]
@@ -1694,7 +2834,7 @@ async fn spawn_agent_creates_thread_and_sends_prompt() {
 }
 
 #[tokio::test]
-async fn ephemeral_spawn_does_not_persist_agent_graph_edge() {
+async fn ephemeral_spawn_persists_only_permanent_close_tombstone() {
     let (home, mut config) = test_config().await;
     config.ephemeral = true;
     let harness = AgentControlHarness::new_with_config(home, config).await;
@@ -1727,6 +2867,56 @@ async fn ephemeral_spawn_does_not_persist_agent_graph_edge() {
         harness.manager.get_thread(child_thread_id).await.is_ok(),
         "ephemeral child should remain live"
     );
+    let metadata = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("ephemeral child should remain registered");
+    assert!(metadata.ephemeral);
+    metadata
+        .lifecycle
+        .remember_cold_terminal_status(AgentStatus::Completed(None), true);
+    let state = harness.control.upgrade().expect("manager should be live");
+    harness
+        .control
+        .unload_agent_thread(&state, child_thread_id)
+        .await
+        .expect("ephemeral child should unload");
+    assert_thread_not_loaded(&harness.manager, child_thread_id).await;
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_some()
+    );
+
+    let report = harness
+        .control
+        .close_agent_subtree(parent_thread_id, child_thread_id)
+        .await
+        .expect("cold ephemeral child should close with a durable tombstone");
+    assert_eq!(report.closed_agents, 1);
+    assert_eq!(report.closed_edges, 1);
+    assert_eq!(report.newly_closed_edges, 1);
+    assert_eq!(report.evicted_identities, 1);
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
+    assert_eq!(
+        harness
+            .state_db
+            .as_ref()
+            .expect("manager should retain state db")
+            .list_thread_spawn_children_with_status(
+                parent_thread_id,
+                DirectionalThreadSpawnEdgeStatus::PermanentlyClosed,
+            )
+            .await
+            .expect("permanent close tombstone should load"),
+        vec![child_thread_id]
+    );
 }
 
 #[tokio::test]
@@ -1735,7 +2925,8 @@ async fn spawn_agent_fork_from_paginated_parent_persists_reference_backed_model_
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     parent_thread
         .inject_user_message_without_turn("paginated parent context".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-paginated".to_string();
     parent_thread
@@ -1779,6 +2970,10 @@ async fn spawn_agent_fork_from_paginated_parent_persists_reference_backed_model_
                         permission_profile: PermissionProfile::workspace_write(),
                         active_permission_profile: None,
                         cwd: harness.config.cwd.clone(),
+                        environments: None,
+                        workspace_roots: Some(harness.config.workspace_roots.clone()),
+                        profile_workspace_roots: None,
+                        windows_sandbox_level: None,
                         reasoning_effort: None,
                         reasoning_summary: None,
                         personality: None,
@@ -1921,17 +3116,17 @@ async fn spawn_agent_fork_from_paginated_parent_persists_reference_backed_model_
         None,
         "reference materialization should preserve the parent's response item"
     );
-    let inherited_parent_context_count = logical_lines
+    let inherited_parent_context_count = child_model_history
         .iter()
-        .filter(|line| {
-            serde_json::to_string(&line.item)
+        .filter(|item| {
+            serde_json::to_string(item)
                 .expect("serialize rollout item")
                 .contains("paginated parent context")
         })
         .count();
     assert_eq!(
         inherited_parent_context_count, 1,
-        "the referenced parent context should materialize once"
+        "the referenced parent context should reconstruct once"
     );
     assert!(
         !copied_prefix.iter().any(|line| {
@@ -1977,6 +3172,19 @@ async fn spawn_agent_fork_from_paginated_parent_persists_reference_backed_model_
             .starts_with(&strip_response_item_ids(live_child_history.raw_items())),
         "cold resume should preserve the paginated child's materialized history and startup suffix"
     );
+    assert_eq!(
+        resumed_child_history
+            .raw_items()
+            .iter()
+            .filter(|item| {
+                serde_json::to_string(item)
+                    .expect("serialize response item")
+                    .contains("paginated parent context")
+            })
+            .count(),
+        1,
+        "cold resume should reconstruct the referenced parent context once"
+    );
     let _ = harness
         .control
         .shutdown_live_agent(resumed_child_thread_id)
@@ -1994,7 +3202,8 @@ async fn spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginate
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     parent_thread
         .inject_user_message_without_turn("parent-only context".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
 
     let child_thread_id = harness
         .spawn_anonymous_child(
@@ -2066,6 +3275,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }),
             RolloutItem::ResponseItem(ResponseItem::Message {
                 id: None,
@@ -2176,7 +3386,8 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
     let parent_thread = new_thread.thread;
     parent_thread
         .inject_user_message_without_turn("parent seed context".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-history".to_string();
     let trigger_message = InterAgentCommunication::new(
@@ -2411,10 +3622,11 @@ async fn spawn_agent_full_history_fork_uses_compact_reference_and_materializes_p
             internal_chat_message_metadata_passthrough: None,
         },
     ]);
-    assert_eq!(
-        strip_response_item_ids(history.raw_items()),
-        strip_response_item_ids(expected_history.as_slice()),
-        "full-history forked child history should preserve the exact parent prefix before adding child-specific context"
+    let stripped_history = strip_response_item_ids(history.raw_items());
+    let stripped_expected_history = strip_response_item_ids(expected_history.as_slice());
+    assert!(
+        stripped_history.starts_with(&stripped_expected_history),
+        "full-history forked child history should preserve the exact parent prefix before adding child-specific context: expected prefix={stripped_expected_history:#?}, actual={stripped_history:#?}"
     );
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
@@ -2562,7 +3774,8 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt_
     let parent_thread = new_thread.thread;
     parent_thread
         .inject_user_message_without_turn("parent seed context".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     parent_thread.session.ensure_rollout_materialized().await;
     parent_thread
         .session
@@ -2915,2677 +4128,15 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
             .await
             .expect("stale supervisor edge should persist");
     }
-    harness
-        .control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
-    assert!(
-        harness
-            .control
-            .state
-            .agent_id_for_path(&supervisor_path)
-            .is_some_and(|thread_id| stale_helper_thread_ids.contains(&thread_id)),
-        "cold restore should reproduce the stale canonical path collision"
-    );
     for stale_helper_thread_id in stale_helper_thread_ids {
-        assert_eq!(
-            harness.control.get_status(stale_helper_thread_id).await,
-            AgentStatus::NotFound,
-            "restored supervisor metadata must not be mistaken for a live helper"
-        );
-    }
-
-    let replacement_thread_id =
-        crate::goal_supervisor::spawn_supervisor_helper_for_test(&parent_thread.session, &goal)
-            .await
-            .expect("new supervisor spawn should reconcile stale persisted state");
-
-    assert!(!stale_helper_thread_ids.contains(&replacement_thread_id));
-    let open_children = state_db
-        .list_thread_spawn_children_with_status(
-            parent_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        )
-        .await
-        .expect("open child query should succeed");
-    let closed_children = state_db
-        .list_thread_spawn_children_with_status(
-            parent_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
-        )
-        .await
-        .expect("closed child query should succeed");
-    for stale_helper_thread_id in stale_helper_thread_ids {
-        assert!(!open_children.contains(&stale_helper_thread_id));
-        assert!(closed_children.contains(&stale_helper_thread_id));
-    }
-}
-
-#[test]
-fn goal_supervisor_reconciliation_preserves_running_supervisor_and_worker() {
-    run_goal_supervisor_test(
-        "goal_supervisor_reconciliation_preserves_running_supervisor_and_worker",
-        goal_supervisor_reconciliation_preserves_running_supervisor_and_worker_inner(),
-    );
-}
-
-async fn goal_supervisor_reconciliation_preserves_running_supervisor_and_worker_inner() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _) = harness.start_thread().await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("goal supervisor test requires state db");
-    let supervisor_path = AgentPath::root()
-        .join("goal_supervisor")
-        .expect("supervisor path");
-    let mut helper_config = harness.config.clone();
-    helper_config.ephemeral = true;
-    let helper_thread_id = harness
-        .control
-        .spawn_agent_with_metadata(
-            helper_config,
-            text_input("supervise"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(supervisor_path.clone()),
-                agent_nickname: None,
-                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-            })),
-            SpawnAgentOptions::default(),
-        )
-        .await
-        .expect("supervisor helper should spawn")
-        .thread_id;
-    let worker_thread_id = harness
-        .control
-        .spawn_agent_with_metadata(
-            harness.config.clone(),
-            text_input("work"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(AgentPath::root().join("worker").expect("worker path")),
-                agent_nickname: None,
-                agent_role: Some("worker".to_string()),
-            })),
-            SpawnAgentOptions::default(),
-        )
-        .await
-        .expect("worker should spawn")
-        .thread_id;
-    for child_thread_id in [helper_thread_id, worker_thread_id] {
-        state_db
-            .upsert_thread_spawn_edge(
-                parent_thread_id,
-                child_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Open,
-            )
-            .await
-            .expect("child edge should persist");
-    }
-    let foreign_supervisor_thread_id = ThreadId::new();
-    let foreign_supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id: ThreadId::new(),
-        depth: 1,
-        agent_path: Some(
-            AgentPath::root()
-                .join("foreign_goal_supervisor")
-                .expect("foreign supervisor path"),
-        ),
-        agent_nickname: None,
-        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-    });
-    let foreign_supervisor_metadata = codex_state::ThreadMetadataBuilder::new(
-        foreign_supervisor_thread_id,
-        harness
-            .config
-            .codex_home
-            .join(format!("{foreign_supervisor_thread_id}.jsonl"))
-            .to_path_buf(),
-        chrono::Utc::now(),
-        foreign_supervisor_source,
-    )
-    .build("openai");
-    state_db
-        .upsert_thread(&foreign_supervisor_metadata)
-        .await
-        .expect("foreign supervisor metadata should persist");
-    state_db
-        .upsert_thread_spawn_edge(
-            parent_thread_id,
-            foreign_supervisor_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        )
-        .await
-        .expect("inaccurate foreign supervisor edge should persist");
-
-    let first_result = harness
-        .control
-        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
-        .await
-        .expect("first reconciliation should succeed");
-    let second_result = harness
-        .control
-        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
-        .await
-        .expect("second reconciliation should be idempotent");
-
-    assert_eq!(first_result, Some(helper_thread_id));
-    assert_eq!(second_result, Some(helper_thread_id));
-    let open_children = state_db
-        .list_thread_spawn_children_with_status(
-            parent_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        )
-        .await
-        .expect("open child query should succeed");
-    assert!(open_children.contains(&helper_thread_id));
-    assert!(open_children.contains(&worker_thread_id));
-    assert!(
-        open_children.contains(&foreign_supervisor_thread_id),
-        "reconciliation must not trust an inaccurate edge over the stored supervisor parent"
-    );
-}
-
-#[test]
-fn goal_supervisor_execution_settings_change_restarts_running_helper() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_execution_settings_change_restarts_running_helper",
-        goal_supervisor_execution_settings_change_restarts_running_helper_inner(),
-    )
-}
-
-async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner()
--> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let delayed_response = Duration::from_secs(30);
-    let request_log = mount_response_sequence(
-        &server,
-        vec![
-            sse_response(sse(vec![
-                ev_response_created("resp-before-settings-change"),
-                ev_completed("resp-before-settings-change"),
-            ]))
-            .set_delay(delayed_response),
-            sse_response(sse(vec![
-                ev_response_created("resp-after-settings-change"),
-                ev_completed("resp-after-settings-change"),
-            ]))
-            .set_delay(delayed_response),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.ensure_rollout_materialized().await;
-    parent_thread.flush_rollout().await?;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("goal supervisor test requires state db");
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Restart the supervisor when execution settings change.",
-    )
-    .await?;
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent_thread.session, &goal_id, &goal)
-        .await?;
-    let first_helper_thread_id =
-        spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    timeout(Duration::from_secs(5), async {
-        while request_log.requests().is_empty() {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("first supervisor request should start");
-
-    let original_model = parent_thread.session.thread_config_snapshot().await.model;
-    let next_model = if original_model == "gpt-5.4" {
-        "gpt-5.2"
-    } else {
-        "gpt-5.4"
-    };
-    let settings_changed_at = Instant::now();
-    parent_thread
-        .submit(Op::ThreadSettings {
-            thread_settings: ThreadSettingsOverrides {
-                model: Some(next_model.to_string()),
-                effort: Some(Some(ReasoningEffort::High)),
-                service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
-                ..Default::default()
-            },
-        })
-        .await?;
-    timeout(Duration::from_secs(5), async {
-        while !harness
-            .manager
-            .captured_ops()
-            .into_iter()
-            .any(|(thread_id, op)| {
-                thread_id == first_helper_thread_id && matches!(op, Op::Shutdown)
-            })
-        {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("settings update should stop the running supervisor helper");
-
-    let replacement_started = timeout(Duration::from_secs(5), async {
-        while request_log.requests().len() < 2 {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-    assert!(
-        replacement_started.is_ok(),
-        "replacement supervisor request should start before the old response finishes: threads={:?}, ops={:?}",
-        harness.manager.list_thread_ids().await,
-        harness.manager.captured_ops(),
-    );
-    assert!(settings_changed_at.elapsed() < delayed_response);
-
-    let requests = request_log.requests();
-    assert_eq!(requests.len(), 2);
-    let replacement_body = requests[1].body_json();
-    assert_eq!(replacement_body["model"].as_str(), Some(next_model));
-    assert_eq!(
-        replacement_body["reasoning"]["effort"].as_str(),
-        Some("high")
-    );
-    assert_eq!(
-        replacement_body["service_tier"].as_str(),
-        Some(ServiceTier::Fast.request_value())
-    );
-
-    let _ = harness
-        .manager
-        .shutdown_all_threads_bounded(Duration::from_secs(5))
-        .await;
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_waits_for_parent_turn_to_finish() {
-    run_goal_supervisor_test(
-        "goal_supervisor_waits_for_parent_turn_to_finish",
-        goal_supervisor_waits_for_parent_turn_to_finish_inner(),
-    );
-}
-
-async fn goal_supervisor_waits_for_parent_turn_to_finish_inner() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread
-        .session
-        .flush_rollout()
-        .await
-        .expect("parent rollout should flush");
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Wait for the parent turn, then continue.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
-    let parent_only = harness.manager.list_thread_ids().await;
-    *parent_thread.session.active_turn.lock().await = Some(ActiveTurn::default());
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        "goal-supervisor-busy-parent-test",
-        &goal,
-    )
-    .await
-    .expect("busy parent should defer the supervisor");
-
-    assert_eq!(harness.manager.list_thread_ids().await, parent_only);
-
-    *parent_thread.session.active_turn.lock().await = None;
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        "goal-supervisor-busy-parent-test",
-        &goal,
-    )
-    .await
-    .expect("idle parent should start the deferred supervisor");
-
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
-    assert!(harness.manager.get_thread(helper_thread_id).await.is_ok());
-}
-
-#[test]
-fn goal_supervisor_finish_serializes_with_the_next_start() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_finish_serializes_with_the_next_start",
-        goal_supervisor_finish_serializes_with_the_next_start_inner(),
-    )
-}
-
-async fn goal_supervisor_finish_serializes_with_the_next_start_inner() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let delayed_response = Duration::from_secs(30);
-    let request_log = mount_response_sequence(
-        &server,
-        vec![
-            sse_response(sse(vec![
-                ev_response_created("first-supervisor"),
-                ev_completed("first-supervisor"),
-            ]))
-            .set_delay(delayed_response),
-            sse_response(sse(vec![
-                ev_response_created("replacement-supervisor"),
-                ev_completed("replacement-supervisor"),
-            ]))
-            .set_delay(delayed_response),
-            sse_response(sse(vec![
-                ev_response_created("post-followup-supervisor"),
-                ev_completed("post-followup-supervisor"),
-            ]))
-            .set_delay(delayed_response),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.ensure_rollout_materialized().await;
-    parent_thread.flush_rollout().await?;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("goal supervisor test requires state db");
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Serialize supervisor retirement and replacement.",
-    )
-    .await?;
-    let parent_only = harness.manager.list_thread_ids().await;
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let first_helper_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
-    timeout(Duration::from_secs(5), async {
-        while request_log.requests().is_empty() {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("first supervisor request should start");
-
-    let transition =
-        crate::goal_supervisor::hold_supervisor_transition_for_test(&parent_thread.session).await;
-    let finish_session = Arc::clone(&parent_thread.session);
-    let finish_task = tokio::spawn(async move {
-        crate::goal_supervisor::finish_supervisor_helper(&finish_session, first_helper_thread_id)
-            .await
-    });
-    tokio::task::yield_now().await;
-    assert!(
-        !finish_task.is_finished(),
-        "supervisor retirement must wait for the lifecycle transition lock"
-    );
-    drop(transition);
-    assert!(
-        finish_task.await.expect("finish task should not panic")?,
-        "the active supervisor should retire"
-    );
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let replacement_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
-    assert_ne!(replacement_thread_id, first_helper_thread_id);
-    timeout(Duration::from_secs(5), async {
-        while request_log.requests().len() < 2 {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("replacement supervisor request should start");
-
-    crate::goal_supervisor::record_followup_action(
-        &parent_thread.session,
-        &InterAgentCommunication::new(
-            AgentPath::root()
-                .join("goal_supervisor")
-                .expect("supervisor path"),
-            AgentPath::root(),
-            Vec::new(),
-            "continue".to_string(),
-            /*trigger_turn*/ true,
-        ),
-    )
-    .await;
-    assert!(
-        crate::goal_supervisor::finish_supervisor_helper_after_followup(
-            &parent_thread.session,
-            replacement_thread_id,
-        )
-        .await?,
-        "the replacement supervisor should retire after its followup"
-    );
-    timeout(Duration::from_secs(5), async {
-        while request_log.requests().len() < 3 {
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("idle recheck should replace a supervisor after its delivered followup");
-
-    let _ = harness
-        .manager
-        .shutdown_all_threads_bounded(Duration::from_secs(5))
-        .await;
-    Ok(())
-}
-
-#[test]
-fn successful_supervisor_parent_compaction_is_recorded() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "successful_supervisor_parent_compaction_is_recorded",
-        successful_supervisor_parent_compaction_is_recorded_inner(),
-    )
-}
-
-async fn successful_supervisor_parent_compaction_is_recorded_inner() -> anyhow::Result<()> {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Record parent compaction in supervisor continuity.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        "parent-compaction-goal",
-        &goal,
-    )
-    .await?;
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    let result = harness
-        .control
-        .compact_parent_for_goal_supervisor_helper(helper_thread_id)
-        .await?;
-    assert_matches!(
-        result,
-        SupervisorParentCompactionResult::Submitted {
-            parent_thread_id: submitted_parent_thread_id,
-            ..
-        } if submitted_parent_thread_id == parent_thread_id
-    );
-    assert!(
-        harness
-            .manager
-            .captured_ops()
-            .iter()
-            .any(|(thread_id, op)| { *thread_id == parent_thread_id && matches!(op, Op::Compact) })
-    );
-
-    let continuity_text = goal_supervisor_continuity_text_for_test(
-        &parent_thread.session,
-        "parent-compaction-goal",
-        &goal,
-    )
-    .await;
-    assert!(continuity_text.contains("\"kind\": \"compact_parent_context\""));
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_snooze_history_preserves_backoff_after_unchanged_parent_poll()
--> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_snooze_history_preserves_backoff_after_unchanged_parent_poll",
-        goal_supervisor_snooze_history_preserves_backoff_after_unchanged_parent_poll_inner(),
-    )
-}
-
-async fn goal_supervisor_snooze_history_preserves_backoff_after_unchanged_parent_poll_inner()
--> anyhow::Result<()> {
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Continue scheduled work without repeating unchanged checks.",
-    )
-    .await?;
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    let reason = format!(
-        "external API\nreturned\tno new results:\r {}",
-        "\u{1F980}".repeat(256)
-    );
-    assert_eq!(
-        harness
-            .control
-            .snooze_goal_supervisor_helper(
-                helper_thread_id,
-                /*delay_seconds*/ 60,
-                Some(reason.as_str()),
-            )
-            .await,
-        Some(60),
-    );
-
-    let expected_reason = reason
-        .split_whitespace()
-        .flat_map(|word| word.chars().chain(std::iter::once(' ')))
-        .filter(|character| !character.is_control())
-        .take(120)
-        .collect::<String>()
-        .trim_end()
-        .to_string();
-    let expected_snooze = format!("Snooze 60s: {expected_reason}");
-    let parent_history = parent_thread.session.clone_history().await;
-    let snooze_messages = parent_history
-        .raw_items()
-        .iter()
-        .filter_map(|item| match item {
-            ResponseItem::Message { role, content, .. } if role == "assistant" => {
-                InterAgentCommunication::from_message_content(content)
-            }
-            _ => None,
-        })
-        .filter(|communication| communication.author.as_str() == "/root/goal_supervisor")
-        .collect::<Vec<_>>();
-    assert_eq!(
-        snooze_messages.len(),
-        1,
-        "one supervisor snooze should produce exactly one model-visible parent message"
-    );
-    let snooze_message = &snooze_messages[0];
-    assert_eq!(snooze_message.recipient, AgentPath::root());
-    assert_eq!(snooze_message.content, expected_snooze);
-    assert!(
-        !snooze_message.content.chars().any(char::is_control),
-        "a snooze must remain a compact, single-line history message"
-    );
-    assert!(
-        !snooze_message.trigger_turn,
-        "recording a snooze must not wake the parent agent"
-    );
-    assert!(
-        parent_thread.session.active_turn.lock().await.is_none(),
-        "recording a snooze must leave the parent agent idle"
-    );
-    assert!(
-        harness
-            .manager
-            .captured_ops()
-            .iter()
-            .all(|(thread_id, op)| {
-                *thread_id != parent_thread_id
-                    || !matches!(
-                        op,
-                        Op::UserInput { .. } | Op::InterAgentCommunication { .. }
-                    )
-            }),
-        "recording a snooze must not submit a parent user turn or queue parent mail"
-    );
-
-    parent_thread.flush_rollout().await?;
-    let rollout_path = parent_thread
-        .rollout_path()
-        .expect("the parent rollout should be materialized");
-    let codex_protocol::protocol::InitialHistory::Resumed(persisted_history) =
-        RolloutRecorder::get_rollout_history(&rollout_path).await?
-    else {
-        anyhow::bail!("the parent rollout should reconstruct as resumed history");
-    };
-    assert!(
-        persisted_history.history.iter().any(|item| {
-            let RolloutItem::ResponseItem(ResponseItem::Message { role, content, .. }) = item
-            else {
-                return false;
-            };
-            role == "assistant"
-                && InterAgentCommunication::from_message_content(content).is_some_and(
-                    |communication| {
-                        communication.author.as_str() == "/root/goal_supervisor"
-                            && communication.content == expected_snooze
-                            && !communication.trigger_turn
-                    },
-                )
-        }),
-        "the compact snooze message must survive rollout persistence"
-    );
-    assert!(
-        !persisted_history.history.iter().any(|item| matches!(
-            item,
-            RolloutItem::EventMsg(EventMsg::Warning(warning))
-                if warning.message.starts_with("Supervisor snoozed for ")
-        )),
-        "a snooze must not also produce a duplicate warning"
-    );
-
-    let continuity_text =
-        goal_supervisor_continuity_text_for_test(&parent_thread.session, &goal_id, &goal).await;
-    let continuity_json = continuity_text
-        .strip_prefix("# Goal Supervisor Continuity\n\n")
-        .expect("supervisor continuity should contain a JSON developer message");
-    let continuity: serde_json::Value = serde_json::from_str(continuity_json)?;
-    assert_eq!(continuity["previous_supervisor_action"]["kind"], "snooze");
-    assert_eq!(
-        continuity["previous_supervisor_action"]["snoozed_seconds"],
-        60
-    );
-    assert_eq!(
-        continuity["goal_timing"]["snooze_count_since_goal_created"],
-        1
-    );
-    assert_eq!(
-        continuity["goal_timing"]["snoozed_seconds_since_goal_created"],
-        60
-    );
-    assert_eq!(
-        continuity["parent_timing"]["snooze_count_since_last_parent_message"],
-        1
-    );
-    assert_eq!(
-        continuity["parent_timing"]["snoozed_seconds_since_last_parent_message"],
-        60
-    );
-
-    let parent_completion = RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
-        turn_id: "unchanged-parent-poll".to_string(),
-        last_agent_message: Some("The external API returned no new results.".to_string()),
-        error: None,
-        started_at: None,
-        completed_at: Some(chrono::Utc::now().timestamp().saturating_add(1)),
-        duration_ms: None,
-        time_to_first_token_ms: None,
-    }));
-    let continuity_item = crate::goal_supervisor::supervisor_continuity_context_item(
-        &parent_thread.session,
-        &goal_id,
-        &goal,
-        &[parent_completion],
-    )
-    .await;
-    let RolloutItem::ResponseItem(ResponseItem::Message { content, .. }) = continuity_item else {
-        anyhow::bail!("supervisor continuity should be a developer message");
-    };
-    let updated_continuity_text = content
-        .into_iter()
-        .find_map(|item| match item {
-            ContentItem::InputText { text } => Some(text),
-            _ => None,
-        })
-        .expect("supervisor continuity should contain text");
-    let updated_continuity_json = updated_continuity_text
-        .strip_prefix("# Goal Supervisor Continuity\n\n")
-        .expect("supervisor continuity should contain a JSON developer message");
-    let updated_continuity: serde_json::Value = serde_json::from_str(updated_continuity_json)?;
-    assert_eq!(
-        updated_continuity["parent_timing"]["snooze_count_since_last_parent_message"],
-        0
-    );
-    assert_eq!(
-        updated_continuity["parent_timing"]["snoozed_seconds_since_last_parent_message"],
-        0
-    );
-    assert_eq!(
-        updated_continuity["goal_timing"]["snooze_count_since_goal_created"], 1,
-        "an unchanged completed parent poll must not reset goal-lifetime backoff"
-    );
-    assert_eq!(
-        updated_continuity["goal_timing"]["snoozed_seconds_since_goal_created"], 60,
-        "an unchanged completed parent poll must preserve prior snooze duration"
-    );
-
-    let replacement_goal = state_db
-        .thread_goals()
-        .replace_thread_goal(
-            parent_thread_id,
-            "Begin a different recurring schedule.",
-            codex_state::ThreadGoalStatus::Active,
-            /*token_budget*/ None,
-        )
-        .await?;
-    let replacement_goal_id = replacement_goal.goal_id.clone();
-    let replacement_goal = crate::goal_supervisor::protocol_goal_from_state(replacement_goal);
-    let replacement_continuity_text = goal_supervisor_continuity_text_for_test(
-        &parent_thread.session,
-        &replacement_goal_id,
-        &replacement_goal,
-    )
-    .await;
-    let replacement_continuity_json = replacement_continuity_text
-        .strip_prefix("# Goal Supervisor Continuity\n\n")
-        .expect("replacement goal continuity should contain a JSON developer message");
-    let replacement_continuity: serde_json::Value =
-        serde_json::from_str(replacement_continuity_json)?;
-    assert!(
-        replacement_continuity["previous_supervisor_action"].is_null(),
-        "a new goal must not inherit a previous goal's supervisor action"
-    );
-    assert_eq!(
-        replacement_continuity["goal_timing"]["snooze_count_since_goal_created"], 0,
-        "a new goal must not inherit a previous goal's polling backoff"
-    );
-    assert_eq!(
-        replacement_continuity["goal_timing"]["snoozed_seconds_since_goal_created"], 0,
-        "a new goal must not inherit a previous goal's snooze duration"
-    );
-    assert_eq!(
-        replacement_continuity["parent_timing"]["snooze_count_since_last_parent_message"], 0,
-        "a new goal must not inherit a previous goal's parent-relative snooze count"
-    );
-    assert_eq!(
-        replacement_continuity["parent_timing"]["snoozed_seconds_since_last_parent_message"], 0,
-        "a new goal must not inherit a previous goal's parent-relative snooze duration"
-    );
-
-    let _ = parent_thread.submit(Op::Shutdown {}).await;
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit() {
-    run_goal_supervisor_test(
-        "goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit",
-        goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit_inner(),
-    );
-}
-
-async fn goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit_inner() {
-    let (home, mut config) = test_config().await;
-    config
-        .features
-        .enable(Feature::MultiAgentV2)
-        .expect("test config should allow multi-agent v2");
-    config
-        .features
-        .enable(Feature::Goals)
-        .expect("test config should allow goals");
-    config
-        .features
-        .enable(Feature::GoalSupervisor)
-        .expect("test config should allow goal supervisor");
-    config.agent_max_threads = None;
-    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
-    assert_eq!(
-        (
-            config.agent_max_threads,
-            config.multi_agent_v2.max_concurrent_threads_per_session,
-            config.effective_agent_max_threads(MultiAgentVersion::V2),
-        ),
-        (None, 2, Some(1))
-    );
-    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let worker_thread_id = ThreadId::new();
-    harness
-        .control
-        .state
-        .reserve_spawn_slot(Some(1))
-        .expect("the user-visible worker slot should be available")
-        .commit(AgentMetadata {
-            agent_id: Some(worker_thread_id),
-            ..Default::default()
-        });
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread
-        .session
-        .flush_rollout()
-        .await
-        .expect("parent rollout should flush");
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Verify supervisor thread accounting.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        "goal-supervisor-limit-test",
-        &goal,
-    )
-    .await
-    .expect("goal supervisor should bypass the user-visible agent limit");
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-
-    let err = match harness
-        .control
-        .state
-        .reserve_spawn_slot(config.effective_agent_max_threads(MultiAgentVersion::V2))
-    {
-        Ok(_) => panic!("the goal supervisor must not free the counted worker slot"),
-        Err(err) => err,
-    };
-    let CodexErrorDetails::AgentLimitReached { max_threads } = err.details() else {
-        panic!("expected AgentLimitReached");
-    };
-    assert_eq!(*max_threads, 1);
-    assert!(harness.manager.get_thread(helper_thread_id).await.is_ok());
-
-    harness
-        .control
-        .state
-        .release_spawned_thread(worker_thread_id);
-    let _ = harness.control.shutdown_live_agent(helper_thread_id).await;
-    let _ = parent_thread.submit(Op::Shutdown {}).await;
-}
-
-#[test]
-fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_goal_resume_clears_snooze_and_spawns_helper",
-        goal_supervisor_goal_resume_clears_snooze_and_spawns_helper_inner(),
-    )
-}
-
-async fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper_inner() -> anyhow::Result<()> {
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Resume the paused goal now.",
-    )
-    .await?;
-    state_db
-        .thread_goals()
-        .set_thread_goal_supervisor_snoozed_until_ms(
-            parent_thread_id,
-            goal_id.as_str(),
-            Some(chrono::Utc::now().timestamp_millis() + 60_000),
-        )
-        .await?;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let before_resume_thread_ids = harness.manager.list_thread_ids().await;
-    assert_eq!(
-        vec![parent_thread_id],
-        before_resume_thread_ids,
-        "plain idle continuation should honor the supervisor snooze"
-    );
-
-    parent_thread
-        .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
-        .await?;
-
-    let child_thread_id =
-        spawned_thread_id_after(&harness.manager, &before_resume_thread_ids).await;
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("supervisor helper thread should be registered");
-    let child_config = child_thread.config_snapshot().await;
-    assert_matches!(
-        child_config.session_source,
-        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            agent_role: Some(agent_role),
-            ..
-        }) if agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
-    );
-    assert_eq!(
-        None,
-        state_db
-            .thread_goals()
-            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
-            .await?,
-        "manual goal resume should clear the persisted supervisor snooze"
-    );
-    let _ = parent_thread.submit(Op::Shutdown {}).await;
-    Ok(())
-}
-
-#[test]
-fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "failed_goal_supervisor_waits_for_one_persisted_retry",
-        failed_goal_supervisor_waits_for_one_persisted_retry_inner(),
-    )
-}
-
-async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse_failed(
-                "supervisor-failure-1",
-                "model_not_found",
-                "saved model unavailable",
-            ),
-            sse_failed(
-                "supervisor-failure-2",
-                "model_not_found",
-                "saved model unavailable",
-            ),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    config.model_provider.request_max_retries = Some(0);
-    config.model_provider.stream_max_retries = Some(0);
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Keep retrying after transient supervisor failures.",
-    )
-    .await?;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-
-    let first_deadline_ms = timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(deadline_ms) = state_db
-                .thread_goals()
-                .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
-                .await?
-                && deadline_ms > chrono::Utc::now().timestamp_millis()
-                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
-            {
-                break Ok::<_, anyhow::Error>(deadline_ms);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await??;
-    assert_eq!(request_log.requests().len(), 1);
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        1
-    );
-    assert!(
-        first_deadline_ms - chrono::Utc::now().timestamp_millis() <= 60_000,
-        "first failure retry should use the one-minute backoff tier"
-    );
-    let persisted_goal = state_db
-        .thread_goals()
-        .get_thread_goal(parent_thread_id)
-        .await?
-        .expect("active goal should remain persisted");
-    assert_eq!(
-        persisted_goal.status,
-        codex_state::ThreadGoalStatus::Active,
-        "supervisor failure must not pause, block, or complete the goal"
-    );
-    let warning = timeout(Duration::from_secs(5), async {
-        loop {
-            let event = parent_thread
-                .next_event()
-                .await
-                .expect("parent event channel should stay open");
-            if let EventMsg::Warning(warning) = event.msg
-                && warning.message.contains("Goal supervisor check-in failed")
-            {
-                break warning.message;
-            }
-        }
-    })
-    .await
-    .expect("failed supervisor should warn the user");
-    assert!(warning.contains("saved model unavailable"));
-    assert!(warning.contains("Retrying in"));
-
-    let scheduled_generation =
-        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
-            &parent_thread.session,
-        )
-        .await
-        .expect("failure should schedule one retry wakeup");
-    for _ in 0..3 {
-        crate::goal_supervisor::maybe_start_supervisor_checkin(
-            &parent_thread.session,
-            goal_id.as_str(),
-            &goal,
-        )
-        .await?;
-    }
-    assert_eq!(
-        request_log.requests().len(),
-        1,
-        "idle signals before the deadline must not replace the failed helper"
-    );
-    assert_eq!(
-        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
-            &parent_thread.session,
-        )
-        .await,
-        Some(scheduled_generation),
-        "idle signals for the same deadline must reuse the existing sleeping timer"
-    );
-
-    state_db
-        .thread_goals()
-        .set_thread_goal_supervisor_snoozed_until_ms(
-            parent_thread_id,
-            goal_id.as_str(),
-            /*snoozed_until_ms*/ None,
-        )
-        .await?;
-    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&parent_thread.session).await;
-    for _ in 0..3 {
-        crate::goal_supervisor::maybe_start_supervisor_checkin(
-            &parent_thread.session,
-            goal_id.as_str(),
-            &goal,
-        )
-        .await?;
-    }
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if request_log.requests().len() == 2
-                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
-            {
-                break;
-            }
-            sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("second failed supervisor should finish");
-    let requests_after_retry = request_log.requests();
-    assert_eq!(
-        requests_after_retry.len(),
-        2,
-        "one failure retry should run after the in-memory deadline; loaded threads: {:?}; captured ops: {:?}",
-        harness.manager.list_thread_ids().await,
-        harness.manager.captured_ops(),
-    );
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
-    assert_eq!(
-        request_log.requests().len(),
-        2,
-        "duplicate idle signals must still produce exactly one retry"
-    );
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        2,
-        "the second implicit failure should advance the backoff tier"
-    );
-    Ok(())
-}
-
-#[test]
-fn goal_resume_clears_supervisor_failure_backoff() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_resume_clears_supervisor_failure_backoff",
-        goal_resume_clears_supervisor_failure_backoff_inner(),
-    )
-}
-
-async fn goal_resume_clears_supervisor_failure_backoff_inner() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse_failed(
-                "supervisor-failure-1",
-                "model_not_found",
-                "saved model unavailable",
-            ),
-            sse_failed(
-                "supervisor-failure-2",
-                "model_not_found",
-                "saved model unavailable",
-            ),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    config.model_provider.request_max_retries = Some(0);
-    config.model_provider.stream_max_retries = Some(0);
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Retry immediately when the user resumes this goal.",
-    )
-    .await?;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let first_deadline_ms = timeout(Duration::from_secs(5), async {
-        loop {
-            if let Some(deadline_ms) = state_db
-                .thread_goals()
-                .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
-                .await?
-                && deadline_ms > chrono::Utc::now().timestamp_millis()
-            {
-                break Ok::<_, anyhow::Error>(deadline_ms);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await??;
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        1
-    );
-    let delivered_parent_message = InterAgentCommunication::new(
-        AgentPath::root(),
-        AgentPath::root(),
-        Vec::new(),
-        "continue".to_string(),
-        /*trigger_turn*/ true,
-    );
-    crate::goal_supervisor::record_followup_action(
-        &parent_thread.session,
-        &delivered_parent_message,
-    )
-    .await;
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        0,
-        "a valid supervisor followup action should reset failure backoff"
-    );
-
-    parent_thread
-        .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
-        .await?;
-    let second_deadline_ms = timeout(Duration::from_secs(5), async {
-        loop {
-            if request_log.requests().len() == 2
-                && let Some(deadline_ms) = state_db
-                    .thread_goals()
-                    .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
-                    .await?
-                && deadline_ms != first_deadline_ms
-                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
-            {
-                break Ok::<_, anyhow::Error>(deadline_ms);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await??;
-    let second_delay_ms = second_deadline_ms - chrono::Utc::now().timestamp_millis();
-    assert!(
-        (0..=60_000).contains(&second_delay_ms),
-        "manual resume should reset the failure count to the one-minute tier, got {second_delay_ms}ms"
-    );
-    assert_eq!(request_log.requests().len(), 2);
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        1
-    );
-    Ok(())
-}
-
-#[test]
-fn goal_resume_replaces_a_terminal_owned_supervisor_without_backoff() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_resume_replaces_a_terminal_owned_supervisor_without_backoff",
-        goal_resume_replaces_a_terminal_owned_supervisor_without_backoff_inner(),
-    )
-}
-
-async fn goal_resume_replaces_a_terminal_owned_supervisor_without_backoff_inner()
--> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let request_log = mount_response_sequence(
-        &server,
-        vec![
-            sse_response(sse(vec![
-                ev_response_created("supervisor-running"),
-                ev_completed("supervisor-running"),
-            ]))
-            .set_delay(Duration::from_millis(250)),
-            sse_response(sse_failed(
-                "supervisor-replacement-failure",
-                "model_not_found",
-                "saved model unavailable",
-            )),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    config.model_provider.request_max_retries = Some(0);
-    config.model_provider.stream_max_retries = Some(0);
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Retry immediately when resume races a terminal supervisor.",
-    )
-    .await?;
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        goal_id.as_str(),
-        &goal,
-    )
-    .await?;
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    timeout(Duration::from_secs(5), async {
-        while request_log.requests().len() != 1 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("first supervisor request should start");
-
-    assert!(
-        harness
-            .manager
-            .remove_thread(&helper_thread_id)
-            .await
-            .is_some(),
-        "remove the first helper before its completion watcher retires it"
-    );
-    parent_thread
-        .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
-        .await
-        .expect("resume should replace the disappeared active helper");
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if request_log.requests().len() == 2
-                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("resume should start one immediate replacement");
-
-    assert_eq!(
-        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
-        1,
-        "the terminal helper retired by resume must not count as a failed retry"
-    );
-    Ok(())
-}
-
-#[test]
-#[serial(fork_env)]
-fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
-        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(),
-    )
-}
-
-async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner()
--> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-parent"),
-                ev_completed("resp-parent"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-child"),
-                ev_completed("resp-child"),
-            ]),
-        ],
-    )
-    .await;
-    let (_home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::AgentPromptInjection);
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    let mcp_server_path = config.codex_home.join("fake_mcp_server.py");
-    std::fs::write(
-        &mcp_server_path,
-        r#"import json
-import sys
-
-def read_message():
-    line = sys.stdin.buffer.readline()
-    if not line:
-        return None
-    return json.loads(line)
-
-def write_message(message):
-    body = json.dumps(message).encode("utf-8")
-    sys.stdout.buffer.write(body)
-    sys.stdout.buffer.write(b"\n")
-    sys.stdout.buffer.flush()
-
-while True:
-    message = read_message()
-    if message is None:
-        break
-    method = message.get("method")
-    request_id = message.get("id")
-    if request_id is None:
-        continue
-    if method == "initialize":
-        write_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "fake-mcp", "version": "1.0.0"},
-            },
-        })
-    elif method == "tools/list":
-        write_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "result": {
-                "tools": [{
-                    "name": "echo",
-                    "description": "Echo from fake MCP",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {},
-                        "additionalProperties": False,
-                    },
-                }],
-            },
-        })
-    else:
-        write_message({
-            "jsonrpc": "2.0",
-            "id": request_id,
-            "error": {"code": -32601, "message": "method not found"},
-        })
-"#,
-    )?;
-    config
-        .mcp_servers
-        .set(std::collections::HashMap::from([(
-            "rmcp".to_string(),
-            McpServerConfig {
-                auth: Default::default(),
-                transport: McpServerTransportConfig::Stdio {
-                    command: "python3".to_string(),
-                    args: vec![mcp_server_path.to_string_lossy().to_string()],
-                    env: None,
-                    env_vars: Vec::new(),
-                    cwd: None,
-                },
-                environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
-                enabled: true,
-                required: false,
-                supports_parallel_tool_calls: false,
-                omit_tools_from: None,
-                disabled_reason: None,
-                oauth: None,
-                startup_timeout_sec: Some(Duration::from_secs(5)),
-                tool_timeout_sec: None,
-                default_tools_approval_mode: None,
-                enabled_tools: None,
-                disabled_tools: None,
-                scopes: None,
-                oauth_resource: None,
-                tools: std::collections::HashMap::new(),
-            },
-        )]))
-        .expect("test config should allow MCP servers");
-
-    let state_db = init_state_db(&config)
-        .await
-        .expect("state db should initialize");
-    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.to_path_buf(),
-        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        Some(state_db.clone()),
-    );
-    let parent = manager
-        .start_thread(StartThreadOptions::new(config.clone()))
-        .await?;
-    let parent_thread_id = parent.thread_id;
-    let parent_prompt_cache_key = parent.thread.session.prompt_cache_key();
-    let mcp_runtime = Arc::clone(&parent.thread.session.services.mcp_runtime);
-    assert!(
-        mcp_runtime
-            .latest_wait_for_server_ready("rmcp", Duration::from_secs(5))
-            .await,
-        "parent MCP server should become ready before forking"
-    );
-    let parent_mcp_tools = mcp_runtime.latest_list_all_tools().await;
-    assert!(
-        parent_mcp_tools
-            .iter()
-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
-        "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
-    );
-    parent
-        .thread
-        .submit(text_input("parent seed").into())
-        .await?;
-    wait_for_turn_complete(parent.thread.as_ref()).await;
-    parent.thread.session.ensure_rollout_materialized().await;
-    parent.thread.session.flush_rollout().await?;
-    let before_thread_ids = manager.list_thread_ids().await;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        &state_db,
-        parent_thread_id,
-        &parent.thread.session,
-        "Supervise the parent with inherited MCP tools.",
-    )
-    .await?;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent.thread.session, &goal_id, &goal)
-        .await?;
-    let child_thread_id = spawned_thread_id_after(&manager, &before_thread_ids).await;
-    let child_thread = manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("child thread should be registered");
-    let child_mcp_tool_snapshot = child_thread
-        .session
-        .services
-        .mcp_tool_snapshot
-        .lock()
-        .await
-        .clone()
-        .expect("goal supervisor helper should inherit the parent MCP tool snapshot");
-    assert!(
-        child_mcp_tool_snapshot
-            .tools
-            .iter()
-            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
-        "goal supervisor helper should inherit the parent MCP tool snapshot"
-    );
-
-    timeout(Duration::from_secs(5), async {
-        loop {
-            let event = child_thread
-                .next_event()
-                .await
-                .expect("child event channel should stay open");
-            if matches!(event.msg, EventMsg::TurnComplete(_)) {
-                break;
-            }
-        }
-    })
-    .await
-    .expect("child turn should complete");
-    let requests = request_log.requests();
-    assert_eq!(requests.len(), 2);
-    let parent_body = requests[0].body_json();
-    let child_body = requests[1].body_json();
-    let parent_input = parent_body["input"]
-        .as_array()
-        .expect("parent input should be an array");
-    let child_input = child_body["input"]
-        .as_array()
-        .expect("child input should be an array");
-    let expected_prompt_cache_key = parent_prompt_cache_key.to_string();
-    assert_eq!(
-        child_body["prompt_cache_key"].as_str(),
-        Some(expected_prompt_cache_key.as_str())
-    );
-    assert_eq!(
-        &child_input[..parent_input.len()],
-        parent_input,
-        "goal supervisor helpers must preserve the exact parent request prefix through the fork point so the fork can reuse the parent prompt cache"
-    );
-    let child_suffix = &child_input[parent_input.len()..];
-    assert!(
-        child_suffix.first().is_some_and(|item| {
-            item["role"] == "developer"
-                && item["content"].as_array().is_some_and(|content| {
-                    content.iter().any(|content_item| {
-                        content_item["text"]
-                            .as_str()
-                            .is_some_and(|text| text.contains("You are also a **goal supervisor**"))
-                    })
-                })
-        }),
-        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
-    );
-    for unexpected_child_context in [
-        "# AGENTS.md instructions",
-        "<permissions instructions>",
-        "<apps_instructions>",
-        "<skills_instructions>",
-        "<plugins_instructions>",
-    ] {
         assert!(
-            child_suffix.iter().all(|item| {
-                item["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .all(|content_item| {
-                        content_item["text"]
-                            .as_str()
-                            .is_none_or(|text| !text.contains(unexpected_child_context))
-                    })
-            }),
-            "goal supervisor helpers must not append fresh child startup context after forking: found {unexpected_child_context} in suffix={child_suffix:#?}"
-        );
-    }
-    assert_eq!(
-        child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
-        "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
-    );
-    assert_eq!(
-        child_body["tools"], parent_body["tools"],
-        "goal supervisor helpers must keep the same serialized tool definitions, order, namespaces, and schemas as their parent"
-    );
-    let parent_tool_signatures = request_tool_signatures(&parent_body);
-    let child_tool_signatures = request_tool_signatures(&child_body);
-    assert_eq!(
-        child_tool_signatures, parent_tool_signatures,
-        "goal supervisor helpers are internal full-history forks and must keep the same eager tool surface as their parent so request prefixes stay cacheable"
-    );
-    for expected_tool in [
-        "collaboration.spawn_agent",
-        "collaboration.send_message",
-        "collaboration.followup_task",
-        "collaboration.wait_agent",
-        "collaboration.list_agents",
-        "collaboration.interrupt_agent",
-        "supervisor.close_self",
-        "supervisor.snooze",
-        "supervisor.compact_parent_context",
-    ] {
-        assert!(
-            child_tool_signatures.contains(expected_tool),
-            "expected forked child request to expose `{expected_tool}`; tools={child_tool_signatures:#?}"
-        );
-    }
-    assert!(
-        child_body["tools"].as_array().is_some_and(|tools| {
-            tools
-                .iter()
-                .any(|tool| tool["type"].as_str() == Some("tool_search"))
-        }),
-        "the inherited MCP snapshot should be discoverable through upstream tool_search: {child_body:#}"
-    );
-
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume",
-        goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_inner(),
-    )
-}
-
-async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_inner()
--> anyhow::Result<()> {
-    const ALIAS: &str = "frontier-local";
-    const OLD_BACKING: &str = "gpt-5.2-preview";
-    const NEW_BACKING: &str = "gpt-5.4-preview";
-    const OLD_GUIDANCE: &str = "Preserve the original alias-backed context.";
-    const NEW_GUIDANCE: &str = "Preserve the updated alias-backed context.";
-
-    let server = start_mock_server().await;
-    let request_log = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![
-                ev_response_created("resp-parent"),
-                ev_completed("resp-parent"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-supervisor"),
-                ev_completed("resp-supervisor"),
-            ]),
-            sse(vec![
-                ev_response_created("resp-resumed"),
-                ev_completed("resp-resumed"),
-            ]),
-        ],
-    )
-    .await;
-    let (home, mut config) = test_config().await;
-    let mut model_catalog = bundled_models_response()?;
-    for (slug, guidance) in [("gpt-5.2", OLD_GUIDANCE), ("gpt-5.4", NEW_GUIDANCE)] {
-        model_catalog
-            .models
-            .iter_mut()
-            .find(|model| model.slug == slug)
-            .and_then(|model| model.model_messages.as_mut())
-            .expect("backing model should expose model messages")
-            .token_budget = Some(ModelTokenBudgetConfig {
-            reminder_threshold_tokens: 6_144,
-            reminder_message_template: "Alias reminder: {n_remaining} tokens remain.".to_string(),
-            guidance_message: guidance.to_string(),
-            auto_compact_fallback_prompt: "Save state before rollover.".to_string(),
-            auto_compact_fallback_buffer_tokens: 16_384,
-        });
-    }
-    let _ = config.features.enable(Feature::AgentPromptInjection);
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    let _ = config.features.enable(Feature::TokenBudget);
-    config.model = Some(ALIAS.to_string());
-    config.model_catalog = Some(model_catalog);
-    config.custom_models.insert(
-        ALIAS.to_string(),
-        CustomModelConfig {
-            model: OLD_BACKING.to_string(),
-            model_context_window: Some(128_000),
-            model_auto_compact_token_limit: Some(100_000),
-        },
-    );
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-
-    let state_db = init_state_db(&config)
-        .await
-        .expect("state db should initialize");
-    let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
-    let manager = ThreadManager::new(
-        &config,
-        Arc::clone(&auth_manager),
-        crate::thread_manager::build_models_manager(&config, auth_manager),
-        crate::CodexAppsToolsCache::default(),
-        SessionSource::Exec,
-        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        empty_extension_registry(),
-        Arc::new(crate::test_support::EmptyUserInstructionsProvider),
-        /*analytics_events_client*/ None,
-        crate::thread_manager::thread_store_from_config(&config, Some(state_db.clone())),
-        crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
-        uuid::Uuid::new_v4().to_string(),
-        /*attestation_provider*/ None,
-        /*external_time_provider*/ None,
-    );
-    let control = manager.agent_control();
-    let harness = AgentControlHarness {
-        _home: home,
-        config: config.clone(),
-        state_db: Some(state_db),
-        manager,
-        control,
-    };
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let parent_prompt_cache_key = parent_thread.session.prompt_cache_key();
-    parent_thread
-        .submit(text_input("seed alias-backed guidance").into())
-        .await?;
-    wait_for_turn_complete(parent_thread.as_ref()).await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread.session.flush_rollout().await?;
-    let (_goal_id, _goal) = create_active_thread_goal_for_test(
-        state_db,
-        parent_thread_id,
-        &parent_thread.session,
-        "Keep the alias-backed parent progressing.",
-    )
-    .await?;
-    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-        parent_thread_id,
-        depth: 1,
-        agent_path: Some(
-            AgentPath::root()
-                .join(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
-                .expect("goal supervisor path should be valid"),
-        ),
-        agent_nickname: None,
-        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-    });
-    let child_thread_id = harness
-        .control
-        .spawn_agent_with_metadata(
-            config.clone(),
-            text_input("inspect the parent goal"),
-            Some(child_source.clone()),
-            SpawnAgentOptions {
-                fork_mode: Some(SpawnAgentForkMode::FullHistory),
-                parent_thread_id: Some(parent_thread_id),
-                ..Default::default()
-            },
-        )
-        .await?
-        .thread_id;
-    let child_thread = harness
-        .manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("goal supervisor helper should be registered");
-    let child_rollout_path = child_thread
-        .rollout_path()
-        .expect("segmented goal supervisor rollout should exist");
-    wait_for_turn_complete(child_thread.as_ref()).await;
-    child_thread.session.flush_rollout().await?;
-
-    let requests = request_log.requests();
-    assert_eq!(requests.len(), 2);
-    let parent_input = requests[0].input();
-    let child_input = requests[1].input();
-    assert_eq!(requests[0].body_json()["model"], OLD_BACKING);
-    assert_eq!(requests[1].body_json()["model"], OLD_BACKING);
-    assert_eq!(
-        &child_input[..parent_input.len()],
-        parent_input,
-        "goal supervisor full-history forks should preserve the exact parent request prefix"
-    );
-    assert_eq!(
-        requests[1].body_json()["prompt_cache_key"],
-        requests[0].body_json()["prompt_cache_key"]
-    );
-    assert_eq!(
-        child_thread.session.prompt_cache_key(),
-        parent_prompt_cache_key
-    );
-    assert_eq!(
-        requests[0]
-            .message_input_texts("developer")
-            .iter()
-            .filter(|text| text.contains(OLD_GUIDANCE))
-            .count(),
-        1,
-        "custom aliases should inherit their backing model's token-budget guidance"
-    );
-    assert_eq!(
-        requests[1]
-            .message_input_texts("developer")
-            .iter()
-            .filter(|text| text.contains(OLD_GUIDANCE))
-            .count(),
-        1,
-        "the supervisor fork should not duplicate inherited guidance"
-    );
-
-    let _ = harness.control.shutdown_live_agent(child_thread_id).await?;
-    let mut resumed_config = config;
-    resumed_config.custom_models.insert(
-        ALIAS.to_string(),
-        CustomModelConfig {
-            model: NEW_BACKING.to_string(),
-            model_context_window: Some(128_000),
-            model_auto_compact_token_limit: Some(100_000),
-        },
-    );
-    let resumed_thread_id = harness
-        .control
-        .resume_agent_from_rollout(resumed_config, child_thread_id, child_source)
-        .await?;
-    assert_eq!(resumed_thread_id, child_thread_id);
-    let resumed_thread = harness
-        .manager
-        .get_thread(resumed_thread_id)
-        .await
-        .expect("cold-resumed supervisor should be registered");
-    resumed_thread
-        .submit(text_input("inspect resumed alias guidance").into())
-        .await?;
-    wait_for_turn_complete(resumed_thread.as_ref()).await;
-    resumed_thread.session.flush_rollout().await?;
-
-    let requests = request_log.requests();
-    assert_eq!(requests.len(), 3);
-    assert_eq!(requests[2].body_json()["model"], NEW_BACKING);
-    let resumed_developer_texts = requests[2].message_input_texts("developer");
-    assert_eq!(
-        resumed_developer_texts
-            .iter()
-            .filter(|text| text.contains(OLD_GUIDANCE))
-            .count(),
-        1,
-        "cold resume should retain the original guidance once"
-    );
-    assert_eq!(
-        resumed_developer_texts
-            .iter()
-            .filter(|text| text.contains(NEW_GUIDANCE))
-            .count(),
-        1,
-        "cold resume should append the updated backing model guidance once"
-    );
-
-    let physical_items = RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
-        .await?
-        .0;
-    let reference_and_world_state = physical_items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                RolloutItem::RolloutReference(_) | RolloutItem::WorldState(_)
-            )
-        })
-        .collect::<Vec<_>>();
-    let [
-        RolloutItem::RolloutReference(_),
-        RolloutItem::WorldState(usage_hint_tombstone),
-        RolloutItem::WorldState(context_guidance),
-    ] = reference_and_world_state.as_slice()
-    else {
-        panic!(
-            "expected rollout reference, usage-hint tombstone, and updated context guidance: {reference_and_world_state:#?}"
-        );
-    };
-    assert!(!usage_hint_tombstone.full);
-    assert_eq!(
-        usage_hint_tombstone.state,
-        serde_json::json!({
-            "multi_agent_mode": {"usage_hint_hash": null},
-            "multi_agent_usage_hint": null,
-        })
-    );
-    assert!(!context_guidance.full);
-    assert_eq!(
-        context_guidance.state,
-        serde_json::json!({"context_window_guidance": NEW_GUIDANCE})
-    );
-
-    let _ = parent_thread.submit(Op::Shutdown {}).await?;
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id()
--> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id",
-        goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id_inner(),
-    )
-}
-
-async fn goal_supervisor_helper_websocket_request_reuses_parent_prompt_cache_key_without_parent_previous_response_id_inner()
--> anyhow::Result<()> {
-    let server = start_websocket_server(vec![
-        vec![
-            vec![
-                ev_response_created("warm-parent"),
-                ev_completed("warm-parent"),
-            ],
-            vec![
-                ev_response_created("resp-parent"),
-                ev_assistant_message("msg-parent", "parent done"),
-                ev_completed("resp-parent"),
-            ],
-        ],
-        vec![
-            vec![
-                ev_response_created("warm-supervisor"),
-                ev_completed("warm-supervisor"),
-            ],
-            vec![
-                ev_response_created("resp-supervisor"),
-                ev_completed("resp-supervisor"),
-            ],
-        ],
-    ])
-    .await;
-    let (_home, mut config) = test_config().await;
-    let _ = config.features.enable(Feature::MultiAgentV2);
-    let _ = config.features.enable(Feature::Goals);
-    let _ = config.features.enable(Feature::GoalSupervisor);
-    let _ = config.features.enable(Feature::Sqlite);
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = true;
-
-    let state_db = init_state_db(&config)
-        .await
-        .expect("state db should initialize");
-    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
-        CodexAuth::from_api_key("dummy"),
-        config.model_provider.clone(),
-        config.codex_home.to_path_buf(),
-        std::sync::Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
-        Some(state_db.clone()),
-    );
-    let parent = manager
-        .start_thread(StartThreadOptions::new(config))
-        .await?;
-    let parent_thread_id = parent.thread_id;
-    let parent_prompt_cache_key = parent.thread.session.prompt_cache_key();
-    parent
-        .thread
-        .submit(text_input("parent seed").into())
-        .await?;
-    wait_for_turn_complete(parent.thread.as_ref()).await;
-    parent.thread.session.ensure_rollout_materialized().await;
-    parent.thread.session.flush_rollout().await?;
-    let before_thread_ids = manager.list_thread_ids().await;
-    let (goal_id, goal) = create_active_thread_goal_for_test(
-        &state_db,
-        parent_thread_id,
-        &parent.thread.session,
-        "Supervise the parent with prompt cache inheritance.",
-    )
-    .await?;
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent.thread.session, &goal_id, &goal)
-        .await?;
-    let child_thread_id = spawned_thread_id_after(&manager, &before_thread_ids).await;
-    let child_thread = manager
-        .get_thread(child_thread_id)
-        .await
-        .expect("supervisor helper thread should be registered");
-    wait_for_turn_complete(child_thread.as_ref()).await;
-
-    let connections = server.connections();
-    let supervisor_connection = connections
-        .get(1)
-        .expect("supervisor helper should use its own websocket connection");
-    let supervisor_generated_request = supervisor_connection
-        .iter()
-        .map(core_test_support::responses::WebSocketRequest::body_json)
-        .find(|body| body["generate"].as_bool() != Some(false))
-        .unwrap_or_else(|| {
-            panic!(
-                "goal supervisor helper should send a generated websocket request after warmup; supervisor requests={supervisor_connection:#?}"
-            )
-        });
-    assert_ne!(
-        supervisor_generated_request["previous_response_id"].as_str(),
-        Some("resp-parent"),
-        "goal supervisor helpers must not reuse a parent websocket previous_response_id on their own websocket connection"
-    );
-    assert_eq!(
-        supervisor_generated_request["prompt_cache_key"].as_str(),
-        Some(parent_prompt_cache_key.to_string().as_str()),
-        "goal supervisor helpers must keep the parent prompt cache key across websocket connections"
-    );
-    assert!(
-        request_tool_signatures(&supervisor_generated_request).contains("supervisor.close_self"),
-        "goal supervisor helper websocket requests must retain the supervisor tool namespace"
-    );
-
-    server.shutdown().await;
-    Ok(())
-}
-
-#[test]
-fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt() {
-    run_goal_supervisor_test(
-        "goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt",
-        goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt_inner(),
-    );
-}
-
-async fn goal_supervisor_helper_uses_full_history_fork_without_duplicate_prompt_inner() {
-    let harness = AgentControlHarness::new().await;
-    let mut parent_config = harness.config.clone();
-    let _ = parent_config.features.enable(Feature::AgentPromptInjection);
-    let _ = parent_config.features.enable(Feature::Goals);
-    let _ = parent_config.features.enable(Feature::GoalSupervisor);
-    let new_thread = harness
-        .manager
-        .start_thread(StartThreadOptions::new(parent_config))
-        .await
-        .expect("start parent thread");
-    let parent_thread_id = new_thread.thread_id;
-    let parent_thread = new_thread.thread;
-    parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
-        .await;
-    parent_thread.session.ensure_rollout_materialized().await;
-    parent_thread
-        .session
-        .flush_rollout()
-        .await
-        .expect("parent rollout should flush");
-    let before_thread_ids = harness.manager.list_thread_ids().await;
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Ship the active user goal.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
-
-    crate::goal_supervisor::maybe_start_supervisor_checkin(
-        &parent_thread.session,
-        "goal-supervisor-test",
-        &goal,
-    )
-    .await
-    .expect("goal supervisor helper should spawn");
-
-    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
-    let helper_thread = harness
-        .manager
-        .get_thread(helper_thread_id)
-        .await
-        .expect("supervisor helper thread should be registered");
-    assert_eq!(
-        helper_thread.session.prompt_cache_key(),
-        parent_thread.session.prompt_cache_key(),
-        "goal supervisor helpers are internal full-history forks and must keep the parent prompt cache key"
-    );
-
-    let helper_history = helper_thread.session.clone_history().await;
-    assert!(
-        helper_history.raw_items().iter().any(|item| matches!(
-            item,
-            ResponseItem::Message { role, content, .. }
-                if role == "user"
-                    && content.iter().any(|content_item| matches!(
-                        content_item,
-                        ContentItem::InputText { text } if text == "parent seed context"
-                    ))
-        )),
-        "goal supervisor helpers must inherit the parent conversation prefix before their supervisor assignment"
-    );
-    let supervisor_prompt =
-        crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
-    let supervisor_prompt_count = helper_history
-        .raw_items()
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                ResponseItem::Message { role, content, .. }
-                    if role == "developer"
-                        && content.iter().any(|content_item| matches!(
-                            content_item,
-                            ContentItem::InputText { text } if text == &supervisor_prompt
-                        ))
-            )
-        })
-        .count();
-    assert_eq!(
-        supervisor_prompt_count, 1,
-        "the supervisor prompt should be injected once as the helper role prompt; duplicating it in the user assignment changes the post-fork context"
-    );
-    assert!(helper_history.raw_items().iter().any(|item| matches!(
-        item,
-        ResponseItem::FunctionCall { name, call_id, .. }
-            if name == "list_agents" && call_id == "synthetic_supervisor_list_agents"
-    )));
-
-    let captured_input = harness
-        .manager
-        .captured_ops()
-        .into_iter()
-        .find_map(|(thread_id, op)| {
-            if thread_id != helper_thread_id {
-                return None;
-            }
-            match op {
-                Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
-                    UserInput::Text { text, .. } => Some(text),
-                    UserInput::Image { .. }
-                    | UserInput::LocalImage { .. }
-                    | UserInput::Skill { .. }
-                    | UserInput::Mention { .. } => None,
-                    _ => None,
-                }),
-                _ => None,
-            }
-        })
-        .expect("supervisor helper assignment should be submitted as user input");
-    assert!(captured_input.contains("# Goal Supervisor Assignment"));
-    assert!(captured_input.contains("Ship the active user goal."));
-    assert!(
-        !captured_input.contains("You are also a **goal supervisor**"),
-        "the supervisor role prompt must not be copied into the helper assignment"
-    );
-}
-
-#[test]
-fn finished_ephemeral_goal_supervisor_closes_persisted_spawn_edge() {
-    run_goal_supervisor_test(
-        "finished_ephemeral_goal_supervisor_closes_persisted_spawn_edge",
-        finished_ephemeral_goal_supervisor_closes_persisted_spawn_edge_inner(),
-    );
-}
-
-async fn finished_ephemeral_goal_supervisor_closes_persisted_spawn_edge_inner() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, _) = harness.start_thread().await;
-    let supervisor_path = AgentPath::root()
-        .join("goal_supervisor")
-        .expect("supervisor path");
-    let mut helper_config = harness.config.clone();
-    helper_config.ephemeral = true;
-    let helper_thread_id = harness
-        .control
-        .spawn_agent_with_metadata(
-            helper_config,
-            text_input("supervise"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: Some(supervisor_path),
-                agent_nickname: None,
-                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-            })),
-            SpawnAgentOptions::default(),
-        )
-        .await
-        .expect("supervisor helper should spawn")
-        .thread_id;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("goal supervisor test requires state db");
-    state_db
-        .upsert_thread_spawn_edge(
-            parent_thread_id,
-            helper_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        )
-        .await
-        .expect("materialized helper edge should persist");
-
-    harness
-        .control
-        .finish_internal_helper_thread(helper_thread_id)
-        .await
-        .expect("supervisor helper should finish");
-
-    let open_children = state_db
-        .list_thread_spawn_children_with_status(
-            parent_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Open,
-        )
-        .await
-        .expect("open child query should succeed");
-    let closed_children = state_db
-        .list_thread_spawn_children_with_status(
-            parent_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
-        )
-        .await
-        .expect("closed child query should succeed");
-    assert!(!open_children.contains(&helper_thread_id));
-    assert!(closed_children.contains(&helper_thread_id));
-}
-
-#[test]
-fn finished_goal_supervisor_releases_shared_mcp_lease() -> anyhow::Result<()> {
-    run_goal_supervisor_test(
-        "finished_goal_supervisor_releases_shared_mcp_lease",
-        finished_goal_supervisor_releases_shared_mcp_lease_inner(),
-    )
-}
-
-async fn finished_goal_supervisor_releases_shared_mcp_lease_inner() -> anyhow::Result<()> {
-    let server = start_mock_server().await;
-    Mock::given(method("POST"))
-        .and(path_regex(".*/responses$"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(sse(vec![
-                    ev_response_created("helper-response"),
-                    ev_completed("helper-response"),
-                ]))
-                .set_delay(Duration::from_millis(250)),
-        )
-        .mount(&server)
-        .await;
-    let (home, mut config) = test_config().await;
-    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
-    config.model_provider.supports_websockets = false;
-    let pid_file = home.path().join("shared-mcp.pid");
-    let mcp_server_path = home.path().join("shared_mcp_server.py");
-    std::fs::write(
-        &mcp_server_path,
-        r#"import json
-import os
-import pathlib
-import sys
-
-pathlib.Path(os.environ["MCP_TEST_PID_FILE"]).write_text(str(os.getpid()))
-
-for line in sys.stdin:
-    message = json.loads(line)
-    request_id = message.get("id")
-    if request_id is None:
-        continue
-    method = message.get("method")
-    if method == "initialize":
-        result = {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {"tools": {"listChanged": False}},
-            "serverInfo": {"name": "shared-mcp-test", "version": "1.0.0"},
-        }
-    elif method == "tools/list":
-        result = {
-            "tools": [{
-                "name": "shared_counter",
-                "description": "Return the shared server process ID",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": False,
-                },
-            }],
-        }
-    elif method == "tools/call":
-        result = {
-            "content": [{"type": "text", "text": "shared"}],
-            "structuredContent": {"pid": os.getpid()},
-            "isError": False,
-        }
-    else:
-        result = None
-    response = {"jsonrpc": "2.0", "id": request_id}
-    if result is None:
-        response["error"] = {"code": -32601, "message": "method not found"}
-    else:
-        response["result"] = result
-    sys.stdout.write(json.dumps(response) + "\n")
-    sys.stdout.flush()
-"#,
-    )?;
-    config
-        .mcp_servers
-        .set(std::collections::HashMap::from([(
-            "retirement".to_string(),
-            McpServerConfig {
-                auth: Default::default(),
-                transport: McpServerTransportConfig::Stdio {
-                    command: "python3".to_string(),
-                    args: vec![mcp_server_path.to_string_lossy().into_owned()],
-                    env: Some(std::collections::HashMap::from([(
-                        "MCP_TEST_PID_FILE".to_string(),
-                        pid_file.to_string_lossy().into_owned(),
-                    )])),
-                    env_vars: Vec::new(),
-                    cwd: None,
-                },
-                environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
-                enabled: true,
-                required: true,
-                supports_parallel_tool_calls: false,
-                omit_tools_from: None,
-                disabled_reason: None,
-                oauth: None,
-                startup_timeout_sec: Some(Duration::from_secs(5)),
-                tool_timeout_sec: Some(Duration::from_secs(5)),
-                default_tools_approval_mode: None,
-                enabled_tools: None,
-                disabled_tools: None,
-                scopes: None,
-                oauth_resource: None,
-                tools: std::collections::HashMap::new(),
-            },
-        )]))
-        .expect("test MCP config should be valid");
-    let harness = AgentControlHarness::new_with_config(home, config).await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let agent_control = parent_thread.session.services.agent_control.clone();
-
-    let sibling_thread_id = agent_control
-        .spawn_agent_with_metadata(
-            harness.config.clone(),
-            text_input("sibling task"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
-            SpawnAgentOptions::default(),
-        )
-        .await?
-        .thread_id;
-    let sibling_thread = harness
-        .manager
-        .get_thread(sibling_thread_id)
-        .await
-        .expect("sibling should be loaded");
-    wait_for_turn_complete(sibling_thread.as_ref()).await;
-
-    let parent_pid = shared_mcp_process_id(parent_thread.as_ref()).await;
-    let sibling_pid = shared_mcp_process_id(sibling_thread.as_ref()).await;
-    let pid = wait_for_pid_file(&pid_file).await?;
-    let pid = pid.parse::<u64>()?;
-    assert_eq!(parent_pid, pid);
-    assert_eq!(sibling_pid, pid);
-    let iterations = std::env::var("CODEX_TEST_GOAL_SUPERVISOR_RETIREMENT_ITERATIONS")
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok())
-        .unwrap_or(1);
-    #[cfg(target_os = "linux")]
-    let baseline_rollout_descriptors =
-        open_rollout_writer_count(harness.config.codex_home.as_path());
-    #[cfg(target_os = "linux")]
-    let mut max_rollout_descriptors = baseline_rollout_descriptors;
-
-    for iteration in 0..iterations {
-        let supervisor_path = AgentPath::root()
-            .join("goal_supervisor")
-            .expect("supervisor path");
-        let mut helper_config = harness.config.clone();
-        helper_config.ephemeral = true;
-        let helper_thread_id = agent_control
-            .spawn_agent_with_metadata(
-                helper_config,
-                text_input("supervise"),
-                Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                    parent_thread_id,
-                    depth: 1,
-                    agent_path: Some(supervisor_path),
-                    agent_nickname: None,
-                    agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-                })),
-                SpawnAgentOptions::default(),
-            )
-            .await?
-            .thread_id;
-        let retained_helper = harness.manager.get_thread(helper_thread_id).await?;
-        timeout(Duration::from_secs(5), async {
-            while !matches!(retained_helper.agent_status().await, AgentStatus::Running) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("supervisor turn should start");
-        retained_helper
-            .session
-            .try_ensure_rollout_materialized()
-            .await
-            .expect("supervisor rollout should materialize for descriptor retirement");
-        #[cfg(target_os = "linux")]
-        let helper_rollout_path = retained_helper
-            .session
-            .current_rollout_path()
-            .await?
-            .expect("materialized supervisor should have a live rollout path");
-        #[cfg(target_os = "linux")]
-        {
-            let active_paths = open_rollout_writer_paths(harness.config.codex_home.as_path());
-            assert!(
-                active_paths.contains(&helper_rollout_path),
-                "the active supervisor must hold its materialized rollout descriptor: helper={}, open={active_paths:?}",
-                helper_rollout_path.display()
-            );
-            let active = active_paths.len();
-            max_rollout_descriptors = max_rollout_descriptors.max(active);
-        }
-        assert_eq!(shared_mcp_process_id(retained_helper.as_ref()).await, pid);
-        assert_eq!(retained_helper.agent_status().await, AgentStatus::Running);
-
-        agent_control
-            .finish_internal_helper_thread(helper_thread_id)
-            .await?;
-        assert_thread_not_loaded(&harness.manager, helper_thread_id).await;
-        timeout(
-            Duration::from_secs(5),
-            retained_helper.wait_until_terminated(),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("supervisor session {iteration} should terminate"));
-        timeout(Duration::from_secs(2), async {
-            loop {
-                let event = retained_helper
-                    .next_event()
-                    .await
-                    .expect("retained helper event channel should remain readable");
-                if matches!(event.msg, EventMsg::TurnComplete(_)) {
-                    break;
-                }
-            }
-        })
-        .await
-        .unwrap_or_else(|_| panic!("supervisor turn {iteration} should complete before shutdown"));
-
-        #[cfg(target_os = "linux")]
-        {
-            let open_paths = timeout(Duration::from_secs(2), async {
-                loop {
-                    let open_paths = open_rollout_writer_paths(harness.config.codex_home.as_path());
-                    if !open_paths.contains(&helper_rollout_path) {
-                        break open_paths;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap_or_else(|_| {
-                panic!(
-                    "retired supervisor must release its rollout descriptor: helper={}",
-                    helper_rollout_path.display()
-                )
-            });
-            let current = open_paths.len();
-            max_rollout_descriptors = max_rollout_descriptors.max(current);
-            assert!(
-                current <= baseline_rollout_descriptors,
-                "retired supervisors must not accumulate rollout descriptors: baseline={baseline_rollout_descriptors}, iteration={iteration}, current={current}"
-            );
-        }
-    }
-
-    assert_eq!(shared_mcp_process_id(parent_thread.as_ref()).await, pid);
-    assert_eq!(shared_mcp_process_id(sibling_thread.as_ref()).await, pid);
-    #[cfg(target_os = "linux")]
-    {
-        assert!(
-            max_rollout_descriptors <= baseline_rollout_descriptors.saturating_add(1),
-            "retired supervisors must keep rollout descriptors bounded"
-        );
-        assert!(
-            open_rollout_writer_count(harness.config.codex_home.as_path())
-                <= baseline_rollout_descriptors,
-            "retired supervisors must release their rollout descriptors"
-        );
-    }
-
-    sibling_thread.shutdown_and_wait().await?;
-    assert!(
-        process_is_alive(&pid.to_string())?,
-        "the parent lease should keep the shared MCP process alive"
-    );
-    parent_thread.shutdown_and_wait().await?;
-    wait_for_process_exit(&pid.to_string()).await
-}
-
-#[test]
-fn goal_supervisor_spawn_reconciles_stale_persisted_state() {
-    run_goal_supervisor_test(
-        "goal_supervisor_spawn_reconciles_stale_persisted_state",
-        goal_supervisor_spawn_reconciles_stale_persisted_state_inner(),
-    );
-}
-
-async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
-    let harness = AgentControlHarness::new().await;
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
-    let state_db = harness
-        .state_db
-        .as_ref()
-        .expect("goal supervisor test requires state db");
-    let goal = ThreadGoal {
-        thread_id: parent_thread_id,
-        objective: "Continue the daily release cycle.".to_string(),
-        status: ThreadGoalStatus::Active,
-        token_budget: None,
-        tokens_used: 0,
-        time_used_seconds: 0,
-        created_at: 1,
-        updated_at: 1,
-    };
-    let supervisor_path = AgentPath::root()
-        .join("goal_supervisor")
-        .expect("supervisor path");
-    let stale_helper_thread_ids = [ThreadId::new(), ThreadId::new()];
-    for stale_helper_thread_id in stale_helper_thread_ids {
-        let stale_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id,
-            depth: 1,
-            agent_path: Some(supervisor_path.clone()),
-            agent_nickname: None,
-            agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
-        });
-        let stale_metadata = codex_state::ThreadMetadataBuilder::new(
-            stale_helper_thread_id,
             harness
-                .config
-                .codex_home
-                .join(format!("{stale_helper_thread_id}.jsonl"))
-                .to_path_buf(),
-            chrono::Utc::now(),
-            stale_source,
-        )
-        .build("openai");
-        state_db
-            .upsert_thread(&stale_metadata)
-            .await
-            .expect("stale supervisor metadata should persist");
-        state_db
-            .upsert_thread_spawn_edge(
-                parent_thread_id,
-                stale_helper_thread_id,
-                DirectionalThreadSpawnEdgeStatus::Open,
-            )
-            .await
-            .expect("stale supervisor edge should persist");
-    }
-    harness
-        .control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
-    assert!(
-        harness
-            .control
-            .state
-            .agent_id_for_path(&supervisor_path)
-            .is_some_and(|thread_id| stale_helper_thread_ids.contains(&thread_id)),
-        "cold restore should reproduce the stale canonical path collision"
-    );
-    for stale_helper_thread_id in stale_helper_thread_ids {
+                .control
+                .state
+                .agent_metadata_for_thread(stale_helper_thread_id)
+                .is_none(),
+            "persisted stale helpers must remain lazy"
+        );
         assert_eq!(
             harness.control.get_status(stale_helper_thread_id).await,
             AgentStatus::NotFound,
@@ -6044,7 +4595,8 @@ async fn goal_supervisor_finish_serializes_with_the_next_start_inner() -> anyhow
             /*trigger_turn*/ true,
         ),
     )
-    .await;
+    .await
+    .expect("record follow-up action");
     assert!(
         crate::goal_supervisor::finish_supervisor_helper_after_followup(
             &parent_thread.session,
@@ -6847,7 +5399,8 @@ async fn goal_resume_clears_supervisor_failure_backoff_inner() -> anyhow::Result
         &parent_thread.session,
         &delivered_parent_message,
     )
-    .await;
+    .await
+    .expect("record follow-up action");
     assert_eq!(
         crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
         0,
@@ -7547,14 +6100,23 @@ async fn goal_supervisor_alias_guidance_survives_fork_and_segmented_cold_resume_
         .collect::<Vec<_>>();
     let [
         RolloutItem::RolloutReference(_),
+        RolloutItem::WorldState(checkpoint_baseline),
         RolloutItem::WorldState(usage_hint_tombstone),
         RolloutItem::WorldState(context_guidance),
     ] = reference_and_world_state.as_slice()
     else {
         panic!(
-            "expected rollout reference, usage-hint tombstone, and updated context guidance: {reference_and_world_state:#?}"
+            "expected rollout reference, checkpoint baseline, usage-hint tombstone, and updated context guidance: {reference_and_world_state:#?}"
         );
     };
+    assert!(checkpoint_baseline.full);
+    assert_eq!(
+        checkpoint_baseline
+            .state
+            .pointer("/context_window_guidance")
+            .and_then(serde_json::Value::as_str),
+        Some(OLD_GUIDANCE)
+    );
     assert!(!usage_hint_tombstone.full);
     assert_eq!(
         usage_hint_tombstone.state,
@@ -7827,7 +6389,7 @@ while True:
     parent
         .thread
         .inject_user_message_without_turn("parent seed".to_string())
-        .await;
+        .await?;
     parent.thread.session.ensure_rollout_materialized().await;
     parent.thread.session.flush_rollout().await?;
 
@@ -8000,6 +6562,7 @@ async fn spawn_agent_full_history_fork_preserves_compacted_parent_prefix() {
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }),
             RolloutItem::TurnContext(turn_context.to_turn_context_item()),
             RolloutItem::ResponseItem(spawn_agent_call(&parent_spawn_call_id)),
@@ -8187,6 +6750,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }),
             RolloutItem::TurnContext(turn_context.to_turn_context_item()),
             RolloutItem::ResponseItem(spawn_agent_call(&parent_spawn_call_id)),
@@ -8313,6 +6877,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }),
         ];
         if let Some(instructions) = parent_developer_instructions {
@@ -8504,7 +7069,8 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
     let old_parent_context = format!("old parent context {}", "x".repeat(128 * 1_024));
     parent_thread
         .inject_user_message_without_turn(old_parent_context.clone())
-        .await;
+        .await
+        .expect("inject parent context");
     let queued_communication = InterAgentCommunication::new(
         AgentPath::root(),
         AgentPath::try_from("/root/worker").expect("agent path"),
@@ -8538,7 +7104,8 @@ async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
         .await;
     parent_thread
         .inject_user_message_without_turn("current parent task".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     let spawn_turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n".to_string();
     parent_thread
@@ -8682,7 +7249,8 @@ async fn spawn_agent_fork_last_n_turns_drops_parent_startup_prefix_when_under_li
         .await;
     parent_thread
         .inject_user_message_without_turn("current parent task".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     let spawn_turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n-under-limit".to_string();
     parent_thread
@@ -8783,7 +7351,8 @@ async fn spawn_agent_fork_last_n_turns_strips_parent_usage_hints() {
     let parent_thread = new_thread.thread;
     parent_thread
         .inject_user_message_without_turn("parent task".to_string())
-        .await;
+        .await
+        .expect("inject parent context");
     let turn_context = parent_thread.session.new_default_turn().await;
     let parent_spawn_call_id = "spawn-call-last-n-usage-hints".to_string();
     parent_thread
@@ -9172,6 +7741,127 @@ async fn spawn_child_completion_notifies_parent_history() {
 }
 
 #[tokio::test]
+async fn provisional_error_waits_for_definitive_completion_before_notifying_parent() {
+    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some("explorer".to_string()),
+    });
+    let (child_thread_id, child_thread) = harness
+        .spawn_quiescent_pathless_v1_child(parent_thread_id, "initial error fixture")
+        .await;
+    let lifecycle = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("child metadata")
+        .lifecycle;
+    let baseline_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            baseline_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: baseline_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("initial error fixture complete".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    timeout(Duration::from_secs(5), async {
+        while lifecycle.completion_watcher_registered() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("initial child watcher should retire");
+
+    let child_turn = child_thread.session.new_default_turn().await;
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::Error(ErrorEvent {
+                message: "provisional child error".to_string(),
+                codex_error_info: None,
+            }),
+        )
+        .await;
+    assert!(harness.control.maybe_start_completion_watcher(
+        child_thread_id,
+        Some(child_source),
+        child_thread_id.to_string(),
+        /*child_agent_path*/ None,
+        MultiAgentVersion::V2,
+    ));
+    sleep(Duration::from_millis(250)).await;
+    assert!(
+        lifecycle.completion_watcher_registered(),
+        "a raw Error must not retire the parent notification watcher"
+    );
+    assert_eq!(
+        history_text_match_count(
+            parent_thread.session.clone_history().await.raw_items(),
+            "provisional child error"
+        ),
+        0
+    );
+
+    child_thread
+        .session
+        .send_event(
+            child_turn.as_ref(),
+            EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: child_turn.sub_id.clone(),
+                started_at: None,
+                last_agent_message: Some("definitive child completion".to_string()),
+                error: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
+            }),
+        )
+        .await;
+    assert!(
+        wait_for_subagent_notification(&parent_thread).await,
+        "definitive completion should notify the parent; registered={}, pending={}, status={:?}, \
+         parent_history={:#?}",
+        lifecycle.completion_watcher_registered(),
+        lifecycle.has_pending_completion_status(),
+        child_thread.agent_status().await,
+        parent_thread.session.clone_history().await.raw_items(),
+    );
+    timeout(Duration::from_secs(5), async {
+        while lifecycle.completion_watcher_registered() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("definitive completion should retire the watcher");
+    assert_eq!(
+        history_text_match_count(
+            parent_thread.session.clone_history().await.raw_items(),
+            "definitive child completion"
+        ),
+        1
+    );
+    assert_eq!(
+        history_text_match_count(
+            parent_thread.session.clone_history().await.raw_items(),
+            "provisional child error"
+        ),
+        0
+    );
+}
+
+#[tokio::test]
 async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
     let harness = AgentControlHarness::new().await;
     let mut config = harness.config.clone();
@@ -9183,7 +7873,10 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
         .expect("root thread should start");
     let root_thread_id = root.thread_id;
     let root_thread = root.thread;
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
+    let worker_path =
+        AgentPath::from_persisted_string(format!("/root/{}", "legacy_worker".repeat(400)))
+            .expect("legacy overlong worker path");
+    assert!(worker_path.as_str().len() > AgentPath::MAX_PATH_BYTES);
     let worker_thread_id = harness
         .control
         .spawn_agent(
@@ -9199,7 +7892,8 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
         )
         .await
         .expect("worker spawn should succeed");
-    let tester_path = worker_path.join("tester").expect("tester path");
+    let tester_path = AgentPath::from_persisted_string(format!("{worker_path}/tester"))
+        .expect("legacy overlong tester path");
     let tester_thread_id = harness
         .control
         .spawn_agent(
@@ -9284,41 +7978,54 @@ async fn multi_agent_v2_completion_ignores_dead_direct_parent() {
 #[tokio::test]
 async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
     let harness = AgentControlHarness::new().await;
-    let (_root_thread_id, root_thread) = harness.start_thread().await;
-    let (worker_thread_id, _worker_thread) = harness.start_thread().await;
-    let mut tester_config = harness.config.clone();
-    let _ = tester_config.features.enable(Feature::MultiAgentV2);
-    let tester_thread_id = harness
-        .manager
-        .start_thread(StartThreadOptions::new(tester_config.clone()))
+    let (root_thread_id, root_thread) = harness.start_thread().await;
+    let mut config = harness.config.clone();
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let worker_path = AgentPath::try_from("/root/worker").expect("worker path");
+    let tester_path = AgentPath::try_from("/root/worker/tester").expect("tester path");
+    let worker_thread_id = harness
+        .control
+        .spawn_agent(
+            config.clone(),
+            text_input("hello worker"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: root_thread_id,
+                depth: 1,
+                agent_path: Some(worker_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
         .await
-        .expect("tester thread should start")
-        .thread_id;
+        .expect("worker thread should start");
+    let tester_thread_id = harness
+        .control
+        .spawn_agent(
+            config,
+            text_input("hello tester"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: worker_thread_id,
+                depth: 2,
+                agent_path: Some(tester_path.clone()),
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+        )
+        .await
+        .expect("tester thread should start");
+    let worker_thread = harness
+        .manager
+        .get_thread(worker_thread_id)
+        .await
+        .expect("worker thread should exist");
     let tester_thread = harness
         .manager
         .get_thread(tester_thread_id)
         .await
         .expect("tester thread should exist");
-    let tester_turn = tester_thread.session.new_default_turn().await;
     assert_eq!(
-        tester_thread
-            .session
-            .resolve_multi_agent_version_for_model(&tester_turn.model_info, &tester_config),
-        MultiAgentVersion::V2,
-    );
-    let worker_path = AgentPath::root().join("worker_a").expect("worker path");
-    let tester_path = worker_path.join("tester").expect("tester path");
-    harness.control.maybe_start_completion_watcher(
-        tester_thread_id,
-        Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: worker_thread_id,
-            depth: 2,
-            agent_path: Some(tester_path.clone()),
-            agent_nickname: None,
-            agent_role: Some("explorer".to_string()),
-        })),
-        tester_path.to_string(),
-        Some(tester_path.clone()),
+        tester_thread.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
     );
     let tester_turn = tester_thread.session.new_default_turn().await;
     tester_thread
@@ -9356,7 +8063,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
         },
     );
 
-    timeout(Duration::from_secs(5), async {
+    let delivered = timeout(Duration::from_secs(5), async {
         loop {
             let captured = harness
                 .manager
@@ -9369,8 +8076,29 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
             sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("completion watcher should queue a direct-parent message");
+    .await;
+    let lifecycle = harness
+        .control
+        .get_agent_metadata(tester_thread_id)
+        .expect("tester metadata should remain registered")
+        .lifecycle;
+    assert!(
+        delivered.is_ok(),
+        "canonical V2 completion should queue a direct-parent message; status={:?}, registered={}, \
+         pending={}, worker_restart_required={}, worker_checkpoint_available={}, captured={:#?}",
+        tester_thread.agent_status().await,
+        lifecycle.completion_watcher_registered(),
+        lifecycle.has_pending_completion_status(),
+        worker_thread.session.persistence_restart_required(),
+        worker_thread
+            .session
+            .checkpoint_admission_lock
+            .try_lock()
+            .is_ok(),
+        harness.manager.captured_ops(),
+    );
+    assert!(!lifecycle.completion_watcher_registered());
+    assert!(!lifecycle.has_pending_completion_status());
 
     let root_history_items = root_thread
         .session
@@ -9391,12 +8119,104 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
 }
 
 #[tokio::test]
+async fn pathless_multi_agent_v2_delivers_every_queued_completion() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let mut child_config = harness.config.clone();
+    let _ = child_config.features.enable(Feature::MultiAgentV2);
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_communication(
+            child_config,
+            InterAgentCommunication::new(
+                AgentPath::root(),
+                AgentPath::root(),
+                Vec::new(),
+                "queued pathless work".to_string(),
+                /*trigger_turn*/ false,
+            ),
+            AgentCommunicationContext::new(AgentCommunicationKind::Message, parent_thread_id),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("pathless child thread should start")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("pathless child should be loaded");
+    let child_lifecycle = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("pathless child metadata should be registered")
+        .lifecycle;
+
+    let first_turn = child_thread.session.new_default_turn().await;
+    let second_turn = child_thread.session.new_default_turn().await;
+    assert_eq!(
+        child_thread.multi_agent_version(),
+        Some(MultiAgentVersion::V2)
+    );
+    for (turn, message) in [
+        (first_turn, "first pathless completion"),
+        (second_turn, "second pathless completion"),
+    ] {
+        child_thread
+            .session
+            .send_event(
+                turn.as_ref(),
+                EventMsg::TurnComplete(TurnCompleteEvent {
+                    turn_id: turn.sub_id.clone(),
+                    started_at: None,
+                    last_agent_message: Some(message.to_string()),
+                    error: None,
+                    completed_at: None,
+                    duration_ms: None,
+                    time_to_first_token_ms: None,
+                }),
+            )
+            .await;
+    }
+
+    let delivered = timeout(Duration::from_secs(5), async {
+        loop {
+            let history = parent_thread.session.clone_history().await;
+            let items = history.raw_items();
+            if history_text_match_count(items, "first pathless completion") == 1
+                && history_text_match_count(items, "second pathless completion") == 1
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        delivered.is_ok(),
+        "pathless V2 completions should each reach the parent exactly once; registered={}, \
+         pending={}: {:#?}",
+        child_lifecycle.completion_watcher_registered(),
+        child_lifecycle.has_pending_completion_status(),
+        parent_thread.session.clone_history().await.raw_items(),
+    );
+}
+
+#[tokio::test]
 async fn completion_watcher_notifies_parent_when_child_is_missing() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     let child_thread_id = ThreadId::new();
+    let control = parent_thread.session.services.agent_control.clone();
 
-    harness.control.maybe_start_completion_watcher(
+    control.maybe_start_completion_watcher(
         child_thread_id,
         Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
@@ -9407,6 +8227,7 @@ async fn completion_watcher_notifies_parent_when_child_is_missing() {
         })),
         child_thread_id.to_string(),
         /*child_agent_path*/ None,
+        MultiAgentVersion::V2,
     );
 
     assert_eq!(wait_for_subagent_notification(&parent_thread).await, true);
@@ -9828,6 +8649,33 @@ async fn resume_agent_from_paginated_rollout_loads_model_context() {
         ThreadHistoryMode::Paginated
     );
     persist_thread_for_tree_resume(&child_thread, "persist before resume").await;
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig::from_config(&harness.config),
+        harness.state_db.clone(),
+    );
+    let stored_model_context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id: child_thread_id,
+            rollout_path: None,
+            include_archived: true,
+        })
+        .await
+        .expect("child model context should load before shutdown");
+    assert!(
+        history_contains_text(
+            &stored_model_context
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    RolloutItem::ResponseItem(item) => Some(item.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>(),
+            "persist before resume",
+        ),
+        "latest model context before shutdown: {:#?}",
+        stored_model_context.items
+    );
     let _ = harness
         .control
         .shutdown_live_agent(child_thread_id)
@@ -10183,6 +9031,18 @@ async fn shutdown_agent_tree_closes_descendants_when_started_at_child() {
         .expect("grandchild thread should exist");
     persist_thread_for_tree_resume(&child_thread, "child persisted").await;
     persist_thread_for_tree_resume(&grandchild_thread, "grandchild persisted").await;
+    let legacy_overlong_path = format!("/root/{}", "legacy".repeat(1024));
+    assert!(legacy_overlong_path.len() > AgentPath::MAX_PATH_BYTES);
+    child_thread
+        .update_thread_metadata(
+            ThreadMetadataPatch {
+                agent_path: Some(Some(legacy_overlong_path)),
+                ..Default::default()
+            },
+            /*include_archived*/ true,
+        )
+        .await
+        .expect("persist legacy overlong child path");
     wait_for_live_thread_spawn_children(&harness.control, parent_thread_id, &[child_thread_id])
         .await;
     wait_for_live_thread_spawn_children(&harness.control, child_thread_id, &[grandchild_thread_id])
@@ -10322,7 +9182,7 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
 }
 
 #[tokio::test]
-async fn resume_closed_child_registers_open_descendants_as_cold() {
+async fn permanently_closed_child_and_descendants_cannot_be_selected() {
     let harness = AgentControlHarness::new_with_multi_agent_v1().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
@@ -10381,42 +9241,24 @@ async fn resume_closed_child_registers_open_descendants_as_cold() {
         .await
         .expect("child close should succeed");
 
-    let resumed_child_thread_id = harness
+    let child_err = harness
         .control
-        .resume_agent_from_rollout(
-            harness.config.clone(),
-            child_thread_id,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            }),
-        )
+        .ensure_open_agent_known_by_id(parent_thread_id, child_thread_id)
         .await
-        .expect("child resume should succeed");
-    assert_eq!(resumed_child_thread_id, child_thread_id);
-    assert_ne!(
-        harness.control.get_status(child_thread_id).await,
-        AgentStatus::NotFound
-    );
-    assert_eq!(
-        harness.control.get_status(grandchild_thread_id).await,
-        AgentStatus::NotFound
-    );
-    assert!(
-        harness
-            .control
-            .get_agent_metadata(grandchild_thread_id)
-            .is_some()
-    );
+        .expect_err("permanently closed child should not be selectable");
+    assert_matches!(child_err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_thread_id);
+    let grandchild_err = harness
+        .control
+        .ensure_open_agent_known_by_id(parent_thread_id, grandchild_thread_id)
+        .await
+        .expect_err("permanently closed grandchild should not be selectable");
+    assert_matches!(grandchild_err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == grandchild_thread_id);
 
     let _ = harness
         .control
         .close_agent(child_thread_id)
         .await
-        .expect("child close after resume should succeed");
+        .expect("permanent close should be idempotent");
     let _ = harness
         .control
         .shutdown_live_agent(parent_thread_id)
@@ -10425,7 +9267,7 @@ async fn resume_closed_child_registers_open_descendants_as_cold() {
 }
 
 #[tokio::test]
-async fn resume_agent_from_rollout_registers_open_descendants_as_cold() {
+async fn resume_agent_from_rollout_keeps_open_descendants_lazy() {
     let harness = AgentControlHarness::new_with_multi_agent_v1().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
@@ -10484,6 +9326,14 @@ async fn resume_agent_from_rollout_registers_open_descendants_as_cold() {
         .await;
     assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
     assert_eq!(report.timed_out, Vec::<ThreadId>::new());
+    harness
+        .control
+        .state
+        .release_spawned_thread(child_thread_id);
+    harness
+        .control
+        .state
+        .release_spawned_thread(grandchild_thread_id);
 
     let resumed_parent_thread_id = harness
         .control
@@ -10495,6 +9345,9 @@ async fn resume_agent_from_rollout_registers_open_descendants_as_cold() {
         .await
         .expect("tree resume should succeed");
     assert_eq!(resumed_parent_thread_id, parent_thread_id);
+    harness
+        .control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     assert_ne!(
         harness.control.get_status(parent_thread_id).await,
         AgentStatus::NotFound
@@ -10511,13 +9364,143 @@ async fn resume_agent_from_rollout_registers_open_descendants_as_cold() {
         harness
             .control
             .get_agent_metadata(child_thread_id)
-            .is_some()
+            .is_none()
     );
     assert!(
         harness
             .control
             .get_agent_metadata(grandchild_thread_id)
-            .is_some()
+            .is_none()
+    );
+    let grandchild_metadata = harness
+        .control
+        .ensure_open_agent_known_by_id(parent_thread_id, grandchild_thread_id)
+        .await
+        .expect("selected open grandchild should register without restoring its parent");
+    assert_eq!(grandchild_metadata.parent_thread_id, Some(child_thread_id));
+    assert_eq!(grandchild_metadata.depth, Some(2));
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none(),
+        "selecting a grandchild by UUID must not eagerly register its parent"
+    );
+    harness
+        .control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            grandchild_thread_id,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id: child_thread_id,
+                depth: 2,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            }),
+        )
+        .await
+        .expect("selected grandchild should resume without restoring its parent");
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none(),
+        "resuming a grandchild by UUID must not eagerly register its parent"
+    );
+    assert_eq!(
+        harness
+            .control
+            .current_agent_members()
+            .await
+            .expect("model membership projection"),
+        harness
+            .manager
+            .current_agent_membership_snapshot(parent_thread_id)
+            .await
+            .expect("root app membership snapshot")
+            .members,
+        "model and app membership must share the root registry projection"
+    );
+    let expected_grandchild_members = harness
+        .control
+        .current_agent_members()
+        .await
+        .expect("model membership projection")
+        .into_iter()
+        .filter(|member| member.thread_id == grandchild_thread_id)
+        .collect::<Vec<_>>();
+    assert_eq!(expected_grandchild_members.len(), 1);
+    assert_eq!(
+        harness
+            .manager
+            .current_agent_membership_snapshot(child_thread_id)
+            .await
+            .expect("unregistered intermediate parent must resolve its registry")
+            .members,
+        expected_grandchild_members,
+        "nested relation snapshots must include a current child even when its parent identity is not registered"
+    );
+    harness
+        .control
+        .shutdown_live_agent(grandchild_thread_id)
+        .await
+        .expect("resumed grandchild shutdown should succeed");
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(grandchild_thread_id)
+            .is_none()
+    );
+    let child_metadata = harness
+        .control
+        .ensure_open_agent_known_by_id(parent_thread_id, child_thread_id)
+        .await
+        .expect("selected open child should register lazily");
+    assert_eq!(child_metadata.parent_thread_id, Some(parent_thread_id));
+    assert_eq!(child_metadata.depth, Some(1));
+    assert_eq!(child_metadata.agent_path, None);
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(grandchild_thread_id)
+            .is_none(),
+        "selecting one child must not eagerly register its descendants"
+    );
+
+    harness
+        .control
+        .resume_agent_from_rollout(
+            harness.config.clone(),
+            child_thread_id,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            }),
+        )
+        .await
+        .expect("legacy overlong path should resume by UUID");
+    let input = vec![UserInput::Text {
+        text: "after lazy UUID resume".to_string(),
+        text_elements: Vec::new(),
+    }];
+    harness
+        .control
+        .send_input(child_thread_id, input.clone(), /*parent_turn_id*/ None)
+        .await
+        .expect("resumed legacy path agent should accept input");
+    assert!(
+        harness
+            .manager
+            .captured_ops()
+            .iter()
+            .any(|(thread_id, op)| {
+                *thread_id == child_thread_id
+                    && matches!(op, Op::UserInput { items, .. } if items == &input)
+            })
     );
 
     let _ = harness
@@ -10627,6 +9610,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
         .await
         .expect("tree resume should succeed");
     assert_eq!(resumed_parent_thread_id, parent_thread_id);
+    resumed_control.register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     assert_ne!(
         resumed_control.get_status(parent_thread_id).await,
         AgentStatus::NotFound
@@ -10638,6 +9622,23 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
     assert_eq!(
         resumed_control.get_status(grandchild_thread_id).await,
         AgentStatus::NotFound
+    );
+    assert!(
+        resumed_control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
+    let selected_grandchild = resumed_control
+        .ensure_open_agent_known_by_id(parent_thread_id, grandchild_thread_id)
+        .await
+        .expect("selected grandchild should use graph-authoritative identity");
+    assert_eq!(selected_grandchild.parent_thread_id, Some(child_thread_id));
+    assert_eq!(selected_grandchild.depth, Some(2));
+    assert!(
+        resumed_control
+            .get_agent_metadata(child_thread_id)
+            .is_none(),
+        "selecting a nested agent must not eagerly register its ancestor or sibling"
     );
     let repaired_grandchild = state_db
         .get_thread(grandchild_thread_id)
@@ -10802,3 +9803,6 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
 
 #[path = "control/legacy_residency_tests.rs"]
 mod legacy_residency_tests;
+
+#[path = "control/checkpoint_ownership_tests.rs"]
+mod checkpoint_ownership_tests;

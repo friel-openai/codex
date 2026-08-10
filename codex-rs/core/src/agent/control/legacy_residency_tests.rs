@@ -24,9 +24,17 @@ impl LegacyTerminalStatus {
                 duration_ms: None,
                 time_to_first_token_ms: None,
             }),
-            Self::Errored => EventMsg::Error(ErrorEvent {
-                message: format!("errored child {child_index}"),
-                codex_error_info: None,
+            Self::Errored => EventMsg::TurnComplete(TurnCompleteEvent {
+                turn_id: turn_id.to_string(),
+                last_agent_message: None,
+                error: Some(ErrorEvent {
+                    message: format!("errored child {child_index}"),
+                    codex_error_info: None,
+                }),
+                started_at: None,
+                completed_at: None,
+                duration_ms: None,
+                time_to_first_token_ms: None,
             }),
             Self::Interrupted => EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some(turn_id.to_string()),
@@ -204,21 +212,30 @@ async fn spawn_quiescent_legacy_child(
 }
 
 fn subagent_notification_count(history_items: &[ResponseItem]) -> usize {
+    subagent_notifications(history_items).len()
+}
+
+fn subagent_notifications(history_items: &[ResponseItem]) -> Vec<String> {
     history_items
         .iter()
-        .filter(|item| {
+        .flat_map(|item| {
             let ResponseItem::Message { role, content, .. } = item else {
-                return false;
+                return Vec::new();
             };
-            role == "user"
-                && content.iter().any(|content_item| match content_item {
+            if role != "user" {
+                return Vec::new();
+            }
+            content
+                .iter()
+                .filter_map(|content_item| match content_item {
                     ContentItem::InputText { text } | ContentItem::OutputText { text } => {
-                        SubagentNotification::matches_text(text)
+                        SubagentNotification::matches_text(text).then(|| text.clone())
                     }
-                    ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+                    ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => None,
                 })
+                .collect::<Vec<_>>()
         })
-        .count()
+        .collect()
 }
 
 async fn wait_for_notification_count(parent_thread: &Arc<CodexThread>, expected: usize) {

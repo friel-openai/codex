@@ -104,7 +104,6 @@ use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
-use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ReasoningItemContent;
 use codex_protocol::models::ReasoningItemReasoningSummary;
 use codex_protocol::models::ResponseItem;
@@ -977,10 +976,23 @@ pub(crate) async fn run_hooks_and_record_inputs(
     let mut blocked_input = false;
     let mut accepted_user_input = false;
     let mut persistence_failed = false;
-    for input_item in input {
+    // Claim every durable receipt before the first await. A task cancellation must resolve
+    // receipts for later items even if an earlier item's persistence is still pending.
+    let mut durable_persistences = input
+        .iter()
+        .map(|input_item| match input_item {
+            TurnInput::ResponseItem(item) => item
+                .id()
+                .cloned()
+                .and_then(|item_id| sess.input_queue.durable_response_item_persistence(item_id)),
+            TurnInput::UserInput { .. } | TurnInput::InterAgentCommunication(_) => None,
+        })
+        .collect::<Vec<_>>();
+    for (input_item, durable_persistence) in input.iter().zip(&mut durable_persistences) {
         let hook_outcome = inspect_pending_input(sess, turn_context, input_item).await;
         if hook_outcome.should_stop {
             blocked_input = true;
+            drop(durable_persistence.take());
             reject_pending_input(sess, turn_context, input_item).await;
             record_additional_contexts(sess, turn_context, hook_outcome.additional_contexts).await;
         } else {
@@ -992,6 +1004,7 @@ pub(crate) async fn run_hooks_and_record_inputs(
                 turn_context,
                 input_item.clone(),
                 hook_outcome.additional_contexts,
+                durable_persistence.take(),
             )
             .await
             .is_err()

@@ -5,26 +5,40 @@ use std::path::PathBuf;
 
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TokenUsageInfo;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -36,7 +50,406 @@ use crate::local::test_support::write_session_file_with_fork;
 use crate::local::test_support::write_session_file_with_history_mode;
 
 #[tokio::test]
-async fn loads_latest_checkpoint_with_required_turn_metadata() {
+async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2040);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-40-00",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write active rollout");
+    let missing_predecessor = home.path().join("missing-predecessor.jsonl");
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: missing_predecessor,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(certified_cleared_checkpoint("active checkpoint").into_items());
+    append_items(path.as_path(), items);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: None,
+            include_archived: false,
+        })
+        .await
+        .expect("load active checkpoint without predecessor");
+
+    assert!(matches!(
+        context.items.first(),
+        Some(RolloutItem::SessionMeta(_))
+    ));
+    assert!(matches!(
+        context.items.get(1),
+        Some(RolloutItem::Compacted(compacted))
+            if compacted.message == "active checkpoint"
+                && compacted.segment_state_checkpoint.is_some()
+    ));
+    read_thread::load_history_items(home.path(), path.as_path())
+        .await
+        .expect_err("complete history still requires the predecessor");
+}
+
+#[tokio::test]
+async fn explicit_external_path_uses_active_checkpoint_without_store_discovery() {
+    let store_home = TempDir::new().expect("store temp dir");
+    let external_home = TempDir::new().expect("external temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2041);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        external_home.path(),
+        "2025-01-03T13-41-00",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write external active rollout");
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: external_home.path().join("missing-predecessor.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(certified_cleared_checkpoint("external active checkpoint").into_items());
+    append_items(path.as_path(), items);
+    let store = LocalThreadStore::new(test_config(store_home.path()), /*state_db*/ None);
+    let params = LoadThreadHistoryParams {
+        thread_id,
+        rollout_path: Some(path.clone()),
+        include_archived: false,
+    };
+
+    let context = store
+        .load_latest_model_context(params.clone())
+        .await
+        .expect("load external active checkpoint");
+
+    assert!(matches!(
+        context.items.first(),
+        Some(RolloutItem::SessionMeta(_))
+    ));
+    assert!(matches!(
+        context.items.get(1),
+        Some(RolloutItem::Compacted(compacted))
+            if compacted.message == "external active checkpoint"
+                && compacted.segment_state_checkpoint.is_some()
+    ));
+    store
+        .load_history(params)
+        .await
+        .expect_err("full external history still requires the predecessor");
+}
+
+#[tokio::test]
+async fn explicit_external_paginated_fallback_uses_selected_lineage() {
+    let store_home = TempDir::new().expect("store temp dir");
+    let external_home = TempDir::new().expect("external temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2043);
+    let (thread_id, active_path, _) = write_external_paginated_lineage(
+        external_home.path(),
+        uuid,
+        "external predecessor",
+        vec![
+            turn_started("external-active"),
+            user_message("external active"),
+            completed_user_message("external-active", "external active"),
+            turn_context(external_home.path(), "external-active"),
+            compacted("unmarked external compaction", Some(Vec::new())),
+            turn_complete("external-active"),
+        ],
+    );
+    write_paginated_rollout(
+        store_home.path(),
+        "2025-01-03T13-46-00",
+        uuid,
+        [
+            turn_started("store-decoy"),
+            user_message("store decoy"),
+            completed_user_message("store-decoy", "store decoy"),
+            turn_context(store_home.path(), "store-decoy"),
+            turn_complete("store-decoy"),
+        ],
+    );
+    let store = LocalThreadStore::new(test_config(store_home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: Some(active_path),
+            include_archived: false,
+        })
+        .await
+        .expect("load selected external lineage");
+    let serialized = serde_json::to_string(&context.items).expect("serialize model context");
+
+    assert!(serialized.contains("external active"));
+    assert!(serialized.contains("external-predecessor-tier"));
+    assert!(serialized.contains("model_context_window"));
+    assert!(!serialized.contains("store decoy"));
+}
+
+#[tokio::test]
+async fn explicit_external_paginated_invalid_checkpoint_falls_back_to_selected_lineage() {
+    let store_home = TempDir::new().expect("store temp dir");
+    let external_home = TempDir::new().expect("external temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2044);
+    let mut checkpoint = certified_cleared_checkpoint("invalid external checkpoint").into_items();
+    let Some(RolloutItem::Compacted(compacted)) = checkpoint.first_mut() else {
+        panic!("checkpoint must start with compaction");
+    };
+    compacted
+        .segment_state_checkpoint
+        .as_mut()
+        .expect("checkpoint descriptor")
+        .version += 1;
+    let (thread_id, active_path, _) = write_external_paginated_lineage(
+        external_home.path(),
+        uuid,
+        "invalid-checkpoint predecessor",
+        checkpoint,
+    );
+    let store = LocalThreadStore::new(test_config(store_home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: Some(active_path),
+            include_archived: false,
+        })
+        .await
+        .expect("fall back through selected external lineage");
+    let serialized = serde_json::to_string(&context.items).expect("serialize model context");
+
+    assert!(serialized.contains("invalid-checkpoint predecessor"));
+    assert!(serialized.contains("invalid external checkpoint"));
+}
+
+#[tokio::test]
+async fn paginated_checkpoint_missing_environments_falls_back_to_predecessor() {
+    let store_home = TempDir::new().expect("store temp dir");
+    let external_home = TempDir::new().expect("external temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2046);
+    let mut checkpoint =
+        certified_cleared_checkpoint("incomplete settings checkpoint").into_items();
+    let settings = checkpoint
+        .iter_mut()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => Some(event),
+            _ => None,
+        })
+        .expect("checkpoint settings event");
+    settings.thread_settings.environments = None;
+    let (thread_id, active_path, predecessor_path) = write_external_paginated_lineage(
+        external_home.path(),
+        uuid,
+        "complete settings predecessor",
+        checkpoint,
+    );
+    let store = LocalThreadStore::new(test_config(store_home.path()), /*state_db*/ None);
+    let params = LoadThreadHistoryParams {
+        thread_id,
+        rollout_path: Some(active_path),
+        include_archived: false,
+    };
+
+    let context = store
+        .load_latest_model_context(params.clone())
+        .await
+        .expect("fall back from incomplete checkpoint");
+    let serialized = serde_json::to_string(&context.items).expect("serialize model context");
+    assert!(serialized.contains("complete settings predecessor"));
+
+    std::fs::remove_file(predecessor_path).expect("remove required predecessor");
+    store
+        .load_latest_model_context(params)
+        .await
+        .expect_err("incomplete checkpoint must not hide a missing predecessor");
+}
+
+#[tokio::test]
+async fn explicit_external_paginated_fallback_reports_missing_selected_predecessor() {
+    let store_home = TempDir::new().expect("store temp dir");
+    let external_home = TempDir::new().expect("external temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2045);
+    let (thread_id, active_path, predecessor_path) = write_external_paginated_lineage(
+        external_home.path(),
+        uuid,
+        "missing external predecessor",
+        vec![
+            turn_started("external-active"),
+            user_message("external active"),
+            completed_user_message("external-active", "external active"),
+            turn_context(external_home.path(), "external-active"),
+            compacted("unmarked external compaction", Some(Vec::new())),
+            turn_complete("external-active"),
+        ],
+    );
+    std::fs::remove_file(predecessor_path).expect("remove selected predecessor");
+    write_paginated_rollout(
+        store_home.path(),
+        "2025-01-03T13-47-00",
+        uuid,
+        [
+            turn_started("store-decoy"),
+            user_message("store decoy"),
+            completed_user_message("store-decoy", "store decoy"),
+            turn_context(store_home.path(), "store-decoy"),
+            turn_complete("store-decoy"),
+        ],
+    );
+    let store = LocalThreadStore::new(test_config(store_home.path()), /*state_db*/ None);
+
+    let error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: Some(active_path),
+            include_archived: false,
+        })
+        .await
+        .expect_err("selected lineage must not fall back to same-id store rollout");
+
+    assert!(
+        error.to_string().contains("could not be resolved"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn malformed_record_newer_than_checkpoint_is_not_discarded_by_lineage_fallback() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2042);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let predecessor = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-42-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write predecessor rollout");
+    append_items(
+        predecessor.as_path(),
+        certified_cleared_checkpoint("older checkpoint").into_items(),
+    );
+    let immutable_predecessor = home.path().join("predecessor.jsonl");
+    std::fs::rename(predecessor, &immutable_predecessor)
+        .expect("move predecessor outside active rollout discovery");
+    let active = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-43-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write active rollout");
+    let mut active_items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: immutable_predecessor,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    active_items.extend(certified_cleared_checkpoint("active checkpoint").into_items());
+    append_items(active.as_path(), active_items);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(active.as_path())
+        .expect("open active rollout");
+    writeln!(file, "{{\"timestamp\":\"2025-01-03T13:43:01Z\",\"type\":")
+        .expect("append torn newer record");
+    file.flush().expect("flush torn newer record");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let session_meta = codex_rollout::read_session_meta_line(active.as_path())
+        .await
+        .expect("read active session metadata");
+    let active_error = scan_projected_active_model_context(&store, active.as_path(), &session_meta)
+        .await
+        .expect_err("active scanner must reject a torn newer record");
+    assert!(
+        active_error.to_string().contains("EOF while parsing"),
+        "unexpected active scan error: {active_error}"
+    );
+
+    let error = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: None,
+            include_archived: false,
+        })
+        .await
+        .expect_err("torn newer state must not fall back to the older checkpoint");
+    assert!(
+        error.to_string().contains("EOF while parsing"),
+        "unexpected error: {error}"
+    );
+}
+
+#[tokio::test]
+async fn archived_compressed_checkpoint_does_not_open_missing_predecessor() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2041);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = crate::local::test_support::write_archived_session_file(
+        home.path(),
+        "2025-01-03T13-41-00",
+        uuid,
+    )
+    .expect("write archived rollout");
+    let missing_predecessor = home.path().join("missing-predecessor.jsonl");
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_path: missing_predecessor,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(certified_cleared_checkpoint("compressed checkpoint").into_items());
+    append_items(path.as_path(), items);
+    let compressed_path = path.with_extension("jsonl.zst");
+    let compressed = zstd::stream::encode_all(
+        std::fs::File::open(&path).expect("open archived rollout"),
+        /*level*/ 1,
+    )
+    .expect("compress archived rollout");
+    std::fs::write(&compressed_path, compressed).expect("write compressed rollout");
+    std::fs::remove_file(&path).expect("remove plain rollout");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: None,
+            include_archived: true,
+        })
+        .await
+        .expect("load compressed checkpoint without predecessor");
+
+    assert!(matches!(
+        context.items.get(1),
+        Some(RolloutItem::Compacted(compacted))
+            if compacted.message == "compressed checkpoint"
+                && compacted.segment_state_checkpoint.is_some()
+    ));
+    read_thread::load_history_items(home.path(), compressed_path.as_path())
+        .await
+        .expect_err("complete archived history still requires the predecessor");
+}
+
+#[tokio::test]
+async fn unmarked_compaction_retains_bounded_history_and_older_sticky_state() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1001);
     let thread_id = codex_protocol::ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -51,6 +464,8 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
         "2025-01-03T13-00-00",
         uuid,
         [
+            sticky_thread_settings("predecessor-tier"),
+            sticky_token_count(/*model_context_window*/ 3210),
             turn_started("turn-1"),
             user_message("older turn"),
             completed_user_message("turn-1", "older turn"),
@@ -70,6 +485,7 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -81,6 +497,12 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
     ));
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "latest checkpoint")
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) if event.thread_settings.service_tier.as_deref() == Some("predecessor-tier"))
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(event)) if event.info.as_ref().and_then(|info| info.model_context_window) == Some(3210))
     }));
     assert!(!context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(compacted) if compacted.message == "older checkpoint")
@@ -97,7 +519,7 @@ async fn loads_latest_checkpoint_with_required_turn_metadata() {
 }
 
 #[tokio::test]
-async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
+async fn unmarked_compaction_scans_513_segments_but_returns_bounded_compatibility_context() {
     const SEGMENT_COUNT: usize = 514;
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2015);
@@ -146,6 +568,15 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
                 compacted_replacement_history_filter_texts: None,
             }));
         }
+        if index == 0 {
+            items.extend([
+                sticky_thread_settings("oldest-segment-tier"),
+                sticky_token_count(/*model_context_window*/ 5140),
+            ]);
+        }
+        if index + 1 != SEGMENT_COUNT {
+            items.push(user_message(&format!("obsolete historical item {index}")));
+        }
         if index + 1 == SEGMENT_COUNT {
             items.extend([
                 turn_started("latest-turn"),
@@ -188,10 +619,11 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
-        .expect("resume from current active checkpoint");
+        .expect("resume from unmarked compatibility compaction");
 
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(item) if item.message == "latest checkpoint")
@@ -199,10 +631,26 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::TurnContext(item) if item.turn_id.as_deref() == Some("latest-turn"))
     }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) if event.thread_settings.service_tier.as_deref() == Some("oldest-segment-tier"))
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(event)) if event.info.as_ref().and_then(|info| info.model_context_window) == Some(5140))
+    }));
+    assert!(
+        context.items.len() < 20,
+        "compatibility projection retained {} items",
+        context.items.len()
+    );
+    assert!(
+        !serde_json::to_string(&context.items)
+            .expect("serialize bounded compatibility context")
+            .contains("obsolete historical item")
+    );
 }
 
 #[tokio::test]
-async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments() {
+async fn unmarked_forked_legacy_compaction_scans_513_segments_but_returns_bounded_context() {
     const SEGMENT_COUNT: usize = 514;
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2018);
@@ -264,6 +712,17 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
             }
             items.push(historical_checkpoint);
         }
+        if index == 0 {
+            items.extend([
+                sticky_thread_settings("oldest-legacy-segment-tier"),
+                sticky_token_count(/*model_context_window*/ 5141),
+            ]);
+        }
+        if index + 1 != SEGMENT_COUNT {
+            items.push(user_message(&format!(
+                "obsolete legacy historical item {index}"
+            )));
+        }
         if index + 1 == SEGMENT_COUNT {
             let mut latest_checkpoint = compacted("latest legacy checkpoint", Some(Vec::new()));
             if let RolloutItem::Compacted(compacted) = &mut latest_checkpoint {
@@ -303,17 +762,18 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
         u64::try_from(SEGMENT_COUNT * 16).expect("ordinal"),
     )
     .await;
-    let canonical_compaction_count = read_thread::load_history_items(home.path(), &active_path)
+    let complete_compaction_count = read_thread::load_history_items(home.path(), &active_path)
         .await
         .expect("load complete canonical legacy history")
         .iter()
         .filter(|item| matches!(item, RolloutItem::Compacted(_)))
         .count();
-    assert_eq!(canonical_compaction_count, 1);
+    assert_eq!(complete_compaction_count, 3);
 
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -333,6 +793,22 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
                 if item.turn_id.as_deref() == Some("latest-turn")
         )
     }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) if event.thread_settings.service_tier.as_deref() == Some("oldest-legacy-segment-tier"))
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(item, RolloutItem::EventMsg(EventMsg::TokenCount(event)) if event.info.as_ref().and_then(|info| info.model_context_window) == Some(5141))
+    }));
+    assert!(
+        context.items.len() < 20,
+        "legacy compatibility projection retained {} items",
+        context.items.len()
+    );
+    assert!(
+        !serde_json::to_string(&context.items)
+            .expect("serialize bounded legacy compatibility context")
+            .contains("obsolete legacy historical item")
+    );
 }
 
 #[tokio::test]
@@ -402,6 +878,7 @@ async fn projected_legacy_checkpoint_without_window_replays_canonical_history() 
     let actual = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -414,7 +891,7 @@ async fn projected_legacy_checkpoint_without_window_replays_canonical_history() 
 }
 
 #[tokio::test]
-async fn projected_active_checkpoint_matches_complete_lineage() {
+async fn unmarked_active_compaction_uses_compatibility_reader() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2016);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -452,10 +929,21 @@ async fn projected_active_checkpoint_matches_complete_lineage() {
     )
     .await
     .expect("scan complete lineage");
-    let actual = scan_projected_active_model_context(&store, &path, &session_meta)
+    assert!(
+        scan_projected_active_model_context(&store, &path, &session_meta)
+            .await
+            .expect("scan indexed active rollout")
+            .is_none()
+    );
+    let actual = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            rollout_path: None,
+            include_archived: false,
+        })
         .await
-        .expect("scan indexed checkpoint")
-        .expect("complete indexed checkpoint");
+        .expect("load compatibility context")
+        .items;
 
     assert_eq!(
         serde_json::to_value(actual).expect("serialize indexed context"),
@@ -540,7 +1028,7 @@ async fn fork_context_excludes_items_after_frozen_cutoff() {
 }
 
 #[tokio::test]
-async fn loads_turn_metadata_across_an_older_checkpoint() {
+async fn unmarked_compaction_compatibility_reader_keeps_required_turn_metadata() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1006);
     let thread_id = codex_protocol::ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -570,6 +1058,7 @@ async fn loads_turn_metadata_across_an_older_checkpoint() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -655,7 +1144,7 @@ async fn returns_scanned_full_history_at_bof_without_checkpoint() {
 }
 
 #[tokio::test]
-async fn uses_agent_message_turn_context_without_scanning_older_turn() {
+async fn unmarked_compaction_with_agent_message_keeps_bounded_turn_context() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 1004);
     let thread_id = codex_protocol::ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -681,6 +1170,7 @@ async fn uses_agent_message_turn_context_without_scanning_older_turn() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -721,6 +1211,7 @@ async fn ignores_contextual_user_messages_when_selecting_turn_context() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -805,6 +1296,7 @@ async fn replays_nested_archived_lineage_from_frozen_prefix() {
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: child_id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -907,6 +1399,95 @@ fn write_ordinaled_paginated_rollout<const N: usize>(
     path
 }
 
+fn write_external_paginated_lineage(
+    home: &Path,
+    uuid: Uuid,
+    predecessor_message: &str,
+    active_items: Vec<RolloutItem>,
+) -> (ThreadId, PathBuf, PathBuf) {
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let predecessor_path = write_session_file_with_history_mode(
+        home,
+        "2025-01-03T13-44-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write external predecessor");
+    let active_path = write_session_file_with_history_mode(
+        home,
+        "2025-01-03T13-45-00",
+        uuid,
+        ThreadHistoryMode::Paginated,
+    )
+    .expect("write external active rollout");
+    let predecessor_segment_id = SegmentId::new();
+    let active_segment_id = SegmentId::new();
+    let mut predecessor_meta = read_session_meta(predecessor_path.as_path());
+    predecessor_meta.meta.segment_id = Some(predecessor_segment_id);
+    let mut active_meta = read_session_meta(active_path.as_path());
+    active_meta.meta.segment_id = Some(active_segment_id);
+    write_ordinaled_items(
+        predecessor_path.as_path(),
+        /*start_ordinal*/ 0,
+        std::iter::once(RolloutItem::SessionMeta(predecessor_meta)).chain([
+            sticky_thread_settings("external-predecessor-tier"),
+            sticky_token_count(/*model_context_window*/ 2048),
+            turn_started("external-predecessor"),
+            user_message(predecessor_message),
+            completed_user_message("external-predecessor", predecessor_message),
+            turn_context(home, "external-predecessor"),
+            turn_complete("external-predecessor"),
+        ]),
+    );
+    write_ordinaled_items(
+        active_path.as_path(),
+        /*start_ordinal*/ 16,
+        std::iter::once(RolloutItem::SessionMeta(active_meta))
+            .chain(std::iter::once(RolloutItem::RolloutReference(
+                RolloutReferenceItem {
+                    rollout_path: predecessor_path.clone(),
+                    thread_id: Some(thread_id),
+                    rollout_timestamp: None,
+                    segment_id: Some(predecessor_segment_id),
+                    max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                    nth_user_message: None,
+                    compacted_replacement_history_filter_texts: None,
+                },
+            )))
+            .chain(active_items),
+    );
+    (thread_id, active_path, predecessor_path)
+}
+
+fn read_session_meta(path: &Path) -> codex_protocol::protocol::SessionMetaLine {
+    let line = std::fs::read_to_string(path).expect("read rollout session metadata");
+    let line: RolloutLine =
+        serde_json::from_str(line.lines().next().expect("session metadata line"))
+            .expect("parse session metadata line");
+    let RolloutItem::SessionMeta(meta) = line.item else {
+        panic!("rollout must start with session metadata");
+    };
+    meta
+}
+
+fn write_ordinaled_items(
+    path: &Path,
+    start_ordinal: u64,
+    items: impl IntoIterator<Item = RolloutItem>,
+) {
+    let lines = items
+        .into_iter()
+        .enumerate()
+        .map(|(offset, item)| RolloutLine {
+            timestamp: "2025-01-03T13:45:00Z".to_string(),
+            ordinal: Some(start_ordinal + u64::try_from(offset).expect("line offset fits u64")),
+            item,
+        })
+        .map(|line| serde_json::to_string(&line).expect("serialize rollout line"))
+        .collect::<Vec<_>>();
+    std::fs::write(path, format!("{}\n", lines.join("\n"))).expect("write rollout lines");
+}
+
 fn set_history_base(path: &Path, history_base: HistoryPosition) {
     let contents = std::fs::read_to_string(path).expect("read rollout");
     let mut lines = contents.lines();
@@ -957,6 +1538,7 @@ async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
     let items = store
         .load_latest_model_context(LoadThreadHistoryParams {
             thread_id: session_meta.meta.id,
+            rollout_path: None,
             include_archived: false,
         })
         .await
@@ -972,7 +1554,7 @@ async fn assert_reverse_scan_matches_full_history(home: &Path, path: &Path) {
     );
 }
 
-fn append_items<const N: usize>(path: &Path, items: [RolloutItem; N]) {
+fn append_items(path: &Path, items: impl IntoIterator<Item = RolloutItem>) {
     let mut file = OpenOptions::new()
         .append(true)
         .open(path)
@@ -1095,6 +1677,7 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        segment_state_checkpoint: None,
     })
 }
 
@@ -1109,5 +1692,107 @@ fn compacted_without_window(
         first_window_id: None,
         previous_window_id: None,
         window_id: None,
+        segment_state_checkpoint: None,
     })
+}
+
+fn sticky_thread_settings(service_tier: &str) -> RolloutItem {
+    let event = certified_cleared_checkpoint("sticky settings source")
+        .into_items()
+        .into_iter()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => Some(event),
+            _ => None,
+        })
+        .expect("certified checkpoint settings event");
+    RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                service_tier: Some(service_tier.to_string()),
+                ..event.thread_settings
+            },
+        },
+    ))
+}
+
+fn sticky_token_count(model_context_window: i64) -> RolloutItem {
+    RolloutItem::EventMsg(EventMsg::TokenCount(TokenCountEvent {
+        info: Some(TokenUsageInfo::full_context_window(model_context_window)),
+        rate_limits: Some(RateLimitSnapshot {
+            limit_id: Some("compatibility-limit".to_string()),
+            limit_name: None,
+            primary: None,
+            secondary: None,
+            credits: None,
+            individual_limit: None,
+            spend_control_reached: None,
+            plan_type: None,
+            rate_limit_reached_type: None,
+        }),
+    }))
+}
+
+fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: message.to_string(),
+            replacement_history: Some(vec![ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "active checkpoint history".to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }]),
+            window_number: Some(4),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        Some(SegmentPreviousTurnSettings {
+            model: "test-model".to_string(),
+            comp_hash: None,
+            realtime_active: None,
+        }),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+                environments: Some(TurnEnvironmentSelections::new(
+                    serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd"),
+                    Vec::new(),
+                )),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid certified checkpoint")
 }

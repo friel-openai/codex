@@ -43,6 +43,9 @@ use codex_otel::TURN_NETWORK_PROXY_METRIC;
 use codex_otel::TURN_TOKEN_USAGE_METRIC;
 use codex_otel::TURN_TOOL_CALL_METRIC;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::protocol::CodexErrorInfo;
+use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::TokenUsage;
@@ -71,6 +74,14 @@ pub(crate) type SessionTaskResult = CodexResult<Option<String>>;
 pub(crate) enum MailboxParentProvenance {
     Ignore,
     Attribute,
+}
+
+/// Reports whether a task crossed the restart-required persistence admission fence.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskStartOutcome {
+    Started,
+    RestartRequired,
+    Superseded,
 }
 
 /// Whether task finalization completed or reserved the active task for pending input.
@@ -332,7 +343,19 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-    ) {
+    ) -> TaskStartOutcome {
+        if self.token_usage_for_task_admission().await.is_err() {
+            self.send_event_raw(Event {
+                id: turn_context.sub_id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: "Thread persistence is in an indeterminate state. Restart this thread before starting another task."
+                        .to_string(),
+                    codex_error_info: Some(CodexErrorInfo::Other),
+                }),
+            })
+            .await;
+            return TaskStartOutcome::RestartRequired;
+        }
         self.abort_all_tasks(TurnAbortReason::Replaced).await;
         self.clear_connector_selection().await;
         self.start_task(
@@ -342,7 +365,7 @@ impl Session {
             /*input_persisted*/ None,
             MailboxParentProvenance::Ignore,
         )
-        .await;
+        .await
     }
 
     pub(crate) async fn start_task<T: SessionTask>(
@@ -350,14 +373,36 @@ impl Session {
         turn_context: Arc<TurnContext>,
         input: Vec<TurnInput>,
         task: T,
-        input_persisted: Option<
+        mut input_persisted: Option<
             tokio::sync::oneshot::Sender<Result<(), TryStartTurnIfIdleRejectionReason>>,
         >,
         mailbox_parent_provenance: MailboxParentProvenance,
-    ) {
+    ) -> TaskStartOutcome {
+        // Idle history injection holds this lock until it either records its items or observes the
+        // active task installed below. This prevents task startup from snapshotting history in the
+        // middle of one direct injection operation.
+        let _history_rewrite = Arc::clone(&self.history_rewrite_lock).lock_owned().await;
         let task: Arc<dyn AnySessionTask> = Arc::new(task);
         let task_kind = task.kind();
         let span_name = task.span_name();
+        let token_usage_at_turn_start = match self.token_usage_for_task_admission().await {
+            Ok(token_usage) => token_usage,
+            Err(_) => {
+                if let Some(sender) = input_persisted.take() {
+                    let _ = sender.send(Err(TryStartTurnIfIdleRejectionReason::PersistenceFailed));
+                }
+                self.send_event_raw(Event {
+                    id: turn_context.sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: "Thread persistence is in an indeterminate state. Restart this thread before starting another task."
+                            .to_string(),
+                        codex_error_info: Some(CodexErrorInfo::Other),
+                    }),
+                })
+                .await;
+                return TaskStartOutcome::RestartRequired;
+            }
+        };
         let started_at = Instant::now();
         let turn_started_at_unix_ms = turn_context
             .turn_timing_state
@@ -366,7 +411,6 @@ impl Session {
         turn_context
             .turn_metadata_state
             .set_turn_started_at_unix_ms(turn_started_at_unix_ms);
-        let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
 
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
@@ -398,8 +442,15 @@ impl Session {
             .await;
 
         let mut active = self.active_turn.lock().await;
-        let turn = active.get_or_insert_with(ActiveTurn::default);
-        debug_assert!(turn.task.is_none());
+        let Some(turn) = active
+            .as_mut()
+            .filter(|turn| turn.task.is_none() && Arc::ptr_eq(&turn.turn_state, &turn_state))
+        else {
+            if let Some(sender) = input_persisted.take() {
+                let _ = sender.send(Err(TryStartTurnIfIdleRejectionReason::Busy));
+            }
+            return TaskStartOutcome::Superseded;
+        };
         let agent_execution_guard = self.services.agent_control.execution_guard(
             turn_context.multi_agent_version,
             &turn_context.session_source,
@@ -496,6 +547,7 @@ impl Session {
             _timer: timer,
         };
         turn.task = Some(running_task);
+        TaskStartOutcome::Started
     }
 
     /// Returns whether an extension has marked this thread as durably asleep.
@@ -558,29 +610,53 @@ impl Session {
         self: &Arc<Self>,
         sub_id: String,
     ) {
-        if !self.has_pending_turn_start_work().await {
-            return;
-        }
+        let _ = self
+            .with_checkpoint_admission("start a turn for pending work", || async {
+                if !self.has_pending_turn_start_work().await {
+                    return;
+                }
 
-        {
-            let mut active_turn = self.active_turn.lock().await;
-            if active_turn.is_some() {
-                return;
-            }
-            *active_turn = Some(ActiveTurn::default());
-        }
+                let turn_state = {
+                    let mut active_turn = self.active_turn.lock().await;
+                    if active_turn.is_some() {
+                        return;
+                    }
+                    let active_turn = active_turn.get_or_insert_with(ActiveTurn::default);
+                    Arc::clone(&active_turn.turn_state)
+                };
 
-        let turn_context = self.new_default_turn_with_sub_id(sub_id).await;
-        self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+                let Ok(turn_context) = self.new_default_turn_with_sub_id(sub_id).await else {
+                    let mut active_turn = self.active_turn.lock().await;
+                    if active_turn.as_ref().is_some_and(|active_turn| {
+                        active_turn.task.is_none()
+                            && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
+                    }) {
+                        *active_turn = None;
+                    }
+                    return;
+                };
+                self.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
+                    .await;
+                let task_start = self
+                    .start_task(
+                        turn_context,
+                        Vec::new(),
+                        RegularTask::new(),
+                        /*input_persisted*/ None,
+                        MailboxParentProvenance::Attribute,
+                    )
+                    .await;
+                if !matches!(task_start, TaskStartOutcome::Started) {
+                    let mut active_turn = self.active_turn.lock().await;
+                    if active_turn.as_ref().is_some_and(|active_turn| {
+                        active_turn.task.is_none()
+                            && Arc::ptr_eq(&active_turn.turn_state, &turn_state)
+                    }) {
+                        *active_turn = None;
+                    }
+                }
+            })
             .await;
-        self.start_task(
-            turn_context,
-            Vec::new(),
-            RegularTask::new(),
-            /*input_persisted*/ None,
-            MailboxParentProvenance::Attribute,
-        )
-        .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {

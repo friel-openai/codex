@@ -385,6 +385,19 @@ pub(super) async fn delete_thread(
         .map_err(thread_history_delete_error)
 }
 
+/// Verifies projected-history deletion can run before rollout deletion makes the thread
+/// unavailable. The subsequent delete still owns the transaction and row mutation.
+pub(super) async fn preflight_delete_thread(store: &LocalThreadStore) -> ThreadStoreResult<()> {
+    let db_path = store.config.sqlite.thread_history_db_path();
+    if tokio::fs::try_exists(db_path.as_path())
+        .await
+        .map_err(thread_history_delete_error)?
+    {
+        store.thread_history_db().await?;
+    }
+    Ok(())
+}
+
 async fn apply_change_set(
     transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     thread_id: &str,

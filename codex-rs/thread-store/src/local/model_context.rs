@@ -10,11 +10,9 @@ use std::path::Path;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
-use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::ModelContextScan;
-use codex_rollout::ModelContextScanProgress;
 use codex_rollout::ReverseJsonlScanner;
 use codex_rollout::ScanOutcome;
 
@@ -32,23 +30,25 @@ mod tests;
 
 /// Loads rollout items needed to reconstruct the latest model-visible context.
 ///
-/// Plain paginated JSONL rollouts use a reverse scan. When it finds both a usable replacement-
-/// history checkpoint and the completed user-turn context needed for resume metadata, the returned
-/// replay starts with the canonical head `SessionMeta` followed by that newest suffix. When no
-/// bounded cutoff is available, the scan continues to the beginning and returns the complete
-/// replay it already accumulated.
+/// Plain paginated JSONL rollouts use a reverse scan. A certified segment-state checkpoint returns
+/// the canonical head `SessionMeta` followed by that newest suffix. An unmarked compaction is not
+/// sufficient because sticky settings and token state may exist before it. Without a certified
+/// checkpoint, the reader scans the complete compatibility lineage and returns a bounded replay.
 ///
-/// Indexed segmented legacy rollouts with complete compaction checkpoints use the same bounded
-/// active scan. Unindexed or inherited rollouts still replay all canonical history.
+/// Indexed segmented legacy rollouts with certified checkpoints use the same bounded active scan.
+/// Unmarked, unindexed, or inherited rollouts still replay canonical compatibility history.
 pub(super) async fn load_latest_model_context(
     store: &LocalThreadStore,
     params: LoadThreadHistoryParams,
 ) -> ThreadStoreResult<StoredModelContext> {
-    let path = read_thread::resolve_rollout_path(store, params.thread_id, params.include_archived)
-        .await?
-        .ok_or_else(|| ThreadStoreError::InvalidRequest {
-            message: format!("no rollout found for thread id {}", params.thread_id),
-        })?;
+    let path = match params.rollout_path.as_ref() {
+        Some(path) => read_thread::resolve_requested_rollout_path(store, path.clone()).await?,
+        None => read_thread::resolve_rollout_path(store, params.thread_id, params.include_archived)
+            .await?
+            .ok_or_else(|| ThreadStoreError::InvalidRequest {
+                message: format!("no rollout found for thread id {}", params.thread_id),
+            })?,
+    };
 
     let session_meta = codex_rollout::read_session_meta_line(path.as_path())
         .await
@@ -66,19 +66,47 @@ pub(super) async fn load_latest_model_context(
         });
     }
 
-    let items = if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
+    let items = if let Some(items) =
+        scan_projected_active_model_context(store, &path, &session_meta).await?
+    {
+        items
+    } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
         || (matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy)
             && session_meta.meta.segment_id.is_some())
     {
-        if let Some(items) =
-            scan_projected_active_model_context(store, &path, &session_meta).await?
-        {
-            items
-        } else if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy) {
-            read_thread::load_history_items(store.config.codex_home.as_path(), path.as_path())
-                .await?
+        if matches!(session_meta.meta.history_mode, ThreadHistoryMode::Legacy) {
+            let (lines, _, parse_errors) =
+                codex_rollout::RolloutRecorder::load_rollout_lines(path.as_path())
+                    .await
+                    .map_err(thread_store_io_error)?;
+            if parse_errors != 0 {
+                return Err(ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to load latest model context {}: rollout contains {parse_errors} invalid record(s)",
+                        path.display()
+                    ),
+                });
+            }
+            codex_rollout::materialize_model_context_rollout_items_from(
+                store.config.codex_home.as_path(),
+                lines,
+            )
+            .await
+            .map_err(|err| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to load latest model context {}: {err}",
+                    path.display()
+                ),
+            })?
         } else {
-            let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
+            let lineage = match params.rollout_path {
+                Some(_) => {
+                    store
+                        .resolve_rollout_lineage_from_path(params.thread_id, path.clone())
+                        .await?
+                }
+                None => store.resolve_rollout_lineage(params.thread_id).await?,
+            };
             scan_model_context_from_lineage(lineage, session_meta).await?
         }
     } else {
@@ -91,22 +119,22 @@ pub(super) async fn load_latest_model_context(
     })
 }
 
-/// Uses an indexed active checkpoint without traversing immutable same-thread predecessors.
+/// Uses a complete active checkpoint without traversing immutable same-thread predecessors.
 ///
-/// The SQLite projection proves that the active file was fully indexed. A completed
-/// `ModelContextScan` then proves the active segment contains all checkpoint and turn metadata
-/// needed for resume. Any unprojected, inherited, incomplete, or concurrently replaced rollout
-/// preserves the existing complete-lineage implementation.
+/// A certified segment-state checkpoint is authoritative from the JSONL file itself; projection
+/// state and predecessor availability cannot invalidate it. Unmarked, incomplete, malformed, or
+/// concurrently replaced files preserve the complete-lineage compatibility implementation.
 pub(super) async fn scan_projected_active_model_context(
-    store: &LocalThreadStore,
+    _store: &LocalThreadStore,
     path: &Path,
     session_meta: &SessionMetaLine,
 ) -> ThreadStoreResult<Option<Vec<RolloutItem>>> {
-    if (matches!(session_meta.meta.history_mode, ThreadHistoryMode::Paginated)
-        && session_meta.meta.forked_from_id.is_some())
-        || session_meta.meta.history_base.is_some()
-        || session_meta.meta.subagent_history_start_ordinal.is_some()
-        || path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+    let compressed_active = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".jsonl.zst"));
+    if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl")
+        && !compressed_active
     {
         return Ok(None);
     }
@@ -114,44 +142,36 @@ pub(super) async fn scan_projected_active_model_context(
     let before = tokio::fs::metadata(path)
         .await
         .map_err(thread_store_io_error)?;
-    let Some(projection_state) =
-        super::thread_history::projection_state(store, session_meta.meta.id).await?
-    else {
-        return Ok(None);
-    };
-    if projection_state.next_byte_offset != before.len() {
-        return Ok(None);
-    }
-
-    let path_for_scan = path.to_path_buf();
-    let meta_for_scan = session_meta.clone();
-    let (items, reference) = tokio::task::spawn_blocking(move || {
-        scan_projected_active_model_context_blocking(&path_for_scan, meta_for_scan)
-    })
-    .await
-    .map_err(|err| ThreadStoreError::Internal {
-        message: format!("failed to join indexed model context scan: {err}"),
-    })?
-    .map_err(thread_store_io_error)?;
-    let Some(items) = items else {
-        return Ok(None);
-    };
-
-    if let Some(reference) = reference {
-        if reference.thread_id != Some(session_meta.meta.id)
-            || reference.nth_user_message.is_some()
-            || reference
-                .compacted_replacement_history_filter_texts
-                .is_some()
-        {
-            return Ok(None);
+    let active_scan = if compressed_active {
+        let (lines, _, parse_errors) = codex_rollout::RolloutRecorder::load_rollout_lines(path)
+            .await
+            .map_err(thread_store_io_error)?;
+        if parse_errors != 0 {
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "active rollout {} contains {parse_errors} invalid record(s)",
+                    path.display()
+                ),
+            });
         }
-        codex_rollout::resolve_rollout_reference_path(
-            store.config.codex_home.as_path(),
-            &reference,
-        )
+        scan_loaded_active_model_context(lines, session_meta.clone())
+    } else {
+        let path_for_scan = path.to_path_buf();
+        let meta_for_scan = session_meta.clone();
+        tokio::task::spawn_blocking(move || {
+            scan_projected_active_model_context_blocking(&path_for_scan, meta_for_scan)
+        })
         .await
-        .map_err(thread_store_io_error)?;
+        .map_err(|err| ThreadStoreError::Internal {
+            message: format!("failed to join indexed model context scan: {err}"),
+        })?
+        .map_err(thread_store_io_error)?
+    };
+    let Some(active_scan) = active_scan else {
+        return Ok(None);
+    };
+    if !active_scan.segment_checkpoint {
+        return Ok(None);
     }
 
     let after = tokio::fs::metadata(path)
@@ -161,47 +181,93 @@ pub(super) async fn scan_projected_active_model_context(
         return Ok(None);
     }
 
-    Ok(Some(items))
+    tracing::debug!(
+        outcome = "active_checkpoint_hit",
+        active_segments_opened = 1_u64,
+        referenced_segments_opened = 0_u64,
+        active_segment_bytes = before.len(),
+        records_scanned = active_scan.records_scanned,
+        compressed_active,
+        "loaded latest model context from the active rollout segment"
+    );
+
+    Ok(Some(active_scan.items))
 }
 
-fn scan_projected_active_model_context_blocking(
-    path: &Path,
-    session_meta: SessionMetaLine,
-) -> io::Result<(Option<Vec<RolloutItem>>, Option<RolloutReferenceItem>)> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    line.clear();
-    let reference = if reader.read_line(&mut line)? == 0 {
-        None
-    } else {
-        let item = serde_json::from_str::<RolloutLine>(&line)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
-            .item;
-        match item {
-            RolloutItem::RolloutReference(reference) => Some(reference),
-            _ => None,
-        }
-    };
+struct ActiveModelContextScan {
+    items: Vec<RolloutItem>,
+    segment_checkpoint: bool,
+    records_scanned: u64,
+}
 
-    let mut scanner = ReverseJsonlScanner::new(reader.into_inner())?;
+fn scan_loaded_active_model_context(
+    lines: Vec<RolloutLine>,
+    session_meta: SessionMetaLine,
+) -> Option<ActiveModelContextScan> {
     let mut scan = ModelContextScan::default();
-    while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
-        let ScanOutcome::Parsed(line) = outcome else {
-            continue;
-        };
+    for (index, line) in lines.into_iter().rev().enumerate() {
+        let records_scanned = index as u64 + 1;
         if matches!(
             line.item,
             RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
         ) {
             continue;
         }
-        if matches!(scan.push(line.item), ModelContextScanProgress::Complete) {
-            return Ok((Some(scan.finish(session_meta)), reference));
+        let progress = scan.push(line.item);
+        if progress.is_complete() {
+            let segment_checkpoint = scan.completed_at_segment_checkpoint();
+            return Some(ActiveModelContextScan {
+                items: scan.finish(session_meta),
+                segment_checkpoint,
+                records_scanned,
+            });
         }
     }
-    Ok((None, reference))
+    None
+}
+
+fn scan_projected_active_model_context_blocking(
+    path: &Path,
+    session_meta: SessionMetaLine,
+) -> io::Result<Option<ActiveModelContextScan>> {
+    let file = File::open(path)?;
+    let mut reader = BufReader::new(file);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    line.clear();
+    if reader.read_line(&mut line)? != 0 {
+        serde_json::from_str::<RolloutLine>(&line)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    }
+
+    let mut scanner = ReverseJsonlScanner::new(reader.into_inner())?;
+    let mut scan = ModelContextScan::default();
+    let mut records_scanned = 0_u64;
+    while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
+        let line = match outcome {
+            ScanOutcome::Parsed(line) => line,
+            ScanOutcome::Rejected(err) => {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+            }
+        };
+        records_scanned += 1;
+        if matches!(
+            line.item,
+            RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
+        ) {
+            continue;
+        }
+        let progress = scan.push(line.item);
+        if progress.is_complete() {
+            let segment_checkpoint = scan.completed_at_segment_checkpoint();
+            return Ok(Some(ActiveModelContextScan {
+                items: scan.finish(session_meta),
+                segment_checkpoint,
+                records_scanned,
+            }));
+        }
+    }
+    Ok(None)
 }
 
 fn unchanged_active_rollout(before: &Metadata, after: &Metadata) -> io::Result<bool> {
@@ -349,8 +415,11 @@ fn scan_model_context_from_lineage_blocking(
             None => ReverseJsonlScanner::new(file)?,
         };
         while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
-            let ScanOutcome::Parsed(line) = outcome else {
-                continue;
+            let line = match outcome {
+                ScanOutcome::Parsed(line) => line,
+                ScanOutcome::Rejected(err) => {
+                    return Err(io::Error::new(io::ErrorKind::InvalidData, err));
+                }
             };
             if let Some(ordinal) = line.ordinal
                 && (ordinal < segment.start_ordinal
@@ -371,9 +440,8 @@ fn scan_model_context_from_lineage_blocking(
             {
                 continue;
             }
-            match scan.push(item) {
-                ModelContextScanProgress::Continue => {}
-                ModelContextScanProgress::Complete => break 'segments,
+            if scan.push(item).is_complete() {
+                break 'segments;
             }
         }
     }
@@ -422,9 +490,8 @@ async fn scan_loaded_model_context_from_lineage(
             {
                 continue;
             }
-            match scan.push(item) {
-                ModelContextScanProgress::Continue => {}
-                ModelContextScanProgress::Complete => break 'segments,
+            if scan.push(item).is_complete() {
+                break 'segments;
             }
         }
     }

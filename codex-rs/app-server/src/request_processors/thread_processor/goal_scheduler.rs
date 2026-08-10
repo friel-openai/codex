@@ -1,4 +1,5 @@
 use super::*;
+use crate::request_processors::thread_goal_processor::thread_lifecycle_mutation_error;
 use codex_state::ActiveGoalSupervisorSchedule;
 
 const SCHEDULER_MATERIALIZED_RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
@@ -30,13 +31,23 @@ impl ThreadRequestProcessor {
             )));
         }
 
-        if let Ok(thread) = self.thread_manager.get_thread(thread_id).await {
-            self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
-                .await?;
-            thread
-                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
-                .await;
-            return Ok(());
+        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await {
+            let lifecycle_admission = self
+                .thread_manager
+                .lock_thread_lifecycle_mutation(thread_id, "activate its Goal supervisor")
+                .await
+                .map_err(thread_lifecycle_mutation_error)?;
+            if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+                && Arc::ptr_eq(&observed_thread, &thread)
+            {
+                self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
+                    .await?;
+                drop(lifecycle_admission);
+                thread
+                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                    .await;
+                return Ok(());
+            }
         }
 
         let thread_id_string = thread_id.to_string();

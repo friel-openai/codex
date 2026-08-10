@@ -1,6 +1,8 @@
 use crate::CodexAppsToolsCache;
 use crate::HostSkillsService;
 use crate::agent::AgentControl;
+use crate::agent::CurrentAgentMember;
+use crate::agent::CurrentAgentMembershipSnapshot;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
@@ -17,12 +19,14 @@ use crate::session::GitEnrichmentPolicy;
 use crate::session::INITIAL_SUBMIT_ID;
 use crate::session::SessionIo;
 use crate::session::SessionSpawnArgs;
+use crate::session::new_submission_id;
 use crate::session::resolve_multi_agent_version;
 use crate::session::session::Session;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
 use codex_agent_graph_store::AgentGraphStore;
 use codex_agent_graph_store::LocalAgentGraphStore;
+use codex_agent_graph_store::ThreadSpawnEdgeStatus;
 use codex_analytics::AnalyticsEventsClient;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::TurnStatus;
@@ -55,6 +59,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
@@ -66,13 +71,16 @@ use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::SessionConfiguredEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::W3cTraceContext;
-use codex_rollout::materialize_recent_rollout_lines_from;
+use codex_rollout::materialize_model_context_rollout_items_from;
+use codex_rollout::materialize_rollout_lines_from;
 use codex_rollout::state_db::StateDbHandle;
 use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::FrozenRolloutSegment;
@@ -101,12 +109,39 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::instrument;
 use tracing::warn;
 
 const THREAD_CREATED_CHANNEL_CAPACITY: usize = 1024;
+
+fn persisted_thread_environment_selections(
+    config: &Config,
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    match &config.persisted_thread_environments {
+        Some(Some(selections)) => return Some(selections.environments.clone()),
+        Some(None) => return None,
+        None => {}
+    }
+    history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(&event.thread_settings)
+            }
+            _ => None,
+        })
+        .and_then(|settings| settings.environments.clone())
+        .map(|selections: TurnEnvironmentSelections| selections.environments)
+}
+
+mod current_membership;
+pub use current_membership::CurrentAgentMembershipHandle;
 
 /// Test-only override for enabling thread-manager behaviors used by integration
 /// tests.
@@ -121,6 +156,22 @@ pub(crate) type ThreadIdGenerator = Arc<dyn Fn() -> ThreadId + Send + Sync>;
 
 pub(crate) fn default_thread_id_generator() -> ThreadIdGenerator {
     Arc::new(ThreadId::new)
+}
+
+/// A receiver-accepted submission that retains checkpoint admission for caller-side bookkeeping.
+pub(crate) struct AdmittedSubmission {
+    id: String,
+    _checkpoint_admission: OwnedMutexGuard<()>,
+}
+
+impl AdmittedSubmission {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn into_id(self) -> String {
+        self.id
+    }
 }
 
 pub(crate) fn set_thread_manager_test_mode_for_tests(enabled: bool) {
@@ -147,6 +198,14 @@ pub struct NewThread {
     pub thread_id: ThreadId,
     pub thread: Arc<CodexThread>,
     pub session_configured: SessionConfiguredEvent,
+}
+
+/// Retains the thread-manager lifecycle mutation boundary for one admitted thread mutation.
+///
+/// The admission rejects permanent-close fences and durable `PermanentlyClosed` ownership before
+/// callers mutate runtime state, Goal state, or resume the selected thread.
+pub struct ThreadLifecycleMutationAdmission {
+    _lifecycle_mutation: OwnedMutexGuard<()>,
 }
 
 // TODO(ccunningham): Add an explicit non-interrupting live-turn snapshot once
@@ -182,13 +241,26 @@ pub enum ForkSnapshot {
 
 struct ForkHistory {
     snapshot: Option<ForkSnapshot>,
+    snapshot_history_materialization: SnapshotHistoryMaterialization,
     initial_history: InitialHistory,
     /// Complete frozen parent context reconstructed only in the child's model state.
     model_history_override: Option<Vec<RolloutItem>>,
+    /// Latest settings context when the selected model history ends at an older fork boundary.
+    settings_history_override: Option<Arc<Vec<RolloutItem>>>,
     /// Immutable parent response history shared directly with the forked model context.
     shared_model_response_items: Option<Arc<Vec<ResponseItem>>>,
     /// Parent settings and cached model baselines matching the immutable response history.
     shared_model_state: Option<ForkModelState>,
+}
+
+/// Selects whether a reference-backed snapshot is reconstructing model startup state or an exact
+/// user-visible fork response.
+#[derive(Clone, Copy)]
+enum SnapshotHistoryMaterialization {
+    /// Reconstruct current model context through the certified-checkpoint compatibility scanner.
+    ModelContext,
+    /// Expand every predecessor segment because the caller promises complete response history.
+    CompleteResponseHistory,
 }
 
 /// Builds the one physical representation used by every exact full-history fork.
@@ -336,11 +408,32 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
     pub(crate) inherited_thread_state: InheritedThreadState,
 }
 
+#[derive(Clone)]
+pub(crate) struct ClosedAgentSubtreeMemory {
+    pub(crate) owner_thread_id: ThreadId,
+    pub(crate) member_thread_ids: Vec<ThreadId>,
+    pub(crate) complete: bool,
+    pub(crate) in_flight_active: bool,
+}
+
 /// Shared, `Arc`-owned state for [`ThreadManager`]. This `Arc` is required to have a single
 /// `Arc` reference that can be downgraded to by `AgentControl` while preventing every single
 /// function to require an `Arc<&Self>`.
 pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
+    /// Serializes ownership changes and registry commits across every root in this manager.
+    lifecycle_mutation: Arc<AsyncMutex<()>>,
+    /// Threads fenced from ownership changes during and after permanent subtree close.
+    ///
+    /// A successful close retains this fence for the manager process. Temporary archive/delete
+    /// eviction removes its marks after every current runtime and registry identity is gone.
+    closed_or_closing_thread_ids: std::sync::Mutex<HashMap<ThreadId, usize>>,
+    /// Exact members returned by each permanent close attempt in this manager process.
+    closed_agent_subtrees: std::sync::Mutex<HashMap<ThreadId, ClosedAgentSubtreeMemory>>,
+    /// Threads fenced only while an archive or delete operation commits current membership.
+    temporary_membership_eviction_thread_ids: std::sync::Mutex<HashMap<ThreadId, usize>>,
+    /// Root registries with cold current members but no loaded runtime carrying the control.
+    retained_agent_controls: std::sync::Mutex<HashMap<ThreadId, AgentControl>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     thread_id_generator: ThreadIdGenerator,
     auth_manager: Arc<AuthManager>,
@@ -470,6 +563,11 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                closed_or_closing_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                closed_agent_subtrees: std::sync::Mutex::new(HashMap::new()),
+                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
@@ -531,6 +629,18 @@ impl ThreadManager {
         state.code_mode_session_provider = Arc::new(
             ProcessOwnedCodeModeSessionProvider::with_host_program(host_program),
         );
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_agent_graph_store_for_tests(
+        mut self,
+        agent_graph_store: Arc<dyn AgentGraphStore>,
+    ) -> Self {
+        let Some(state) = Arc::get_mut(&mut self.state) else {
+            unreachable!("agent graph store must be set before the manager is shared");
+        };
+        state.agent_graph_store = Some(agent_graph_store);
         self
     }
 
@@ -616,6 +726,11 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                closed_or_closing_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                closed_agent_subtrees: std::sync::Mutex::new(HashMap::new()),
+                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -861,6 +976,59 @@ impl ThreadManager {
         Ok(subtree_thread_ids)
     }
 
+    /// Returns whether a loaded thread's recorded parent chain reaches `ancestor_thread_id`.
+    ///
+    /// Loaded parents are read from memory. Unloaded intermediates are resolved by thread ID from
+    /// the thread store so callers do not depend on a complete spawn-edge index for older homes.
+    pub async fn loaded_thread_descends_from(
+        &self,
+        thread_id: ThreadId,
+        ancestor_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let Ok(thread) = self.get_thread(thread_id).await else {
+            return Ok(false);
+        };
+        let mut parent_thread_id = thread
+            .session_configured()
+            .parent_thread_id
+            .or_else(|| thread.session_source.parent_thread_id());
+        let mut visited = HashSet::from([thread_id]);
+        while let Some(parent_id) = parent_thread_id {
+            if parent_id == ancestor_thread_id {
+                return Ok(true);
+            }
+            if !visited.insert(parent_id) {
+                return Ok(false);
+            }
+            if let Ok(loaded_parent) = self.get_thread(parent_id).await {
+                parent_thread_id = loaded_parent
+                    .session_configured()
+                    .parent_thread_id
+                    .or_else(|| loaded_parent.session_source.parent_thread_id());
+                continue;
+            }
+            let stored_parent = match self
+                .state
+                .read_stored_thread(ReadThreadParams {
+                    thread_id: parent_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+            {
+                Ok(stored_parent) => stored_parent,
+                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            };
+            parent_thread_id = stored_parent
+                .parent_thread_id
+                .or_else(|| stored_parent.source.parent_thread_id());
+        }
+        Ok(false)
+    }
+
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
         Box::pin(self.start_thread_inner(options, /*forked_from_thread_id*/ None)).await
     }
@@ -904,6 +1072,7 @@ impl ThreadManager {
             .reference_backed_snapshot_history(
                 forked_from_thread_id,
                 options.config.codex_home.as_path(),
+                SnapshotHistoryMaterialization::ModelContext,
                 ForkSnapshot::Interrupted,
                 InterruptedTurnHistoryMarker::from_config_and_version(
                     &options.config,
@@ -931,7 +1100,9 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let initial_history = self
+            .latest_initial_history_from_rollout_path(rollout_path)
+            .await?;
         Box::pin(self.resume_thread_with_history(
             config,
             initial_history,
@@ -951,6 +1122,13 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        let _lifecycle_admission = match &initial_history {
+            InitialHistory::Resumed(resumed) => Some(
+                self.lock_thread_lifecycle_mutation(resumed.conversation_id, "resume the thread")
+                    .await?,
+            ),
+            InitialHistory::New | InitialHistory::Forked(_) | InitialHistory::Cleared => None,
+        };
         if let InitialHistory::Resumed(resumed) = &mut initial_history {
             let metadata =
                 Arc::make_mut(&mut resumed.history)
@@ -1041,24 +1219,19 @@ impl ThreadManager {
                 }
             }
         }
+        let environments =
+            persisted_thread_environment_selections(&config, initial_history.get_rollout_items());
         let agent_control = self.agent_control_for_config(&config);
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
-        if let InitialHistory::Resumed(resumed) = &initial_history
-            && initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2)
-            && !session_source.is_non_root_agent()
-        {
-            agent_control
-                .restore_v2_agent_metadata(&config, resumed.conversation_id)
-                .await;
-        }
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            environments,
             ..StartThreadOptions::new(config)
         };
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
@@ -1095,7 +1268,9 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
         let agent_control = self.agent_control_for_config(&config);
-        let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let initial_history = self
+            .latest_initial_history_from_rollout_path(rollout_path)
+            .await?;
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
@@ -1215,6 +1390,39 @@ impl ThreadManager {
         stored_thread_to_initial_history(stored_thread, Some(requested_rollout_path))
     }
 
+    /// Resolve a rollout path to its thread, then load only the canonical latest model context.
+    ///
+    /// Resume must not inherit the full-history behavior used by explicit fork operations. A
+    /// certified active segment is sufficient even when its immutable predecessor is unavailable.
+    async fn latest_initial_history_from_rollout_path(
+        &self,
+        rollout_path: PathBuf,
+    ) -> CodexResult<InitialHistory> {
+        let stored_thread = self
+            .state
+            .thread_store
+            .read_thread_by_rollout_path(ReadThreadByRolloutPathParams {
+                rollout_path: rollout_path.clone(),
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+            .map_err(thread_store_rollout_read_error)?;
+        let model_context = self
+            .state
+            .load_latest_model_context(LoadThreadHistoryParams {
+                thread_id: stored_thread.thread_id,
+                rollout_path: Some(rollout_path.clone()),
+                include_archived: true,
+            })
+            .await?;
+        Ok(InitialHistory::Resumed(ResumedHistory {
+            conversation_id: model_context.thread_id,
+            history: Arc::new(model_context.items),
+            rollout_path: Some(rollout_path),
+        }))
+    }
+
     /// Fork an existing thread from already-loaded store history.
     pub async fn fork_thread_from_history<S>(
         &self,
@@ -1253,12 +1461,68 @@ impl ThreadManager {
     where
         S: Into<ForkSnapshot>,
     {
+        self.fork_thread_from_history_with_materialization(
+            snapshot,
+            config,
+            history,
+            SnapshotHistoryMaterialization::CompleteResponseHistory,
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    /// Fork the latest model context without expanding irrelevant predecessor segments.
+    pub async fn fork_thread_from_model_context_with_response<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)>
+    where
+        S: Into<ForkSnapshot>,
+    {
+        self.fork_thread_from_history_with_materialization(
+            snapshot,
+            config,
+            history,
+            SnapshotHistoryMaterialization::ModelContext,
+            thread_source,
+            parent_trace,
+            client_mcp_extensions,
+        )
+        .await
+    }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "fork startup keeps the source snapshot, materialization policy, and inherited runtime inputs explicit"
+    )]
+    async fn fork_thread_from_history_with_materialization<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        snapshot_history_materialization: SnapshotHistoryMaterialization,
+        thread_source: Option<ThreadSource>,
+        parent_trace: Option<W3cTraceContext>,
+        client_mcp_extensions: ClientMcpExtensions,
+    ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)>
+    where
+        S: Into<ForkSnapshot>,
+    {
         self.fork_thread_with_initial_history(
             config,
             ForkHistory {
                 snapshot: Some(snapshot.into()),
+                snapshot_history_materialization,
                 initial_history: history,
                 model_history_override: None,
+                settings_history_override: None,
                 shared_model_response_items: None,
                 shared_model_state: None,
             },
@@ -1369,8 +1633,11 @@ impl ThreadManager {
                 config,
                 ForkHistory {
                     snapshot: None,
+                    snapshot_history_materialization:
+                        SnapshotHistoryMaterialization::CompleteResponseHistory,
                     initial_history: history,
                     model_history_override: Some(model_history_override),
+                    settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                     shared_model_response_items,
                     shared_model_state,
                 },
@@ -1393,8 +1660,10 @@ impl ThreadManager {
     ) -> CodexResult<(NewThread, Arc<Vec<RolloutItem>>)> {
         let ForkHistory {
             snapshot,
+            snapshot_history_materialization,
             initial_history: history,
-            model_history_override,
+            mut model_history_override,
+            settings_history_override,
             shared_model_response_items,
             shared_model_state,
         } = fork_history;
@@ -1433,6 +1702,7 @@ impl ThreadManager {
                     .reference_backed_snapshot_history(
                         source_thread_id,
                         config.codex_home.as_path(),
+                        snapshot_history_materialization,
                         snapshot,
                         interrupted_marker,
                         expected_source_items,
@@ -1460,12 +1730,32 @@ impl ThreadManager {
             let response_history = Arc::new(history.get_rollout_items().to_vec());
             (history, response_history, None)
         };
+        if model_history_override.is_none()
+            && matches!(
+                snapshot_history_materialization,
+                SnapshotHistoryMaterialization::ModelContext
+            )
+        {
+            model_history_override = Some(response_history.as_ref().clone());
+        }
+        let environments = settings_history_override
+            .as_deref()
+            .map(|history| persisted_thread_environment_selections(&config, history))
+            .unwrap_or_else(|| match model_history_override.as_deref() {
+                Some(model_history_override) => {
+                    persisted_thread_environment_selections(&config, model_history_override)
+                }
+                None => {
+                    persisted_thread_environment_selections(&config, history.get_rollout_items())
+                }
+            });
         let agent_control = self.agent_control_for_config(&config);
         let options = StartThreadOptions {
             initial_history: history,
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            environments,
             ..StartThreadOptions::new(config)
         };
         let mut request =
@@ -1494,6 +1784,67 @@ impl ThreadManager {
         )
     }
 
+    /// Serializes a public mutation with permanent close and rejects closed agent identities.
+    pub async fn lock_thread_lifecycle_mutation(
+        &self,
+        thread_id: ThreadId,
+        operation: &str,
+    ) -> CodexResult<ThreadLifecycleMutationAdmission> {
+        let lifecycle_mutation = self.state.lock_lifecycle_mutation().await;
+        if self.state.is_thread_closing(thread_id) {
+            return Err(CodexErr::InvalidRequest(format!(
+                "thread {thread_id} is permanently closed or closing; cannot {operation}"
+            )));
+        }
+        if let Some(store) = self.state.agent_graph_store() {
+            let mut current_thread_id = thread_id;
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(current_thread_id) {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to verify lifecycle state for thread {thread_id}: ownership cycle at {current_thread_id}"
+                    )));
+                }
+                let edges = store
+                    .list_thread_spawn_edges_by_child_ids(&[current_thread_id])
+                    .await
+                    .map_err(|err| {
+                        CodexErr::Fatal(format!(
+                            "failed to verify lifecycle state for thread {thread_id}: {err}"
+                        ))
+                    })?;
+                let mut edges = edges
+                    .into_iter()
+                    .filter(|edge| edge.child_thread_id == current_thread_id);
+                let Some(edge) = edges.next() else {
+                    break;
+                };
+                if edges.next().is_some() {
+                    return Err(CodexErr::Fatal(format!(
+                        "failed to verify lifecycle state for thread {thread_id}: multiple incoming ownership edges for {current_thread_id}"
+                    )));
+                }
+                match edge.status {
+                    ThreadSpawnEdgeStatus::PermanentlyClosed => {
+                        return Err(CodexErr::InvalidRequest(format!(
+                            "thread {thread_id} is permanently closed; cannot {operation}"
+                        )));
+                    }
+                    ThreadSpawnEdgeStatus::Closed => break,
+                    ThreadSpawnEdgeStatus::Open => {
+                        if edge.parent_thread_id == current_thread_id {
+                            break;
+                        }
+                        current_thread_id = edge.parent_thread_id;
+                    }
+                }
+            }
+        }
+        Ok(ThreadLifecycleMutationAdmission {
+            _lifecycle_mutation: lifecycle_mutation,
+        })
+    }
+
     fn agent_control_for_config(&self, config: &Config) -> AgentControl {
         AgentControl::new(
             Arc::downgrade(&self.state),
@@ -1513,6 +1864,153 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) fn clone_thread_id_generator(&self) -> ThreadIdGenerator {
+        Arc::clone(&self.thread_id_generator)
+    }
+
+    pub(crate) async fn lock_lifecycle_mutation(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.lifecycle_mutation).lock_owned().await
+    }
+
+    pub(crate) fn mark_threads_closing(&self, thread_ids: impl IntoIterator<Item = ThreadId>) {
+        let mut closed_or_closing_thread_ids = self
+            .closed_or_closing_thread_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for thread_id in thread_ids {
+            *closed_or_closing_thread_ids.entry(thread_id).or_default() += 1;
+        }
+    }
+
+    pub(crate) fn unmark_threads_closing(&self, thread_ids: impl IntoIterator<Item = ThreadId>) {
+        let mut closed_or_closing_thread_ids = self
+            .closed_or_closing_thread_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for thread_id in thread_ids {
+            match closed_or_closing_thread_ids.entry(thread_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) if *entry.get() > 1 => {
+                    *entry.get_mut() -= 1;
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    entry.remove();
+                }
+                std::collections::hash_map::Entry::Vacant(_) => {}
+            }
+        }
+    }
+
+    /// Replaces one close fence with another without exposing either set between lock acquisitions.
+    ///
+    /// Final members are retained before temporary members are released. IDs present in both sets
+    /// therefore remain fenced even when another task checks the map during close completion.
+    pub(crate) fn replace_threads_closing(
+        &self,
+        temporary_thread_ids: impl IntoIterator<Item = ThreadId>,
+        final_thread_ids: impl IntoIterator<Item = ThreadId>,
+    ) {
+        let mut closed_or_closing_thread_ids = self
+            .closed_or_closing_thread_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for thread_id in final_thread_ids {
+            *closed_or_closing_thread_ids.entry(thread_id).or_default() += 1;
+        }
+        for thread_id in temporary_thread_ids {
+            match closed_or_closing_thread_ids.entry(thread_id) {
+                std::collections::hash_map::Entry::Occupied(mut entry) if *entry.get() > 1 => {
+                    *entry.get_mut() -= 1;
+                }
+                std::collections::hash_map::Entry::Occupied(entry) => {
+                    entry.remove();
+                }
+                std::collections::hash_map::Entry::Vacant(_) => {}
+            }
+        }
+    }
+
+    pub(crate) fn is_thread_permanently_closing(&self, thread_id: ThreadId) -> bool {
+        self.closed_or_closing_thread_ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&thread_id)
+    }
+
+    pub(crate) fn is_thread_closing(&self, thread_id: ThreadId) -> bool {
+        self.is_thread_permanently_closing(thread_id)
+            || self.is_thread_under_membership_eviction(thread_id)
+    }
+
+    pub(crate) fn remember_in_flight_agent_subtree_close(
+        &self,
+        owner_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        member_thread_ids: Vec<ThreadId>,
+    ) {
+        self.closed_agent_subtrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                target_thread_id,
+                ClosedAgentSubtreeMemory {
+                    owner_thread_id,
+                    member_thread_ids,
+                    complete: false,
+                    in_flight_active: true,
+                },
+            );
+    }
+
+    pub(crate) fn finish_agent_subtree_close(
+        &self,
+        owner_thread_id: ThreadId,
+        target_thread_id: ThreadId,
+        member_thread_ids: Vec<ThreadId>,
+    ) {
+        self.closed_agent_subtrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                target_thread_id,
+                ClosedAgentSubtreeMemory {
+                    owner_thread_id,
+                    member_thread_ids,
+                    complete: true,
+                    in_flight_active: false,
+                },
+            );
+    }
+
+    pub(crate) fn forget_in_flight_agent_subtree_close(&self, target_thread_id: ThreadId) {
+        self.closed_agent_subtrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&target_thread_id);
+    }
+
+    pub(crate) fn abandon_in_flight_agent_subtree_close(&self, target_thread_id: ThreadId) {
+        if let Some(memory) = self
+            .closed_agent_subtrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&target_thread_id)
+            && !memory.complete
+        {
+            memory.in_flight_active = false;
+        }
+    }
+
+    pub(crate) fn closed_agent_subtree_memory(
+        &self,
+        target_thread_id: ThreadId,
+    ) -> Option<ClosedAgentSubtreeMemory> {
+        self.closed_agent_subtrees
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&target_thread_id)
+            .cloned()
+    }
+
     /// Update loaded metadata through its live writer and cold metadata through the thread store.
     pub(crate) async fn update_thread_metadata(
         &self,
@@ -1583,6 +2081,7 @@ impl ThreadManagerState {
         &self,
         source_thread_id: ThreadId,
         codex_home: &std::path::Path,
+        materialization: SnapshotHistoryMaterialization,
         snapshot: ForkSnapshot,
         interrupted_marker: InterruptedTurnHistoryMarker,
         expected_source_items: Option<Vec<RolloutItem>>,
@@ -1592,23 +2091,28 @@ impl ThreadManagerState {
         ThreadLifecycleReservation,
     )> {
         let (frozen, reservation) = self.snapshot_rollout_segment(source_thread_id).await?;
-        let source_items = materialize_recent_rollout_lines_from(
-            codex_home,
-            full_history_from_frozen_segment(frozen.clone())
-                .get_rollout_items()
-                .iter()
-                .cloned()
-                .map(|item| RolloutLine {
-                    timestamp: String::new(),
-                    ordinal: None,
-                    item,
-                })
-                .collect(),
-        )
-        .await?
-        .into_iter()
-        .map(|line| line.item)
-        .collect::<Vec<_>>();
+        let root_lines = full_history_from_frozen_segment(frozen.clone())
+            .get_rollout_items()
+            .iter()
+            .cloned()
+            .map(|item| RolloutLine {
+                timestamp: String::new(),
+                ordinal: None,
+                item,
+            })
+            .collect();
+        let source_items = match materialization {
+            SnapshotHistoryMaterialization::ModelContext => {
+                materialize_model_context_rollout_items_from(codex_home, root_lines).await?
+            }
+            SnapshotHistoryMaterialization::CompleteResponseHistory => {
+                materialize_rollout_lines_from(codex_home, root_lines)
+                    .await?
+                    .into_iter()
+                    .map(|line| line.item)
+                    .collect::<Vec<_>>()
+            }
+        };
         if let Some(expected_source_items) = expected_source_items {
             let without_session_meta = |items: &[RolloutItem]| {
                 items
@@ -1663,19 +2167,12 @@ impl ThreadManagerState {
         self.agent_graph_store.clone()
     }
 
-    pub(crate) async fn indexed_thread_metadata(
-        &self,
-        thread_id: ThreadId,
-    ) -> Option<codex_state::ThreadMetadata> {
+    pub(crate) async fn state_db(&self) -> Option<StateDbHandle> {
         self.thread_store
             .as_any()
             .downcast_ref::<LocalThreadStore>()?
             .state_db()
-            .await?
-            .get_thread(thread_id)
             .await
-            .ok()
-            .flatten()
     }
 
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
@@ -1769,6 +2266,12 @@ impl ThreadManagerState {
         op: Op,
         parent_turn_id: Option<String>,
     ) -> CodexResult<String> {
+        if !matches!(&op, Op::Shutdown) {
+            return self
+                .send_op_admitted(thread_id, op, parent_turn_id)
+                .await
+                .map(AdmittedSubmission::into_id);
+        }
         let thread = self.get_thread(thread_id).await?;
         if let Some(ops_log) = &self.ops_log
             && let Ok(mut log) = ops_log.lock()
@@ -1779,6 +2282,59 @@ impl ThreadManagerState {
             .io
             .submit_with_trace(op, /*trace*/ None, parent_turn_id)
             .await
+    }
+
+    pub(crate) async fn send_op_admitted(
+        &self,
+        thread_id: ThreadId,
+        op: Op,
+        parent_turn_id: Option<String>,
+    ) -> CodexResult<AdmittedSubmission> {
+        struct PendingAcknowledgement<'a> {
+            session: &'a Session,
+            submission_id: String,
+        }
+
+        impl Drop for PendingAcknowledgement<'_> {
+            fn drop(&mut self) {
+                self.session
+                    .remove_checkpoint_submission_acknowledgement(&self.submission_id);
+            }
+        }
+
+        debug_assert!(!matches!(&op, Op::Shutdown));
+        let thread = self.get_thread(thread_id).await?;
+        let submission_id = new_submission_id();
+        let acknowledgement = thread
+            .session
+            .register_checkpoint_submission_acknowledgement(submission_id.clone());
+        let pending_acknowledgement = PendingAcknowledgement {
+            session: thread.session.as_ref(),
+            submission_id: submission_id.clone(),
+        };
+        thread
+            .io
+            .submit_with_id(Submission {
+                id: submission_id.clone(),
+                op: op.clone(),
+                client_user_message_id: None,
+                trace: None,
+                parent_turn_id,
+            })
+            .await?;
+        let checkpoint_admission = acknowledgement
+            .await
+            .map_err(|_| CodexErr::InternalAgentDied)??;
+        drop(pending_acknowledgement);
+        if let Some(ops_log) = &self.ops_log
+            && let Ok(mut log) = ops_log.lock()
+        {
+            log.push((thread_id, op));
+        }
+        Ok(AdmittedSubmission {
+            id: submission_id,
+            _checkpoint_admission: checkpoint_admission,
+        })
     }
 
     /// Remove a thread from the manager by ID, returning it when present.
@@ -2023,12 +2579,15 @@ impl ThreadManagerState {
             inherited_exec_policy,
             inherited_thread_state,
         } = options;
+        let environments =
+            persisted_thread_environment_selections(&config, initial_history.get_rollout_items());
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let thread_source = initial_history.get_resumed_thread_source();
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),
             thread_source,
+            environments,
             client_mcp_extensions,
             ..StartThreadOptions::new(config)
         };
@@ -2552,3 +3111,7 @@ fn append_interrupted_boundary(
 #[cfg(test)]
 #[path = "thread_manager_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "thread_manager_checkpoint_settings_tests.rs"]
+mod checkpoint_settings_tests;

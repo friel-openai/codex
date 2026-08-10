@@ -21,6 +21,7 @@ use codex_core::CodexThread;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutItem;
+use codex_rollout::validated_segment_state_checkpoint;
 
 use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
@@ -61,6 +62,16 @@ pub(super) fn restored_token_usage_turn_id(
 ) -> String {
     latest_token_usage_turn_id_from_rollout_items(rollout_items, turns)
         .unwrap_or_else(|| latest_token_usage_turn_id(turns))
+}
+
+/// Whether metadata-only resume can replay usage without opening older rollout segments.
+pub(super) fn has_segment_local_token_usage(rollout_items: &[RolloutItem]) -> bool {
+    rollout_items.iter().enumerate().rev().any(|(index, item)| {
+        let RolloutItem::Compacted(compacted) = item else {
+            return false;
+        };
+        validated_segment_state_checkpoint(compacted, &rollout_items[index + 1..]).is_some()
+    })
 }
 
 /// Identifies the turn that was active when the latest `TokenCount` record appeared.

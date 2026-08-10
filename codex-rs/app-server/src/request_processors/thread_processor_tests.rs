@@ -71,6 +71,10 @@ mod persisted_resume_approval_policy_tests {
                     permission_profile: PermissionProfile::read_only(),
                     active_permission_profile: None,
                     cwd: cwd(),
+                    environments: None,
+                    workspace_roots: None,
+                    profile_workspace_roots: None,
+                    windows_sandbox_level: None,
                     reasoning_effort: None,
                     reasoning_summary: None,
                     personality: None,
@@ -118,6 +122,8 @@ mod persisted_resume_approval_policy_tests {
             multi_agent_mode: None,
             realtime_active: None,
             effort: None,
+            service_tier: None,
+            model_profile: None,
             summary: codex_protocol::config_types::ReasoningSummary::Auto,
         })
     }
@@ -901,6 +907,7 @@ mod thread_processor_behavior_tests {
             environments: TurnEnvironmentSelections::new(cwd, Vec::new()),
             workspace_roots: Vec::new(),
             profile_workspace_roots: Vec::new(),
+            windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel::Disabled,
             ephemeral: false,
             reasoning_effort: None,
             reasoning_summary: None,
@@ -943,6 +950,194 @@ mod thread_processor_behavior_tests {
         metadata.model = model.map(ToString::to_string);
         metadata.reasoning_effort = reasoning_effort;
         Ok(metadata)
+    }
+
+    fn persisted_thread_settings_item() -> RolloutItem {
+        let cwd = test_path_buf("/tmp/persisted-thread").abs();
+        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
+            codex_protocol::protocol::ThreadSettingsAppliedEvent {
+                thread_settings: ThreadSettingsSnapshot {
+                    model: "gpt-5.1-codex-max".to_string(),
+                    model_provider_id: "mock_provider".to_string(),
+                    service_tier: Some("flex".to_string()),
+                    approval_policy: AskForApproval::Never,
+                    approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::AutoReview,
+                    permission_profile: PermissionProfile::read_only(),
+                    active_permission_profile: Some(
+                        codex_protocol::models::ActivePermissionProfile {
+                            id: "persisted-profile".to_string(),
+                            extends: None,
+                        },
+                    ),
+                    cwd: cwd.clone(),
+                    environments: Some(TurnEnvironmentSelections::new(cwd.clone(), Vec::new())),
+                    workspace_roots: Some(vec![cwd]),
+                    profile_workspace_roots: Some(Vec::new()),
+                    windows_sandbox_level: Some(
+                        codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+                    ),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    reasoning_summary: Some(codex_protocol::config_types::ReasoningSummary::Auto),
+                    personality: Some(codex_protocol::config_types::Personality::Friendly),
+                    collaboration_mode: CollaborationMode {
+                        mode: ModeKind::Plan,
+                        settings: Settings {
+                            model: "gpt-5.1-codex-max".to_string(),
+                            reasoning_effort: Some(ReasoningEffort::High),
+                            developer_instructions: Some(
+                                "persisted collaboration instructions".to_string(),
+                            ),
+                        },
+                    },
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn merge_persisted_thread_settings_builds_complete_resume_baseline() {
+        let history = vec![persisted_thread_settings_item()];
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &history[0] else {
+            unreachable!("test item is thread settings");
+        };
+        let settings = &event.thread_settings;
+        let mut typesafe_overrides = ConfigOverrides::default();
+
+        assert!(merge_persisted_thread_settings(
+            &history,
+            /*request_overrides*/ None,
+            &mut typesafe_overrides,
+        ));
+
+        assert_eq!(
+            typesafe_overrides.persisted_thread_settings,
+            Some(PersistedThreadSettingsBaseline {
+                model: Some(settings.model.clone()),
+                model_provider: Some(settings.model_provider_id.clone()),
+                service_tier: Some(settings.service_tier.clone()),
+                cwd: Some(settings.cwd.to_path_buf()),
+                workspace_roots: settings.workspace_roots.clone(),
+                environments: Some(settings.environments.clone()),
+                approval_policy: Some(settings.approval_policy),
+                approvals_reviewer: Some(settings.approvals_reviewer),
+                permission_profile: Some(settings.permission_profile.clone()),
+                active_permission_profile: Some(settings.active_permission_profile.clone()),
+                profile_workspace_roots: settings.profile_workspace_roots.clone(),
+                windows_sandbox_level: settings.windows_sandbox_level,
+                reasoning_effort: Some(settings.reasoning_effort.clone()),
+                reasoning_summary: Some(settings.reasoning_summary),
+                personality: Some(settings.personality),
+                collaboration_mode: Some(settings.collaboration_mode.clone()),
+            })
+        );
+    }
+
+    #[test]
+    fn merge_persisted_thread_settings_preserves_explicit_resume_overrides() {
+        let history = vec![persisted_thread_settings_item()];
+        let request_overrides = HashMap::from([
+            ("model_provider".to_string(), json!("explicit-provider")),
+            ("service_tier".to_string(), json!("default")),
+            ("workspace_roots".to_string(), json!([])),
+            ("approval_policy".to_string(), json!("on-request")),
+            ("approvals_reviewer".to_string(), json!("user")),
+            ("permission_profile".to_string(), json!({})),
+            ("model_reasoning_effort".to_string(), json!("low")),
+            ("model_reasoning_summary".to_string(), json!("none")),
+            ("personality".to_string(), json!("pragmatic")),
+            ("windows.sandbox".to_string(), json!("elevated")),
+        ]);
+        let mut typesafe_overrides = ConfigOverrides {
+            model: Some("explicit-model".to_string()),
+            cwd: Some(test_path_buf("/tmp/explicit-thread")),
+            developer_instructions: Some("explicit developer instructions".to_string()),
+            ..Default::default()
+        };
+
+        assert!(merge_persisted_thread_settings(
+            &history,
+            Some(&request_overrides),
+            &mut typesafe_overrides,
+        ));
+
+        assert_eq!(
+            typesafe_overrides.persisted_thread_settings,
+            Some(PersistedThreadSettingsBaseline {
+                environments: Some(None),
+                collaboration_mode: latest_persisted_thread_settings(&history)
+                    .map(|settings| settings.collaboration_mode.clone()),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[test]
+    fn merge_persisted_thread_settings_uses_legacy_turn_context_workspace_roots() {
+        let legacy_cwd = test_path_buf("/tmp/legacy-thread").abs();
+        let legacy_workspace_root = test_path_buf("/tmp/legacy-workspace").abs();
+        let legacy_context = RolloutItem::TurnContext(codex_protocol::protocol::TurnContextItem {
+            turn_id: Some("legacy-turn".to_string()),
+            cwd: legacy_cwd,
+            workspace_roots: Some(vec![legacy_workspace_root.clone()]),
+            current_date: None,
+            timezone: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: None,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::new_read_only_policy(),
+            permission_profile: None,
+            network: None,
+            file_system_sandbox_policy: None,
+            model: "gpt-5.1-codex-max".to_string(),
+            comp_hash: None,
+            personality: None,
+            collaboration_mode: None,
+            multi_agent_version: None,
+            multi_agent_mode: None,
+            realtime_active: None,
+            effort: None,
+            service_tier: None,
+            model_profile: None,
+            summary: codex_protocol::config_types::ReasoningSummary::Auto,
+        });
+        let mut settings_item = persisted_thread_settings_item();
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut settings_item
+        else {
+            unreachable!("test item is thread settings");
+        };
+        event.thread_settings.workspace_roots = None;
+        let mut typesafe_overrides = ConfigOverrides::default();
+
+        assert!(merge_persisted_thread_settings(
+            &[legacy_context.clone(), settings_item.clone()],
+            /*request_overrides*/ None,
+            &mut typesafe_overrides,
+        ));
+        assert_eq!(
+            typesafe_overrides
+                .persisted_thread_settings
+                .as_ref()
+                .and_then(|baseline| baseline.workspace_roots.clone()),
+            Some(vec![legacy_workspace_root])
+        );
+
+        let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut settings_item
+        else {
+            unreachable!("test item is thread settings");
+        };
+        event.thread_settings.workspace_roots = Some(Vec::new());
+        let mut typesafe_overrides = ConfigOverrides::default();
+        assert!(merge_persisted_thread_settings(
+            &[legacy_context, settings_item],
+            /*request_overrides*/ None,
+            &mut typesafe_overrides,
+        ));
+        assert_eq!(
+            typesafe_overrides
+                .persisted_thread_settings
+                .as_ref()
+                .and_then(|baseline| baseline.workspace_roots.clone()),
+            Some(Vec::new())
+        );
     }
 
     #[test]

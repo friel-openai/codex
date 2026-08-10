@@ -465,7 +465,7 @@ async fn persist_user_shell_output(
         return;
     }
 
-    session
+    let _ = session
         .inject_no_new_turn(vec![output_item], Some(turn_context))
         .await;
 }

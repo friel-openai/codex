@@ -9,6 +9,10 @@ mod thread_metadata;
 
 pub use backfill_state::BackfillState;
 pub use backfill_state::BackfillStatus;
+pub use graph::ClosedThreadSpawnSubtree;
+pub use graph::ClosedThreadSpawnSubtreeMember;
+pub use graph::CurrentOnlyThreadSpawnEdge;
+pub use graph::DirectionalThreadSpawnEdge;
 pub use graph::DirectionalThreadSpawnEdgeStatus;
 pub use log::LogEntry;
 pub use log::LogQuery;

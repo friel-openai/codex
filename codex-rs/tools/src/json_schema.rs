@@ -48,6 +48,9 @@ pub struct JsonSchema {
     /// Responses-only marker for reviewed encrypted tool parameters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted: Option<bool>,
+    /// Maximum character length accepted by a string schema.
+    #[serde(rename = "maxLength", skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
     #[serde(rename = "enum", skip_serializing_if = "Option::is_none")]
     pub enum_values: Option<Vec<JsonValue>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -117,6 +120,11 @@ impl JsonSchema {
 
     pub fn with_encrypted(mut self) -> Self {
         self.encrypted = Some(true);
+        self
+    }
+
+    pub fn with_max_length(mut self, max_length: usize) -> Self {
+        self.max_length = Some(max_length);
         self
     }
 
@@ -521,7 +529,10 @@ fn sanitize_json_schema(value: &mut JsonValue) {
                     schema_types.push(JsonSchemaPrimitiveType::Object);
                 } else if map.contains_key("items") || map.contains_key("prefixItems") {
                     schema_types.push(JsonSchemaPrimitiveType::Array);
-                } else if map.contains_key("enum") || map.contains_key("format") {
+                } else if map.contains_key("enum")
+                    || map.contains_key("format")
+                    || map.contains_key("maxLength")
+                {
                     schema_types.push(JsonSchemaPrimitiveType::String);
                 } else if map.contains_key("minimum")
                     || map.contains_key("maximum")

@@ -12,16 +12,20 @@ use codex_app_server_protocol::ThreadDeleteResponse;
 use codex_app_server_protocol::ThreadDeletedNotification;
 use codex_app_server_protocol::ThreadLoadedListParams;
 use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_core::TurnInput;
 use codex_core::find_thread_path_by_id_str;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::user_input::UserInput as CoreUserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::SqliteConfig;
 use codex_state::StateRuntime;
+use codex_state::ThreadGoalStatus;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use std::path::Path;
@@ -57,7 +61,6 @@ async fn thread_delete_rejects_paginated_writer_owned_by_another_process() -> Re
             },
         })
         .await?;
-
     let mut other = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .build_initialized()
@@ -109,7 +112,7 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
         (
             parent_thread_id,
             child_thread_id,
-            DirectionalThreadSpawnEdgeStatus::Closed,
+            DirectionalThreadSpawnEdgeStatus::Open,
         ),
         (
             child_thread_id,
@@ -165,6 +168,132 @@ async fn thread_delete_deletes_spawned_descendants() -> Result<()> {
             .list_thread_spawn_descendants(parent_thread_id)
             .await?,
         Vec::<ThreadId>::new()
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_delete_preserves_promoted_subtree_beyond_closed_edge() -> Result<()> {
+    let server = create_mock_responses_server_repeating_assistant("Done").await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    let former_parent_id =
+        create_delete_test_rollout(codex_home.path(), /*minute*/ 0, "former parent")?;
+    let promoted_id =
+        create_delete_test_rollout(codex_home.path(), /*minute*/ 1, "promoted root")?;
+    let descendant_id =
+        create_delete_test_rollout(codex_home.path(), /*minute*/ 2, "promoted descendant")?;
+    let former_parent_thread_id = ThreadId::from_string(&former_parent_id)?;
+    let promoted_thread_id = ThreadId::from_string(&promoted_id)?;
+    let descendant_thread_id = ThreadId::from_string(&descendant_id)?;
+    let state_db = StateRuntime::init(
+        SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    state_db
+        .upsert_thread_spawn_edge(
+            former_parent_thread_id,
+            promoted_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await?;
+    state_db
+        .upsert_thread_spawn_edge(
+            promoted_thread_id,
+            descendant_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await?;
+
+    let mut mcp = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let _: ThreadResumeResponse = mcp
+        .request(|request_id| ClientRequest::ThreadResume {
+            request_id,
+            params: ThreadResumeParams {
+                thread_id: promoted_id.clone(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+        })
+        .await?;
+    let promoted_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            promoted_thread_id,
+            "preserve promoted goal",
+            ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let promoted_queue_payload = serde_json::to_string(&TurnInput::UserInput {
+        content: vec![CoreUserInput::Text {
+            text: "preserve promoted queue".to_string(),
+            text_elements: Vec::new(),
+        }],
+        client_id: None,
+    })?;
+    let promoted_queue_item = state_db
+        .thread_queue()
+        .enqueue(promoted_thread_id, promoted_queue_payload.as_str())
+        .await?;
+    let _: ThreadDeleteResponse = mcp
+        .request(|request_id| ClientRequest::ThreadDelete {
+            request_id,
+            params: ThreadDeleteParams {
+                thread_id: former_parent_id.clone(),
+            },
+        })
+        .await?;
+    let deleted_notification: ThreadDeletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/deleted"),
+    )
+    .await??;
+    assert_eq!(deleted_notification.thread_id, former_parent_id);
+
+    for preserved_id in [&promoted_id, &descendant_id] {
+        assert!(
+            find_thread_path_by_id_str(codex_home.path(), preserved_id, /*state_db_ctx*/ None,)
+                .await?
+                .is_some(),
+            "promoted subtree thread {preserved_id} must remain"
+        );
+    }
+    assert_eq!(
+        state_db
+            .list_thread_spawn_descendants(promoted_thread_id)
+            .await?,
+        vec![descendant_thread_id]
+    );
+    let loaded: ThreadLoadedListResponse = mcp
+        .request(|request_id| ClientRequest::ThreadLoadedList {
+            request_id,
+            params: ThreadLoadedListParams::default(),
+        })
+        .await?;
+    assert!(loaded.data.contains(&promoted_id));
+    assert_eq!(
+        state_db
+            .thread_goals()
+            .get_thread_goal(promoted_thread_id)
+            .await?
+            .map(|goal| goal.goal_id),
+        Some(promoted_goal.goal_id)
+    );
+    assert_eq!(
+        state_db
+            .thread_queue()
+            .list_page(promoted_thread_id, 0, 10)
+            .await?
+            .into_iter()
+            .map(|item| item.id)
+            .collect::<Vec<_>>(),
+        vec![promoted_queue_item.id]
     );
     Ok(())
 }
@@ -294,10 +423,30 @@ async fn thread_delete_handles_live_threads_before_rollout_exists() -> Result<()
         .request(|request_id| ClientRequest::ThreadDelete {
             request_id,
             params: ThreadDeleteParams {
-                thread_id: persisted_thread.id,
+                thread_id: persisted_thread.id.clone(),
             },
         })
         .await?;
+    let deleted: ThreadDeletedNotification = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_notification("thread/deleted"),
+    )
+    .await??;
+    assert_eq!(deleted.thread_id, persisted_thread.id);
+
+    let read_id = mcp
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: persisted_thread.id,
+            include_turns: false,
+        })
+        .await?;
+    let read_err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(read_id)),
+    )
+    .await??;
+    assert_eq!(read_err.error.code, -32600);
+    assert!(read_err.error.message.contains("thread not loaded"));
 
     let ThreadStartResponse { thread, .. } = mcp
         .start_thread(ThreadStartParams {

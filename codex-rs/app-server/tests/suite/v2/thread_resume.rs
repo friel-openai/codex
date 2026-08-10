@@ -1,3 +1,4 @@
+use super::checkpoint_test_support::test_segment_state_checkpoint_with_current_state;
 use anyhow::Result;
 use app_test_support::ChatGptAuthFixture;
 use app_test_support::MockResponsesConfig;
@@ -13,6 +14,7 @@ use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::create_shell_command_sse_response;
 use app_test_support::rollout_path;
 use app_test_support::test_absolute_path;
+use app_test_support::test_thread_settings_snapshot;
 use app_test_support::to_response;
 use app_test_support::write_chatgpt_auth;
 use chrono::Utc;
@@ -72,7 +74,9 @@ use codex_core::ARCHIVED_SESSIONS_SUBDIR;
 use codex_features::Feature;
 use codex_login::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_protocol::AgentPath;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer as ProtocolApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::Personality;
@@ -90,9 +94,12 @@ use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource as RolloutSessionSource;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::protocol::TokenUsageInfo;
@@ -145,6 +152,11 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const CODEX_5_2_INSTRUCTIONS_TEMPLATE_DEFAULT: &str = "You are Codex, a coding agent based on GPT-5. You and the user share the same workspace and collaborate to achieve the user's goals.";
 
+#[path = "thread_resume_checkpoint_tests.rs"]
+mod checkpoint_tests;
+#[path = "thread_goal_admission_tests.rs"]
+mod goal_admission_tests;
+
 #[tokio::test]
 async fn thread_resume_paginated_model_context_preserves_original_metadata() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
@@ -168,6 +180,7 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
             first_window_id: None,
             previous_window_id: None,
             window_id: None,
+            segment_state_checkpoint: None,
         }),
     )
     .await?;

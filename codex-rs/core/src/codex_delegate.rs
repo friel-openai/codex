@@ -171,6 +171,7 @@ pub(crate) async fn run_codex_thread_interactive(
     let pending_mcp_invocations =
         Arc::new(Mutex::new(HashMap::<String, PendingMcpInvocation>::new()));
     let caller_io = SessionIo {
+        tx_control_sub: tx_ops.clone(),
         tx_sub: tx_ops,
         rx_event: rx_sub,
         agent_status: io.agent_status.clone(),
@@ -287,6 +288,7 @@ pub(crate) async fn run_codex_thread_one_shot(
         session,
         SessionIo {
             rx_event: rx_bridge,
+            tx_control_sub: tx_closed.clone(),
             tx_sub: tx_closed,
             agent_status,
             session_loop_termination,

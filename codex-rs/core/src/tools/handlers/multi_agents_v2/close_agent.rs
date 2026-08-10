@@ -1,6 +1,7 @@
 use super::*;
 use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v2;
+use codex_protocol::ThreadId;
 use codex_tools::ToolSpec;
 
 /// Authorizes MultiAgentV2 ownership before reusing the existing close-agent operation.
@@ -19,31 +20,25 @@ impl ToolExecutor<ToolInvocation> for Handler {
         Box::pin(async move {
             let arguments = function_arguments(invocation.payload.clone())?;
             let args: CloseAgentArgs = parse_arguments(&arguments)?;
-            let caller_agent_path = match invocation.turn.session_source.get_agent_path() {
-                Some(agent_path) => agent_path,
-                None if invocation.turn.parent_thread_id.is_none()
-                    && !invocation.turn.session_source.is_non_root_agent() =>
-                {
-                    AgentPath::root()
-                }
-                None => {
-                    return Err(FunctionCallError::RespondToModel(
-                        "calling agent is missing an agent_path".to_string(),
-                    ));
-                }
-            };
             let agent_id =
-                resolve_agent_target(&invocation.session, &invocation.turn, &args.target).await?;
+                match resolve_agent_target(&invocation.session, &invocation.turn, &args.target)
+                    .await
+                {
+                    Ok(agent_id) => agent_id,
+                    Err(resolve_error) => {
+                        ThreadId::from_string(&args.target).map_err(|_| resolve_error)?
+                    }
+                };
             let receiver_agent = invocation
                 .session
                 .services
                 .agent_control
                 .ensure_agent_known(agent_id)
-                .map_err(|err| collab_agent_error(agent_id, err))?;
+                .ok();
 
             if receiver_agent
-                .agent_path
                 .as_ref()
+                .and_then(|metadata| metadata.agent_path.as_ref())
                 .is_some_and(AgentPath::is_root)
             {
                 return Err(FunctionCallError::RespondToModel(
@@ -55,26 +50,13 @@ impl ToolExecutor<ToolInvocation> for Handler {
                     "an agent cannot close itself".to_string(),
                 ));
             }
-            if receiver_agent.agent_role.as_deref()
+            if receiver_agent
+                .as_ref()
+                .and_then(|metadata| metadata.agent_role.as_deref())
                 == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
             {
                 return Err(FunctionCallError::RespondToModel(
                     "goal supervisor agents cannot be closed with close_agent".to_string(),
-                ));
-            }
-
-            let receiver_agent_path = receiver_agent.agent_path.ok_or_else(|| {
-                FunctionCallError::RespondToModel(
-                    "target agent is missing an agent_path".to_string(),
-                )
-            })?;
-            let is_owned_descendant = receiver_agent_path
-                .as_str()
-                .strip_prefix(caller_agent_path.as_str())
-                .is_some_and(|suffix| suffix.starts_with('/'));
-            if !is_owned_descendant {
-                return Err(FunctionCallError::RespondToModel(
-                    "target agent is not an owned descendant".to_string(),
                 ));
             }
 

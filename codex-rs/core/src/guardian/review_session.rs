@@ -25,7 +25,6 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
-#[cfg(test)]
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -959,7 +958,7 @@ async fn run_review_on_session(
 
 async fn append_guardian_followup_reminder(review_session: &GuardianReviewSession) {
     let reminder: ResponseItem = ContextualUserFragment::into(GuardianFollowupReviewReminder);
-    review_session
+    let _ = review_session
         .session
         .inject_no_new_turn(vec![reminder], /*current_turn_context*/ None)
         .await;
@@ -1245,6 +1244,7 @@ mod tests {
             GuardianReviewSession {
                 session,
                 io: SessionIo {
+                    tx_control_sub: tx_sub.clone(),
                     tx_sub,
                     rx_event,
                     agent_status,

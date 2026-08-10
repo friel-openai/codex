@@ -34,7 +34,9 @@ use codex_rollout::StateDbHandle;
 use codex_state::SqliteConfig;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
@@ -50,6 +52,7 @@ use crate::CreateThreadParams;
 use crate::CreateThreadSectionParams;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
+use crate::DeleteThreadsOutcome;
 use crate::DeleteThreadsParams;
 use crate::FreezeRolloutSegmentParams;
 use crate::FrozenRolloutSegment;
@@ -64,10 +67,12 @@ use crate::PrepareForkParams;
 use crate::PreparedFork;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
+use crate::ReadThreadsParams;
 use crate::RenameThreadSectionParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::SortDirection;
 use crate::StoredModelContext;
 use crate::StoredThread;
@@ -121,6 +126,12 @@ pub struct LocalThreadStore {
 
 struct LiveRecorderEntry {
     recorder: RolloutRecorder,
+    /// Reopens the committed stable rollout before the next live operation.
+    ///
+    /// Segment rotation installs this before shutting down the previous recorder. The marker
+    /// therefore survives cancellation, atomic-replace failure, and a transient post-commit open
+    /// failure without making a later writer reuse a recorder whose task has exited.
+    recovery: Option<LiveRecorderRecovery>,
     // Local rollout files are materialized lazily, but metadata updates can arrive before the
     // canonical SessionMeta is durable. Retain the mode captured when live persistence was opened
     // so missing SQLite rows can still be seeded.
@@ -138,6 +149,12 @@ struct LiveRecorderEntry {
     // A resumed legacy writer rebuilds reducer state from complete canonical
     // lineage before its first append, not from bounded model context.
     legacy_history_builder_needs_rebuild: bool,
+}
+
+#[derive(Clone)]
+struct LiveRecorderRecovery {
+    config: codex_rollout::RolloutConfig,
+    rollout_path: PathBuf,
 }
 
 #[derive(Default)]
@@ -438,6 +455,7 @@ impl LocalThreadStore {
             Entry::Vacant(entry) => {
                 entry.insert(LiveRecorderEntry {
                     recorder,
+                    recovery: None,
                     history_mode,
                     writer_lock,
                     persistence_mode,
@@ -454,6 +472,26 @@ impl LocalThreadStore {
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreResult<StoredThreadHistory> {
+        if let Some(rollout_path) = params.rollout_path {
+            let thread = read_thread::read_thread_by_rollout_path(
+                self,
+                rollout_path,
+                params.include_archived,
+                /*include_history*/ true,
+            )
+            .await?;
+            if thread.thread_id != params.thread_id {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: format!(
+                        "requested thread {} but rollout belongs to {}",
+                        params.thread_id, thread.thread_id
+                    ),
+                });
+            }
+            return thread.history.ok_or_else(|| ThreadStoreError::Internal {
+                message: format!("failed to load history for thread {}", params.thread_id),
+            });
+        }
         if let Ok(rollout_path) = live_writer::rollout_path(self, params.thread_id).await {
             if !params.include_archived
                 && helpers::rollout_path_is_archived(
@@ -574,6 +612,14 @@ impl ThreadStore for LocalThreadStore {
         Box::pin(async move { live_writer::append_items(self, params).await })
     }
 
+    fn persist_segment_checkpoint(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> Pin<Box<dyn Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>> {
+        Box::pin(async move { segment::persist_segment_checkpoint(self, thread_id, params).await })
+    }
+
     fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::persist_thread(self, thread_id).await })
     }
@@ -610,6 +656,10 @@ impl ThreadStore for LocalThreadStore {
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(async move { read_thread::read_thread(self, params).await })
+    }
+
+    fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
+        Box::pin(async move { read_thread::read_threads(self, params.thread_ids).await })
     }
 
     fn read_thread_by_rollout_path(
@@ -748,6 +798,19 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
+        Box::pin(async move {
+            let outcome = delete_thread::delete_threads(self, params).await?;
+            match outcome.failure {
+                Some(failure) => Err(failure.error),
+                None => Ok(()),
+            }
+        })
+    }
+
+    fn delete_threads_with_outcome(
+        &self,
+        params: DeleteThreadsParams,
+    ) -> ThreadStoreFuture<'_, DeleteThreadsOutcome> {
         Box::pin(async move { delete_thread::delete_threads(self, params).await })
     }
 }
@@ -1733,6 +1796,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_thread_supplied_history_accepts_empty_placeholder_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(412);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let legacy_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-03-00",
+            uuid,
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("legacy session file");
+        let history = Arc::new(
+            RolloutRecorder::load_rollout_items(legacy_path.as_path())
+                .await
+                .expect("legacy supplied history")
+                .0,
+        );
+        let empty_path = home.path().join("empty-rollout.jsonl");
+        std::fs::write(&empty_path, "").expect("empty rollout placeholder");
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(empty_path.clone()),
+                history: Some(history),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume from supplied history and empty placeholder");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("after empty placeholder")],
+            })
+            .await
+            .expect("append resumed item");
+        store.flush_thread(thread_id).await.expect("flush thread");
+
+        assert_rollout_contains_message(empty_path.as_path(), "after empty placeholder").await;
+    }
+
+    #[tokio::test]
     async fn resume_thread_supplied_history_does_not_mask_malformed_rollout() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -1765,11 +1872,8 @@ mod tests {
             .await
             .expect_err("malformed nonempty rollout should fail");
 
-        assert!(
-            error
-                .to_string()
-                .contains("failed to resume local thread recorder")
-        );
+        let message = error.to_string();
+        assert!(message.contains("rollout"), "unexpected error: {message}");
     }
 
     #[tokio::test]
@@ -1955,6 +2059,7 @@ mod tests {
         let history = store
             .load_history(LoadThreadHistoryParams {
                 thread_id,
+                rollout_path: None,
                 include_archived: false,
             })
             .await
@@ -2060,6 +2165,7 @@ mod tests {
         let err = store
             .load_history(LoadThreadHistoryParams {
                 thread_id,
+                rollout_path: None,
                 include_archived: false,
             })
             .await
@@ -2070,6 +2176,7 @@ mod tests {
         let history = store
             .load_history(LoadThreadHistoryParams {
                 thread_id,
+                rollout_path: None,
                 include_archived: true,
             })
             .await
@@ -2191,6 +2298,7 @@ mod tests {
         let history = store
             .load_history(LoadThreadHistoryParams {
                 thread_id,
+                rollout_path: None,
                 include_archived: false,
             })
             .await

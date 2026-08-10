@@ -4,6 +4,7 @@ use codex_core::ForkSnapshot;
 use codex_core::NewThread;
 use codex_core::ThreadConfigSnapshot;
 use codex_core::parse_turn_item;
+use codex_features::Feature;
 use codex_protocol::items::TurnItem;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::protocol::EventMsg;
@@ -12,21 +13,149 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ResumedHistory;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SegmentStateCheckpointDisposition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::user_input::UserInput;
 use codex_rollout::materialize_rollout_items;
+use codex_rollout::validate_certified_segment_state_checkpoint;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use serde_json::Value;
 use wiremock::Mock;
 use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_clears_inherited_subagent_environment_context() {
+    skip_if_no_network!();
+
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-initial"),
+                ev_completed("resp-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-fork"),
+                ev_completed("resp-fork"),
+            ]),
+        ],
+    )
+    .await;
+    let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .enable(Feature::MultiAgentV2)
+            .expect("test config should allow feature update");
+    });
+    let initial = builder
+        .build_with_auto_env(&server)
+        .await
+        .expect("create source conversation");
+    initial
+        .submit_turn("persist a source world state")
+        .await
+        .expect("complete source turn");
+    initial.codex.ensure_rollout_materialized().await;
+    initial
+        .codex
+        .flush_rollout()
+        .await
+        .expect("flush source rollout");
+    let source_thread_id = initial.session_configured.thread_id;
+    let rollout_path = initial.codex.rollout_path().expect("source rollout path");
+    initial
+        .codex
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown source before disk-backed fork");
+    initial
+        .thread_manager
+        .remove_thread(&source_thread_id)
+        .await
+        .expect("remove source runtime");
+
+    let mut rollout_lines = std::fs::read_to_string(&rollout_path)
+        .expect("read source rollout")
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<serde_json::Result<Vec<_>>>()
+        .expect("parse source rollout");
+    let world_state = rollout_lines
+        .iter_mut()
+        .rev()
+        .find_map(|line| match &mut line.item {
+            RolloutItem::WorldState(world_state) => Some(world_state),
+            _ => None,
+        })
+        .expect("source turn should persist a world state");
+    let state = world_state
+        .state
+        .as_object_mut()
+        .expect("world state should be an object");
+    let environments = state
+        .entry("environments")
+        .or_insert_with(|| Value::Object(Default::default()))
+        .as_object_mut()
+        .expect("environments world state should be an object");
+    environments.insert(
+        "subagents".to_string(),
+        Value::String("- /root/stale: working".to_string()),
+    );
+    let persisted = rollout_lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<serde_json::Result<Vec<_>>>()
+        .expect("serialize source rollout")
+        .join("\n");
+    std::fs::write(&rollout_path, format!("{persisted}\n")).expect("write source rollout");
+
+    let NewThread { thread: fork, .. } = initial
+        .thread_manager
+        .fork_thread(
+            ForkSnapshot::Interrupted,
+            initial.config.clone(),
+            rollout_path,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+        )
+        .await
+        .expect("fork source conversation");
+    fork.submit(Op::UserInput {
+        items: vec![UserInput::Text {
+            text: "confirm fork membership".to_string(),
+            text_elements: Vec::new(),
+        }],
+        final_output_json_schema: None,
+        responsesapi_client_metadata: None,
+        additional_context: Default::default(),
+        thread_settings: Default::default(),
+    })
+    .await
+    .expect("submit fork turn");
+    wait_for_event(&fork, |event| matches!(event, EventMsg::TurnComplete(_))).await;
+
+    let requests = responses.requests();
+    pretty_assertions::assert_eq!(requests.len(), 2);
+    assert!(
+        requests[1]
+            .message_input_texts("user")
+            .iter()
+            .any(|text| text.contains("<subagents />")),
+        "the first fork request must clear inherited subagent context"
+    );
+}
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fork_thread_twice_drops_to_first_message() {
@@ -142,13 +271,19 @@ async fn fork_thread_twice_drops_to_first_message() {
             .iter()
             .all(|item| !matches!(item, RolloutItem::ResponseItem(_)))
     );
-    let fork1_items = without_session_meta(
+    let fork1_materialized_items = without_session_meta(
         materialize_rollout_items(test.config.codex_home.as_path(), &fork1_path)
             .await
             .expect("materialize first fork"),
     );
+    let expected_fork1_settings = expected_after_first
+        .pop()
+        .expect("expected fork settings item");
+    let (fork1_items, fork1_checkpoint) =
+        split_certified_segment_checkpoint(&fork1_materialized_items);
+    assert_checkpoint_thread_settings(fork1_checkpoint, &expected_fork1_settings);
     pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork1_items).unwrap(),
+        serde_json::to_value(fork1_items).unwrap(),
         serde_json::to_value(&expected_after_first).unwrap()
     );
 
@@ -169,11 +304,11 @@ async fn fork_thread_twice_drops_to_first_message() {
 
     let fork2_path = codex_fork2.rollout_path().expect("rollout path");
     // GetHistory on fork2 flushed; the file is ready.
-    let fork1_user_inputs = find_user_input_positions(&fork1_items);
+    let fork1_user_inputs = find_user_input_positions(fork1_items);
     let cut_last_on_fork1 = fork1_user_inputs
         .get(fork1_user_inputs.len().saturating_sub(1))
         .copied()
-        .map(|position| turn_boundary_for_user(&fork1_items, position))
+        .map(|position| turn_boundary_for_user(fork1_items, position))
         .unwrap_or(0);
     let mut expected_after_second: Vec<RolloutItem> = fork1_items[..cut_last_on_fork1].to_vec();
     expected_after_second.push(thread_settings_applied_item(
@@ -190,13 +325,19 @@ async fn fork_thread_twice_drops_to_first_message() {
             .iter()
             .all(|item| !matches!(item, RolloutItem::ResponseItem(_)))
     );
-    let fork2_items = without_session_meta(
+    let fork2_materialized_items = without_session_meta(
         materialize_rollout_items(test.config.codex_home.as_path(), &fork2_path)
             .await
             .expect("materialize second fork"),
     );
+    let expected_fork2_settings = expected_after_second
+        .pop()
+        .expect("expected fork settings item");
+    let (fork2_items, fork2_checkpoint) =
+        split_certified_segment_checkpoint(&fork2_materialized_items);
+    assert_checkpoint_thread_settings(fork2_checkpoint, &expected_fork2_settings);
     pretty_assertions::assert_eq!(
-        serde_json::to_value(&fork2_items).unwrap(),
+        serde_json::to_value(fork2_items).unwrap(),
         serde_json::to_value(&expected_after_second).unwrap()
     );
 
@@ -216,26 +357,82 @@ async fn fork_thread_twice_drops_to_first_message() {
         .await
         .expect("re-fork truncated child");
     let refork_path = codex_refork.rollout_path().expect("re-fork rollout path");
-    let refork_raw_items = read_rollout_items(&refork_path);
+    let expected_refork_settings =
+        thread_settings_applied_item(codex_refork.config_snapshot().await);
+    let refork_raw_items = without_session_meta(read_rollout_items(&refork_path));
+    let (refork_physical_prefix, refork_physical_checkpoint) =
+        split_certified_segment_checkpoint(&refork_raw_items);
     assert!(matches!(
-        without_session_meta(refork_raw_items).as_slice(),
-        [
-            RolloutItem::RolloutReference(_),
-            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
-        ]
+        refork_physical_prefix,
+        [RolloutItem::RolloutReference(_)]
     ));
-    let refork_items = without_session_meta(
+    assert_checkpoint_thread_settings(refork_physical_checkpoint, &expected_refork_settings);
+
+    let refork_materialized_items = without_session_meta(
         materialize_rollout_items(test.config.codex_home.as_path(), &refork_path)
             .await
             .expect("materialize re-forked history"),
     );
-    let mut expected_refork_items = fork1_items;
-    expected_refork_items.push(thread_settings_applied_item(
-        codex_refork.config_snapshot().await,
-    ));
+    let (refork_items, refork_checkpoint) =
+        split_certified_segment_checkpoint(&refork_materialized_items);
+    assert_checkpoint_thread_settings(refork_checkpoint, &expected_refork_settings);
     pretty_assertions::assert_eq!(
-        serde_json::to_value(&refork_items).unwrap(),
-        serde_json::to_value(&expected_refork_items).unwrap()
+        serde_json::to_value(refork_items).unwrap(),
+        serde_json::to_value(&fork1_materialized_items).unwrap()
+    );
+}
+
+fn split_certified_segment_checkpoint(items: &[RolloutItem]) -> (&[RolloutItem], &[RolloutItem]) {
+    let checkpoint_start = items
+        .iter()
+        .rposition(|item| {
+            matches!(
+                item,
+                RolloutItem::Compacted(compacted)
+                    if compacted.segment_state_checkpoint.is_some()
+            )
+        })
+        .expect("fork must persist a child-local checkpoint");
+    let RolloutItem::Compacted(compacted) = &items[checkpoint_start] else {
+        unreachable!("checkpoint start must be compacted history");
+    };
+    let descriptor = compacted
+        .segment_state_checkpoint
+        .as_ref()
+        .expect("checkpoint descriptor");
+    let checkpoint_len =
+        3 + usize::from(matches!(
+            descriptor.world_state,
+            SegmentStateCheckpointDisposition::Established
+        )) + usize::from(matches!(
+            descriptor.reference_context,
+            SegmentStateCheckpointDisposition::Established
+        ));
+    let checkpoint_end = checkpoint_start + checkpoint_len;
+    assert_eq!(
+        checkpoint_end,
+        items.len(),
+        "child-local checkpoint must be the terminal physical state"
+    );
+    let checkpoint = &items[checkpoint_start..checkpoint_end];
+    validate_certified_segment_state_checkpoint(checkpoint)
+        .expect("child-local checkpoint must be certified");
+    (&items[..checkpoint_start], checkpoint)
+}
+
+fn assert_checkpoint_thread_settings(checkpoint: &[RolloutItem], expected: &RolloutItem) {
+    let actual = checkpoint
+        .iter()
+        .find(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+            )
+        })
+        .expect("checkpoint settings");
+    pretty_assertions::assert_eq!(
+        serde_json::to_value(actual).expect("serialize actual settings"),
+        serde_json::to_value(expected).expect("serialize expected settings")
     );
 }
 

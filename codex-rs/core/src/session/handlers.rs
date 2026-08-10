@@ -19,6 +19,7 @@ use crate::config::Config;
 use crate::review_prompts::resolve_review_request;
 use crate::session::spawn_review_thread;
 use crate::tasks::CompactTask;
+use crate::tasks::TaskStartOutcome;
 use crate::tasks::UserShellCommandMode;
 use crate::tasks::UserShellCommandTask;
 use crate::tasks::execute_user_shell_command;
@@ -58,6 +59,7 @@ use codex_rmcp_client::ElicitationAction;
 use codex_rmcp_client::ElicitationResponse;
 use serde_json::Value;
 use std::sync::Arc;
+use tokio::sync::OwnedMutexGuard;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
@@ -106,33 +108,51 @@ pub async fn update_thread_settings(
     sub_id: String,
     thread_settings: ThreadSettingsOverrides,
 ) {
-    let previous_execution_settings = execution_settings(sess).await;
-    let updates = thread_settings_update(sess, thread_settings).await;
-    match sess.update_settings(updates).await {
-        Ok(()) => {
-            if execution_settings(sess).await != previous_execution_settings {
-                if let Some(active_turn) = sess.active_turn.lock().await.as_mut() {
-                    active_turn.execution_settings_refresh_requested = true;
-                }
-                crate::goal_supervisor::restart_active_helper_for_execution_settings_change(sess)
+    let event_id = sub_id.clone();
+    let result = sess
+        .with_checkpoint_admission("update thread settings", || async {
+            let previous_execution_settings = execution_settings(sess).await;
+            let updates = thread_settings_update(sess, thread_settings).await;
+            match sess.update_settings(updates).await {
+                Ok(()) => {
+                    if execution_settings(sess).await != previous_execution_settings {
+                        if let Some(active_turn) = sess.active_turn.lock().await.as_mut() {
+                            active_turn.execution_settings_refresh_requested = true;
+                        }
+                        crate::goal_supervisor::restart_active_helper_for_execution_settings_change(
+                            sess,
+                        )
+                        .await;
+                    }
+                    sess.send_event_raw_without_materializing_rollout(Event {
+                        id: event_id.clone(),
+                        msg: thread_settings_applied_event(sess).await,
+                    })
                     .await;
+                }
+                Err(err) => {
+                    sess.send_event_raw(Event {
+                        id: event_id,
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: format!("invalid thread settings override: {err}"),
+                            codex_error_info: Some(CodexErrorInfo::BadRequest),
+                        }),
+                    })
+                    .await;
+                }
             }
-            sess.send_event_raw_without_materializing_rollout(Event {
-                id: sub_id,
-                msg: thread_settings_applied_event(sess).await,
-            })
-            .await;
-        }
-        Err(err) => {
-            sess.send_event_raw(Event {
-                id: sub_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    message: format!("invalid thread settings override: {err}"),
-                    codex_error_info: Some(CodexErrorInfo::BadRequest),
-                }),
-            })
-            .await;
-        }
+        })
+        .await;
+    if result.is_err() {
+        sess.deliver_event_raw(Event {
+            id: sub_id,
+            msg: EventMsg::Error(ErrorEvent {
+                message: "Thread persistence is in an indeterminate state. Restart this thread before changing its settings."
+                    .to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
+            }),
+        })
+        .await;
     }
 }
 
@@ -270,6 +290,19 @@ pub(super) async fn user_input_or_turn_inner(
             current_context.session_telemetry.user_prompt(&items);
             let additional_context_input = {
                 let mut state = sess.state.lock().await;
+                if sess.persistence_restart_required() {
+                    drop(state);
+                    sess.send_event_raw(Event {
+                        id: sub_id,
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: "Thread persistence is in an indeterminate state. Restart this thread before starting another turn."
+                                .to_string(),
+                            codex_error_info: Some(CodexErrorInfo::Other),
+                        }),
+                    })
+                    .await;
+                    return Err(CodexErr::TurnAborted);
+                }
                 state.additional_context.merge(additional_context)
             };
             let mut task_input = additional_context_input
@@ -283,12 +316,16 @@ pub(super) async fn user_input_or_turn_inner(
                     client_id: client_user_message_id,
                 });
             }
-            sess.spawn_task(
-                Arc::clone(&current_context),
-                task_input,
-                crate::tasks::RegularTask::new(),
-            )
-            .await;
+            let task_start = sess
+                .spawn_task(
+                    Arc::clone(&current_context),
+                    task_input,
+                    crate::tasks::RegularTask::new(),
+                )
+                .await;
+            if matches!(task_start, TaskStartOutcome::RestartRequired) {
+                return Err(CodexErr::TurnAborted);
+            }
             Ok(UserMessageAdmission::Started { turn_id: sub_id })
         }
         Err(err) => {
@@ -312,10 +349,15 @@ pub async fn inter_agent_communication(
     communication: InterAgentCommunication,
     parent_turn_id: Option<String>,
 ) {
+    let state = Arc::clone(&sess.state).lock_owned().await;
+    if sess.persistence_restart_required() {
+        return;
+    }
     let trigger_turn = communication.trigger_turn;
     sess.input_queue
         .enqueue_mailbox_communication(communication, parent_turn_id.filter(|_| trigger_turn))
         .await;
+    drop(state);
     crate::agent_communication::emit_agent_communication_receive(&sub_id);
     if trigger_turn || sess.has_outstanding_durable_sleep() {
         sess.maybe_start_turn_for_pending_work_with_sub_id(sub_id)
@@ -341,7 +383,9 @@ pub async fn run_user_shell_command(sess: &Arc<Session>, sub_id: String, command
         return;
     }
 
-    let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+    let Ok(turn_context) = sess.new_default_turn_with_sub_id(sub_id).await else {
+        return;
+    };
     sess.spawn_task(
         Arc::clone(&turn_context),
         Vec::new(),
@@ -454,7 +498,11 @@ pub async fn dynamic_tool_response(sess: &Arc<Session>, id: String, response: Dy
     sess.notify_dynamic_tool_response(&id, response).await;
 }
 
-pub fn refresh_mcp_servers(sess: &Session) {
+pub async fn refresh_mcp_servers(sess: &Session) {
+    let Ok(_checkpoint_admission) = sess.lock_checkpoint_admission("refresh MCP servers").await
+    else {
+        return;
+    };
     sess.services.mcp_runtime.reconnect_on_next_refresh();
     sess.request_mcp_runtime_refresh();
 }
@@ -464,13 +512,32 @@ pub async fn reload_user_config(sess: &Arc<Session>) {
 }
 
 pub async fn compact(sess: &Arc<Session>, sub_id: String) {
-    let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+    let Ok(turn_context) = sess.new_default_turn_with_sub_id(sub_id).await else {
+        return;
+    };
 
     sess.spawn_task(Arc::clone(&turn_context), Vec::new(), CompactTask)
         .await;
 }
 
+#[cfg(test)]
 pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32) {
+    let checkpoint_admission = Arc::clone(&sess.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
+    thread_rollback_with_admission(sess, sub_id, num_turns, checkpoint_admission).await;
+}
+
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "rollback keeps active-turn admission closed until the replacement turn is installed"
+)]
+async fn thread_rollback_with_admission(
+    sess: &Arc<Session>,
+    sub_id: String,
+    num_turns: u32,
+    checkpoint_admission: OwnedMutexGuard<()>,
+) {
     if num_turns == 0 {
         sess.send_event_raw(Event {
             id: sub_id,
@@ -483,8 +550,9 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         return;
     }
 
-    let has_active_turn = { sess.active_turn.lock().await.is_some() };
-    if has_active_turn {
+    let history_rewrite = Arc::clone(&sess.history_rewrite_lock).lock_owned().await;
+    let active_turn = sess.active_turn.lock().await;
+    if active_turn.is_some() {
         sess.send_event_raw(Event {
             id: sub_id,
             msg: EventMsg::Error(ErrorEvent {
@@ -496,7 +564,23 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         return;
     }
 
-    let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+    let Ok(turn_context) = sess.new_default_turn_with_sub_id(sub_id).await else {
+        return;
+    };
+    let state = Arc::clone(&sess.state).lock_owned().await;
+    if sess.persistence_restart_required() {
+        drop(state);
+        sess.deliver_event_raw(Event {
+            id: turn_context.sub_id.clone(),
+            msg: EventMsg::Error(ErrorEvent {
+                message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
+                    .to_string(),
+                codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+            }),
+        })
+        .await;
+        return;
+    }
     let live_thread = match sess.live_thread_for_persistence("rollback thread") {
         Ok(live_thread) => live_thread,
         Err(_) => {
@@ -545,46 +629,37 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .into_iter()
         .chain(std::iter::once(RolloutItem::EventMsg(rollback_msg.clone())))
         .collect::<Vec<_>>();
-    sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
-        .await;
-    sess.services
-        .agent_control
-        .rollout_budget()
-        .rearm_reminder(sess.thread_id());
-    sess.recompute_token_usage(turn_context.as_ref()).await;
-
-    sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
-        .await;
-    if let Err(err) = sess.flush_rollout().await {
-        sess.send_event(
-            turn_context.as_ref(),
-            EventMsg::Warning(WarningEvent {
-                message: format!(
-                    "Rolled the thread back, but failed to save the rollback marker. Codex will continue retrying. Error: {err}"
-                ),
-            }),
-        )
-        .await;
-    }
-
-    sess.deliver_event_raw(Event {
-        id: turn_context.sub_id.clone(),
-        msg: rollback_msg,
-    })
+    let state = super::CheckpointMutationGuard::new(checkpoint_admission, state, Arc::clone(sess));
+    sess.complete_thread_rollback(
+        turn_context,
+        replay_items,
+        rollback_event,
+        state,
+        history_rewrite,
+    )
     .await;
+    drop(active_turn);
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "memory-mode persistence must remain ordered with checkpoint persistence"
+)]
 pub(super) async fn persist_thread_memory_mode_update(
     sess: &Arc<Session>,
     mode: ThreadMemoryMode,
 ) -> anyhow::Result<()> {
-    let live_thread = sess.live_thread_for_persistence("update thread memory mode")?;
+    let state = sess
+        .lock_state_for_persistence_mutation("update thread memory mode")
+        .await?;
+    let live_thread = sess.live_thread_for_mutation("update thread memory mode")?;
     live_thread.persist().await?;
     live_thread.flush().await?;
     live_thread
         .update_memory_mode(mode, /*include_archived*/ false)
         .await?;
     live_thread.flush().await?;
+    drop(state);
     Ok(())
 }
 
@@ -697,7 +772,9 @@ pub async fn review(
     sub_id: String,
     review_request: ReviewRequest,
 ) {
-    let turn_context = sess.new_default_turn_with_sub_id(sub_id.clone()).await;
+    let Ok(turn_context) = sess.new_default_turn_with_sub_id(sub_id.clone()).await else {
+        return;
+    };
     sess.maybe_emit_model_warnings_for_turn(turn_context.as_ref())
         .await;
     #[allow(deprecated)]
@@ -725,165 +802,113 @@ pub async fn review(
     }
 }
 
+#[cfg(test)]
 pub(super) async fn submission_loop(
     sess: Arc<Session>,
     config: Arc<Config>,
     rx_sub: Receiver<Submission>,
 ) {
+    let (tx_control_sub, rx_control_sub) = async_channel::bounded(1);
+    drop(tx_control_sub);
+    submission_loop_with_control(sess, config, rx_sub, rx_control_sub).await;
+}
+
+pub(super) async fn submission_loop_with_control(
+    sess: Arc<Session>,
+    config: Arc<Config>,
+    rx_sub: Receiver<Submission>,
+    rx_control_sub: Receiver<Submission>,
+) {
+    struct PendingCheckpointAcknowledgements<'a>(&'a Session);
+
+    impl Drop for PendingCheckpointAcknowledgements<'_> {
+        fn drop(&mut self) {
+            self.0.clear_checkpoint_submission_acknowledgements();
+        }
+    }
+
+    let _pending_checkpoint_acknowledgements = PendingCheckpointAcknowledgements(sess.as_ref());
     // To break out of this loop, send Op::Shutdown.
     let mut shutdown_received = false;
-    while let Ok(sub) = rx_sub.recv().await {
-        debug!(?sub, "Submission");
-        let dispatch_span = submission_dispatch_span(&sub);
-        let should_exit = async {
-            match sub.op.clone() {
-                Op::Interrupt => {
-                    interrupt(&sess).await;
-                    false
-                }
-                Op::CleanBackgroundTerminals => {
-                    clean_background_terminals(&sess).await;
-                    false
-                }
-                Op::RealtimeConversationStart(params) => {
-                    if let Err(err) =
-                        handle_realtime_conversation_start(&sess, sub.id.clone(), params).await
-                    {
-                        sess.send_event_raw(Event {
-                            id: sub.id.clone(),
-                            msg: EventMsg::Error(ErrorEvent {
-                                message: err.to_string(),
-                                codex_error_info: Some(CodexErrorInfo::Other),
-                            }),
-                        })
-                        .await;
+    let mut ordinary_open = true;
+    let mut control_open = true;
+    let mut pending_ordinary = None;
+    while ordinary_open || control_open || pending_ordinary.is_some() {
+        if pending_ordinary.is_none() {
+            tokio::select! {
+                biased;
+                control = rx_control_sub.recv(), if control_open => match control {
+                    Ok(sub) => {
+                        if matches!(sub.op, Op::Shutdown) {
+                            shutdown_received = shutdown_while_serving_control(
+                                &sess,
+                                &config,
+                                sub,
+                                &rx_control_sub,
+                            )
+                            .await;
+                            break;
+                        }
+                        dispatch_submission(&sess, &config, sub, None).await;
                     }
-                    false
-                }
-                Op::RealtimeConversationAudio(params) => {
-                    handle_realtime_conversation_audio(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationText(params) => {
-                    handle_realtime_conversation_text(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationSpeech(params) => {
-                    handle_realtime_conversation_speech(&sess, sub.id.clone(), params).await;
-                    false
-                }
-                Op::RealtimeConversationClose => {
-                    handle_realtime_conversation_close(&sess, sub.id.clone()).await;
-                    false
-                }
-                Op::RealtimeConversationListVoices => {
-                    realtime_conversation_list_voices(&sess, sub.id.clone()).await;
-                    false
-                }
-                Op::UserInput { .. } => {
-                    user_input_or_turn(
-                        &sess,
-                        sub.id.clone(),
-                        sub.op,
-                        sub.client_user_message_id,
-                        sub.parent_turn_id,
-                    )
-                    .await;
-                    false
-                }
-                Op::ThreadSettings { thread_settings } => {
-                    update_thread_settings(&sess, sub.id.clone(), thread_settings).await;
-                    false
-                }
-                Op::InterAgentCommunication { communication } => {
-                    inter_agent_communication(
-                        &sess,
-                        sub.id.clone(),
-                        communication,
-                        sub.parent_turn_id,
-                    )
-                    .await;
-                    false
-                }
-                Op::ExecApproval {
-                    id: approval_id,
-                    turn_id,
-                    decision,
-                } => {
-                    exec_approval(&sess, approval_id, turn_id, decision).await;
-                    false
-                }
-                Op::PatchApproval { id, decision } => {
-                    patch_approval(&sess, id, decision).await;
-                    false
-                }
-                Op::UserInputAnswer { id, response } => {
-                    request_user_input_response(&sess, id, response).await;
-                    false
-                }
-                Op::RequestPermissionsResponse { id, response } => {
-                    request_permissions_response(&sess, id, response).await;
-                    false
-                }
-                Op::DynamicToolResponse { id, response } => {
-                    dynamic_tool_response(&sess, id, response).await;
-                    false
-                }
-                Op::RefreshMcpServers => {
-                    refresh_mcp_servers(&sess);
-                    false
-                }
-                Op::ReloadUserConfig => {
-                    reload_user_config(&sess).await;
-                    false
-                }
-                Op::Compact => {
-                    compact(&sess, sub.id.clone()).await;
-                    false
-                }
-                Op::ThreadRollback { num_turns } => {
-                    thread_rollback(&sess, sub.id.clone(), num_turns).await;
-                    false
-                }
-                Op::SetThreadMemoryMode { mode } => {
-                    set_thread_memory_mode(&sess, sub.id.clone(), mode).await;
-                    false
-                }
-                Op::RunUserShellCommand { command } => {
-                    run_user_shell_command(&sess, sub.id.clone(), command).await;
-                    false
-                }
-                Op::ResolveElicitation {
-                    server_name,
-                    request_id,
-                    decision,
-                    content,
-                    meta,
-                } => {
-                    resolve_elicitation(&sess, server_name, request_id, decision, content, meta)
+                    Err(_) => control_open = false,
+                },
+                ordinary = rx_sub.recv(), if ordinary_open => match ordinary {
+                    Ok(sub) => pending_ordinary = Some(sub),
+                    Err(_) => ordinary_open = false,
+                },
+            }
+            continue;
+        }
+
+        let checkpoint_admission = Arc::clone(&sess.checkpoint_admission_lock).lock_owned();
+        tokio::pin!(checkpoint_admission);
+        loop {
+            tokio::select! {
+                biased;
+                control = rx_control_sub.recv(), if control_open => match control {
+                    Ok(sub) => {
+                        if matches!(sub.op, Op::Shutdown) {
+                            shutdown_received = shutdown_while_serving_control(
+                                &sess,
+                                &config,
+                                sub,
+                                &rx_control_sub,
+                            )
+                            .await;
+                            break;
+                        }
+                        dispatch_submission(&sess, &config, sub, None).await;
+                    }
+                    Err(_) => control_open = false,
+                },
+                admission = &mut checkpoint_admission => {
+                    let Some(sub) = pending_ordinary.take() else {
+                        break;
+                    };
+                    if matches!(sub.op, Op::Shutdown) {
+                        shutdown_received = dispatch_submission(
+                            &sess,
+                            &config,
+                            sub,
+                            Some(admission),
+                        )
                         .await;
-                    false
+                    } else {
+                        dispatch_submission(&sess, &config, sub, Some(admission)).await;
+                    }
+                    break;
                 }
-                Op::Shutdown => shutdown(&sess, sub.id.clone()).await,
-                Op::Review { review_request } => {
-                    review(&sess, &config, sub.id.clone(), review_request).await;
-                    false
-                }
-                Op::ApproveGuardianDeniedAction { event } => {
-                    approve_guardian_denied_action(&sess, event).await;
-                    false
-                }
-                _ => false, // Ignore unknown ops; enum is non_exhaustive to allow extensions.
+            }
+            if shutdown_received {
+                break;
             }
         }
-        .instrument(dispatch_span)
-        .await;
-        if should_exit {
-            shutdown_received = true;
+        if shutdown_received {
             break;
         }
     }
-    // If the submission loop exits because the channel closed without an
+    // If the submission loop exits because the channels closed without an
     // explicit shutdown op, still run session teardown.
     if !shutdown_received {
         shutdown_session_runtime(&sess).await;
@@ -895,6 +920,252 @@ pub(super) async fn submission_loop(
         }
     }
     debug!("Agent loop exited");
+}
+
+async fn shutdown_while_serving_control(
+    sess: &Arc<Session>,
+    config: &Arc<Config>,
+    shutdown_sub: Submission,
+    rx_control_sub: &Receiver<Submission>,
+) -> bool {
+    let shutdown = dispatch_submission(sess, config, shutdown_sub, None);
+    tokio::pin!(shutdown);
+    loop {
+        tokio::select! {
+            biased;
+            result = &mut shutdown => return result,
+            control = rx_control_sub.recv() => match control {
+                Ok(sub) if matches!(sub.op, Op::ResolveElicitation { .. }) => {
+                    dispatch_submission(sess, config, sub, None).await;
+                }
+                Ok(sub) => {
+                    warn!(op = ?sub.op, "ignoring control submission after shutdown started");
+                }
+                Err(_) => return shutdown.await,
+            }
+        }
+    }
+}
+
+async fn dispatch_submission(
+    sess: &Arc<Session>,
+    config: &Arc<Config>,
+    sub: Submission,
+    mut checkpoint_admission: Option<OwnedMutexGuard<()>>,
+) -> bool {
+    let checkpoint_submission_acknowledgement =
+        sess.take_checkpoint_submission_acknowledgement(&sub.id);
+    debug!(?sub, "Submission");
+    if sess.persistence_restart_required() && !matches!(&sub.op, Op::Shutdown) {
+        if matches!(&sub.op, Op::UserInput { .. }) {
+            sess.pending_user_message_admissions
+                .complete(&sub.id, Err(CodexErr::TurnAborted));
+        }
+        if let Some(acknowledgement) = checkpoint_submission_acknowledgement {
+            let _ = acknowledgement.send(Err(CodexErr::TurnAborted));
+        }
+        sess.deliver_event_raw(Event {
+            id: sub.id.clone(),
+            msg: EventMsg::Error(ErrorEvent {
+                message: "Thread persistence is in an indeterminate state. Restart this thread before continuing."
+                    .to_string(),
+                codex_error_info: Some(CodexErrorInfo::Other),
+            }),
+        })
+        .await;
+        return false;
+    }
+    let dispatch_span = submission_dispatch_span(&sub);
+    let thread_rollback_admission = if matches!(&sub.op, Op::ThreadRollback { .. }) {
+        checkpoint_admission.take()
+    } else {
+        None
+    };
+    let dispatch = async {
+        match sub.op.clone() {
+            Op::Interrupt => {
+                interrupt(sess).await;
+                false
+            }
+            Op::CleanBackgroundTerminals => {
+                clean_background_terminals(sess).await;
+                false
+            }
+            Op::RealtimeConversationStart(params) => {
+                if let Err(err) = Box::pin(handle_realtime_conversation_start(
+                    sess,
+                    sub.id.clone(),
+                    params,
+                ))
+                .await
+                {
+                    sess.send_event_raw(Event {
+                        id: sub.id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: err.to_string(),
+                            codex_error_info: Some(CodexErrorInfo::Other),
+                        }),
+                    })
+                    .await;
+                }
+                false
+            }
+            Op::RealtimeConversationAudio(params) => {
+                handle_realtime_conversation_audio(sess, sub.id.clone(), params).await;
+                false
+            }
+            Op::RealtimeConversationText(params) => {
+                handle_realtime_conversation_text(sess, sub.id.clone(), params).await;
+                false
+            }
+            Op::RealtimeConversationSpeech(params) => {
+                handle_realtime_conversation_speech(sess, sub.id.clone(), params).await;
+                false
+            }
+            Op::RealtimeConversationClose => {
+                handle_realtime_conversation_close(sess, sub.id.clone()).await;
+                false
+            }
+            Op::RealtimeConversationListVoices => {
+                realtime_conversation_list_voices(sess, sub.id.clone()).await;
+                false
+            }
+            Op::UserInput { .. } => {
+                user_input_or_turn(
+                    sess,
+                    sub.id.clone(),
+                    sub.op,
+                    sub.client_user_message_id,
+                    sub.parent_turn_id,
+                )
+                .await;
+                false
+            }
+            Op::ThreadSettings { thread_settings } => {
+                update_thread_settings(sess, sub.id.clone(), thread_settings).await;
+                false
+            }
+            Op::InterAgentCommunication { communication } => {
+                inter_agent_communication(sess, sub.id.clone(), communication, sub.parent_turn_id)
+                    .await;
+                false
+            }
+            Op::ExecApproval {
+                id: approval_id,
+                turn_id,
+                decision,
+            } => {
+                exec_approval(sess, approval_id, turn_id, decision).await;
+                false
+            }
+            Op::PatchApproval { id, decision } => {
+                patch_approval(sess, id, decision).await;
+                false
+            }
+            Op::UserInputAnswer { id, response } => {
+                request_user_input_response(sess, id, response).await;
+                false
+            }
+            Op::RequestPermissionsResponse { id, response } => {
+                request_permissions_response(sess, id, response).await;
+                false
+            }
+            Op::DynamicToolResponse { id, response } => {
+                dynamic_tool_response(sess, id, response).await;
+                false
+            }
+            Op::RefreshMcpServers => {
+                refresh_mcp_servers(sess).await;
+                false
+            }
+            Op::ReloadUserConfig => {
+                reload_user_config(sess).await;
+                false
+            }
+            Op::Compact => {
+                compact(sess, sub.id.clone()).await;
+                false
+            }
+            Op::ThreadRollback { num_turns } => {
+                let Some(checkpoint_admission) = thread_rollback_admission else {
+                    sess.deliver_event_raw(Event {
+                        id: sub.id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: "thread rollback admission was not acquired".to_string(),
+                            codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        }),
+                    })
+                    .await;
+                    return false;
+                };
+                thread_rollback_with_admission(
+                    sess,
+                    sub.id.clone(),
+                    num_turns,
+                    checkpoint_admission,
+                )
+                .await;
+                false
+            }
+            Op::SetThreadMemoryMode { mode } => {
+                set_thread_memory_mode(sess, sub.id.clone(), mode).await;
+                false
+            }
+            Op::RunUserShellCommand { command } => {
+                run_user_shell_command(sess, sub.id.clone(), command).await;
+                false
+            }
+            Op::ResolveElicitation {
+                server_name,
+                request_id,
+                decision,
+                content,
+                meta,
+            } => {
+                resolve_elicitation(sess, server_name, request_id, decision, content, meta).await;
+                false
+            }
+            Op::Shutdown => shutdown(sess, sub.id.clone()).await,
+            Op::Review { review_request } => {
+                review(sess, config, sub.id.clone(), review_request).await;
+                false
+            }
+            Op::ApproveGuardianDeniedAction { event } => {
+                approve_guardian_denied_action(sess, event).await;
+                false
+            }
+            _ => false, // Ignore unknown ops; enum is non_exhaustive to allow extensions.
+        }
+    }
+    .instrument(dispatch_span);
+    let should_exit = if checkpoint_admission.is_some() {
+        sess.with_inherited_checkpoint_admission(dispatch).await
+    } else {
+        dispatch.await
+    };
+    if let Some(acknowledgement) = checkpoint_submission_acknowledgement {
+        match checkpoint_admission.take() {
+            Some(admission) => {
+                let _ = acknowledgement.send(Ok(admission));
+            }
+            None => {
+                let session = Arc::clone(sess);
+                tokio::spawn(async move {
+                    let admission = Arc::clone(&session.checkpoint_admission_lock)
+                        .lock_owned()
+                        .await;
+                    let admission_result = if session.persistence_restart_required() {
+                        Err(CodexErr::TurnAborted)
+                    } else {
+                        Ok(admission)
+                    };
+                    let _ = acknowledgement.send(admission_result);
+                });
+            }
+        }
+    }
+    drop(checkpoint_admission);
+    should_exit
 }
 
 async fn approve_guardian_denied_action(sess: &Arc<Session>, event: GuardianAssessmentEvent) {
@@ -933,7 +1204,8 @@ Approved action:
         phase: None,
     })];
 
-    sess.inject_no_new_turn(items, /*current_turn_context*/ None)
+    let _ = sess
+        .inject_no_new_turn(items, /*current_turn_context*/ None)
         .await;
 }
 

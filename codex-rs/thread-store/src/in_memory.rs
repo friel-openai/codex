@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::MutexGuard;
@@ -23,12 +25,15 @@ use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::MoveThreadToSectionParams;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
+use crate::ReadThreadsParams;
 use crate::ResumeThreadParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
@@ -360,6 +365,7 @@ mod tests {
             store
                 .load_history(LoadThreadHistoryParams {
                     thread_id,
+                    rollout_path: None,
                     include_archived: false,
                 })
                 .await
@@ -540,6 +546,38 @@ mod tests {
             }
         ));
     }
+
+    #[tokio::test]
+    async fn read_threads_batches_metadata_without_scalar_reads() {
+        let store = InMemoryThreadStore::default();
+        let thread_ids = (0..64).map(|_| ThreadId::new()).collect::<Vec<_>>();
+        for thread_id in &thread_ids {
+            store
+                .create_thread(create_thread_params(*thread_id, ThreadHistoryMode::Legacy))
+                .await
+                .expect("create thread");
+        }
+
+        let threads = ThreadStore::read_threads(
+            &store,
+            ReadThreadsParams {
+                thread_ids: thread_ids.clone(),
+            },
+        )
+        .await
+        .expect("read thread metadata batch");
+
+        assert_eq!(
+            threads
+                .into_iter()
+                .map(|thread| thread.thread_id)
+                .collect::<Vec<_>>(),
+            thread_ids
+        );
+        let calls = store.calls().await;
+        assert_eq!(calls.read_threads, 1);
+        assert_eq!(calls.read_thread, 0);
+    }
 }
 
 fn stores_guard() -> MutexGuard<'static, HashMap<String, Arc<InMemoryThreadStore>>> {
@@ -562,6 +600,7 @@ pub struct InMemoryThreadStoreCalls {
     pub load_history: usize,
     pub load_latest_model_context: usize,
     pub read_thread: usize,
+    pub read_threads: usize,
     pub read_thread_with_history: usize,
     pub read_thread_by_rollout_path: usize,
     pub list_threads: usize,
@@ -586,6 +625,8 @@ pub struct InMemoryThreadStore {
 struct InMemoryThreadStoreState {
     calls: InMemoryThreadStoreCalls,
     fail_appends: bool,
+    fail_archive_thread: Option<ThreadId>,
+    fail_delete_thread: Option<ThreadId>,
     created_threads: HashMap<ThreadId, CreateThreadParams>,
     creation_times: HashMap<ThreadId, DateTime<Utc>>,
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
@@ -621,6 +662,16 @@ impl InMemoryThreadStore {
     /// Makes non-empty appends fail. Intended for startup failure-path tests.
     pub async fn fail_appends(&self) {
         self.state.lock().await.fail_appends = true;
+    }
+
+    /// Makes archive fail before mutating `thread_id`. Intended for request-level failure tests.
+    pub async fn fail_archive_thread(&self, thread_id: ThreadId) {
+        self.state.lock().await.fail_archive_thread = Some(thread_id);
+    }
+
+    /// Makes deletion fail before mutating `thread_id`. Intended for request-level failure tests.
+    pub async fn fail_delete_thread(&self, thread_id: ThreadId) {
+        self.state.lock().await.fail_delete_thread = Some(thread_id);
     }
 
     async fn create_thread(&self, params: CreateThreadParams) -> ThreadStoreResult<()> {
@@ -713,6 +764,17 @@ impl InMemoryThreadStore {
     ) -> ThreadStoreResult<StoredThreadHistory> {
         let mut state = self.state.lock().await;
         state.calls.load_history += 1;
+        if let Some(rollout_path) = params.rollout_path.as_ref()
+            && state.rollout_paths.get(rollout_path) != Some(&params.thread_id)
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "rollout path {} does not belong to thread {}",
+                    rollout_path.display(),
+                    params.thread_id
+                ),
+            });
+        }
         let items =
             state
                 .histories
@@ -734,6 +796,17 @@ impl InMemoryThreadStore {
     ) -> ThreadStoreResult<StoredModelContext> {
         let mut state = self.state.lock().await;
         state.calls.load_latest_model_context += 1;
+        if let Some(rollout_path) = params.rollout_path.as_ref()
+            && state.rollout_paths.get(rollout_path) != Some(&params.thread_id)
+        {
+            return Err(ThreadStoreError::InvalidRequest {
+                message: format!(
+                    "rollout path {} does not belong to thread {}",
+                    rollout_path.display(),
+                    params.thread_id
+                ),
+            });
+        }
         let items =
             state
                 .histories
@@ -756,6 +829,22 @@ impl InMemoryThreadStore {
         }
         let thread = stored_thread_from_state(&state, params.thread_id, params.include_history)?;
         Ok(thread)
+    }
+
+    async fn read_threads(
+        &self,
+        params: ReadThreadsParams,
+    ) -> ThreadStoreResult<Vec<StoredThread>> {
+        let mut state = self.state.lock().await;
+        state.calls.read_threads += 1;
+        params
+            .thread_ids
+            .into_iter()
+            .filter(|thread_id| state.created_threads.contains_key(thread_id))
+            .map(|thread_id| {
+                stored_thread_from_state(&state, thread_id, /*include_history*/ false)
+            })
+            .collect()
     }
 
     async fn read_thread_by_rollout_path(
@@ -963,6 +1052,11 @@ impl InMemoryThreadStore {
     async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
         let mut state = self.state.lock().await;
         state.calls.delete_thread += 1;
+        if state.fail_delete_thread == Some(params.thread_id) {
+            return Err(ThreadStoreError::Internal {
+                message: format!("injected delete failure for {}", params.thread_id),
+            });
+        }
         let existed = state.histories.remove(&params.thread_id).is_some();
         state.created_threads.remove(&params.thread_id);
         state.names.remove(&params.thread_id);
@@ -998,6 +1092,43 @@ impl ThreadStore for InMemoryThreadStore {
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(InMemoryThreadStore::append_items(self, params))
+    }
+
+    fn persist_segment_checkpoint(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> Pin<Box<dyn Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>> {
+        Box::pin(async move {
+            if params.is_snapshot() {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::InvalidRequest {
+                        message: "a segment-state checkpoint must rotate the active rollout"
+                            .to_string(),
+                    },
+                };
+            }
+            if let Err(error) = params.validate() {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::InvalidRequest {
+                        message: error.to_string(),
+                    },
+                };
+            }
+            let mut state = self.state.lock().await;
+            state.calls.append_items += 1;
+            if state.fail_appends {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::Internal {
+                        message: "injected append failure".to_string(),
+                    },
+                };
+            }
+            let history_mode = history_mode_from_state(&state, thread_id);
+            let items = persisted_rollout_items(params.initial_items(), history_mode);
+            state.histories.entry(thread_id).or_default().extend(items);
+            SegmentCheckpointPersistenceOutcome::Committed
+        })
     }
 
     fn persist_thread(&self, _thread_id: ThreadId) -> ThreadStoreFuture<'_, ()> {
@@ -1044,6 +1175,10 @@ impl ThreadStore for InMemoryThreadStore {
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
         Box::pin(InMemoryThreadStore::read_thread(self, params))
+    }
+
+    fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
+        Box::pin(InMemoryThreadStore::read_threads(self, params))
     }
 
     fn read_thread_by_rollout_path(
@@ -1127,9 +1262,15 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::move_thread_to_section(self, params))
     }
 
-    fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
-            self.state.lock().await.calls.archive_thread += 1;
+            let mut state = self.state.lock().await;
+            state.calls.archive_thread += 1;
+            if state.fail_archive_thread == Some(params.thread_id) {
+                return Err(ThreadStoreError::Internal {
+                    message: format!("injected archive failure for {}", params.thread_id),
+                });
+            }
             Ok(())
         })
     }

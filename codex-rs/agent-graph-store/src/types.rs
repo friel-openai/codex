@@ -9,6 +9,16 @@ pub enum ThreadSpawnEdgeStatus {
     Open,
     /// The child thread has been closed from the parent/child graph's perspective.
     Closed,
+    /// The child thread was permanently closed and still requires idempotent cleanup on retry.
+    PermanentlyClosed,
+}
+
+/// One persisted incoming thread-spawn edge selected by child thread ID.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ThreadSpawnEdge {
+    pub parent_thread_id: codex_protocol::ThreadId,
+    pub child_thread_id: codex_protocol::ThreadId,
+    pub status: ThreadSpawnEdgeStatus,
 }
 
 #[cfg(test)]
@@ -29,6 +39,11 @@ mod tests {
             "\"closed\""
         );
         assert_eq!(
+            serde_json::to_string(&ThreadSpawnEdgeStatus::PermanentlyClosed)
+                .expect("permanently closed status should serialize"),
+            "\"permanently_closed\""
+        );
+        assert_eq!(
             serde_json::from_str::<ThreadSpawnEdgeStatus>("\"open\"")
                 .expect("open status should deserialize"),
             ThreadSpawnEdgeStatus::Open
@@ -37,6 +52,11 @@ mod tests {
             serde_json::from_str::<ThreadSpawnEdgeStatus>("\"closed\"")
                 .expect("closed status should deserialize"),
             ThreadSpawnEdgeStatus::Closed
+        );
+        assert_eq!(
+            serde_json::from_str::<ThreadSpawnEdgeStatus>("\"permanently_closed\"")
+                .expect("permanently closed status should deserialize"),
+            ThreadSpawnEdgeStatus::PermanentlyClosed
         );
     }
 }

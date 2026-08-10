@@ -11,7 +11,10 @@ use crate::CreateThreadParams;
 use crate::CreateThreadSectionParams;
 use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
+use crate::DeleteThreadsFailure;
+use crate::DeleteThreadsOutcome;
 use crate::DeleteThreadsParams;
+use crate::FreezeRolloutSegmentParams;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListThreadSectionsParams;
@@ -23,10 +26,12 @@ use crate::PrepareForkParams;
 use crate::PreparedFork;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
+use crate::ReadThreadsParams;
 use crate::RenameThreadSectionParams;
 use crate::ResumeThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
@@ -69,6 +74,25 @@ pub trait ThreadStore: Any + Send + Sync {
     /// replay history and before updating any implementation-owned projections.
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()>;
 
+    /// Persists a certified current-state checkpoint as one atomic authority change.
+    ///
+    /// Implementations must not return [`SegmentCheckpointPersistenceOutcome::NotCommitted`] after
+    /// making any checkpoint record durable or retaining one for a later retry. Stores that cannot
+    /// provide that guarantee should return `Indeterminate`. The default performs no mutation.
+    fn persist_segment_checkpoint(
+        &self,
+        _thread_id: ThreadId,
+        _params: FreezeRolloutSegmentParams,
+    ) -> Pin<Box<dyn Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>> {
+        Box::pin(async {
+            SegmentCheckpointPersistenceOutcome::NotCommitted {
+                error: ThreadStoreError::Unsupported {
+                    operation: "persist_segment_checkpoint",
+                },
+            }
+        })
+    }
+
     /// Materializes the thread if persistence is lazy, then persists all queued items.
     fn persist_thread(&self, thread_id: ThreadId) -> ThreadStoreFuture<'_, ()>;
 
@@ -96,11 +120,13 @@ pub trait ThreadStore: Any + Send + Sync {
     /// Implementations that cannot perform a targeted read may return the full persisted history.
     fn load_latest_model_context(
         &self,
-        _params: LoadThreadHistoryParams,
+        params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredModelContext> {
-        Box::pin(async {
-            Err(ThreadStoreError::Unsupported {
-                operation: "load_latest_model_context",
+        Box::pin(async move {
+            let history = self.load_history(params).await?;
+            Ok(StoredModelContext {
+                thread_id: history.thread_id,
+                items: history.items,
             })
         })
     }
@@ -118,6 +144,28 @@ pub trait ThreadStore: Any + Send + Sync {
 
     /// Reads a thread summary and optionally its persisted history.
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread>;
+
+    /// Reads persisted metadata for a bounded set of threads in one store operation.
+    fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
+        Box::pin(async move {
+            let mut threads = Vec::new();
+            for thread_id in params.thread_ids {
+                match self
+                    .read_thread(ReadThreadParams {
+                        thread_id,
+                        include_archived: true,
+                        include_history: false,
+                    })
+                    .await
+                {
+                    Ok(thread) => threads.push(thread),
+                    Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                    Err(err) => return Err(err),
+                }
+            }
+            Ok(threads)
+        })
+    }
 
     /// Reads a rollout-backed thread by path when the store supports path-addressed lookups.
     ///
@@ -306,4 +354,35 @@ pub trait ThreadStore: Any + Send + Sync {
             Ok(())
         })
     }
+
+    /// Deletes threads in order and reports the exact completed prefix on a later failure.
+    fn delete_threads_with_outcome(
+        &self,
+        params: DeleteThreadsParams,
+    ) -> ThreadStoreFuture<'_, DeleteThreadsOutcome> {
+        Box::pin(async move {
+            let mut deleted_thread_ids = Vec::new();
+            for thread_id in params.thread_ids {
+                match self.delete_thread(DeleteThreadParams { thread_id }).await {
+                    Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {
+                        deleted_thread_ids.push(thread_id);
+                    }
+                    Err(error) => {
+                        return Ok(DeleteThreadsOutcome {
+                            deleted_thread_ids,
+                            failure: Some(DeleteThreadsFailure { thread_id, error }),
+                        });
+                    }
+                }
+            }
+            Ok(DeleteThreadsOutcome {
+                deleted_thread_ids,
+                failure: None,
+            })
+        })
+    }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

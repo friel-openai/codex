@@ -1,5 +1,6 @@
 use super::*;
 use crate::tools::handlers::multi_agents_spec::create_close_agent_tool_v1;
+use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErrorDetails;
 use codex_tools::ToolSpec;
 
@@ -40,8 +41,21 @@ async fn handle_close_agent(
     let args: CloseAgentArgs = parse_arguments(&arguments)?;
     let agent_id = parse_agent_id_target(&args.target)?;
     let receiver_agent = session.services.agent_control.get_agent_metadata(agent_id);
-    let known_agent = receiver_agent.is_some();
     let receiver_agent = receiver_agent.unwrap_or_default();
+    if agent_id == session.thread_id {
+        return Err(FunctionCallError::RespondToModel(
+            "an agent cannot close itself".to_string(),
+        ));
+    }
+    if receiver_agent
+        .agent_path
+        .as_ref()
+        .is_some_and(AgentPath::is_root)
+    {
+        return Err(FunctionCallError::RespondToModel(
+            "root is not a spawned agent".to_string(),
+        ));
+    }
     session
         .emit_turn_item_started(
             &turn,
@@ -66,41 +80,19 @@ async fn handle_close_agent(
         .await
     {
         Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
-        Err(err)
-            if known_agent && matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
-        {
+        Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
             session.services.agent_control.get_status(agent_id).await
         }
-        Err(err) => {
-            let status = session.services.agent_control.get_status(agent_id).await;
-            session
-                .emit_turn_item_completed(
-                    &turn,
-                    TurnItem::CollabAgentToolCall(CollabAgentToolCallItem {
-                        id: call_id.clone(),
-                        tool: CollabAgentTool::CloseAgent,
-                        status: collab_tool_call_status(&status, Some(agent_id)),
-                        sender_thread_id: session.thread_id(),
-                        receiver_thread_ids: vec![agent_id],
-                        receiver_agents: vec![CollabAgentRef {
-                            thread_id: agent_id,
-                            agent_nickname: receiver_agent.agent_nickname.clone(),
-                            agent_role: receiver_agent.agent_role.clone(),
-                        }],
-                        prompt: None,
-                        model: None,
-                        reasoning_effort: None,
-                        agents_states: [(agent_id, status)].into_iter().collect(),
-                    }),
-                )
-                .await;
-            return Err(collab_agent_error(agent_id, err));
-        }
+        Err(_) => session.services.agent_control.get_status(agent_id).await,
     };
-    let result = Box::pin(session.services.agent_control.close_agent(agent_id))
-        .await
-        .map_err(|err| collab_agent_error(agent_id, err))
-        .map(|_| ());
+    let result = Box::pin(
+        session
+            .services
+            .agent_control
+            .close_agent_subtree(session.thread_id, agent_id),
+    )
+    .await
+    .map_err(|err| collab_agent_error(agent_id, err));
     session
         .emit_turn_item_completed(
             &turn,
@@ -122,10 +114,17 @@ async fn handle_close_agent(
             }),
         )
         .await;
-    result?;
+    let report = result?;
 
     Ok(CloseAgentResult {
         previous_status: status,
+        closed_agents: report.closed_agents,
+        closed_edges: report.closed_edges,
+        newly_closed_edges: report.newly_closed_edges,
+        stopped_runtimes: report.stopped_runtimes,
+        paused_goals: report.paused_goals,
+        cleared_queued_items: report.cleared_queued_items,
+        evicted_identities: report.evicted_identities,
     })
 }
 
@@ -138,6 +137,13 @@ impl CoreToolRuntime for Handler {
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct CloseAgentResult {
     pub(crate) previous_status: AgentStatus,
+    pub(crate) closed_agents: usize,
+    pub(crate) closed_edges: usize,
+    pub(crate) newly_closed_edges: usize,
+    pub(crate) stopped_runtimes: usize,
+    pub(crate) paused_goals: usize,
+    pub(crate) cleared_queued_items: usize,
+    pub(crate) evicted_identities: usize,
 }
 
 impl ToolOutput for CloseAgentResult {

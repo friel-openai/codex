@@ -95,6 +95,7 @@ use codex_models_manager::ModelRoutingProfile;
 use codex_models_manager::ModelsManagerConfig;
 use codex_protocol::config_types::AltScreenMode;
 use codex_protocol::config_types::AutoCompactTokenLimitScope;
+use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
@@ -118,6 +119,8 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 pub use codex_thread_store::ExtraConfig;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -836,6 +839,17 @@ pub struct Config {
     /// or legacy config, rather than defaulting to `cwd`.
     pub workspace_roots_explicit: bool,
 
+    /// Persisted environment selection decision for resume/fork startup.
+    ///
+    /// `None` means no complete persisted settings record was available and the caller may use
+    /// legacy history reconstruction. `Some(Some(_))` restores the persisted selections.
+    /// `Some(None)` means explicit cwd/workspace-root overrides require selections to be derived
+    /// from this resolved `Config` instead.
+    pub(crate) persisted_thread_environments: Option<Option<TurnEnvironmentSelections>>,
+
+    /// Effective Windows sandbox level after persisted settings and managed requirements.
+    pub(crate) windows_sandbox_level: WindowsSandboxLevel,
+
     /// Preferred store for CLI auth credentials.
     /// file (default): Use a file in the Codex home directory.
     /// keyring: Use an OS-specific keyring service.
@@ -970,6 +984,10 @@ pub struct Config {
     /// Value to use for `reasoning.effort` when making a request using the
     /// Responses API.
     pub model_reasoning_effort: Option<ReasoningEffort>,
+    /// Collaboration mode restored from a persisted thread-settings snapshot.
+    /// Session startup overlays the resolved model and reasoning effort while preserving the
+    /// persisted mode and mode-specific developer instructions.
+    pub initial_collaboration_mode: Option<CollaborationMode>,
     /// Optional Plan-mode-specific reasoning effort override used by the TUI.
     ///
     /// When unset, Plan mode uses the built-in Plan preset default (currently
@@ -1478,7 +1496,16 @@ impl ConfigBuilder {
         let cli_overrides = cli_overrides.unwrap_or_default();
         let mut harness_overrides = harness_overrides.unwrap_or_default();
         let loader_overrides = loader_overrides.unwrap_or_default();
-        let cwd_override = harness_overrides.cwd.as_deref().or(fallback_cwd.as_deref());
+        let cwd_override = harness_overrides
+            .cwd
+            .as_deref()
+            .or_else(|| {
+                harness_overrides
+                    .persisted_thread_settings
+                    .as_ref()
+                    .and_then(|settings| settings.cwd.as_deref())
+            })
+            .or(fallback_cwd.as_deref());
         let cwd = match cwd_override {
             Some(path) => AbsolutePathBuf::relative_to_current_dir(path)?,
             None => AbsolutePathBuf::current_dir()?,
@@ -2615,6 +2642,97 @@ fn apply_managed_filesystem_constraints(
     }
 }
 
+/// Persisted thread settings used as a resume baseline above ambient config.
+///
+/// Every field is optional because app-server removes fields that an explicit resume request
+/// overrides. Nested options preserve an explicitly persisted absence separately from an omitted
+/// baseline field.
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct PersistedThreadSettingsBaseline {
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub service_tier: Option<Option<String>>,
+    pub cwd: Option<PathBuf>,
+    pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Persisted environment decision, including explicit suppression when resume/fork overrides
+    /// cwd or workspace roots.
+    pub environments: Option<Option<TurnEnvironmentSelections>>,
+    pub approval_policy: Option<AskForApproval>,
+    pub approvals_reviewer: Option<ApprovalsReviewer>,
+    pub permission_profile: Option<PermissionProfile>,
+    /// Persisted active-profile identity, including an explicit absence.
+    pub active_permission_profile: Option<Option<ActivePermissionProfile>>,
+    pub profile_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    pub windows_sandbox_level: Option<WindowsSandboxLevel>,
+    pub reasoning_effort: Option<Option<ReasoningEffort>>,
+    pub reasoning_summary: Option<Option<ReasoningSummary>>,
+    pub personality: Option<Option<Personality>>,
+    pub collaboration_mode: Option<CollaborationMode>,
+}
+
+impl PersistedThreadSettingsBaseline {
+    /// Convert the latest persisted settings record into the complete resume baseline.
+    ///
+    /// `legacy_workspace_roots` is used only for rollout records written before
+    /// `ThreadSettingsSnapshot::workspace_roots` was added. New certified checkpoints always
+    /// carry every optional field required by this conversion.
+    pub(crate) fn from_thread_settings_snapshot(
+        settings: &ThreadSettingsSnapshot,
+        legacy_workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    ) -> Self {
+        Self {
+            model: Some(settings.model.clone()),
+            model_provider: Some(settings.model_provider_id.clone()),
+            service_tier: Some(settings.service_tier.clone()),
+            cwd: Some(settings.cwd.to_path_buf()),
+            workspace_roots: settings.workspace_roots.clone().or(legacy_workspace_roots),
+            environments: settings.environments.clone().map(Some),
+            approval_policy: Some(settings.approval_policy),
+            approvals_reviewer: Some(settings.approvals_reviewer),
+            permission_profile: Some(settings.permission_profile.clone()),
+            active_permission_profile: Some(settings.active_permission_profile.clone()),
+            profile_workspace_roots: settings.profile_workspace_roots.clone(),
+            windows_sandbox_level: settings.windows_sandbox_level,
+            reasoning_effort: Some(settings.reasoning_effort.clone()),
+            reasoning_summary: Some(settings.reasoning_summary),
+            personality: Some(settings.personality),
+            collaboration_mode: Some(settings.collaboration_mode.clone()),
+        }
+    }
+
+    /// Fill fields that are absent from this baseline with an older compatibility source.
+    ///
+    /// The latest `ThreadSettingsApplied` record remains authoritative for every field it
+    /// contains. Indexed metadata and legacy `TurnContext` records supply only fields that older
+    /// rollouts did not persist in `ThreadSettingsApplied`.
+    pub(crate) fn fill_missing_from(self, fallback: Self) -> Self {
+        Self {
+            model: self.model.or(fallback.model),
+            model_provider: self.model_provider.or(fallback.model_provider),
+            service_tier: self.service_tier.or(fallback.service_tier),
+            cwd: self.cwd.or(fallback.cwd),
+            workspace_roots: self.workspace_roots.or(fallback.workspace_roots),
+            environments: self.environments.or(fallback.environments),
+            approval_policy: self.approval_policy.or(fallback.approval_policy),
+            approvals_reviewer: self.approvals_reviewer.or(fallback.approvals_reviewer),
+            permission_profile: self.permission_profile.or(fallback.permission_profile),
+            active_permission_profile: self
+                .active_permission_profile
+                .or(fallback.active_permission_profile),
+            profile_workspace_roots: self
+                .profile_workspace_roots
+                .or(fallback.profile_workspace_roots),
+            windows_sandbox_level: self
+                .windows_sandbox_level
+                .or(fallback.windows_sandbox_level),
+            reasoning_effort: self.reasoning_effort.or(fallback.reasoning_effort),
+            reasoning_summary: self.reasoning_summary.or(fallback.reasoning_summary),
+            personality: self.personality.or(fallback.personality),
+            collaboration_mode: self.collaboration_mode.or(fallback.collaboration_mode),
+        }
+    }
+}
+
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
@@ -2646,6 +2764,8 @@ pub struct ConfigOverrides {
     /// Explicit absolute runtime workspace roots for this session. When set,
     /// this is the full runtime root list rather than an additive override.
     pub workspace_roots: Option<Vec<AbsolutePathBuf>>,
+    /// Complete persisted settings baseline for resuming an existing thread.
+    pub persisted_thread_settings: Option<PersistedThreadSettingsBaseline>,
 }
 
 fn dedupe_absolute_paths(paths: &mut Vec<AbsolutePathBuf>) {
@@ -3381,6 +3501,163 @@ fn validate_custom_model_alias_cycles(
 }
 
 impl Config {
+    /// Apply settings reconstructed from a thread rollout to an already-loaded runtime config.
+    ///
+    /// AgentControl uses this when it reloads or transfers a cold thread. The destination root's
+    /// config still supplies process-wide services and managed requirements, while this method
+    /// restores the thread-scoped settings that app-server resume restores through
+    /// `ConfigOverrides::persisted_thread_settings`.
+    pub(crate) fn apply_persisted_thread_settings_baseline(
+        &mut self,
+        baseline: PersistedThreadSettingsBaseline,
+    ) -> std::io::Result<()> {
+        if let Some(model_provider_id) = baseline.model_provider {
+            if self.model_provider_id != model_provider_id {
+                self.model_provider = self
+                    .model_providers
+                    .get(&model_provider_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        std::io::Error::new(
+                            ErrorKind::InvalidInput,
+                            format!(
+                                "cannot restore thread because its model provider `{model_provider_id}` is unavailable"
+                            ),
+                        )
+                    })?;
+            }
+            self.model_provider_id = model_provider_id;
+        }
+        if let Some(model) = baseline.model {
+            self.model = Some(model);
+        }
+        if let Some(service_tier) = baseline.service_tier {
+            self.service_tier = service_tier;
+        }
+        if let Some(cwd) = baseline.cwd {
+            self.cwd = AbsolutePathBuf::try_from(cwd)?;
+        }
+        if let Some(workspace_roots) = baseline.workspace_roots {
+            self.workspace_roots_explicit = true;
+            self.workspace_roots = workspace_roots;
+            self.permissions
+                .set_workspace_roots(self.workspace_roots.clone());
+        }
+        if let Some(environments) = baseline.environments {
+            self.persisted_thread_environments = Some(environments);
+        }
+        if let Some(approval_policy) = baseline.approval_policy
+            && let Err(err) = self.permissions.approval_policy.set(approval_policy)
+        {
+            tracing::warn!(
+                error = %err,
+                "persisted approval policy is disallowed by current requirements; retaining the current value"
+            );
+            self.startup_warnings.push(format!(
+                    "Persisted `approval_policy` is disallowed by current requirements; retaining the current value. Details: {err}"
+                ));
+        }
+        if let Some(approvals_reviewer) = baseline.approvals_reviewer {
+            let mut constrained_approvals_reviewer = self
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .clone();
+            apply_requirement_constrained_value(
+                "approvals_reviewer",
+                approvals_reviewer,
+                &mut constrained_approvals_reviewer,
+                &mut self.startup_warnings,
+            )?;
+            self.approvals_reviewer = constrained_approvals_reviewer.value();
+        }
+        if let Some(permission_profile) = baseline.permission_profile {
+            let profile_workspace_roots = baseline
+                .profile_workspace_roots
+                .unwrap_or_else(|| self.permissions.profile_workspace_roots().to_vec());
+            let (permission_snapshot, network) = match baseline.active_permission_profile.flatten()
+            {
+                Some(active_permission_profile) => {
+                    let network = self.network_proxy_spec_for_active_permission_profile(
+                        &active_permission_profile,
+                        &permission_profile,
+                    )?;
+                    (
+                        PermissionProfileSnapshot::active_with_profile_workspace_roots(
+                            permission_profile,
+                            active_permission_profile,
+                            profile_workspace_roots,
+                        ),
+                        network,
+                    )
+                }
+                None => {
+                    let network = if profile_allows_configured_network_proxy(&permission_profile) {
+                        self.permissions.network.clone()
+                    } else {
+                        None
+                    };
+                    (
+                        PermissionProfileSnapshot::legacy(permission_profile),
+                        network,
+                    )
+                }
+            };
+            match self
+                .permissions
+                .set_permission_profile_from_session_snapshot(permission_snapshot)
+            {
+                Ok(()) => self.permissions.network = network,
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "persisted permission profile is disallowed by current requirements; retaining the current value"
+                    );
+                    self.startup_warnings.push(format!(
+                        "Persisted `permission_profile` is disallowed by current requirements; retaining the current value. Details: {err}"
+                    ));
+                }
+            }
+        }
+        if let Some(windows_sandbox_level) = baseline.windows_sandbox_level {
+            let selected_windows_sandbox_mode = match windows_sandbox_level {
+                WindowsSandboxLevel::Disabled => None,
+                WindowsSandboxLevel::RestrictedToken => Some(WindowsSandboxModeToml::Unelevated),
+                WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+            };
+            let mut constrained_windows_sandbox_mode = self
+                .config_layer_stack
+                .requirements()
+                .windows_sandbox_mode
+                .clone();
+            apply_requirement_constrained_value(
+                "windows.sandbox",
+                selected_windows_sandbox_mode,
+                &mut constrained_windows_sandbox_mode,
+                &mut self.startup_warnings,
+            )?;
+            self.permissions.windows_sandbox_mode = *constrained_windows_sandbox_mode.get();
+            self.windows_sandbox_level = match self.permissions.windows_sandbox_mode {
+                Some(WindowsSandboxModeToml::Elevated) => WindowsSandboxLevel::Elevated,
+                Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
+                None => WindowsSandboxLevel::Disabled,
+            };
+        }
+        if let Some(reasoning_effort) = baseline.reasoning_effort {
+            self.model_reasoning_effort = reasoning_effort;
+        }
+        if let Some(reasoning_summary) = baseline.reasoning_summary {
+            self.model_reasoning_summary = reasoning_summary;
+        }
+        if let Some(personality) = baseline.personality {
+            self.personality = personality;
+        }
+        if let Some(collaboration_mode) = baseline.collaboration_mode {
+            self.initial_collaboration_mode = Some(collaboration_mode);
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     async fn load_from_base_config_with_overrides(
         cfg: ConfigToml,
@@ -3493,7 +3770,44 @@ impl Config {
             psp,
             additional_writable_roots,
             workspace_roots: workspace_roots_override,
+            persisted_thread_settings,
         } = overrides;
+        let PersistedThreadSettingsBaseline {
+            model: persisted_model,
+            model_provider: persisted_model_provider,
+            service_tier: persisted_service_tier,
+            cwd: persisted_cwd,
+            workspace_roots: persisted_workspace_roots,
+            environments: persisted_thread_environments,
+            approval_policy: persisted_approval_policy,
+            approvals_reviewer: persisted_approvals_reviewer,
+            permission_profile: persisted_permission_profile,
+            active_permission_profile: persisted_active_permission_profile,
+            profile_workspace_roots: persisted_profile_workspace_roots,
+            windows_sandbox_level: persisted_windows_sandbox_level,
+            reasoning_effort: persisted_reasoning_effort,
+            reasoning_summary: persisted_reasoning_summary,
+            personality: persisted_personality,
+            collaboration_mode: initial_collaboration_mode,
+        } = persisted_thread_settings.unwrap_or_default();
+        let model = model.or(persisted_model);
+        let model_provider = model_provider.or(persisted_model_provider);
+        let cwd = cwd.or(persisted_cwd);
+        let approval_policy_override = approval_policy_override.or(persisted_approval_policy);
+        let approvals_reviewer_override =
+            approvals_reviewer_override.or(persisted_approvals_reviewer);
+        let explicit_permission_override = sandbox_mode.is_some()
+            || permission_profile.is_some()
+            || default_permissions_override.is_some();
+        let permission_profile = permission_profile.or_else(|| {
+            (!explicit_permission_override)
+                .then_some(persisted_permission_profile)
+                .flatten()
+        });
+        let persisted_active_permission_profile = (!explicit_permission_override)
+            .then_some(persisted_active_permission_profile)
+            .flatten();
+        let workspace_roots_override = workspace_roots_override.or(persisted_workspace_roots);
         let bypass_hook_trust = bypass_hook_trust.unwrap_or_default();
 
         if bypass_hook_trust {
@@ -3564,15 +3878,26 @@ impl Config {
         let respect_system_proxy = features.enabled(Feature::RespectSystemProxy);
         let enable_network_proxy = features.enabled(Feature::NetworkProxy);
         let configured_windows_sandbox_mode = resolve_windows_sandbox_mode(&cfg);
+        let persisted_windows_sandbox_mode = persisted_windows_sandbox_level.map(|level| match level {
+            WindowsSandboxLevel::Disabled => None,
+            WindowsSandboxLevel::RestrictedToken => Some(WindowsSandboxModeToml::Unelevated),
+            WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+        });
         // Keep the configured mode separate so a requirement-constrained mode
         // does not look like it was explicitly selected in config.
-        let selected_windows_sandbox_mode = configured_windows_sandbox_mode.or_else(|| {
-            match WindowsSandboxLevel::from_features(&features) {
-                WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
-                WindowsSandboxLevel::RestrictedToken => Some(WindowsSandboxModeToml::Unelevated),
-                WindowsSandboxLevel::Disabled => None,
-            }
-        });
+        let selected_windows_sandbox_mode = match persisted_windows_sandbox_mode {
+            Some(mode) => mode,
+            None if persisted_windows_sandbox_level.is_some() => None,
+            None => configured_windows_sandbox_mode.or_else(|| {
+                match WindowsSandboxLevel::from_features(&features) {
+                    WindowsSandboxLevel::Elevated => Some(WindowsSandboxModeToml::Elevated),
+                    WindowsSandboxLevel::RestrictedToken => {
+                        Some(WindowsSandboxModeToml::Unelevated)
+                    }
+                    WindowsSandboxLevel::Disabled => None,
+                }
+            }),
+        };
         apply_requirement_constrained_value(
             "windows.sandbox",
             selected_windows_sandbox_mode,
@@ -3580,7 +3905,9 @@ impl Config {
             &mut startup_warnings,
         )?;
         let effective_windows_sandbox_mode = *constrained_windows_sandbox_mode.get();
-        let windows_sandbox_mode = if constrained_windows_sandbox_mode.source.is_some() {
+        let windows_sandbox_mode = if constrained_windows_sandbox_mode.source.is_some()
+            || persisted_windows_sandbox_level.is_some()
+        {
             effective_windows_sandbox_mode
         } else {
             configured_windows_sandbox_mode
@@ -3849,6 +4176,12 @@ impl Config {
                 Vec::new(),
             )
         };
+        if let Some(persisted_active_permission_profile) = persisted_active_permission_profile {
+            active_permission_profile = persisted_active_permission_profile;
+            if let Some(persisted_profile_workspace_roots) = persisted_profile_workspace_roots {
+                profile_workspace_roots = persisted_profile_workspace_roots;
+            }
+        }
         if enable_network_proxy && permission_profile.network_sandbox_policy().is_enabled() {
             if let Some(network_proxy) = network_proxy_toml_config(cfg.features.as_ref()) {
                 apply_network_proxy_feature_config(
@@ -4078,7 +4411,7 @@ impl Config {
         let service_tier = match service_tier_override {
             Some(Some(service_tier)) => Some(service_tier),
             Some(None) => Some(SERVICE_TIER_DEFAULT_REQUEST_VALUE.to_string()),
-            None => cfg.service_tier,
+            None => persisted_service_tier.unwrap_or(cfg.service_tier),
         };
         let service_tier = service_tier.and_then(|service_tier| {
             match ServiceTier::from_request_value(&service_tier) {
@@ -4135,13 +4468,16 @@ impl Config {
                             auto_review.policy.as_deref(),
                         ))
                 });
-        let personality = personality
-            .or(cfg.personality)
-            .or_else(|| {
-                features
-                    .enabled(Feature::Personality)
-                    .then_some(Personality::Pragmatic)
-            });
+        let personality = match personality {
+            Some(personality) => Some(personality),
+            None => persisted_personality.unwrap_or_else(|| {
+                cfg.personality.or_else(|| {
+                    features
+                        .enabled(Feature::Personality)
+                        .then_some(Personality::Pragmatic)
+                })
+            }),
+        };
 
         let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
         let file_compact_prompt = Self::try_read_non_empty_file(
@@ -4304,6 +4640,8 @@ impl Config {
             cwd: resolved_cwd,
             workspace_roots: workspace_roots.clone(),
             workspace_roots_explicit,
+            persisted_thread_environments,
+            windows_sandbox_level,
             startup_warnings,
             permissions: Permissions {
                 approval_policy: constrained_approval_policy.value,
@@ -4411,9 +4749,12 @@ impl Config {
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
             guardian_policy_config,
-            model_reasoning_effort: cfg.model_reasoning_effort,
+            model_reasoning_effort: persisted_reasoning_effort
+                .unwrap_or(cfg.model_reasoning_effort),
+            initial_collaboration_mode,
             plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
-            model_reasoning_summary: cfg.model_reasoning_summary,
+            model_reasoning_summary: persisted_reasoning_summary
+                .unwrap_or(cfg.model_reasoning_summary),
             model_catalog,
             model_verbosity: cfg.model_verbosity,
             chatgpt_base_url: cfg
