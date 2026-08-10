@@ -3153,7 +3153,7 @@ pub(crate) fn resolve_custom_models(
         let (model, routing_profile) = match (custom_model.model, custom_model.candidates) {
             (Some(model), candidates) if candidates.is_empty() => {
                 validate_custom_model_target(&alias, &model)?;
-                if aliases.contains(&model) {
+                if model != alias && aliases.contains(&model) {
                     dependencies.push(model.clone());
                 }
                 (model, None)
@@ -3163,7 +3163,7 @@ pub(crate) fn resolve_custom_models(
                 let mut resolved_candidates = Vec::with_capacity(candidates.len());
                 for candidate in candidates {
                     validate_custom_model_target(&alias, &candidate.model)?;
-                    if aliases.contains(&candidate.model) {
+                    if candidate.model != alias && aliases.contains(&candidate.model) {
                         return Err(std::io::Error::new(
                             ErrorKind::InvalidInput,
                             format!(
