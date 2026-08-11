@@ -33,7 +33,9 @@ use std::sync::LazyLock;
 use std::time::SystemTime;
 
 mod current_agent_list;
+mod subagent_history_projection;
 use current_agent_list::CurrentAgentThreadListParams;
+use subagent_history_projection::SubagentHistoryProjection;
 
 pub(super) const THREAD_LIST_DEFAULT_LIMIT: usize = 25;
 pub(super) const THREAD_LIST_MAX_LIMIT: usize = 100;
@@ -987,18 +989,32 @@ impl ThreadRequestProcessor {
         &self,
         params: ThreadReadParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_read_response_inner(params)
-            .await
-            .map(|response| Some(response.into()))
+        let include_turns = params.include_turns;
+        let thread_id = params.thread_id.clone();
+        let mut response = self.thread_read_response_inner(params).await?;
+        if include_turns
+            && let Ok(thread_id) = ThreadId::from_string(&thread_id)
+            && let Some(projection) = self.subagent_history_projection(thread_id).await
+        {
+            projection.project_turns(&mut response.thread.turns);
+        }
+        Ok(Some(response.into()))
     }
 
     pub(crate) async fn thread_turns_list(
         &self,
         params: ThreadTurnsListParams,
     ) -> Result<Option<ClientResponsePayload>, JSONRPCErrorError> {
-        self.thread_turns_list_response_inner(params)
-            .await
-            .map(|response| Some(response.into()))
+        let include_full_items = matches!(params.items_view, Some(TurnItemsView::Full));
+        let thread_id = params.thread_id.clone();
+        let mut response = self.thread_turns_list_response_inner(params).await?;
+        if include_full_items
+            && let Ok(thread_id) = ThreadId::from_string(&thread_id)
+            && let Some(projection) = self.subagent_history_projection(thread_id).await
+        {
+            projection.project_turns(&mut response.data);
+        }
+        Ok(Some(response.into()))
     }
 
     pub(crate) async fn thread_items_list(
@@ -1008,6 +1024,71 @@ impl ThreadRequestProcessor {
         self.thread_items_list_response_inner(params)
             .await
             .map(|response| Some(response.into()))
+    }
+
+    /// Builds the compatibility projection used only by full-history app-server responses.
+    ///
+    /// Any read failure leaves the response unfiltered. Historical APIs must remain readable when
+    /// a predecessor segment or the in-memory current-membership source is unavailable.
+    async fn subagent_history_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<SubagentHistoryProjection> {
+        let stored_thread = match self
+            .thread_store
+            .read_thread(StoreReadThreadParams {
+                thread_id,
+                include_archived: true,
+                include_history: false,
+            })
+            .await
+        {
+            Ok(stored_thread) => stored_thread,
+            Err(err) => {
+                warn!("failed to load rollout path for subagent history projection: {err}");
+                return None;
+            }
+        };
+        let rollout_path = stored_thread.rollout_path?;
+        self.subagent_history_projection_from_rollout(thread_id, rollout_path.as_path())
+            .await
+    }
+
+    async fn subagent_history_projection_from_rollout(
+        &self,
+        thread_id: ThreadId,
+        rollout_path: &Path,
+    ) -> Option<SubagentHistoryProjection> {
+        let current_thread_ids = match self
+            .thread_manager
+            .current_agent_membership_snapshot(thread_id)
+            .await
+        {
+            Ok(snapshot) => snapshot
+                .members
+                .into_iter()
+                .map(|member| member.thread_id)
+                .collect::<Vec<_>>(),
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => Vec::new(),
+            Err(err) => {
+                warn!("failed to load current agents for subagent history projection: {err}");
+                return None;
+            }
+        };
+        match SubagentHistoryProjection::load(
+            self.config.codex_home.as_path(),
+            rollout_path,
+            thread_id,
+            current_thread_ids,
+        )
+        .await
+        {
+            Ok(projection) => projection,
+            Err(err) => {
+                warn!("failed to build subagent history projection: {err}");
+                None
+            }
+        }
     }
 
     pub(crate) async fn thread_shell_command(
@@ -5030,6 +5111,15 @@ impl ThreadRequestProcessor {
                         restored_token_usage_turn_id(response_history.get_rollout_items(), turns)
                     })
                     .filter(|turn_id| !turn_id.is_empty());
+                if let Some(projection) = self
+                    .subagent_history_projection_from_rollout(thread_id, rollout_path.as_path())
+                    .await
+                {
+                    projection.project_turns(&mut thread.turns);
+                    if let Some(initial_turns_page) = initial_turns_page.as_mut() {
+                        projection.project_turns(&mut initial_turns_page.data);
+                    }
+                }
                 if redact_resume_payloads {
                     redact_thread_resume_payloads(&mut thread.turns);
                     if let Some(initial_turns_page) = initial_turns_page.as_mut() {
