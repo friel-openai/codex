@@ -3971,7 +3971,7 @@ impl ThreadRequestProcessor {
     ) -> std::io::Result<LegacyHistoryWindow> {
         if matches!(sort_direction, SortDirection::Asc) && cursor.is_none() {
             return Ok(LegacyHistoryWindow {
-                items: codex_rollout::materialize_rollout_items(
+                items: codex_rollout::materialize_recent_rollout_items(
                     self.config.codex_home.as_path(),
                     rollout_path,
                 )
@@ -3989,6 +3989,7 @@ impl ThreadRequestProcessor {
         } else {
             None
         };
+        let max_reference_limit = codex_rollout::FRODEX_RECENT_ROLLOUT_SEGMENTS.saturating_sub(1);
         let mut ordinary_reference_limit = match (&generation, cursor) {
             (Some(generation), Some(cursor)) if !cursor.include_anchor => self
                 .legacy_page_depth_hints
@@ -4003,7 +4004,8 @@ impl ThreadRequestProcessor {
                 .lookup(generation, None, page_size)
                 .unwrap_or(DEFAULT_ROLLOUT_REFERENCE_DEPTH),
             _ => DEFAULT_ROLLOUT_REFERENCE_DEPTH,
-        };
+        }
+        .min(max_reference_limit);
         let mut materializer = codex_rollout::BoundedRolloutMaterializer::new(
             self.config.codex_home.as_path(),
             rollout_path,
@@ -4023,7 +4025,9 @@ impl ThreadRequestProcessor {
                 sort_direction,
                 materialized.has_older_reference,
             ) {
-                if materialized.has_older_reference
+                let has_available_older_reference = materialized.has_older_reference
+                    && ordinary_reference_limit < max_reference_limit;
+                if has_available_older_reference
                     && !items.iter().any(|item| {
                         matches!(item, RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_)))
                     })
@@ -4056,11 +4060,12 @@ impl ThreadRequestProcessor {
                 }
                 return Ok(LegacyHistoryWindow {
                     items,
-                    has_older_reference: materialized.has_older_reference
+                    has_older_reference: has_available_older_reference
                         && matches!(sort_direction, SortDirection::Desc),
                 });
             }
-            if !materialized.has_older_reference {
+            if !materialized.has_older_reference || ordinary_reference_limit >= max_reference_limit
+            {
                 return Ok(LegacyHistoryWindow {
                     items,
                     has_older_reference: false,
@@ -4070,7 +4075,7 @@ impl ThreadRequestProcessor {
             let next_limit = ordinary_reference_limit.checked_mul(2).ok_or_else(|| {
                 std::io::Error::other("rollout reference depth exceeds addressable memory")
             })?;
-            ordinary_reference_limit = next_limit;
+            ordinary_reference_limit = next_limit.min(max_reference_limit);
         }
     }
 
