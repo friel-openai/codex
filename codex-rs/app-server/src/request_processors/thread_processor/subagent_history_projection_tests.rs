@@ -13,12 +13,12 @@ use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 
@@ -124,7 +124,8 @@ fn drops_emptied_spawn_but_keeps_failed_spawn_and_other_tools() {
 async fn exact_five_same_thread_segments_disable_projection() {
     let home = TempDir::new().expect("temporary rollout home");
     let thread_id = ThreadId::new();
-    let paths = write_same_thread_chain(home.path(), thread_id, 5, &[], &[]).await;
+    let paths =
+        write_same_thread_chain(home.path(), thread_id, /*segment_count*/ 5, &[], &[]).await;
 
     let projection = SubagentHistoryProjection::load(
         home.path(),
@@ -148,7 +149,7 @@ async fn sixth_segment_enables_projection_and_current_ids_survive() {
     let paths = write_same_thread_chain(
         home.path(),
         thread_id,
-        6,
+        /*segment_count*/ 6,
         &[(0, stale_id), (0, current_id), (1, recent_id)],
         &[],
     )
@@ -186,7 +187,14 @@ async fn fork_boundary_does_not_contribute_recent_ids() {
     let fork_thread_id = ThreadId::new();
     let fork_agent_id = ThreadId::new();
     let fork_segment_id = SegmentId::new();
-    let fork_path = home.path().join("fork.jsonl");
+    let fork_path = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(fork_thread_id.to_string())
+        .join(fork_segment_id.to_string())
+        .join(format!(
+            "rollout-2026-08-11T00-00-00-{fork_thread_id}.jsonl"
+        ));
     write_rollout(
         fork_path.as_path(),
         &[
@@ -198,13 +206,21 @@ async fn fork_boundary_does_not_contribute_recent_ids() {
     let fork_reference = RolloutReferenceItem {
         rollout_path: fork_path,
         thread_id: Some(fork_thread_id),
+        rollout_id: None,
         rollout_timestamp: None,
         segment_id: Some(fork_segment_id),
         max_depth: 2,
         nth_user_message: Some(1),
         compacted_replacement_history_filter_texts: None,
     };
-    let paths = write_same_thread_chain(home.path(), thread_id, 6, &[], &[fork_reference]).await;
+    let paths = write_same_thread_chain(
+        home.path(),
+        thread_id,
+        /*segment_count*/ 6,
+        &[],
+        &[fork_reference],
+    )
+    .await;
     let projection = SubagentHistoryProjection::load(
         home.path(),
         paths.last().expect("active rollout").as_path(),
@@ -240,8 +256,15 @@ async fn write_same_thread_chain(
     let segment_ids = (0..segment_count)
         .map(|_| SegmentId::new())
         .collect::<Vec<_>>();
-    let paths = (0..segment_count)
-        .map(|index| directory.join(format!("segment-{index}.jsonl")))
+    let paths = segment_ids
+        .iter()
+        .map(|segment_id| {
+            directory
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segment_id.to_string())
+                .join(format!("rollout-2026-08-11T00-00-00-{thread_id}.jsonl"))
+        })
         .collect::<Vec<_>>();
     for index in 0..segment_count {
         let mut lines = vec![meta_line(thread_id, segment_ids[index])];
@@ -249,6 +272,7 @@ async fn write_same_thread_chain(
             lines.push(reference_line(RolloutReferenceItem {
                 rollout_path: paths[index - 1].clone(),
                 thread_id: Some(thread_id),
+                rollout_id: None,
                 rollout_timestamp: None,
                 segment_id: Some(segment_ids[index - 1]),
                 max_depth: 2,
@@ -316,6 +340,9 @@ fn interaction_line(sender_thread_id: ThreadId, receiver_thread_id: ThreadId) ->
 }
 
 async fn write_rollout(path: &Path, lines: &[RolloutLine]) {
+    tokio::fs::create_dir_all(path.parent().expect("rollout parent directory"))
+        .await
+        .expect("create rollout parent directory");
     let mut contents = lines
         .iter()
         .map(|line| serde_json::to_string(line).expect("serialize rollout line"))
