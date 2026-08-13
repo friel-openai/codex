@@ -31,6 +31,7 @@ use codex_protocol::capabilities::SelectedCapabilityRoot;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::Settings;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::items::TurnItem;
@@ -40,6 +41,7 @@ use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::EventMsg;
@@ -53,6 +55,7 @@ use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
@@ -89,6 +92,7 @@ use std::ffi::OsStr;
 use std::ffi::OsString;
 use tempfile::TempDir;
 use tokio::time::Duration;
+use tokio::time::Instant;
 use tokio::time::sleep;
 use tokio::time::timeout;
 use toml::Value as TomlValue;
@@ -227,6 +231,26 @@ async fn spawned_thread_id_after(
     spawned_thread_ids
         .pop()
         .expect("spawned thread id should be present")
+}
+
+fn goal_supervisor_continuity_from_history(
+    history: &crate::context_manager::ContextManager,
+) -> serde_json::Value {
+    history
+        .raw_items()
+        .filter_map(|item| match item {
+            ResponseItem::Message { content, .. } => {
+                content.iter().find_map(|content| match content {
+                    ContentItem::InputText { text } => text
+                        .strip_prefix("# Goal Supervisor Continuity\n\n")
+                        .and_then(|json| serde_json::from_str(json).ok()),
+                    _ => None,
+                })
+            }
+            _ => None,
+        })
+        .next_back()
+        .expect("helper history should contain goal supervisor continuity")
 }
 
 async fn wait_for_turn_complete(thread: &CodexThread) {
@@ -6335,6 +6359,339 @@ async fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper_inner() -> 
         "manual goal resume should clear the persisted supervisor snooze"
     );
     let _ = parent_thread.submit(Op::Shutdown {}).await;
+    Ok(())
+}
+
+#[test]
+fn goal_supervisor_snooze_persists_wakes_and_invalidates_stale_generation() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "goal_supervisor_snooze_persists_wakes_and_invalidates_stale_generation",
+        goal_supervisor_snooze_persists_wakes_and_invalidates_stale_generation_inner(),
+    )
+}
+
+async fn goal_supervisor_snooze_persists_wakes_and_invalidates_stale_generation_inner()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let delayed_response = Duration::from_secs(30);
+    let request_log = mount_response_sequence(
+        &server,
+        (0..3)
+            .map(|index| {
+                let response_id = format!("goal-supervisor-snooze-{index}");
+                sse_response(sse(vec![
+                    ev_response_created(&response_id),
+                    ev_completed(&response_id),
+                ]))
+                .set_delay(delayed_response)
+            })
+            .collect(),
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires a state db");
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread.session.flush_rollout().await?;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Resume the scheduled goal after each snooze.",
+    )
+    .await?;
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let first_helper_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first supervisor request should start");
+    assert_eq!(
+        harness
+            .control
+            .snooze_goal_supervisor_helper(
+                first_helper_id,
+                /*delay_seconds*/ 60,
+                Some("external work is not ready"),
+            )
+            .await,
+        Some(60)
+    );
+
+    let snoozed_until_ms = state_db
+        .thread_goals()
+        .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+        .await?
+        .expect("snooze deadline should be persisted");
+    assert!(snoozed_until_ms > chrono::Utc::now().timestamp_millis());
+    let first_generation = crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+        &parent_thread.session,
+    )
+    .await
+    .expect("snooze should schedule a wakeup");
+
+    state_db
+        .thread_goals()
+        .set_thread_goal_supervisor_snoozed_until_ms(
+            parent_thread_id,
+            goal_id.as_str(),
+            /*snoozed_until_ms*/ None,
+        )
+        .await?;
+    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&parent_thread.session).await;
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().len() < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("scheduled wakeup should start exactly one replacement helper");
+    let second_helper_id = spawned_thread_id_after(&harness.manager, &[parent_thread_id]).await;
+    assert_ne!(second_helper_id, first_helper_id);
+    assert_eq!(
+        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+            &parent_thread.session,
+        )
+        .await,
+        None
+    );
+
+    assert_eq!(
+        harness
+            .control
+            .snooze_goal_supervisor_helper(
+                second_helper_id,
+                /*delay_seconds*/ 60,
+                Some("still waiting for external work"),
+            )
+            .await,
+        Some(60)
+    );
+    let stale_generation = crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+        &parent_thread.session,
+    )
+    .await
+    .expect("second snooze should schedule a wakeup");
+    assert_ne!(stale_generation, first_generation);
+    let before_manual_resume = harness.manager.list_thread_ids().await;
+    parent_thread
+        .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
+        .await?;
+    let third_helper_id = spawned_thread_id_after(&harness.manager, &before_manual_resume).await;
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().len() < 3 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("manual resume should start one replacement helper");
+    assert_ne!(third_helper_id, second_helper_id);
+    assert_eq!(
+        state_db
+            .thread_goals()
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+            .await?,
+        None
+    );
+    assert_eq!(
+        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+            &parent_thread.session,
+        )
+        .await,
+        None
+    );
+
+    let generation_after_resume =
+        crate::goal_supervisor::supervisor_wakeup_generation_for_test(&parent_thread.session);
+    assert_ne!(generation_after_resume, stale_generation);
+    crate::goal_supervisor::fire_supervisor_wakeup_generation_for_test(
+        &parent_thread.session,
+        stale_generation,
+    )
+    .await;
+    assert_eq!(
+        crate::goal_supervisor::supervisor_wakeup_generation_for_test(&parent_thread.session),
+        generation_after_resume,
+        "an invalidated wakeup must not advance the current generation"
+    );
+    assert_eq!(request_log.requests().len(), 3);
+
+    let third_helper = harness
+        .manager
+        .get_thread(third_helper_id)
+        .await
+        .expect("manual resume helper should remain loaded");
+    let continuity =
+        goal_supervisor_continuity_from_history(&third_helper.session.clone_history().await);
+    assert_eq!(continuity["previous_supervisor_action"]["kind"], "snooze");
+    assert_eq!(
+        continuity["goal_timing"]["snooze_count_since_goal_created"],
+        2
+    );
+
+    let _ = harness
+        .manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    Ok(())
+}
+
+#[test]
+fn goal_supervisor_execution_settings_change_restarts_running_helper() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "goal_supervisor_execution_settings_change_restarts_running_helper",
+        goal_supervisor_execution_settings_change_restarts_running_helper_inner(),
+    )
+}
+
+async fn goal_supervisor_execution_settings_change_restarts_running_helper_inner()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let delayed_response = Duration::from_secs(30);
+    let request_log = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_response_created("resp-before-settings-change"),
+                ev_completed("resp-before-settings-change"),
+            ]))
+            .set_delay(delayed_response),
+            sse_response(sse(vec![
+                ev_response_created("resp-after-settings-change"),
+                ev_completed("resp-after-settings-change"),
+            ]))
+            .set_delay(delayed_response),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires a state db");
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread.session.flush_rollout().await?;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Restart the supervisor when execution settings change.",
+    )
+    .await?;
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let first_helper_thread_id =
+        spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first supervisor request should start");
+
+    let original_model = parent_thread.session.thread_config_snapshot().await.model;
+    let next_model = if original_model == "gpt-5.4" {
+        "gpt-5.2"
+    } else {
+        "gpt-5.4"
+    };
+    let settings_changed_at = Instant::now();
+    parent_thread
+        .submit(Op::ThreadSettings {
+            thread_settings: ThreadSettingsOverrides {
+                model: Some(next_model.to_string()),
+                effort: Some(Some(ReasoningEffort::High)),
+                service_tier: Some(Some(ServiceTier::Fast.request_value().to_string())),
+                ..Default::default()
+            },
+        })
+        .await?;
+    timeout(Duration::from_secs(5), async {
+        while !harness
+            .manager
+            .captured_ops()
+            .into_iter()
+            .any(|(thread_id, op)| {
+                thread_id == first_helper_thread_id && matches!(op, Op::Shutdown)
+            })
+        {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("settings update should stop the running supervisor helper");
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().len() < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement supervisor should start before the old response finishes");
+    assert!(settings_changed_at.elapsed() < delayed_response);
+
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let replacement_body = requests[1].body_json();
+    assert_eq!(replacement_body["model"].as_str(), Some(next_model));
+    assert_eq!(
+        replacement_body["reasoning"]["effort"].as_str(),
+        Some("high")
+    );
+    assert_eq!(
+        replacement_body["service_tier"].as_str(),
+        Some(ServiceTier::Fast.request_value())
+    );
+
+    let _ = harness
+        .manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
     Ok(())
 }
 

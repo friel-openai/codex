@@ -230,6 +230,61 @@ async fn probe(configure_turn: impl FnOnce(&mut TurnContext)) -> ToolPlanProbe {
     probe_with(configure_turn, ToolPlanInputs::default()).await
 }
 
+#[tokio::test]
+async fn supervisor_tools_are_visible_only_to_goal_supervisor_helpers() {
+    let source = |path: &str, role: &str| {
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(AgentPath::try_from(path).expect("valid agent path")),
+            agent_nickname: None,
+            agent_role: Some(role.to_string()),
+        })
+    };
+
+    let supervisor = probe(|turn| {
+        turn.session_source = source(
+            "/root/goal_supervisor",
+            crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME,
+        );
+    })
+    .await;
+    assert_eq!(
+        supervisor.namespace_function_names("supervisor"),
+        ["close_self", "compact_parent_context", "snooze"]
+    );
+
+    let supervisor_path_without_role = probe(|turn| {
+        turn.session_source = source("/root/goal_supervisor", "worker");
+    })
+    .await;
+    assert!(
+        supervisor_path_without_role
+            .namespace_function_names("supervisor")
+            .is_empty()
+    );
+    supervisor_path_without_role.assert_registered_lacks(&[
+        "supervisor.close_self",
+        "supervisor.snooze",
+        "supervisor.compact_parent_context",
+    ]);
+
+    let supervisor_role_on_custom_path = probe(|turn| {
+        turn.session_source = source(
+            "/root/checker",
+            crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME,
+        );
+    })
+    .await;
+    assert_eq!(
+        supervisor_role_on_custom_path.namespace_function_names("supervisor"),
+        ["close_self", "compact_parent_context", "snooze"]
+    );
+
+    let root = probe(|turn| turn.session_source = SessionSource::Exec).await;
+    assert!(root.namespace_function_names("supervisor").is_empty());
+}
+
 fn set_feature(turn: &mut TurnContext, feature: Feature, enabled: bool) {
     let mut config = (*turn.config).clone();
     if enabled {

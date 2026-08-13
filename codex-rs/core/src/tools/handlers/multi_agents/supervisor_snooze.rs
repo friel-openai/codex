@@ -82,3 +82,15 @@ impl ToolOutput for SupervisorSnoozeResult {
         tool_output_code_mode_result(self, "snooze")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snooze_result_ends_the_supervisor_turn() {
+        let result = SupervisorSnoozeResult { delay_seconds: 60 };
+
+        assert!(result.terminal_no_response());
+    }
+}
