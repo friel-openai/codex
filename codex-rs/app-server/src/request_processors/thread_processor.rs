@@ -8058,6 +8058,8 @@ fn build_thread_from_loaded_snapshot(
     )
 }
 
+mod goal_scheduler;
+
 #[cfg(test)]
 #[path = "thread_processor_tests.rs"]
 mod thread_processor_tests;
