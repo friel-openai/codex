@@ -6805,15 +6805,28 @@ while True:
         child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
         "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
     );
-    assert_eq!(
-        child_body["tools"], parent_body["tools"],
-        "goal supervisor helpers must keep the same serialized tool definitions, order, namespaces, and schemas as their parent"
-    );
     let parent_tool_signatures = request_tool_signatures(&parent_body);
     let child_tool_signatures = request_tool_signatures(&child_body);
+    let supervisor_tool_signatures = std::collections::BTreeSet::from([
+        "supervisor.close_self".to_string(),
+        "supervisor.snooze".to_string(),
+        "supervisor.compact_parent_context".to_string(),
+    ]);
     assert_eq!(
-        child_tool_signatures, parent_tool_signatures,
-        "goal supervisor helpers must keep the same eager tool surface as their parent"
+        child_tool_signatures
+            .difference(&supervisor_tool_signatures)
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        parent_tool_signatures,
+        "goal supervisor helpers must inherit every non-supervisor tool from their parent"
+    );
+    assert!(
+        parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
+        "supervisor tools must not be exposed to the parent request: tools={parent_tool_signatures:#?}"
+    );
+    assert!(
+        supervisor_tool_signatures.is_subset(&child_tool_signatures),
+        "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
     );
     for expected_tool in [
         "collaboration.spawn_agent",
