@@ -198,7 +198,7 @@ async fn handle_agent_start(
         message,
         &source,
         /*trigger_turn*/ true,
-    );
+    )?;
     let context = AgentCommunicationContext::new(AgentCommunicationKind::Spawn, session.thread_id);
     let spawned_agent = if let Some(thread_id) = adopted_thread_id {
         Box::pin(
