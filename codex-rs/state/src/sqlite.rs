@@ -6,6 +6,7 @@
 )]
 
 use crate::DbTelemetry;
+use crate::migrations::repair_frodex_agent_path_migration_collision;
 use crate::migrations::repair_frodex_goal_supervisor_state_migration;
 use crate::migrations::repair_legacy_recency_migration_version;
 use crate::runtime::RuntimeDbInitError;
@@ -295,6 +296,7 @@ impl SqliteConfig {
             };
             if matches!(spec.kind, DbKind::State) {
                 repair_frodex_goal_supervisor_state_migration(&pool).await?;
+                repair_frodex_agent_path_migration_collision(&pool, migrator).await?;
                 repair_legacy_recency_migration_version(&pool, migrator).await?;
             }
             migrator.run(&pool).await.map_err(anyhow::Error::from)
