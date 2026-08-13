@@ -1629,8 +1629,60 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Updates metadata without requiring a public `ThreadManager` handle.
+    ///
+    /// Agent ownership transitions hold only the shared manager state while they move loaded and
+    /// cold descendants between `AgentControl` instances. Loaded threads must remain ordered with
+    /// rollout writes, while cold threads must update the backing store directly.
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> CodexResult<StoredThread> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support metadata updates: {thread_id}"
+                )));
+            }
+            return thread
+                .update_thread_metadata(patch, include_archived)
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+        }
+        self.thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch,
+                include_archived,
+            })
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => thread_store_metadata_update_error(thread_id, err),
+            })
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
+    }
+
+    pub(crate) async fn indexed_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<codex_state::ThreadMetadata> {
+        self.thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()?
+            .state_db()
+            .await?
+            .get_thread(thread_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
@@ -2091,7 +2143,12 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
+        if let Some(multi_agent_version) =
+            crate::session::configured_or_persisted_multi_agent_version(
+                initial_history,
+                config.multi_agent_version_override(),
+            )
+        {
             return multi_agent_version;
         }
         self.initial_multi_agent_version_for_spawn(
@@ -2341,6 +2398,7 @@ impl ThreadManagerState {
         &self,
         config: Config,
         initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         history_mode: Option<ThreadHistoryMode>,
         agent_control: AgentControl,
         session_source: SessionSource,
@@ -2368,6 +2426,7 @@ impl ThreadManagerState {
             ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
         request.parent_thread_id = parent_thread_id;
         request.forked_from_thread_id = forked_from_thread_id;
+        request.fork_startup_items = fork_startup_items;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
         request.inherited_thread_state = inherited_thread_state;
