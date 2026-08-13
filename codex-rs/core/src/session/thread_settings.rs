@@ -4,6 +4,7 @@
 use super::session::Session;
 use super::session::SessionSettingsUpdate;
 use crate::config::ConstraintResult;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -19,18 +20,44 @@ pub(super) async fn update(
     submission_id: String,
     overrides: ThreadSettingsOverrides,
 ) {
+    let previous_execution_settings = execution_settings(session).await;
     let updates = prepare_update(session, overrides).await;
-    if let Err(error) = apply_update(session, submission_id.clone(), updates).await {
-        session
-            .send_event_raw(Event {
-                id: submission_id,
-                msg: EventMsg::Error(ErrorEvent {
-                    message: format!("invalid thread settings override: {error}"),
-                    codex_error_info: Some(CodexErrorInfo::BadRequest),
-                }),
-            })
-            .await;
+    match session.update_settings(updates).await {
+        Ok(()) => {
+            if execution_settings(session).await != previous_execution_settings {
+                if let Some(active_turn) = session.active_turn.lock().await.as_mut() {
+                    active_turn.execution_settings_refresh_requested = true;
+                }
+                crate::goal_supervisor::restart_active_helper_for_execution_settings_change(
+                    session,
+                )
+                .await;
+            }
+            emit_applied(session, submission_id).await;
+        }
+        Err(error) => {
+            session
+                .send_event_raw(Event {
+                    id: submission_id,
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: format!("invalid thread settings override: {error}"),
+                        codex_error_info: Some(CodexErrorInfo::BadRequest),
+                    }),
+                })
+                .await;
+        }
     }
+}
+
+async fn execution_settings(
+    session: &Session,
+) -> (String, Option<ReasoningEffort>, Option<String>) {
+    let snapshot = session.thread_config_snapshot().await;
+    (
+        snapshot.model,
+        snapshot.reasoning_effort,
+        snapshot.service_tier,
+    )
 }
 
 /// Converts protocol overrides into the internal settings update shape.
