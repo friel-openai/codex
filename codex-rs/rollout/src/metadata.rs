@@ -10,6 +10,7 @@ use chrono::NaiveDateTime;
 use chrono::Timelike;
 use chrono::Utc;
 use codex_protocol::RolloutId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionMetaLine;
@@ -107,6 +108,16 @@ pub fn builder_from_items(
 pub fn rollout_id_from_path(rollout_path: &Path) -> Option<RolloutId> {
     let file_name = rollout_path.file_name()?.to_str()?;
     Some(RolloutFileName::parse(file_name)?.rollout_id())
+}
+
+/// Returns the stable thread ID encoded in a canonical rollout filename.
+///
+/// Threads that have been reverted use
+/// `rollout-<timestamp>-<thread-id>_<rollout-id>.jsonl`. This returns the ID before `_`, while
+/// [`rollout_id_from_path`] returns the physical rollout ID after `_`.
+pub fn thread_id_from_path(rollout_path: &Path) -> Option<ThreadId> {
+    let file_name = rollout_path.file_name()?.to_str()?;
+    Some(RolloutFileName::parse(file_name)?.thread_id())
 }
 
 pub async fn extract_metadata_from_rollout(

@@ -486,6 +486,146 @@ async fn migration_skips_non_selected_reverted_rollout_and_projects_selected_rol
 }
 
 #[tokio::test]
+async fn migration_attributes_corrupt_reverted_filename_to_stable_thread_id() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let rollout_id = ThreadId::new();
+    let directory = home.path().join("sessions/2025/01/03");
+    fs::create_dir_all(&directory).expect("create rollout directory");
+    let path = directory.join(format!(
+        "rollout-2025-01-03T12-00-00-{thread_id}_{rollout_id}.jsonl"
+    ));
+    fs::write(&path, "{not json}\n").expect("write corrupt rollout");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let selected = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..RolloutMigrationOptions::default()
+        })
+        .await
+        .expect("inspect corrupt stable thread");
+    assert_eq!(selected.outcomes.len(), 1);
+    assert_eq!(selected.outcomes[0].thread_id, Some(thread_id));
+    assert_eq!(selected.outcomes[0].status, RolloutMigrationStatus::Failed);
+
+    let physical_only = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![rollout_id],
+            ..RolloutMigrationOptions::default()
+        })
+        .await
+        .expect("physical rollout ID must not select stable thread");
+    assert!(physical_only.outcomes.is_empty());
+}
+
+#[tokio::test]
+async fn migration_supports_authenticated_noncanonical_selected_rollout() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let canonical_path = write_rollout(
+        home.path(),
+        thread_id,
+        SessionSource::Cli,
+        vec![
+            user_message("imported question"),
+            agent_message("imported answer"),
+        ],
+    );
+    let imported_path = canonical_path.with_file_name("rollout-imported.jsonl");
+    fs::rename(&canonical_path, &imported_path).expect("rename imported rollout");
+    let competing_thread_id = ThreadId::new();
+    let competing_path = write_rollout(
+        home.path(),
+        competing_thread_id,
+        SessionSource::Cli,
+        vec![user_message("newer competing question")],
+    );
+    let newer_directory = home.path().join("sessions/2025/01/04");
+    fs::create_dir_all(&newer_directory).expect("create newer directory");
+    fs::rename(
+        &competing_path,
+        newer_directory.join(competing_path.file_name().expect("competing filename")),
+    )
+    .expect("move competing rollout");
+    let store = indexed_store(home.path()).await;
+    assert_eq!(
+        store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read imported thread")
+            .expect("imported thread metadata")
+            .rollout_path,
+        imported_path
+    );
+
+    let migrated = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate imported rollout");
+    assert_eq!(migrated.outcomes.len(), 1);
+    assert_eq!(
+        migrated.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    assert!(matches!(
+        read_rollout(&imported_path).first().map(|line| &line.item),
+        Some(RolloutItem::SessionMeta(metadata))
+            if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+    ));
+    let projection = thread_history::projection_state(&store, thread_id)
+        .await
+        .expect("read imported projection")
+        .expect("imported projection");
+    assert_eq!(
+        projection.next_byte_offset,
+        fs::metadata(&imported_path)
+            .expect("imported rollout metadata")
+            .len()
+    );
+    assert_eq!(
+        list_active_summary_turns(&store, thread_id)
+            .await
+            .turns
+            .len(),
+        1
+    );
+
+    thread_history::delete_thread(&store, thread_id)
+        .await
+        .expect("simulate missing imported projection");
+    let journal_path = migration_journal_path(home.path(), thread_id);
+    write_migration_journal(&journal_path)
+        .await
+        .expect("simulate imported recovery journal");
+    let recovered = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("recover imported rollout");
+    assert_eq!(recovered.outcomes.len(), 2);
+    assert_eq!(recovered.outcomes[0].thread_id, Some(thread_id));
+    assert_eq!(
+        recovered.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    assert_eq!(recovered.outcomes[1].thread_id, Some(competing_thread_id));
+    assert_no_migration_artifacts(home.path(), &imported_path, thread_id).await;
+    assert_eq!(
+        list_active_summary_turns(&store, thread_id)
+            .await
+            .turns
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn migration_refuses_segmented_legacy_history_without_mutation() {
     let home = TempDir::new().expect("create Codex home");
     let parent_id = ThreadId::new();
@@ -2252,12 +2392,23 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
 async fn migration_recovers_pending_rollouts_before_new_work() {
     let home = TempDir::new().expect("create Codex home");
     let pending_thread_id = ThreadId::new();
-    write_rollout(
+    let pending_path = write_rollout(
         home.path(),
         pending_thread_id,
         SessionSource::Cli,
         vec![user_message("pending question")],
     );
+    let pending_rollout_id = ThreadId::new();
+    let pending_path = pending_path.with_file_name(format!(
+        "rollout-2025-01-03T12-00-00-{pending_thread_id}_{pending_rollout_id}.jsonl"
+    ));
+    fs::rename(
+        home.path().join(format!(
+            "sessions/2025/01/03/rollout-2025-01-03T12-00-00-{pending_thread_id}.jsonl"
+        )),
+        &pending_path,
+    )
+    .expect("rename pending physical rollout");
     let new_thread_id = ThreadId::new();
     let new_path = write_rollout(
         home.path(),
@@ -2281,7 +2432,7 @@ async fn migration_recovers_pending_rollouts_before_new_work() {
         })
         .await
         .expect("publish pending rollout");
-    thread_history::delete_thread(&store, pending_thread_id)
+    thread_history::delete_thread(&store, pending_rollout_id)
         .await
         .expect("simulate missing projection");
     write_migration_journal(&migration_journal_path(home.path(), pending_thread_id))
