@@ -108,7 +108,7 @@ impl ToolOutput for CompactParentContextResult {
     }
 
     fn terminal_no_response(&self) -> bool {
-        true
+        self.kind != "not_supervisor_helper"
     }
 
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
@@ -117,5 +117,32 @@ impl ToolOutput for CompactParentContextResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "compact_parent_context")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submitted_compaction_ends_the_supervisor_turn() {
+        let result = CompactParentContextResult {
+            kind: "submitted",
+            parent_thread_id: Some("parent".to_string()),
+            submission_id: Some("submission".to_string()),
+        };
+
+        assert!(result.terminal_no_response());
+    }
+
+    #[test]
+    fn rejected_non_supervisor_compaction_keeps_the_turn_active() {
+        let result = CompactParentContextResult {
+            kind: "not_supervisor_helper",
+            parent_thread_id: None,
+            submission_id: None,
+        };
+
+        assert!(!result.terminal_no_response());
     }
 }
