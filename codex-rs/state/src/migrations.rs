@@ -13,6 +13,11 @@ const LEGACY_FRODEX_AGENT_PATH_MIGRATION_VERSION: i64 = 48;
 const LEGACY_FRODEX_AGENT_PATH_MIGRATION_DESCRIPTION: &str = "threads agent path index";
 const LEGACY_FRODEX_AGENT_PATH_MIGRATION_CHECKSUM_HEX: &str = "6e2da6fd82ca71d665d712527262760e81a468eed448e940173e94d330286527508503b739159ed4424e8e0a8f9036d5";
 const LEGACY_FRODEX_AGENT_PATH_INDEX: &str = "idx_threads_agent_path";
+const LEGACY_FRODEX_AGENT_PATH_INDEX_SQL: &str = r#"
+CREATE INDEX idx_threads_agent_path
+    ON threads(agent_path)
+    WHERE agent_path IS NOT NULL
+"#;
 const UPSTREAM_THREAD_SECTION_APPEARANCE_SQL: &str =
     "ALTER TABLE thread_sections ADD COLUMN appearance TEXT;\n";
 
@@ -204,6 +209,17 @@ SELECT
     if index_shape != (1, 1, 0) || index_column.as_deref() != Some("agent_path") {
         anyhow::bail!("index {index_name} does not match the Frodex agent-path index schema");
     }
+    let index_sql = sqlx::query_scalar::<_, String>(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+    )
+    .bind(index_name)
+    .fetch_optional(&mut *connection)
+    .await?
+    .context("released Frodex agent-path index is missing its SQL definition")?;
+    if normalize_schema_sql(&index_sql) != normalize_schema_sql(LEGACY_FRODEX_AGENT_PATH_INDEX_SQL)
+    {
+        anyhow::bail!("index {index_name} does not match the released Frodex index SQL");
+    }
     sqlx::query(forced_query)
         .bind("__frodex_index_validation__")
         .fetch_all(&mut *connection)
@@ -285,6 +301,7 @@ WHERE version = ?
         return Ok(());
     }
 
+    validate_frodex_agent_path_predecessor_ledger(&mut transaction, migrator).await?;
     validate_agent_path_index(
         &mut transaction,
         LEGACY_FRODEX_AGENT_PATH_INDEX,
@@ -348,6 +365,62 @@ WHERE version = ?
         migration_version = LEGACY_FRODEX_AGENT_PATH_MIGRATION_VERSION,
         "repaired released Frodex state migration collision"
     );
+    Ok(())
+}
+
+async fn validate_frodex_agent_path_predecessor_ledger(
+    connection: &mut SqliteConnection,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query(
+        "SELECT version, description, success, checksum FROM _sqlx_migrations WHERE version < 48 ORDER BY version",
+    )
+    .fetch_all(&mut *connection)
+    .await?;
+    let legacy_goal_supervisor_table_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
+    )
+    .fetch_one(&mut *connection)
+    .await?
+        != 0;
+    let expected_predecessors = migrator
+        .migrations
+        .iter()
+        .filter(|migration| migration.version < LEGACY_FRODEX_AGENT_PATH_MIGRATION_VERSION)
+        .collect::<Vec<_>>();
+    let mut row_index = 0;
+    for expected in expected_predecessors {
+        let row = rows.get(row_index);
+        let row_version = row
+            .map(|row| row.try_get::<i64, _>("version"))
+            .transpose()?;
+        if row_version == Some(expected.version) {
+            let row = row.context("migration predecessor row disappeared")?;
+            let description: String = row.try_get("description")?;
+            let success: bool = row.try_get("success")?;
+            let checksum: Vec<u8> = row.try_get("checksum")?;
+            if !success
+                || description != expected.description
+                || checksum.as_slice() != expected.checksum.as_ref()
+            {
+                bail!(
+                    "refusing to repair Frodex migration 48 because predecessor migration {} is not official",
+                    expected.version
+                );
+            }
+            row_index += 1;
+            continue;
+        }
+        if !legacy_goal_supervisor_table_exists || !matches!(expected.version, 33 | 34) {
+            bail!(
+                "refusing to repair Frodex migration 48 because predecessor migration {} is missing",
+                expected.version
+            );
+        }
+    }
+    if row_index != rows.len() {
+        bail!("refusing to repair Frodex migration 48 because its predecessor ledger is unknown");
+    }
     Ok(())
 }
 
