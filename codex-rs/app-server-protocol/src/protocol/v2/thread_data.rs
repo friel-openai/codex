@@ -1,4 +1,5 @@
 use super::CodexErrorInfo;
+use super::CollabAgentStatus;
 use super::ThreadItem;
 use super::ThreadStatus;
 use super::TurnStatus;
@@ -209,7 +210,8 @@ pub struct Thread {
     pub session_id: String,
     /// Source thread id when this thread was created by forking another thread.
     pub forked_from_id: Option<String>,
-    /// The ID of the parent thread. This will only be set if this thread is a subagent.
+    /// The ID of the parent thread. Relation-scoped `thread/list` responses use the canonical
+    /// immediate owner from current-agent membership.
     pub parent_thread_id: Option<String>,
     /// Usually the first user message in the thread, if available.
     pub preview: String,
@@ -244,6 +246,12 @@ pub struct Thread {
     pub recency_at: Option<i64>,
     /// Current runtime status for the thread.
     pub status: ThreadStatus,
+    /// Current AgentControl lifecycle status for relation-scoped thread listings.
+    ///
+    /// This field is `None` outside `thread/list` requests that specify `parentThreadId` or
+    /// `ancestorThreadId`.
+    #[experimental("thread.agentStatus")]
+    pub agent_status: Option<CollabAgentStatus>,
     /// [UNSTABLE] Path to the thread on disk.
     pub path: Option<PathBuf>,
     /// Working directory captured for the thread.
