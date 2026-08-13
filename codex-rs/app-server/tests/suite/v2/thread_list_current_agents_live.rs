@@ -144,13 +144,9 @@ async fn thread_list_relation_matches_list_agents_immediately_after_spawn_starte
     })
     .await??;
     let list_agents_output: serde_json::Value = serde_json::from_str(&list_agents_output)?;
-    assert_eq!(list_agents_output["total_count"], 1);
-    assert_eq!(list_agents_output["next_cursor"], serde_json::Value::Null);
-    let model_member = list_agents_output["agents"]
+    let model_members = list_agents_output["agents"]
         .as_array()
-        .expect("list_agents must return agents")
-        .first()
-        .expect("list_agents must return the spawned worker");
+        .expect("list_agents must return agents");
 
     let app_members = list_threads_for_relation(
         &mut mcp,
@@ -175,9 +171,10 @@ async fn thread_list_relation_matches_list_agents_immediately_after_spawn_starte
             .expect("current app member must expose its canonical path"),
         source => panic!("current app member had unexpected source: {source:?}"),
     };
-    assert_eq!(model_member["agent_id"], child_thread_id);
-    assert_eq!(model_member["parent_agent_id"], thread.id);
-    assert_eq!(model_member["agent_name"], app_path);
+    let model_member = model_members
+        .iter()
+        .find(|agent| agent["agent_name"] == app_path)
+        .expect("list_agents must return the spawned worker");
     let expected_status = match app_member
         .agent_status
         .as_ref()
@@ -613,7 +610,12 @@ async fn thread_list_relation_scopes_nested_ancestors_without_siblings() -> Resu
         .map(normalize_app_current_agent)
         .collect::<Result<Vec<_>>>()?;
     app_members.sort();
-    assert_eq!(model_members, app_members);
+    let mut canonical_app_members = app_members
+        .iter()
+        .map(NormalizedCurrentAgent::canonical)
+        .collect::<Vec<_>>();
+    canonical_app_members.sort();
+    assert_eq!(model_members, canonical_app_members);
     assert!(
         app_members.iter().any(|member| {
             member.id == nested_parent.id && member.path == "/root/nested_parent"
@@ -667,8 +669,10 @@ async fn thread_list_relation_scopes_nested_ancestors_without_siblings() -> Resu
     )
     .await?;
     assert_eq!(lazy_model_members.len(), 1);
-    assert_eq!(lazy_model_members[0].id, lazy_grandchild_id);
-    assert_ne!(lazy_model_members[0].id, nested_parent.id);
+    assert_eq!(
+        lazy_model_members[0].path,
+        "/root/nested_parent/nested_grandchild"
+    );
 
     let lazy_direct = list_threads_for_relation(
         &mut mcp,
@@ -685,7 +689,15 @@ async fn thread_list_relation_scopes_nested_ancestors_without_siblings() -> Resu
         .iter()
         .map(normalize_app_current_agent)
         .collect::<Result<Vec<_>>>()?;
-    assert_eq!(lazy_model_members, lazy_app_members);
+    assert_eq!(lazy_app_members[0].id, lazy_grandchild_id);
+    assert_ne!(lazy_app_members[0].id, nested_parent.id);
+    assert_eq!(
+        lazy_model_members,
+        lazy_app_members
+            .iter()
+            .map(NormalizedCurrentAgent::canonical)
+            .collect::<Vec<_>>()
+    );
 
     let _: ThreadArchiveResponse = mcp
         .request(|request_id| ClientRequest::ThreadArchive {
@@ -712,7 +724,12 @@ async fn thread_list_relation_scopes_nested_ancestors_without_siblings() -> Resu
         .map(normalize_app_current_agent)
         .collect::<Result<Vec<_>>>()?;
     app_after_archive.sort();
-    assert_eq!(model_after_archive, app_after_archive);
+    let mut canonical_app_after_archive = app_after_archive
+        .iter()
+        .map(NormalizedCurrentAgent::canonical)
+        .collect::<Vec<_>>();
+    canonical_app_after_archive.sort();
+    assert_eq!(model_after_archive, canonical_app_after_archive);
     assert!(
         app_after_archive
             .iter()
