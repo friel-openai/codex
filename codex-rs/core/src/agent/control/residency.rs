@@ -81,7 +81,7 @@ impl AgentControl {
         }
     }
 
-    pub(super) fn forget_agent_residency(&self, thread_id: ThreadId) {
+    pub(crate) fn forget_agent_residency(&self, thread_id: ThreadId) {
         self.agent_residency.remove(thread_id);
     }
 }
