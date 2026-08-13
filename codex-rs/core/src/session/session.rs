@@ -70,8 +70,8 @@ pub(crate) struct Session {
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
     /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
-    /// terminal action. This state is scoped to the parent session and reconstructed from the
-    /// goals database after process restart.
+    /// terminal action. The persisted snooze deadline is reconstructed from the goals database;
+    /// action and retry state remain scoped to the parent process.
     pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
