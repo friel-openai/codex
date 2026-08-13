@@ -265,7 +265,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
     include_str!("../../root_agent_supervisor_prompt.md");
 const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
 const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
-const GOAL_SUPERVISOR_ROLE_NAME: &str = "goal_supervisor";
 
 async fn load_agent_prompt_fallback(
     codex_home: &Path,
@@ -335,7 +334,8 @@ pub(crate) async fn load_agent_role_prompt(
 
     let role_prompt = match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
-            if agent_role.as_deref() == Some(GOAL_SUPERVISOR_ROLE_NAME) =>
+            if agent_role.as_deref()
+                == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) =>
         {
             load_supervisor_agent_prompt(&config.codex_home).await
         }
