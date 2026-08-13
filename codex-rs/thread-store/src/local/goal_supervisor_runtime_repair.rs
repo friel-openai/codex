@@ -478,6 +478,14 @@ async fn discover_scope(
     let lineage = store
         .resolve_rollout_lineage_from_path(thread_id, rollout_path.as_path())
         .await?;
+    let mut lineage_thread_ids = lineage
+        .segments()
+        .iter()
+        .map(|segment| segment.thread_id())
+        .collect::<Vec<_>>();
+    lineage_thread_ids.push(thread_id);
+    lineage_thread_ids.sort_unstable_by_key(ThreadId::to_string);
+    lineage_thread_ids.dedup();
     let mut roots = Vec::new();
     let mut seen = HashSet::new();
     for segment in lineage.segments() {
@@ -504,6 +512,15 @@ async fn discover_scope(
     } else if !roots.iter().any(|candidate| candidate.path == root.path) {
         roots.push(root);
     }
+    // Fork preparation has always reserved every stable thread identity in the consumed lineage,
+    // including identities represented only by immutable segments. Preserve that reservation
+    // while history repair owns the writer locks so decompression and reference materialization
+    // cannot discover an owner outside the locked set.
+    roots[0].lock_thread_ids.extend(lineage_thread_ids);
+    roots[0]
+        .lock_thread_ids
+        .sort_unstable_by_key(ThreadId::to_string);
+    roots[0].lock_thread_ids.dedup();
     Ok(RepairScope { roots })
 }
 
