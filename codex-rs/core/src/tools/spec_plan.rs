@@ -38,6 +38,9 @@ use crate::tools::handlers::multi_agents::CloseAgentHandler;
 use crate::tools::handlers::multi_agents::ResumeAgentHandler;
 use crate::tools::handlers::multi_agents::SendInputHandler;
 use crate::tools::handlers::multi_agents::SpawnAgentHandler;
+use crate::tools::handlers::multi_agents::SupervisorCompactParentContextHandler;
+use crate::tools::handlers::multi_agents::SupervisorSelfCloseHandler;
+use crate::tools::handlers::multi_agents::SupervisorSnoozeHandler;
 use crate::tools::handlers::multi_agents::WaitAgentHandler;
 use crate::tools::handlers::multi_agents_common::DEFAULT_WAIT_TIMEOUT_MS;
 use crate::tools::handlers::multi_agents_common::MAX_WAIT_TIMEOUT_MS;
@@ -608,6 +611,9 @@ fn collab_tools_enabled(turn_context: &TurnContext) -> bool {
         MultiAgentVersion::V2 => {
             turn_context.session_source.get_agent_path().is_none()
                 || turn_context.model_info.multi_agent_version == Some(MultiAgentVersion::V2)
+                || crate::goal_supervisor::is_goal_supervisor_helper_source(
+                    &turn_context.session_source,
+                )
         }
     }
 }
@@ -1221,6 +1227,11 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
                 .add_with_exposure(WaitAgentHandler::new(context.wait_agent_timeouts), exposure);
             registry.add_with_exposure(CloseAgentHandler, exposure);
         }
+    }
+    if crate::goal_supervisor::is_goal_supervisor_helper_source(&turn_context.session_source) {
+        registry.add(SupervisorSelfCloseHandler);
+        registry.add(SupervisorSnoozeHandler);
+        registry.add(SupervisorCompactParentContextHandler);
     }
 }
 
