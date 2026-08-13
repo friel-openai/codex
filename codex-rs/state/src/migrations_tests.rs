@@ -668,6 +668,65 @@ async fn unknown_migration_48_checksum_still_fails_closed() {
 }
 
 #[tokio::test]
+async fn unknown_migration_48_predecessor_fails_without_mutation() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("state database should open");
+    released_frodex_state_migrator()
+        .run(&pool)
+        .await
+        .expect("released Frodex migrations should apply");
+    sqlx::query("UPDATE _sqlx_migrations SET checksum = ? WHERE version = 47")
+        .bind(vec![0_u8; 48])
+        .execute(&pool)
+        .await
+        .expect("test predecessor checksum should update");
+    pool.close().await;
+
+    sqlite
+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
+        .await
+        .expect_err("unknown predecessor checksum should fail before repair");
+
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("failed state database should reopen");
+    let appearance_columns = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('thread_sections') WHERE name = 'appearance'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("appearance columns should count");
+    let legacy_indexes = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_index_list('threads') WHERE name = 'idx_threads_agent_path'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("legacy indexes should count");
+    let description = sqlx::query_scalar::<_, String>(
+        "SELECT description FROM _sqlx_migrations WHERE version = 48",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("legacy migration 48 should load");
+    assert_eq!(appearance_columns, 0);
+    assert_eq!(legacy_indexes, 1);
+    assert_eq!(description, "threads agent path index");
+    pool.close().await;
+}
+
+#[tokio::test]
 async fn released_frodex_migration_48_with_missing_index_fails_closed() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -686,6 +745,11 @@ async fn released_frodex_migration_48_with_missing_index_fails_closed() {
         .run(&pool)
         .await
         .expect("released Frodex migrations should apply");
+    drop(pool);
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("released state database should reopen without stale schema cache");
     sqlx::query("DROP INDEX idx_threads_agent_path")
         .execute(&pool)
         .await
@@ -698,6 +762,68 @@ async fn released_frodex_migration_48_with_missing_index_fails_closed() {
             .to_string()
             .contains("refusing to repair Frodex migration 48")
     );
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn released_frodex_migration_48_with_alternate_index_sql_fails_closed() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = sqlite.state_db_path();
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("state database should open");
+    released_frodex_state_migrator()
+        .run(&pool)
+        .await
+        .expect("released Frodex migrations should apply");
+    drop(pool);
+    let pool = sqlite
+        .open_read_write_pool(&state_path)
+        .await
+        .expect("released state database should reopen without stale schema cache");
+    sqlx::query("DROP INDEX idx_threads_agent_path")
+        .execute(&pool)
+        .await
+        .expect("released index should drop");
+    sqlx::query(
+        "CREATE INDEX idx_threads_agent_path ON threads(agent_path DESC) WHERE agent_path IS NOT NULL",
+    )
+    .execute(&pool)
+    .await
+    .expect("alternate index should install");
+
+    repair_frodex_agent_path_migration_collision(&pool, &runtime_state_migrator())
+        .await
+        .expect_err("alternate index SQL should fail closed");
+    let appearance_columns = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM pragma_table_info('thread_sections') WHERE name = 'appearance'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("appearance columns should count");
+    let index_sql = sqlx::query_scalar::<_, String>(
+        "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = 'idx_threads_agent_path'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("alternate index SQL should load");
+    let description = sqlx::query_scalar::<_, String>(
+        "SELECT description FROM _sqlx_migrations WHERE version = 48",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("legacy migration 48 should load");
+    assert_eq!(appearance_columns, 0);
+    assert!(index_sql.contains("agent_path DESC"));
+    assert_eq!(description, "threads agent path index");
     pool.close().await;
 }
 
