@@ -1499,6 +1499,35 @@ async fn get_status_returns_not_found_for_missing_thread() {
 }
 
 #[tokio::test]
+async fn status_and_subscription_retain_a_cold_terminal_agent() {
+    let harness = AgentControlHarness::new().await;
+    let thread_id = ThreadId::new();
+    let metadata = AgentMetadata {
+        agent_id: Some(thread_id),
+        ..Default::default()
+    };
+    metadata.lifecycle.remember_cold_terminal_status(
+        AgentStatus::Completed(Some("completed while loaded".to_string())),
+        /*visible_when_cold*/ true,
+    );
+    harness
+        .control
+        .state
+        .reserve_spawn_slot(/*max_threads*/ None)
+        .expect("cold terminal agent slot")
+        .commit(metadata);
+
+    let expected = AgentStatus::Completed(Some("completed while loaded".to_string()));
+    assert_eq!(harness.control.get_status(thread_id).await, expected);
+    let receiver = harness
+        .control
+        .subscribe_status(thread_id)
+        .await
+        .expect("cold terminal agent must remain observable");
+    assert_eq!(receiver.borrow().clone(), expected);
+}
+
+#[tokio::test]
 async fn get_status_returns_pending_init_for_new_thread() {
     let harness = AgentControlHarness::new().await;
     let (thread_id, _) = harness.start_thread().await;
@@ -1692,6 +1721,19 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         },
         Ok(_) => panic!("expected thread to be removed"),
     }
+    let child_lifecycle = harness
+        .control
+        .get_agent_metadata(spawned_agent.thread_id)
+        .expect("cold child registration")
+        .lifecycle;
+    child_lifecycle.remember_cold_terminal_status(
+        AgentStatus::Completed(Some("completed before reload".to_string())),
+        /*visible_when_cold*/ true,
+    );
+    assert_eq!(
+        harness.control.get_status(spawned_agent.thread_id).await,
+        AgentStatus::Completed(Some("completed before reload".to_string()))
+    );
 
     let mut sender_config = harness.config.clone();
     sender_config.model_provider_id = "ollama".to_string();
@@ -1706,6 +1748,7 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id)
         .await
         .expect("known v2 agent should reload");
+    assert_eq!(child_lifecycle.cold_terminal_status(), None);
     let reloaded_child = harness
         .manager
         .get_thread(spawned_agent.thread_id)
