@@ -128,13 +128,6 @@ fn code_mode_tool_definitions_for_spec(spec: &ToolSpec) -> Vec<CodeModeToolDefin
         .collect()
 }
 
-/// Returns whether any function in `spec` requires a Responses-encrypted input parameter.
-pub fn tool_spec_has_encrypted_input(spec: &ToolSpec) -> bool {
-    code_mode_tool_definitions_for_spec_unfiltered(spec)
-        .iter()
-        .any(code_mode_definition_has_encrypted_input)
-}
-
 fn code_mode_tool_definitions_for_spec_unfiltered(spec: &ToolSpec) -> Vec<CodeModeToolDefinition> {
     match spec {
         ToolSpec::Function(tool) => {
