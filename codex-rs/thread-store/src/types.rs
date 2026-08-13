@@ -306,6 +306,9 @@ pub struct PreparedFork {
     pub latest_model_context: Arc<Vec<RolloutItem>>,
     /// Complete logical history selected by the requested fork boundary.
     pub response_history: Arc<Vec<RolloutItem>>,
+    /// Complete logical history that must be copied because a `history_base` edge cannot be
+    /// represented by the frozen segment reference.
+    pub copied_history: Option<Arc<Vec<RolloutItem>>>,
     /// Complete projected parent turns when indexed fork preparation avoids JSONL replay.
     pub projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
     /// Authoritative copy-on-write model history retained without copying parent response items.
@@ -348,6 +351,7 @@ impl PreparedFork {
             model_context,
             latest_model_context,
             response_history,
+            copied_history: None,
             projected_response_turns: None,
             shared_model_response_items: None,
             interrupt_if_open,

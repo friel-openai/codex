@@ -1292,9 +1292,31 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
         })
         .await
         .expect("append child history");
-    let latest_history_base = prepare_paginated_fork(&store, child_id, ForkBoundary::Latest)
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: source_id,
+            items: vec![
+                turn_started("source-after-fork"),
+                user_message("source message after child boundary"),
+                turn_completed("source-after-fork"),
+            ],
+        })
         .await
-        .history_base;
+        .expect("append source history after child boundary");
+    let latest_prepared = prepare_paginated_fork(&store, child_id, ForkBoundary::Latest).await;
+    assert!(contains_user_message(
+        latest_prepared.response_history.as_slice(),
+        "source message"
+    ));
+    assert!(contains_user_message(
+        latest_prepared.response_history.as_slice(),
+        "child message"
+    ));
+    assert!(!contains_user_message(
+        latest_prepared.response_history.as_slice(),
+        "source message after child boundary"
+    ));
+    let latest_history_base = latest_prepared.history_base;
     for (boundary, expected_base) in [
         (ForkBoundary::Latest, latest_history_base),
         (
