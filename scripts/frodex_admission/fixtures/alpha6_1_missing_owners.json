@@ -21,11 +21,6 @@
       "id": "agent-tree-shared-mcp",
       "required": true,
       "resolution": "missing"
-    },
-    {
-      "id": "unified-exec-cumulative-streamed-byte-budget",
-      "required": true,
-      "resolution": "missing"
     }
   ]
 }
