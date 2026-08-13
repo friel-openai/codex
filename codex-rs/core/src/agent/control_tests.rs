@@ -12,6 +12,7 @@ use crate::context::ContextualUserFragment;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::SubagentNotification;
 use crate::init_state_db;
+use crate::state::ActiveTurn;
 use crate::thread_manager::StartThreadOptions;
 use assert_matches::assert_matches;
 use codex_config::types::McpServerConfig;
@@ -49,6 +50,7 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadGoal;
+use codex_protocol::protocol::ThreadGoalStatus;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -77,6 +79,7 @@ use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
+use core_test_support::responses::sse_failed;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
@@ -148,6 +151,81 @@ fn assistant_message(text: &str, phase: Option<MessagePhase>) -> ResponseItem {
         phase,
         internal_chat_message_metadata_passthrough: None,
     }
+}
+
+fn run_goal_supervisor_test<F, T>(name: &'static str, future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build goal supervisor test runtime")
+                .block_on(future)
+        })
+        .expect("spawn goal supervisor test thread");
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
+async fn spawned_thread_id_after(
+    manager: &ThreadManager,
+    before_thread_ids: &[ThreadId],
+) -> ThreadId {
+    let mut spawned_thread_ids = manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|thread_id| !before_thread_ids.contains(thread_id))
+        .collect::<Vec<_>>();
+    spawned_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        spawned_thread_ids.len(),
+        1,
+        "spawn should add exactly one child thread"
+    );
+    spawned_thread_ids
+        .pop()
+        .expect("spawned thread id should be present")
+}
+
+async fn create_active_thread_goal_for_test(
+    state_db: &StateDbHandle,
+    parent_thread_id: ThreadId,
+    parent_session: &std::sync::Arc<crate::session::session::Session>,
+    objective: &str,
+) -> anyhow::Result<(String, ThreadGoal)> {
+    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
+        parent_thread_id,
+        parent_session
+            .get_config()
+            .await
+            .codex_home
+            .join(format!("{parent_thread_id}.jsonl"))
+            .to_path_buf(),
+        chrono::Utc::now(),
+        SessionSource::Exec,
+    )
+    .build("openai");
+    state_db.upsert_thread(&parent_metadata).await?;
+    let state_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            parent_thread_id,
+            objective,
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
+    Ok((state_goal.goal_id, protocol_goal))
 }
 
 #[test]
@@ -5448,6 +5526,671 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
         .shutdown_agent_tree(parent_thread_id)
         .await
         .expect("tree shutdown after resume should succeed");
+}
+
+#[test]
+fn goal_supervisor_spawn_reconciles_stale_persisted_state() {
+    run_goal_supervisor_test(
+        "goal_supervisor_spawn_reconciles_stale_persisted_state",
+        goal_supervisor_spawn_reconciles_stale_persisted_state_inner(),
+    );
+}
+
+async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires state db");
+    let goal = ThreadGoal {
+        thread_id: parent_thread_id,
+        objective: "Continue the daily release cycle.".to_string(),
+        status: ThreadGoalStatus::Active,
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        created_at: 1,
+        updated_at: 1,
+    };
+    let supervisor_path = AgentPath::root()
+        .join("goal_supervisor")
+        .expect("supervisor path");
+    let stale_helper_thread_ids = [ThreadId::new(), ThreadId::new()];
+    for stale_helper_thread_id in stale_helper_thread_ids {
+        let stale_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: Some(supervisor_path.clone()),
+            agent_nickname: None,
+            agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+        });
+        let stale_metadata = codex_state::ThreadMetadataBuilder::new(
+            stale_helper_thread_id,
+            harness
+                .config
+                .codex_home
+                .join(format!("{stale_helper_thread_id}.jsonl"))
+                .to_path_buf(),
+            chrono::Utc::now(),
+            stale_source,
+        )
+        .build("openai");
+        state_db
+            .upsert_thread(&stale_metadata)
+            .await
+            .expect("stale supervisor metadata should persist");
+        state_db
+            .upsert_thread_spawn_edge(
+                parent_thread_id,
+                stale_helper_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("stale supervisor edge should persist");
+    }
+    harness
+        .control
+        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
+        .await;
+    assert!(
+        harness
+            .control
+            .state
+            .agent_id_for_path(&supervisor_path)
+            .is_some_and(|thread_id| stale_helper_thread_ids.contains(&thread_id)),
+        "cold restore should reproduce the stale canonical path collision"
+    );
+    for stale_helper_thread_id in stale_helper_thread_ids {
+        assert_eq!(
+            harness.control.get_status(stale_helper_thread_id).await,
+            AgentStatus::NotFound,
+            "restored supervisor metadata must not be mistaken for a live helper"
+        );
+    }
+
+    let replacement_thread_id =
+        crate::goal_supervisor::spawn_supervisor_helper_for_test(&parent_thread.session, &goal)
+            .await
+            .expect("new supervisor spawn should reconcile stale persisted state");
+
+    assert!(!stale_helper_thread_ids.contains(&replacement_thread_id));
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            parent_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open child query should succeed");
+    let closed_children = state_db
+        .list_thread_spawn_children_with_status(
+            parent_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Closed,
+        )
+        .await
+        .expect("closed child query should succeed");
+    for stale_helper_thread_id in stale_helper_thread_ids {
+        assert!(!open_children.contains(&stale_helper_thread_id));
+        assert!(closed_children.contains(&stale_helper_thread_id));
+    }
+}
+
+#[test]
+fn goal_supervisor_reconciliation_preserves_running_supervisor_and_worker() {
+    run_goal_supervisor_test(
+        "goal_supervisor_reconciliation_preserves_running_supervisor_and_worker",
+        goal_supervisor_reconciliation_preserves_running_supervisor_and_worker_inner(),
+    );
+}
+
+async fn goal_supervisor_reconciliation_preserves_running_supervisor_and_worker_inner() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires state db");
+    let supervisor_path = AgentPath::root()
+        .join("goal_supervisor")
+        .expect("supervisor path");
+    let mut helper_config = harness.config.clone();
+    helper_config.ephemeral = true;
+    let helper_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            helper_config,
+            text_input("supervise"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(supervisor_path.clone()),
+                agent_nickname: None,
+                agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+            })),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("supervisor helper should spawn")
+        .thread_id;
+    let worker_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("work"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: Some(AgentPath::root().join("worker").expect("worker path")),
+                agent_nickname: None,
+                agent_role: Some("worker".to_string()),
+            })),
+            SpawnAgentOptions::default(),
+        )
+        .await
+        .expect("worker should spawn")
+        .thread_id;
+    for child_thread_id in [helper_thread_id, worker_thread_id] {
+        state_db
+            .upsert_thread_spawn_edge(
+                parent_thread_id,
+                child_thread_id,
+                DirectionalThreadSpawnEdgeStatus::Open,
+            )
+            .await
+            .expect("child edge should persist");
+    }
+    let foreign_supervisor_thread_id = ThreadId::new();
+    let foreign_supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(
+            AgentPath::root()
+                .join("foreign_goal_supervisor")
+                .expect("foreign supervisor path"),
+        ),
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+    let foreign_supervisor_metadata = codex_state::ThreadMetadataBuilder::new(
+        foreign_supervisor_thread_id,
+        harness
+            .config
+            .codex_home
+            .join(format!("{foreign_supervisor_thread_id}.jsonl"))
+            .to_path_buf(),
+        chrono::Utc::now(),
+        foreign_supervisor_source,
+    )
+    .build("openai");
+    state_db
+        .upsert_thread(&foreign_supervisor_metadata)
+        .await
+        .expect("foreign supervisor metadata should persist");
+    state_db
+        .upsert_thread_spawn_edge(
+            parent_thread_id,
+            foreign_supervisor_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("inaccurate foreign supervisor edge should persist");
+
+    let first_result = harness
+        .control
+        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
+        .await
+        .expect("first reconciliation should succeed");
+    let second_result = harness
+        .control
+        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
+        .await
+        .expect("second reconciliation should be idempotent");
+
+    assert_eq!(first_result, Some(helper_thread_id));
+    assert_eq!(second_result, Some(helper_thread_id));
+    let open_children = state_db
+        .list_thread_spawn_children_with_status(
+            parent_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("open child query should succeed");
+    assert!(open_children.contains(&helper_thread_id));
+    assert!(open_children.contains(&worker_thread_id));
+    assert!(
+        open_children.contains(&foreign_supervisor_thread_id),
+        "reconciliation must not trust an inaccurate edge over the stored supervisor parent"
+    );
+}
+
+#[test]
+fn goal_supervisor_waits_for_parent_turn_to_finish() {
+    run_goal_supervisor_test(
+        "goal_supervisor_waits_for_parent_turn_to_finish",
+        goal_supervisor_waits_for_parent_turn_to_finish_inner(),
+    );
+}
+
+async fn goal_supervisor_waits_for_parent_turn_to_finish_inner() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+    let goal = ThreadGoal {
+        thread_id: parent_thread_id,
+        objective: "Wait for the parent turn, then continue.".to_string(),
+        status: ThreadGoalStatus::Active,
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        created_at: 1,
+        updated_at: 1,
+    };
+    let parent_only = harness.manager.list_thread_ids().await;
+    *parent_thread.session.active_turn.lock().await = Some(ActiveTurn::default());
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        "goal-supervisor-busy-parent-test",
+        &goal,
+    )
+    .await
+    .expect("busy parent should defer the supervisor");
+
+    assert_eq!(harness.manager.list_thread_ids().await, parent_only);
+
+    *parent_thread.session.active_turn.lock().await = None;
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        "goal-supervisor-busy-parent-test",
+        &goal,
+    )
+    .await
+    .expect("idle parent should start the deferred supervisor");
+
+    let helper_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
+    assert!(harness.manager.get_thread(helper_thread_id).await.is_ok());
+}
+
+#[test]
+fn goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit() {
+    run_goal_supervisor_test(
+        "goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit",
+        goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit_inner(),
+    );
+}
+
+async fn goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit_inner() {
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow multi-agent v2");
+    config
+        .features
+        .enable(Feature::Goals)
+        .expect("test config should allow goals");
+    config
+        .features
+        .enable(Feature::GoalSupervisor)
+        .expect("test config should allow goal supervisor");
+    config.agent_max_threads = None;
+    config.multi_agent_v2.max_concurrent_threads_per_session = 2;
+    assert_eq!(
+        (
+            config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V2),
+        ),
+        (None, 2, Some(1))
+    );
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let worker_thread_id = ThreadId::new();
+    harness
+        .control
+        .state
+        .reserve_spawn_slot(Some(1))
+        .expect("the user-visible worker slot should be available")
+        .commit(AgentMetadata {
+            agent_id: Some(worker_thread_id),
+            ..Default::default()
+        });
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+    let goal = ThreadGoal {
+        thread_id: parent_thread_id,
+        objective: "Verify supervisor thread accounting.".to_string(),
+        status: ThreadGoalStatus::Active,
+        token_budget: None,
+        tokens_used: 0,
+        time_used_seconds: 0,
+        created_at: 1,
+        updated_at: 1,
+    };
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        "goal-supervisor-limit-test",
+        &goal,
+    )
+    .await
+    .expect("goal supervisor should bypass the user-visible agent limit");
+    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+
+    let err = match harness
+        .control
+        .state
+        .reserve_spawn_slot(config.effective_agent_max_threads(MultiAgentVersion::V2))
+    {
+        Ok(_) => panic!("the goal supervisor must not free the counted worker slot"),
+        Err(err) => err,
+    };
+    let CodexErrorDetails::AgentLimitReached { max_threads } = err.details() else {
+        panic!("expected AgentLimitReached");
+    };
+    assert_eq!(*max_threads, 1);
+    assert!(harness.manager.get_thread(helper_thread_id).await.is_ok());
+
+    harness
+        .control
+        .state
+        .release_spawned_thread(worker_thread_id);
+    let _ = harness.control.shutdown_live_agent(helper_thread_id).await;
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
+}
+
+#[test]
+fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "goal_supervisor_goal_resume_clears_snooze_and_spawns_helper",
+        goal_supervisor_goal_resume_clears_snooze_and_spawns_helper_inner(),
+    )
+}
+
+async fn goal_supervisor_goal_resume_clears_snooze_and_spawns_helper_inner() -> anyhow::Result<()> {
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::Sqlite);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread.session.flush_rollout().await?;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Resume the paused goal now.",
+    )
+    .await?;
+    state_db
+        .thread_goals()
+        .set_thread_goal_supervisor_snoozed_until_ms(
+            parent_thread_id,
+            goal_id.as_str(),
+            Some(chrono::Utc::now().timestamp_millis() + 60_000),
+        )
+        .await?;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let before_resume_thread_ids = harness.manager.list_thread_ids().await;
+    assert_eq!(
+        vec![parent_thread_id],
+        before_resume_thread_ids,
+        "plain idle continuation should honor the supervisor snooze"
+    );
+
+    parent_thread
+        .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
+        .await?;
+
+    let child_thread_id =
+        spawned_thread_id_after(&harness.manager, &before_resume_thread_ids).await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("supervisor helper thread should be registered");
+    let child_config = child_thread.config_snapshot().await;
+    assert_matches!(
+        child_config.session_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            agent_role: Some(agent_role),
+            ..
+        }) if agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
+    );
+    assert_eq!(
+        None,
+        state_db
+            .thread_goals()
+            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+            .await?,
+        "manual goal resume should clear the persisted supervisor snooze"
+    );
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
+    Ok(())
+}
+
+#[test]
+fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "failed_goal_supervisor_waits_for_one_persisted_retry",
+        failed_goal_supervisor_waits_for_one_persisted_retry_inner(),
+    )
+}
+
+async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse_failed(
+                "supervisor-failure-1",
+                "model_not_found",
+                "saved model unavailable",
+            ),
+            sse_failed(
+                "supervisor-failure-2",
+                "model_not_found",
+                "saved model unavailable",
+            ),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_provider.request_max_retries = Some(0);
+    config.model_provider.stream_max_retries = Some(0);
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread.session.flush_rollout().await?;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Keep retrying after transient supervisor failures.",
+    )
+    .await?;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+
+    let first_deadline_ms = timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(deadline_ms) = state_db
+                .thread_goals()
+                .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
+                .await?
+                && deadline_ms > chrono::Utc::now().timestamp_millis()
+                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
+            {
+                break Ok::<_, anyhow::Error>(deadline_ms);
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await??;
+    assert_eq!(request_log.requests().len(), 1);
+    assert_eq!(
+        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
+        1
+    );
+    assert!(
+        first_deadline_ms - chrono::Utc::now().timestamp_millis() <= 60_000,
+        "first failure retry should use the one-minute backoff tier"
+    );
+    let persisted_goal = state_db
+        .thread_goals()
+        .get_thread_goal(parent_thread_id)
+        .await?
+        .expect("active goal should remain persisted");
+    assert_eq!(
+        persisted_goal.status,
+        codex_state::ThreadGoalStatus::Active,
+        "supervisor failure must not pause, block, or complete the goal"
+    );
+    let warning = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = parent_thread
+                .next_event()
+                .await
+                .expect("parent event channel should stay open");
+            if let EventMsg::Warning(warning) = event.msg
+                && warning.message.contains("Goal supervisor check-in failed")
+            {
+                break warning.message;
+            }
+        }
+    })
+    .await
+    .expect("failed supervisor should warn the user");
+    assert!(warning.contains("saved model unavailable"));
+    assert!(warning.contains("Retrying in"));
+
+    let scheduled_generation =
+        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+            &parent_thread.session,
+        )
+        .await
+        .expect("failure should schedule one retry wakeup");
+    for _ in 0..3 {
+        crate::goal_supervisor::maybe_start_supervisor_checkin(
+            &parent_thread.session,
+            goal_id.as_str(),
+            &goal,
+        )
+        .await?;
+    }
+    assert_eq!(
+        request_log.requests().len(),
+        1,
+        "idle signals before the deadline must not replace the failed helper"
+    );
+    assert_eq!(
+        crate::goal_supervisor::scheduled_supervisor_wakeup_generation_for_test(
+            &parent_thread.session,
+        )
+        .await,
+        Some(scheduled_generation),
+        "idle signals for the same deadline must reuse the existing sleeping timer"
+    );
+
+    state_db
+        .thread_goals()
+        .set_thread_goal_supervisor_snoozed_until_ms(
+            parent_thread_id,
+            goal_id.as_str(),
+            /*snoozed_until_ms*/ None,
+        )
+        .await?;
+    crate::goal_supervisor::fire_scheduled_supervisor_wakeup_for_test(&parent_thread.session).await;
+    for _ in 0..3 {
+        crate::goal_supervisor::maybe_start_supervisor_checkin(
+            &parent_thread.session,
+            goal_id.as_str(),
+            &goal,
+        )
+        .await?;
+    }
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if request_log.requests().len() == 2
+                && harness.manager.list_thread_ids().await == vec![parent_thread_id]
+            {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("second failed supervisor should finish");
+    let requests_after_retry = request_log.requests();
+    assert_eq!(
+        requests_after_retry.len(),
+        2,
+        "one failure retry should run after the in-memory deadline; loaded threads: {:?}; captured ops: {:?}",
+        harness.manager.list_thread_ids().await,
+        harness.manager.captured_ops(),
+    );
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        request_log.requests().len(),
+        2,
+        "duplicate idle signals must still produce exactly one retry"
+    );
+    assert_eq!(
+        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
+        2,
+        "the second implicit failure should advance the backoff tier"
+    );
+    Ok(())
 }
 
 #[tokio::test]
