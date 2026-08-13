@@ -143,6 +143,10 @@ pub(super) async fn handle(
     mode: TurnInputMode,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("submit turn input")
+        .await
+        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
     match mode {
         TurnInputMode::StartOrSteer => start_or_steer(session, request, submission_id).await,
         TurnInputMode::StartIfIdle => {
@@ -159,6 +163,10 @@ pub(super) async fn handle_recovery(
     thread_settings: ThreadSettingsOverrides,
     submission_id: String,
 ) -> CodexResult<TurnInputSubmission> {
+    let _checkpoint_admission = session
+        .lock_checkpoint_admission("recover an interrupted turn")
+        .await
+        .map_err(|error| CodexErr::Fatal(error.to_string()))?;
     let request = TurnInputRequest::user_input(Vec::new()).with_thread_settings(thread_settings);
     start_if_idle(session, request, submission_id, /*is_recovery*/ true).await
 }
