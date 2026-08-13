@@ -30,8 +30,6 @@ use codex_protocol::protocol::ExecCommandOutputDeltaEvent;
 use codex_protocol::protocol::ExecCommandSource;
 use codex_protocol::protocol::ExecOutputStream;
 use codex_utils_path_uri::PathUri;
-use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
-use codex_utils_string::take_bytes_at_char_boundary;
 
 pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
 
@@ -42,12 +40,6 @@ pub(crate) const TRAILING_OUTPUT_GRACE: Duration = Duration::from_millis(100);
 /// downstream event consumers (especially app-server JSON-RPC) don't have to
 /// process arbitrarily large delta payloads.
 const UNIFIED_EXEC_OUTPUT_DELTA_MAX_BYTES: usize = 8192;
-
-#[derive(Default)]
-struct StreamedOutputBudget {
-    emitted_bytes: usize,
-    emitted_events: usize,
-}
 
 /// Spawn a background task that continuously reads from the PTY, appends to the
 /// shared transcript, and emits ExecCommandOutputDelta events on UTF‑8
@@ -74,7 +66,7 @@ pub(crate) fn start_streaming_output(
         use tokio::sync::broadcast::error::RecvError;
 
         let mut pending = VecDeque::<u8>::new();
-        let mut output_budget = StreamedOutputBudget::default();
+        let mut emitted_deltas: usize = 0;
 
         let mut grace_sleep: Option<Pin<Box<Sleep>>> = None;
         let output_closed_notified = output_closed_notify.notified();
@@ -126,7 +118,7 @@ pub(crate) fn start_streaming_output(
                         &call_id,
                         &session_ref,
                         &turn_ref,
-                        &mut output_budget,
+                        &mut emitted_deltas,
                         Some(chunk),
                     ).await;
                 }
@@ -154,7 +146,7 @@ pub(crate) fn start_streaming_output(
                     &call_id,
                     &session_ref,
                     &turn_ref,
-                    &mut output_budget,
+                    &mut emitted_deltas,
                     Some(chunk),
                 )
                 .await;
@@ -167,7 +159,7 @@ pub(crate) fn start_streaming_output(
             &call_id,
             &session_ref,
             &turn_ref,
-            &mut output_budget,
+            &mut emitted_deltas,
             /*chunk*/ None,
         )
         .await;
@@ -261,7 +253,7 @@ async fn process_chunk(
     call_id: &str,
     session_ref: &Arc<Session>,
     turn_ref: &Arc<TurnContext>,
-    output_budget: &mut StreamedOutputBudget,
+    emitted_deltas: &mut usize,
     chunk: Option<Vec<u8>>,
 ) {
     let flush_incomplete = chunk.is_none();
@@ -280,37 +272,19 @@ async fn process_chunk(
             guard.push_chunk(prefix.to_vec());
         }
 
-        if output_budget.emitted_events >= MAX_EXEC_OUTPUT_DELTAS_PER_CALL {
+        if *emitted_deltas >= MAX_EXEC_OUTPUT_DELTAS_PER_CALL {
             continue;
         }
 
-        let remaining = DEFAULT_OUTPUT_BYTES_CAP.saturating_sub(output_budget.emitted_bytes);
-        if remaining == 0 {
-            continue;
-        }
-        let streamed_prefix = match std::str::from_utf8(&prefix) {
-            Ok(valid) => take_bytes_at_char_boundary(valid, remaining).as_bytes(),
-            Err(_) => &prefix[..prefix.len().min(remaining)],
-        };
-        if streamed_prefix.is_empty() {
-            output_budget.emitted_bytes = DEFAULT_OUTPUT_BYTES_CAP;
-            continue;
-        }
-
-        output_budget.emitted_bytes = if streamed_prefix.len() < prefix.len() {
-            DEFAULT_OUTPUT_BYTES_CAP
-        } else {
-            output_budget.emitted_bytes + streamed_prefix.len()
-        };
         let event = ExecCommandOutputDeltaEvent {
             call_id: call_id.to_string(),
             stream: ExecOutputStream::Stdout,
-            chunk: streamed_prefix.to_vec(),
+            chunk: prefix,
         };
         session_ref
             .send_event(turn_ref.as_ref(), EventMsg::ExecCommandOutputDelta(event))
             .await;
-        output_budget.emitted_events += 1;
+        *emitted_deltas += 1;
     }
 }
 
