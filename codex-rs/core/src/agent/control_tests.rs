@@ -68,9 +68,12 @@ use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadPersistenceMode;
 use codex_thread_store::ThreadStore;
 use codex_utils_path_uri::PathUri;
+use core_test_support::responses::assert_parent_turn;
+use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
 use core_test_support::responses::mount_sse_once;
+use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_response_item_ids;
@@ -412,6 +415,88 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
     // CI can take several seconds to schedule the detached completion watcher,
     // especially on slower Windows runners.
     timeout(Duration::from_secs(10), wait).await.is_ok()
+}
+
+async fn wait_for_agent_status(
+    control: &AgentControl,
+    thread_id: ThreadId,
+    predicate: impl Fn(&AgentStatus) -> bool,
+) {
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let status = control.get_status(thread_id).await;
+            if predicate(&status) {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent should reach the expected status");
+}
+
+async fn make_cold_multi_agent_v1_child(
+    harness: &AgentControlHarness,
+    parent_thread_id: ThreadId,
+) -> ThreadId {
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("initial v1 child task"),
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: Some("explorer".to_string()),
+            })),
+            SpawnAgentOptions {
+                parent_thread_id: Some(parent_thread_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("v1 child spawn should succeed")
+        .thread_id;
+    wait_for_agent_status(&harness.control, child_thread_id, |status| {
+        matches!(status, AgentStatus::Completed(_))
+    })
+    .await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("v1 child should be loaded before becoming cold");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("v1 child rollout should flush");
+    let lifecycle = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("v1 child metadata should remain registered")
+        .lifecycle;
+    lifecycle.wait_for_completion_watcher().await;
+    child_thread
+        .shutdown_and_wait()
+        .await
+        .expect("v1 child should shut down before cold reload");
+    assert!(
+        harness
+            .manager
+            .remove_thread(&child_thread_id)
+            .await
+            .is_some(),
+        "v1 child should be removed from the live manager"
+    );
+    drop(child_thread);
+    assert!(matches!(
+        harness.manager.get_thread(child_thread_id).await,
+        Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_thread_id)
+    ));
+    child_thread_id
 }
 
 async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
@@ -1011,6 +1096,209 @@ async fn ensure_v2_agent_loaded_reloads_registered_unloaded_agent() {
         .into_iter()
         .find(|entry| captured_op_matches(entry, &expected));
     assert!(captured.is_some());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let responses = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-v1-initial"),
+                ev_completed("resp-v1-initial"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-v1-cold"),
+                ev_completed("resp-v1-cold"),
+            ]),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow feature update");
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_providers.insert(
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+    );
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let child_thread_id = make_cold_multi_agent_v1_child(&harness, parent_thread_id).await;
+
+    let parent_turn_id = "parent-turn-v1-cold";
+    let root_turn_id = "root-turn-v1-cold";
+    harness
+        .control
+        .deliver_input_to_agent(
+            harness.config.clone(),
+            child_thread_id,
+            text_input("cold v1 delivery"),
+            AgentInputDelivery::Queue,
+            Some(parent_turn_id.to_string()),
+            Some(root_turn_id.to_string()),
+        )
+        .await
+        .expect("cold v1 delivery should reload and submit");
+
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if responses.requests().len() == 2 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("cold v1 delivery should reach the model");
+    let requests = responses.requests();
+    assert_eq!(requests.len(), 2);
+    let cold_request = requests[1].body_json();
+    assert_parent_turn(&cold_request, Some(parent_turn_id))?;
+    assert_root_turn(&cold_request, Some(root_turn_id))?;
+    assert!(
+        requests[1].body_contains_text("cold v1 delivery"),
+        "the reloaded v1 agent should receive the submitted input"
+    );
+    assert!(
+        harness.manager.get_thread(child_thread_id).await.is_ok(),
+        "cold v1 delivery should restore the child in the live manager"
+    );
+    wait_for_agent_status(&harness.control, child_thread_id, |status| {
+        matches!(status, AgentStatus::Completed(_))
+    })
+    .await;
+    harness
+        .manager
+        .get_thread(child_thread_id)
+        .await?
+        .shutdown_and_wait()
+        .await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cold_delivery_waits_for_completion_cleanup_before_reloading() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let _initial_response = mount_sse_once(
+        &server,
+        sse(vec![
+            ev_response_created("resp-v1-race-initial"),
+            ev_completed("resp-v1-race-initial"),
+        ]),
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    config
+        .features
+        .enable(Feature::Sqlite)
+        .expect("test config should allow feature update");
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    config.model_providers.insert(
+        config.model_provider_id.clone(),
+        config.model_provider.clone(),
+    );
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
+    let child_thread_id = make_cold_multi_agent_v1_child(&harness, parent_thread_id).await;
+    let lifecycle = harness
+        .control
+        .get_agent_metadata(child_thread_id)
+        .expect("cold child metadata should remain registered")
+        .lifecycle;
+    let completion_registration = lifecycle
+        .try_start_completion_watcher()
+        .expect("test should own the simulated completion cleanup");
+    let cleanup_transition = lifecycle.lock_transition().await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::root(),
+        AgentPath::try_from("/root/cold_v1_child").expect("test agent path"),
+        Vec::new(),
+        "queue after completion cleanup".to_string(),
+        /*trigger_turn*/ false,
+    );
+    let expected = (
+        child_thread_id,
+        Op::InterAgentCommunication {
+            communication: communication.clone(),
+        },
+    );
+    let control = harness.control.clone();
+    let delivery_config = harness.config.clone();
+    let mut delivery = tokio::spawn(async move {
+        control
+            .deliver_inter_agent_communication_to_agent(
+                delivery_config,
+                child_thread_id,
+                communication,
+                AgentCommunicationContext::new(AgentCommunicationKind::Message, parent_thread_id),
+                AgentInputDelivery::Queue,
+                /*parent_turn_id*/ None,
+                /*root_turn_id*/ None,
+            )
+            .await
+    });
+
+    assert!(
+        timeout(Duration::from_millis(100), &mut delivery)
+            .await
+            .is_err(),
+        "delivery must wait while completion cleanup owns the transition"
+    );
+    assert!(matches!(
+        harness.manager.get_thread(child_thread_id).await,
+        Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_thread_id)
+    ));
+    drop(cleanup_transition);
+    assert!(
+        timeout(Duration::from_millis(100), &mut delivery)
+            .await
+            .is_err(),
+        "delivery must still wait for the completion watcher to publish cleanup completion"
+    );
+    assert!(matches!(
+        harness.manager.get_thread(child_thread_id).await,
+        Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_thread_id)
+    ));
+
+    drop(completion_registration);
+    timeout(Duration::from_secs(10), delivery)
+        .await
+        .expect("delivery should finish after completion cleanup")
+        .expect("delivery task should not panic")
+        .expect("delivery should reload the child");
+    assert!(
+        harness
+            .manager
+            .captured_ops()
+            .iter()
+            .any(|entry| captured_op_matches(entry, &expected)),
+        "delivery should submit exactly after the cold reload is admitted"
+    );
+    assert!(
+        harness.manager.get_thread(child_thread_id).await.is_ok(),
+        "delivery should reload the child once cleanup is complete"
+    );
+    harness
+        .manager
+        .get_thread(child_thread_id)
+        .await?
+        .shutdown_and_wait()
+        .await?;
+    Ok(())
 }
 
 #[tokio::test]
