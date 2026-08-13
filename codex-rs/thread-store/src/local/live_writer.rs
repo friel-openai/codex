@@ -141,20 +141,41 @@ pub(super) async fn resume_thread(
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
     };
-    let segmented_rollout = matches!(history_mode, ThreadHistoryMode::Legacy)
-        && codex_rollout::read_session_meta_line(rollout_path.as_path())
-            .await
-            .is_ok_and(|metadata| metadata.meta.segment_id.is_some());
-    let rollout_id = super::thread_rollout_resolver::rollout_id_from_path_or_legacy_thread_id(
-        rollout_path.as_path(),
-        params.thread_id,
-        history_mode,
-    )?;
     let recorder = RolloutRecorder::new(&config, RolloutRecorderParams::resume(rollout_path))
         .await
         .map_err(|err| ThreadStoreError::Internal {
             message: format!("failed to resume local thread recorder: {err}"),
         })?;
+    let rollout_path = recorder.rollout_path().to_path_buf();
+    let noncanonical_session_meta =
+        if codex_rollout::rollout_id_from_path(rollout_path.as_path()).is_none() {
+            Some(
+                codex_rollout::read_session_meta_line(rollout_path.as_path())
+                    .await
+                    .map_err(thread_store_io_error)?,
+            )
+        } else {
+            None
+        };
+    let segmented_rollout = matches!(history_mode, ThreadHistoryMode::Legacy)
+        && match noncanonical_session_meta.as_ref() {
+            Some(metadata) => metadata.meta.segment_id.is_some(),
+            None => codex_rollout::read_session_meta_line(rollout_path.as_path())
+                .await
+                .is_ok_and(|metadata| metadata.meta.segment_id.is_some()),
+        };
+    let rollout_id = match codex_rollout::rollout_id_from_path(rollout_path.as_path()) {
+        Some(rollout_id) => rollout_id,
+        None => super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+            rollout_path.as_path(),
+            params.thread_id,
+            noncanonical_session_meta
+                .as_ref()
+                .expect("noncanonical rollout metadata is loaded")
+                .meta
+                .id,
+        )?,
+    };
     let segmented_legacy_projection_complete = if segmented_rollout {
         Some(if store.state_db().await.is_none() {
             has_supplied_history
