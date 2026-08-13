@@ -148,51 +148,132 @@ impl AgentControl {
         let Some(agent_graph_store) = state.agent_graph_store() else {
             return;
         };
-        let descendant_ids = match agent_graph_store
-            .list_thread_spawn_descendants(
-                root_thread_id,
-                Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
-            )
-            .await
-        {
-            Ok(descendant_ids) => descendant_ids,
-            Err(err) => {
-                warn!("failed to restore persisted V2 agent metadata for {root_thread_id}: {err}");
-                return;
-            }
+        let indexed_identities =
+            match agent_graph_store.list_open_thread_spawn_descendant_identities(root_thread_id) {
+                Some(identity_query) => identity_query.await.ok(),
+                None => None,
+            };
+        let descendant_identities: Vec<(
+            ThreadId,
+            Option<codex_state::ThreadSpawnDescendantIdentity>,
+        )> = match indexed_identities {
+            Some(identities) => identities
+                .into_iter()
+                .map(|identity| (identity.thread_id, Some(identity)))
+                .collect(),
+            None => match agent_graph_store
+                .list_thread_spawn_descendants(
+                    root_thread_id,
+                    Some(codex_agent_graph_store::ThreadSpawnEdgeStatus::Open),
+                )
+                .await
+            {
+                Ok(descendant_ids) => descendant_ids
+                    .into_iter()
+                    .map(|thread_id| (thread_id, None))
+                    .collect(),
+                Err(err) => {
+                    warn!(
+                        "failed to restore persisted V2 agent metadata for {root_thread_id}: {err}"
+                    );
+                    return;
+                }
+            },
         };
 
-        for thread_id in descendant_ids {
+        for (thread_id, indexed_identity) in descendant_identities {
             if self.state.agent_metadata_for_thread(thread_id).is_some() {
                 continue;
             }
             let restore_result = async {
-                let stored_thread = state
-                    .read_stored_thread(ReadThreadParams {
-                        thread_id,
-                        include_archived: true,
-                        include_history: false,
-                    })
-                    .await?;
-                let stored_agent_path = stored_thread
-                    .agent_path
-                    .as_deref()
-                    .map(AgentPath::try_from)
-                    .transpose()
-                    .map_err(|err| {
-                        CodexErr::InvalidRequest(format!("invalid stored agent path: {err}"))
-                    })?;
+                let indexed_identity = match indexed_identity {
+                    Some(identity) => identity.source.map(|source| {
+                        (
+                            source,
+                            identity.agent_path,
+                            identity.agent_role,
+                            identity.agent_nickname,
+                        )
+                    }),
+                    None => state
+                        .indexed_thread_metadata(thread_id)
+                        .await
+                        .map(|metadata| {
+                            (
+                                metadata.source,
+                                metadata.agent_path,
+                                metadata.agent_role,
+                                metadata.agent_nickname,
+                            )
+                        }),
+                }
+                .and_then(|(source, agent_path, agent_role, agent_nickname)| {
+                    let source = serde_json::from_str::<SessionSource>(&source)
+                        .or_else(|_| serde_json::from_value(serde_json::Value::String(source)))
+                        .ok()?;
+                    if !matches!(
+                        source,
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+                    ) {
+                        return None;
+                    }
+                    let agent_path = agent_path
+                        .as_deref()
+                        .map(AgentPath::try_from)
+                        .transpose()
+                        .ok()?
+                        .or_else(|| source.get_agent_path());
+                    Some((
+                        agent_path,
+                        agent_role.or_else(|| source.get_agent_role()),
+                        agent_nickname.or_else(|| source.get_nickname()),
+                    ))
+                });
+                let (agent_path, agent_role, agent_nickname) = match indexed_identity {
+                    Some(identity) => identity,
+                    None => {
+                        let stored_thread = state
+                            .read_stored_thread(ReadThreadParams {
+                                thread_id,
+                                include_archived: true,
+                                include_history: false,
+                            })
+                            .await?;
+                        let stored_agent_path = match stored_thread
+                            .agent_path
+                            .as_deref()
+                            .map(AgentPath::try_from)
+                            .transpose()
+                        {
+                            Ok(agent_path) => agent_path,
+                            Err(err) => {
+                                stored_thread.source.get_agent_path().map(Some).ok_or_else(
+                                    || {
+                                        CodexErr::InvalidRequest(format!(
+                                            "invalid stored agent path: {err}"
+                                        ))
+                                    },
+                                )?
+                            }
+                        };
+                        (
+                            stored_agent_path.or_else(|| stored_thread.source.get_agent_path()),
+                            stored_thread
+                                .agent_role
+                                .or_else(|| stored_thread.source.get_agent_role()),
+                            stored_thread
+                                .agent_nickname
+                                .or_else(|| stored_thread.source.get_nickname()),
+                        )
+                    }
+                };
                 let mut reservation = self.state.reserve_spawn_slot(/*max_threads*/ None)?;
                 let mut metadata = self.prepare_agent_metadata(
                     &mut reservation,
                     config,
-                    stored_agent_path.or_else(|| stored_thread.source.get_agent_path()),
-                    stored_thread
-                        .agent_role
-                        .or_else(|| stored_thread.source.get_agent_role()),
-                    stored_thread
-                        .agent_nickname
-                        .or_else(|| stored_thread.source.get_nickname()),
+                    agent_path,
+                    agent_role,
+                    agent_nickname,
                 )?;
                 metadata.agent_id = Some(thread_id);
                 reservation.commit(metadata);
@@ -204,7 +285,6 @@ impl AgentControl {
             }
         }
     }
-
     /// Spawn a new agent thread and submit the initial prompt.
     #[cfg(test)]
     pub(crate) async fn spawn_agent(

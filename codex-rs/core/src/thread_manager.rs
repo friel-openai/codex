@@ -1651,6 +1651,21 @@ impl ThreadManagerState {
         self.agent_graph_store.clone()
     }
 
+    pub(crate) async fn indexed_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<codex_state::ThreadMetadata> {
+        self.thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()?
+            .state_db()
+            .await?
+            .get_thread(thread_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
         self.threads
             .read()

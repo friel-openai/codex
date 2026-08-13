@@ -57,6 +57,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout::RolloutRecorder;
+use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::CreateThreadParams;
@@ -473,6 +474,118 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId) 
         },
         Ok(_) => panic!("expected thread not to be loaded"),
     }
+}
+
+#[tokio::test]
+async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout() {
+    let harness = AgentControlHarness::new().await;
+    let (parent_thread_id, _) = harness.start_thread().await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("metadata restoration requires state db");
+    let indexed_thread_id = ThreadId::new();
+    let indexed_path = AgentPath::root()
+        .join("indexed_worker")
+        .expect("indexed agent path");
+    let source_path = AgentPath::root()
+        .join("source_worker")
+        .expect("source agent path");
+    let malformed_rollout = harness.config.codex_home.join("malformed-rollout.jsonl");
+    tokio::fs::write(&malformed_rollout, "not a rollout record\n")
+        .await
+        .expect("malformed rollout should exist");
+    let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(source_path),
+        agent_nickname: Some("source-name".to_string()),
+        agent_role: Some("source-role".to_string()),
+    });
+    let mut builder = codex_state::ThreadMetadataBuilder::new(
+        indexed_thread_id,
+        malformed_rollout.to_path_buf(),
+        chrono::Utc::now(),
+        source,
+    );
+    builder.agent_path = Some(indexed_path.to_string());
+    builder.agent_nickname = Some("indexed-name".to_string());
+    builder.agent_role = Some("indexed-role".to_string());
+    state_db
+        .upsert_thread(&builder.build("openai"))
+        .await
+        .expect("indexed metadata should persist");
+    state_db
+        .upsert_thread_spawn_edge(
+            parent_thread_id,
+            indexed_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("indexed spawn edge should persist");
+
+    let anonymous_thread_id = ThreadId::new();
+    let anonymous_rollout = harness.config.codex_home.join("anonymous-malformed.jsonl");
+    tokio::fs::write(&anonymous_rollout, "not a rollout record\n")
+        .await
+        .expect("anonymous malformed rollout should exist");
+    let anonymous_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: Some("anonymous-name".to_string()),
+        agent_role: None,
+    });
+    let anonymous_metadata = codex_state::ThreadMetadataBuilder::new(
+        anonymous_thread_id,
+        anonymous_rollout.to_path_buf(),
+        chrono::Utc::now(),
+        anonymous_source,
+    )
+    .build("openai");
+    state_db
+        .upsert_thread(&anonymous_metadata)
+        .await
+        .expect("anonymous metadata should persist");
+    state_db
+        .upsert_thread_spawn_edge(
+            parent_thread_id,
+            anonymous_thread_id,
+            DirectionalThreadSpawnEdgeStatus::Open,
+        )
+        .await
+        .expect("anonymous spawn edge should persist");
+
+    harness
+        .control
+        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
+        .await;
+
+    let indexed_metadata = harness
+        .control
+        .state
+        .agent_metadata_for_thread(indexed_thread_id)
+        .expect("indexed agent should be restored without reading its malformed rollout");
+    assert_eq!(indexed_metadata.agent_path, Some(indexed_path));
+    assert_eq!(indexed_metadata.agent_role.as_deref(), Some("indexed-role"));
+    assert_eq!(
+        indexed_metadata.agent_nickname.as_deref(),
+        Some("indexed-name")
+    );
+
+    let anonymous_metadata = harness
+        .control
+        .state
+        .agent_metadata_for_thread(anonymous_thread_id)
+        .expect("missing optional path and role should not require reading the rollout");
+    assert_eq!(anonymous_metadata.agent_path, None);
+    assert_eq!(anonymous_metadata.agent_role, None);
+    assert_eq!(
+        anonymous_metadata.agent_nickname.as_deref(),
+        Some("anonymous-name")
+    );
+    assert_thread_not_loaded(&harness.manager, indexed_thread_id).await;
+    assert_thread_not_loaded(&harness.manager, anonymous_thread_id).await;
 }
 
 #[tokio::test]
