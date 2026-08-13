@@ -10482,6 +10482,43 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
 }
 
 #[tokio::test]
+async fn build_initial_context_omits_usage_hint_for_goal_supervisor_helper() {
+    let (session, mut turn_context) =
+        make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ true).await;
+    let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id: ThreadId::new(),
+        depth: 1,
+        agent_path: Some(
+            AgentPath::try_from("/root/goal_supervisor").expect("supervisor path should parse"),
+        ),
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+    session
+        .state
+        .lock()
+        .await
+        .session_configuration
+        .session_source = session_source.clone();
+    Arc::get_mut(&mut turn_context)
+        .expect("thread settings should not be shared")
+        .session_source = session_source;
+
+    let initial_context = build_initial_context(&session, &turn_context).await;
+    let developer_messages = developer_message_texts(&initial_context);
+
+    assert!(
+        !developer_messages.iter().any(|message| {
+            matches!(
+                message.as_slice(),
+                ["Root guidance."] | ["Subagent guidance."]
+            )
+        }),
+        "goal supervisor helpers use dedicated supervisor context, not generic usage hints: {developer_messages:?}"
+    );
+}
+
+#[tokio::test]
 async fn build_initial_context_omits_multi_agent_v2_usage_hints_when_feature_disabled() {
     let (session, turn_context) =
         make_multi_agent_v2_usage_hint_test_session(/*enable_multi_agent_v2*/ false).await;

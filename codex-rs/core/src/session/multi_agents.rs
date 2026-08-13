@@ -15,6 +15,10 @@ pub(super) fn usage_hint_text<'a>(
     }
 
     let multi_agent_v2 = &turn_context.config.multi_agent_v2;
+    if crate::goal_supervisor::is_goal_supervisor_helper_source(session_source) {
+        return None;
+    }
+
     configured_usage_hint_text_for_source(multi_agent_v2, session_source)
 }
 
