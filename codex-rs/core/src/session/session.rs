@@ -71,6 +71,10 @@ pub(crate) struct Session {
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
     pub(crate) guardian_review_session: GuardianReviewSessionManager,
+    /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
+    /// terminal action. This state is scoped to the parent session and reconstructed from the
+    /// goals database after process restart.
+    pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) next_internal_sub_id: AtomicU64,
@@ -1410,6 +1414,7 @@ impl Session {
                 async_hook_results,
                 input_queue: InputQueue::new(),
                 guardian_review_session: GuardianReviewSessionManager::default(),
+                goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
                 git_enrichment_policy,
                 next_internal_sub_id: AtomicU64::new(0),
