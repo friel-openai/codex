@@ -15,9 +15,10 @@ use crate::telemetry::DbKind;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use log::LevelFilter;
 use sqlx::ConnectOptions;
-use sqlx::Connection;
 use sqlx::Error;
+use sqlx::Sqlite;
 use sqlx::SqlitePool;
+use sqlx::Transaction;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteAutoVacuum;
 use sqlx::sqlite::SqliteConnectOptions;
@@ -53,18 +54,48 @@ fn ensure_transactional_migrations(migrator: &Migrator) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn migrate_state_database_with_hook<F>(
+fn is_sqlite_writer_contention(error: &sqlx::Error) -> bool {
+    let sqlx::Error::Database(database_error) = error else {
+        return false;
+    };
+    database_error
+        .code()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6))
+}
+
+async fn begin_state_migration_transaction<F>(
+    pool: &SqlitePool,
+    mut on_contention: F,
+) -> anyhow::Result<Transaction<'static, Sqlite>>
+where
+    F: FnMut(),
+{
+    loop {
+        match pool.begin_with("BEGIN IMMEDIATE").await {
+            Ok(transaction) => return Ok(transaction),
+            Err(error) if is_sqlite_writer_contention(&error) => {
+                on_contention();
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+}
+
+async fn migrate_state_database_with_hooks<F, G>(
     pool: &SqlitePool,
     migrator: &Migrator,
     mut after_step: F,
+    on_contention: G,
 ) -> anyhow::Result<()>
 where
     F: FnMut(StateMigrationStep) -> anyhow::Result<()>,
+    G: FnMut(),
 {
     ensure_transactional_migrations(migrator)?;
 
-    let mut connection = pool.acquire().await?;
-    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+    let mut transaction = begin_state_migration_transaction(pool, on_contention).await?;
     let migration_result = async {
         repair_frodex_goal_supervisor_state_migration(&mut transaction).await?;
         after_step(StateMigrationStep::GoalSupervisorCompatibility)?;
@@ -107,7 +138,7 @@ where
 }
 
 async fn migrate_state_database(pool: &SqlitePool, migrator: &Migrator) -> anyhow::Result<()> {
-    migrate_state_database_with_hook(pool, migrator, |_| Ok(())).await
+    migrate_state_database_with_hooks(pool, migrator, |_| Ok(()), || {}).await
 }
 
 #[cfg(test)]
@@ -116,13 +147,30 @@ pub(crate) async fn migrate_state_database_with_fault(
     migrator: &Migrator,
     fault: StateMigrationStep,
 ) -> anyhow::Result<()> {
-    migrate_state_database_with_hook(pool, migrator, |completed| {
-        if completed == fault {
-            anyhow::bail!("injected state migration failure after {completed:?}");
-        }
-        Ok(())
-    })
+    migrate_state_database_with_hooks(
+        pool,
+        migrator,
+        |completed| {
+            if completed == fault {
+                anyhow::bail!("injected state migration failure after {completed:?}");
+            }
+            Ok(())
+        },
+        || {},
+    )
     .await
+}
+
+#[cfg(test)]
+pub(crate) async fn migrate_state_database_with_contention_hook<F>(
+    pool: &SqlitePool,
+    migrator: &Migrator,
+    on_contention: F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(),
+{
+    migrate_state_database_with_hooks(pool, migrator, |_| Ok(()), on_contention).await
 }
 
 #[derive(Clone, Copy)]
@@ -328,10 +376,17 @@ impl SqliteConfig {
     ) -> anyhow::Result<SqlitePool> {
         let path = spec.path(self.home());
         let started = Instant::now();
-        let pool_result = self
-            .open_read_write_pool(&path)
-            .await
-            .map_err(anyhow::Error::from);
+        let pool_result = loop {
+            match self.open_read_write_pool(&path).await {
+                Err(error)
+                    if matches!(spec.kind, DbKind::State)
+                        && is_sqlite_writer_contention(&error) =>
+                {
+                    tokio::time::sleep(Duration::from_millis(25)).await;
+                }
+                result => break result.map_err(anyhow::Error::from),
+            }
+        };
         telemetry::record_init_result(
             telemetry_override,
             spec.kind,
