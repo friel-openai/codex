@@ -2711,6 +2711,28 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
     );
 }
 
+#[test]
+fn configured_multi_agent_v2_preserves_persisted_v1_history() {
+    let thread_id = ThreadId::default();
+    let history = InitialHistory::Resumed(ResumedHistory {
+        conversation_id: thread_id,
+        history: Arc::new(vec![session_meta_item(
+            thread_id,
+            Some(MultiAgentVersion::V1),
+        )]),
+        rollout_path: None,
+    });
+
+    assert_eq!(
+        configured_or_persisted_multi_agent_version(&history, Some(MultiAgentVersion::V2)),
+        Some(MultiAgentVersion::V1)
+    );
+    assert_eq!(
+        configured_or_persisted_multi_agent_version(&history, Some(MultiAgentVersion::Disabled)),
+        Some(MultiAgentVersion::Disabled)
+    );
+}
+
 #[tokio::test]
 async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
     let codex_home = tempfile::tempdir().expect("create Codex home");
