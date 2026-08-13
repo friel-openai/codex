@@ -72,8 +72,10 @@ use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::RolloutLine;
 use codex_rollout::materialize_model_context_rollout_items_from;
 use codex_rollout::materialize_recent_rollout_lines_from;
+use codex_rollout::open_rollout_line_reader;
 use codex_rollout::state_db::StateDbHandle;
 use codex_skills_extension::HostSkillsService;
+use codex_thread_store::ForkBoundary;
 use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::FrozenRolloutSegment;
 use codex_thread_store::InMemoryThreadStore;
@@ -81,6 +83,7 @@ use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
 use codex_thread_store::MoveThreadToSectionParams;
+use codex_thread_store::PrepareForkParams;
 use codex_thread_store::PreparedFork;
 use codex_thread_store::ReadThreadByRolloutPathParams;
 use codex_thread_store::ReadThreadParams;
@@ -207,6 +210,66 @@ pub(crate) fn full_history_from_frozen_segment(frozen: FrozenRolloutSegment) -> 
         RolloutItem::SessionMeta(frozen.source_session_meta),
         RolloutItem::RolloutReference(frozen.reference),
     ])
+}
+
+/// Returns an error when a frozen paginated segment needs SQLite lineage resolution.
+///
+/// A paginated segment without `history_base` or `RolloutReference` is self-contained and keeps
+/// the pre-SQLite snapshot behavior. A segment with either pointer must fail closed when SQLite is
+/// unavailable because snapshot materialization cannot prove that it retained every ancestor.
+async fn require_self_contained_paginated_segment(
+    frozen: &FrozenRolloutSegment,
+) -> CodexResult<()> {
+    if frozen.source_session_meta.meta.history_base.is_some() {
+        return Err(CodexErr::Fatal(
+            "paginated fork source has history_base ancestry but no state database is available"
+                .to_string(),
+        ));
+    }
+    let mut reader = open_rollout_line_reader(frozen.reference.rollout_path.as_path())
+        .await
+        .map_err(|error| {
+            CodexErr::Fatal(format!(
+                "failed to inspect paginated fork source {}: {error}",
+                frozen.reference.rollout_path.display()
+            ))
+        })?;
+    while let Some(line) = reader.next_line().await.map_err(|error| {
+        CodexErr::Fatal(format!(
+            "failed to inspect paginated fork source {}: {error}",
+            frozen.reference.rollout_path.display()
+        ))
+    })? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line: RolloutLine = serde_json::from_str(&line).map_err(|error| {
+            CodexErr::Fatal(format!(
+                "failed to inspect paginated fork source {}: {error}",
+                frozen.reference.rollout_path.display()
+            ))
+        })?;
+        if matches!(&line.item, RolloutItem::RolloutReference(_))
+            || matches!(&line.item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some())
+        {
+            return Err(CodexErr::Fatal(
+                "paginated fork source has unresolved ancestry but no state database is available"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Keeps the source alive until a FullHistory child has durably persisted its inherited prefix.
+#[derive(Debug)]
+pub(crate) enum FullHistorySourceReservation {
+    /// A legacy source persisted through one immutable reference.
+    Referenced {
+        _reservation: ThreadLifecycleReservation,
+    },
+    /// A paginated source prepared under one selected-rollout reservation.
+    Prepared { _prepared: PreparedFork },
 }
 
 /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
@@ -970,11 +1033,13 @@ impl ThreadManager {
         let inherited_multi_agent_version = fork_source
             .multi_agent_version()
             .unwrap_or(MultiAgentVersion::V1);
+        let source_history_mode = fork_source.config_snapshot().await.history_mode;
         let (initial_history, _response_history, source_reservation) = self
             .state
             .reference_backed_snapshot_history(
                 forked_from_thread_id,
                 options.config.codex_home.as_path(),
+                source_history_mode,
                 ForkSnapshot::Interrupted,
                 InterruptedTurnHistoryMarker::from_config_and_version(
                     &options.config,
@@ -1315,9 +1380,23 @@ impl ThreadManager {
         } else {
             InitialHistory::Forked(prepared_response_history)
         };
-        let mut history = full_history_from_frozen_segment(prepared.frozen_segment.clone());
         let synthesized_suffix = &snapshot_response_history.get_rollout_items()[prepared_items..];
-        if !synthesized_suffix.is_empty()
+        let mut history = if let Some(copied_history) = &prepared.copied_history {
+            let copied_history = Arc::unwrap_or_clone(Arc::clone(copied_history));
+            if prepared.interrupt_if_open {
+                fork_history_from_snapshot(
+                    ForkSnapshot::Interrupted,
+                    InitialHistory::Forked(copied_history),
+                    interrupted_marker,
+                )
+            } else {
+                InitialHistory::Forked(copied_history)
+            }
+        } else {
+            full_history_from_frozen_segment(prepared.frozen_segment.clone())
+        };
+        if prepared.copied_history.is_none()
+            && !synthesized_suffix.is_empty()
             && let InitialHistory::Forked(history_items) = &mut history
         {
             history_items.extend_from_slice(synthesized_suffix);
@@ -1444,6 +1523,14 @@ impl ThreadManager {
                     .reference_backed_snapshot_history(
                         source_thread_id,
                         config.codex_home.as_path(),
+                        history
+                            .get_rollout_items()
+                            .iter()
+                            .find_map(|item| match item {
+                                RolloutItem::SessionMeta(meta) => Some(meta.meta.history_mode),
+                                _ => None,
+                            })
+                            .unwrap_or_default(),
                         snapshot,
                         interrupted_marker,
                         expected_source_items,
@@ -1621,11 +1708,109 @@ impl ThreadManagerState {
         &self,
         source_thread_id: ThreadId,
         codex_home: &std::path::Path,
-    ) -> CodexResult<(InitialHistory, Vec<RolloutItem>, ThreadLifecycleReservation)> {
+    ) -> CodexResult<(
+        InitialHistory,
+        Vec<RolloutItem>,
+        FullHistorySourceReservation,
+    )> {
+        let history_mode = self
+            .get_thread(source_thread_id)
+            .await?
+            .config_snapshot()
+            .await
+            .history_mode;
+        if matches!(history_mode, ThreadHistoryMode::Paginated) {
+            let local_store = self
+                .thread_store
+                .as_any()
+                .downcast_ref::<LocalThreadStore>()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(
+                        "reference-backed history requires a local thread store".to_string(),
+                    )
+                })?;
+            if local_store.state_db().await.is_none() {
+                let (frozen, reservation) = self
+                    .snapshot_rollout_segment(source_thread_id, /*expected_rollout_id*/ None)
+                    .await?;
+                require_self_contained_paginated_segment(&frozen).await?;
+                let reference_history = full_history_from_frozen_segment(frozen);
+                let logical_history = materialize_recent_rollout_lines_from(
+                    codex_home,
+                    reference_history
+                        .get_rollout_items()
+                        .iter()
+                        .cloned()
+                        .map(|item| RolloutLine {
+                            timestamp: String::new(),
+                            ordinal: None,
+                            item,
+                        })
+                        .collect(),
+                )
+                .await?
+                .into_iter()
+                .map(|line| line.item)
+                .collect();
+                return Ok((
+                    reference_history,
+                    logical_history,
+                    FullHistorySourceReservation::Referenced {
+                        _reservation: reservation,
+                    },
+                ));
+            }
+            let prepared = local_store
+                .prepare_fork(PrepareForkParams {
+                    thread_id: source_thread_id,
+                    boundary: ForkBoundary::Latest,
+                })
+                .await
+                .map_err(|err| {
+                    CodexErr::Fatal(format!(
+                        "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
+                    ))
+                })?;
+            if let Some(copied_history) = &prepared.copied_history {
+                let logical_history = copied_history.as_ref().clone();
+                return Ok((
+                    InitialHistory::Forked(logical_history.clone()),
+                    logical_history,
+                    FullHistorySourceReservation::Prepared {
+                        _prepared: prepared,
+                    },
+                ));
+            }
+            let reference_history =
+                full_history_from_frozen_segment(prepared.frozen_segment.clone());
+            let logical_history = materialize_recent_rollout_lines_from(
+                codex_home,
+                reference_history
+                    .get_rollout_items()
+                    .iter()
+                    .cloned()
+                    .map(|item| RolloutLine {
+                        timestamp: String::new(),
+                        ordinal: None,
+                        item,
+                    })
+                    .collect(),
+            )
+            .await?
+            .into_iter()
+            .map(|line| line.item)
+            .collect();
+            return Ok((
+                reference_history,
+                logical_history,
+                FullHistorySourceReservation::Prepared {
+                    _prepared: prepared,
+                },
+            ));
+        }
         let (frozen, reservation) = self
             .snapshot_rollout_segment(source_thread_id, /*expected_rollout_id*/ None)
             .await?;
-        let history_mode = frozen.source_session_meta.meta.history_mode;
         let reference_history = full_history_from_frozen_segment(frozen);
         let lines = reference_history
             .get_rollout_items()
@@ -1637,25 +1822,22 @@ impl ThreadManagerState {
                 item,
             })
             .collect();
-        let logical_history = match history_mode {
-            ThreadHistoryMode::Legacy => {
-                materialize_model_context_rollout_items_from(codex_home, lines).await?
-            }
-            ThreadHistoryMode::Paginated => {
-                materialize_recent_rollout_lines_from(codex_home, lines)
-                    .await?
-                    .into_iter()
-                    .map(|line| line.item)
-                    .collect()
-            }
-        };
-        Ok((reference_history, logical_history, reservation))
+        let logical_history =
+            materialize_model_context_rollout_items_from(codex_home, lines).await?;
+        Ok((
+            reference_history,
+            logical_history,
+            FullHistorySourceReservation::Referenced {
+                _reservation: reservation,
+            },
+        ))
     }
 
     async fn reference_backed_snapshot_history(
         &self,
         source_thread_id: ThreadId,
         codex_home: &std::path::Path,
+        source_history_mode: ThreadHistoryMode,
         snapshot: ForkSnapshot,
         interrupted_marker: InterruptedTurnHistoryMarker,
         expected_source_items: Option<Vec<RolloutItem>>,
@@ -1663,28 +1845,105 @@ impl ThreadManagerState {
     ) -> CodexResult<(
         InitialHistory,
         Arc<Vec<RolloutItem>>,
-        ThreadLifecycleReservation,
+        FullHistorySourceReservation,
     )> {
-        let (frozen, reservation) = self
-            .snapshot_rollout_segment(source_thread_id, expected_source_rollout_id)
-            .await?;
-        let source_items = materialize_recent_rollout_lines_from(
-            codex_home,
-            full_history_from_frozen_segment(frozen.clone())
-                .get_rollout_items()
-                .iter()
-                .cloned()
-                .map(|item| RolloutLine {
-                    timestamp: String::new(),
-                    ordinal: None,
-                    item,
-                })
-                .collect(),
-        )
-        .await?
-        .into_iter()
-        .map(|line| line.item)
-        .collect::<Vec<_>>();
+        let (frozen, source_items, reservation) = match source_history_mode {
+            ThreadHistoryMode::Paginated => {
+                let local_store = self
+                    .thread_store
+                    .as_any()
+                    .downcast_ref::<LocalThreadStore>()
+                    .ok_or_else(|| {
+                        CodexErr::InvalidRequest(
+                            "reference-backed history requires a local thread store".to_string(),
+                        )
+                    })?;
+                if local_store.state_db().await.is_none() {
+                    let (frozen, reservation) = self
+                        .snapshot_rollout_segment(source_thread_id, expected_source_rollout_id)
+                        .await?;
+                    require_self_contained_paginated_segment(&frozen).await?;
+                    let source_items = materialize_recent_rollout_lines_from(
+                        codex_home,
+                        full_history_from_frozen_segment(frozen.clone())
+                            .get_rollout_items()
+                            .iter()
+                            .cloned()
+                            .map(|item| RolloutLine {
+                                timestamp: String::new(),
+                                ordinal: None,
+                                item,
+                            })
+                            .collect(),
+                    )
+                    .await?
+                    .into_iter()
+                    .map(|line| line.item)
+                    .collect::<Vec<_>>();
+                    (
+                        frozen,
+                        source_items,
+                        FullHistorySourceReservation::Referenced {
+                            _reservation: reservation,
+                        },
+                    )
+                } else {
+                    let params = PrepareForkParams {
+                        thread_id: source_thread_id,
+                        boundary: ForkBoundary::Latest,
+                    };
+                    let prepared = match expected_source_rollout_id {
+                        Some(expected_rollout_id) => {
+                            local_store
+                                .prepare_fork_for_rollout(params, expected_rollout_id)
+                                .await
+                        }
+                        None => local_store.prepare_fork(params).await,
+                    }
+                    .map_err(|err| {
+                        CodexErr::Fatal(format!(
+                            "failed to prepare paginated fork source {source_thread_id}: {err}"
+                        ))
+                    })?;
+                    (
+                        prepared.frozen_segment.clone(),
+                        prepared.response_history.as_ref().clone(),
+                        FullHistorySourceReservation::Prepared {
+                            _prepared: prepared,
+                        },
+                    )
+                }
+            }
+            ThreadHistoryMode::Legacy => {
+                let (frozen, reservation) = self
+                    .snapshot_rollout_segment(source_thread_id, expected_source_rollout_id)
+                    .await?;
+                let source_items = materialize_recent_rollout_lines_from(
+                    codex_home,
+                    full_history_from_frozen_segment(frozen.clone())
+                        .get_rollout_items()
+                        .iter()
+                        .cloned()
+                        .map(|item| RolloutLine {
+                            timestamp: String::new(),
+                            ordinal: None,
+                            item,
+                        })
+                        .collect(),
+                )
+                .await?
+                .into_iter()
+                .map(|line| line.item)
+                .collect::<Vec<_>>();
+                (
+                    frozen,
+                    source_items,
+                    FullHistorySourceReservation::Referenced {
+                        _reservation: reservation,
+                    },
+                )
+            }
+        };
         if let Some(expected_source_items) = expected_source_items {
             let without_session_meta = |items: &[RolloutItem]| {
                 items
@@ -1709,6 +1968,15 @@ impl ThreadManagerState {
         let expected_history =
             fork_history_from_snapshot(snapshot, source_history, interrupted_marker);
         let expected_items = expected_history.get_rollout_items().to_vec();
+        if let FullHistorySourceReservation::Prepared { _prepared } = &reservation
+            && _prepared.copied_history.is_some()
+        {
+            return Ok((
+                InitialHistory::Forked(expected_items.clone()),
+                Arc::new(expected_items),
+                reservation,
+            ));
+        }
         let nth_user_message = truncation::user_message_positions_in_rollout(&expected_items).len();
 
         let mut reference = frozen.reference;

@@ -121,6 +121,59 @@ async fn resolves_archived_ancestors() {
 }
 
 #[tokio::test]
+async fn nested_reference_filters_compose_oldest_first() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let oldest = ThreadId::new();
+    let middle = ThreadId::new();
+    let root = ThreadId::new();
+    let oldest_path = write_rollout(
+        home.path(),
+        oldest,
+        /*history_base*/ None,
+        /*next_ordinal*/ 3,
+    );
+    let middle_path = write_referenced_rollout(
+        home.path(),
+        middle,
+        oldest,
+        oldest_path,
+        /*reference_ordinal*/ 3,
+        /*next_ordinal*/ 5,
+    );
+    set_leading_reference_filters(
+        middle_path.as_path(),
+        vec!["inner-b".to_string(), "outer-a".to_string()],
+    );
+    let root_path = write_referenced_rollout(
+        home.path(),
+        root,
+        middle,
+        middle_path,
+        /*reference_ordinal*/ 6,
+        /*next_ordinal*/ 8,
+    );
+    set_leading_reference_filters(root_path.as_path(), vec!["outer-a".to_string()]);
+
+    let lineage = store
+        .resolve_rollout_lineage(root)
+        .await
+        .expect("resolve filtered nested lineage");
+    assert_eq!(
+        lineage
+            .segments
+            .iter()
+            .map(|segment| (segment.thread_id, segment.filter_texts.clone()))
+            .collect::<Vec<_>>(),
+        vec![
+            (oldest, vec!["outer-a".to_string(), "inner-b".to_string()]),
+            (middle, vec!["outer-a".to_string()]),
+            (root, Vec::new()),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn resolves_lineage_at_explicit_history_position() {
     let home = TempDir::new().expect("temp dir");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -372,9 +425,14 @@ async fn history_base_cutoff_survives_parent_rotation() {
         parent,
         /*end_ordinal_exclusive*/ 4,
     );
-    let immutable_path = home
+    let immutable_directory = home
         .path()
-        .join(parent_path.file_name().expect("parent rollout file name"));
+        .join("rotated_rollout_segments")
+        .join(parent.to_string())
+        .join("initial");
+    fs::create_dir_all(&immutable_directory).expect("create immutable parent directory");
+    let immutable_path =
+        immutable_directory.join(parent_path.file_name().expect("parent rollout file name"));
     fs::copy(parent_path.as_path(), immutable_path.as_path()).expect("copy immutable parent");
     write_referenced_rollout_at(
         parent_path.as_path(),
@@ -647,6 +705,8 @@ async fn resolves_512_same_thread_lineage_segments() {
     let paths = (0..SEGMENT_COUNT)
         .map(|index| {
             home.path()
+                .join("rotated_rollout_segments")
+                .join(thread_id.to_string())
                 .join(format!("lineage-segment-{index}"))
                 .join(format!("rollout-2026-07-16T00-00-00-{thread_id}.jsonl"))
         })
@@ -711,6 +771,8 @@ async fn resolves_512_same_thread_lineage_segments() {
 
     let overflow_path = home
         .path()
+        .join("rotated_rollout_segments")
+        .join(thread_id.to_string())
         .join("lineage-segment-overflow")
         .join(format!("rollout-2026-07-16T00-00-00-{thread_id}.jsonl"));
     let overflow_ordinal = u64::try_from(SEGMENT_COUNT).expect("fixture ordinal") * 3;
@@ -890,6 +952,36 @@ fn write_referenced_rollout_at(
         ));
     }
     fs::write(path, format!("{}\n", lines.join("\n"))).expect("write rollout");
+}
+
+fn set_leading_reference_filters(path: &Path, filter_texts: Vec<String>) {
+    let mut lines = fs::read_to_string(path)
+        .expect("read referenced rollout")
+        .lines()
+        .map(serde_json::from_str::<RolloutLine>)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse referenced rollout");
+    let reference = lines
+        .iter_mut()
+        .find_map(|line| match &mut line.item {
+            RolloutItem::RolloutReference(reference) => Some(reference),
+            _ => None,
+        })
+        .expect("leading reference");
+    reference.compacted_replacement_history_filter_texts = Some(filter_texts);
+    fs::write(
+        path,
+        format!(
+            "{}\n",
+            lines
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()
+                .expect("serialize referenced rollout")
+                .join("\n")
+        ),
+    )
+    .expect("rewrite referenced rollout");
 }
 
 fn rollout_line(ordinal: u64, item: RolloutItem) -> String {

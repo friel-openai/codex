@@ -36,6 +36,7 @@ use super::ExpansionState;
 use super::MAX_REQUEST_CACHE_BYTES;
 use super::MAX_ROLLOUT_REFERENCE_DEPTH;
 use super::MaterializationPolicy;
+use super::compose_compacted_replacement_history_filter_texts;
 use super::expand_lines;
 use super::materialize_bounded_rollout_lines;
 use super::materialize_model_context_rollout_items_from;
@@ -45,6 +46,7 @@ use super::resolve_rollout_reference_path;
 use crate::ARCHIVED_SESSIONS_SUBDIR;
 use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use crate::ResponseItemEnvelope;
+use crate::SESSIONS_SUBDIR;
 
 fn meta_line(thread_id: ThreadId, segment_id: SegmentId, ordinal: u64) -> RolloutLine {
     meta_line_with_segment(thread_id, Some(segment_id), ordinal)
@@ -197,6 +199,50 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
     }
 }
 
+fn developer_line(message: &str, ordinal: u64) -> RolloutLine {
+    RolloutLine {
+        timestamp: "2026-07-13T00:00:01Z".to_string(),
+        ordinal: Some(ordinal),
+        item: RolloutItem::ResponseItem(
+            ResponseItem::Message {
+                id: None,
+                role: "developer".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: message.to_string(),
+                }],
+                phase: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+    }
+}
+
+fn compacted_developer_lines(messages: &[&str], ordinal: u64) -> RolloutLine {
+    let mut line = compacted_line("checkpoint", ordinal);
+    let RolloutItem::Compacted(compacted) = &mut line.item else {
+        unreachable!("compacted fixture");
+    };
+    compacted.replacement_history = Some(
+        messages
+            .iter()
+            .map(|message| {
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: (*message).to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into()
+            })
+            .collect(),
+    );
+    line
+}
+
 fn reference_line(
     path: PathBuf,
     thread_id: ThreadId,
@@ -308,6 +354,26 @@ fn rollout_file_name(timestamp: &str, thread_id: ThreadId) -> String {
     format!("rollout-{timestamp}-{thread_id}.jsonl")
 }
 
+fn immutable_segment_path(
+    codex_home: &Path,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+    timestamp: &str,
+) -> PathBuf {
+    codex_home
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string())
+        .join(rollout_file_name(timestamp, thread_id))
+}
+
+fn active_rollout_path(codex_home: &Path, thread_id: ThreadId, timestamp: &str) -> PathBuf {
+    codex_home
+        .join(SESSIONS_SUBDIR)
+        .join("2026/07/13")
+        .join(rollout_file_name(timestamp, thread_id))
+}
+
 fn event_messages(lines: &[RolloutLine]) -> Vec<&str> {
     lines
         .iter()
@@ -316,6 +382,139 @@ fn event_messages(lines: &[RolloutLine]) -> Vec<&str> {
             _ => None,
         })
         .collect()
+}
+
+fn developer_texts(lines: &[RolloutLine]) -> Vec<&str> {
+    lines
+        .iter()
+        .flat_map(|line| match &line.item {
+            RolloutItem::ResponseItem(item) => developer_text(&item.item).into_iter().collect(),
+            RolloutItem::Compacted(compacted) => compacted
+                .replacement_history
+                .iter()
+                .flatten()
+                .filter_map(|item| developer_text(&item.item))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+fn developer_text(item: &ResponseItem) -> Option<&str> {
+    let ResponseItem::Message { role, content, .. } = item else {
+        return None;
+    };
+    let [ContentItem::InputText { text }] = content.as_slice() else {
+        return None;
+    };
+    (role == "developer").then_some(text.as_str())
+}
+
+#[test]
+fn composes_nested_filter_texts_in_stable_order() {
+    let inherited = vec![
+        "outer-a".to_string(),
+        "shared".to_string(),
+        "outer-a".to_string(),
+    ];
+    let local = vec!["inner-b".to_string(), "shared".to_string()];
+    assert_eq!(
+        compose_compacted_replacement_history_filter_texts(
+            Some(inherited.as_slice()),
+            Some(local.as_slice()),
+        ),
+        Some(vec![
+            "outer-a".to_string(),
+            "shared".to_string(),
+            "inner-b".to_string(),
+        ])
+    );
+    assert_eq!(
+        compose_compacted_replacement_history_filter_texts(None, None),
+        None
+    );
+    assert_eq!(
+        compose_compacted_replacement_history_filter_texts(Some(&[]), None),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        compose_compacted_replacement_history_filter_texts(None, Some(&[])),
+        Some(Vec::new())
+    );
+}
+
+#[tokio::test]
+async fn nested_reference_filters_compose_for_direct_and_compacted_messages() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let oldest_segment = SegmentId::new();
+    let middle_segment = SegmentId::new();
+    let root_segment = SegmentId::new();
+    let segment_path = |segment_id: SegmentId, timestamp: &str| {
+        home.path()
+            .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            .join(thread_id.to_string())
+            .join(segment_id.to_string())
+            .join(rollout_file_name(timestamp, thread_id))
+    };
+    let oldest_path = segment_path(oldest_segment, "2026-07-13T00-00-00");
+    let middle_path = segment_path(middle_segment, "2026-07-13T00-01-00");
+    let root_path = home
+        .path()
+        .join("sessions/2026/07/13")
+        .join(rollout_file_name("2026-07-13T00-02-00", thread_id));
+
+    write_rollout(
+        oldest_path.as_path(),
+        &[
+            meta_line(thread_id, oldest_segment, 0),
+            developer_line("A", 1),
+            developer_line("B", 2),
+            developer_line("C", 3),
+            compacted_developer_lines(&["A", "B", "C"], 4),
+        ],
+    )?;
+    let mut inner_reference =
+        reference_line(oldest_path, thread_id, oldest_segment, /*ordinal*/ 6);
+    let RolloutItem::RolloutReference(inner) = &mut inner_reference.item else {
+        unreachable!("reference fixture");
+    };
+    inner.compacted_replacement_history_filter_texts = Some(vec!["B".to_string(), "A".to_string()]);
+    write_rollout(
+        middle_path.as_path(),
+        &[
+            meta_line(thread_id, middle_segment, 5),
+            inner_reference,
+            developer_line("A", 7),
+            developer_line("B", 8),
+            developer_line("C", 9),
+            compacted_developer_lines(&["A", "B", "C"], 10),
+        ],
+    )?;
+    let mut outer_reference =
+        reference_line(middle_path, thread_id, middle_segment, /*ordinal*/ 12);
+    let RolloutItem::RolloutReference(outer) = &mut outer_reference.item else {
+        unreachable!("reference fixture");
+    };
+    outer.compacted_replacement_history_filter_texts = Some(vec!["A".to_string()]);
+    write_rollout(
+        root_path.as_path(),
+        &[
+            meta_line(thread_id, root_segment, 11),
+            outer_reference,
+            developer_line("A", 13),
+            developer_line("B", 14),
+            developer_line("C", 15),
+            compacted_developer_lines(&["A", "B", "C"], 16),
+        ],
+    )?;
+
+    let lines = materialize_rollout_lines(home.path(), root_path.as_path()).await?;
+    let texts = developer_texts(lines.as_slice());
+    assert_eq!(texts.iter().filter(|text| **text == "A").count(), 2);
+    assert_eq!(texts.iter().filter(|text| **text == "B").count(), 4);
+    assert_eq!(texts.iter().filter(|text| **text == "C").count(), 6);
+    Ok(())
 }
 
 #[tokio::test]
@@ -1037,7 +1236,7 @@ async fn bounded_materializer_does_not_cache_unfrozen_rollout_files() -> io::Res
     let thread_id = ThreadId::new();
     let referenced_segment = SegmentId::new();
     let root_segment = SegmentId::new();
-    let referenced_path = home.path().join("unfrozen.jsonl");
+    let referenced_path = active_rollout_path(home.path(), thread_id, "2026-07-13T00-00-00");
     let root_path = home.path().join("root.jsonl");
 
     write_rollout(
@@ -1077,7 +1276,12 @@ async fn nth_user_message_excludes_corresponding_turn_started_and_suffix() -> io
     let home = TempDir::new()?;
     let source_thread = ThreadId::new();
     let source_segment = SegmentId::new();
-    let source_path = home.path().join("source.jsonl");
+    let source_path = immutable_segment_path(
+        home.path(),
+        source_thread,
+        source_segment,
+        "2026-07-13T00-00-00",
+    );
     write_rollout(
         source_path.as_path(),
         &[
@@ -1155,7 +1359,12 @@ async fn nth_user_message_uses_real_turn_events_instead_of_contextual_user_items
     let home = TempDir::new()?;
     let source_thread = ThreadId::new();
     let source_segment = SegmentId::new();
-    let source_path = home.path().join("source.jsonl");
+    let source_path = immutable_segment_path(
+        home.path(),
+        source_thread,
+        source_segment,
+        "2026-07-13T00-00-00",
+    );
     write_rollout(
         source_path.as_path(),
         &[
@@ -1278,7 +1487,12 @@ async fn materialization_accepts_legacy_turn_context_file_uri_cwd() -> io::Resul
     let home = TempDir::new()?;
     let source_thread = ThreadId::new();
     let source_segment = SegmentId::new();
-    let source_path = home.path().join("source.jsonl");
+    let source_path = immutable_segment_path(
+        home.path(),
+        source_thread,
+        source_segment,
+        "2026-07-13T00-00-00",
+    );
     let source_meta = serde_json::to_string(&meta_line(
         source_thread,
         source_segment,
@@ -1301,6 +1515,7 @@ async fn materialization_accepts_legacy_turn_context_file_uri_cwd() -> io::Resul
             "summary": "auto"
         }
     });
+    fs::create_dir_all(source_path.parent().expect("immutable segment directory"))?;
     fs::write(
         source_path.as_path(),
         format!("{source_meta}\n{legacy_turn_context}\n"),
@@ -1343,7 +1558,12 @@ async fn materialization_skips_torn_ordinary_records_in_active_legacy_root() -> 
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
     let source_segment = SegmentId::new();
-    let source_path = home.path().join("immutable.jsonl");
+    let source_path = immutable_segment_path(
+        home.path(),
+        thread_id,
+        source_segment,
+        "2026-07-13T00-00-00",
+    );
     write_rollout(
         source_path.as_path(),
         &[
@@ -1517,6 +1737,251 @@ async fn resolver_rejects_missing_and_mismatched_segments() -> io::Result<()> {
 }
 
 #[tokio::test]
+async fn resolver_rejects_matching_recorded_path_outside_codex_home() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let outside = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let outside_path = outside
+        .path()
+        .join(rollout_file_name("2026-07-13T00-00-00", thread_id));
+    write_rollout(
+        outside_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: outside_path,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference)
+            .await
+            .expect_err("an out-of-home path must not be opened")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_ignores_old_home_path_and_finds_current_home_identity() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let old_home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let file_name = rollout_file_name("2026-07-13T00-00-00", thread_id);
+    let old_path = old_home.path().join(file_name.as_str());
+    write_rollout(
+        old_path.as_path(),
+        &[
+            meta_line(thread_id, segment_id, /*ordinal*/ 0),
+            agent_line("old home", /*ordinal*/ 1),
+        ],
+    )?;
+    let current_path = home
+        .path()
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string())
+        .join(file_name);
+    write_rollout(
+        current_path.as_path(),
+        &[
+            meta_line(thread_id, segment_id, /*ordinal*/ 0),
+            agent_line("current home", /*ordinal*/ 1),
+        ],
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: old_path,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference).await?,
+        fs::canonicalize(current_path)?
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolver_finds_moved_identity_through_symlinked_codex_home() -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let real_home = TempDir::new()?;
+    let home_link_parent = TempDir::new()?;
+    let old_home = TempDir::new()?;
+    let codex_home = home_link_parent.path().join("codex-home");
+    symlink(real_home.path(), codex_home.as_path())?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let file_name = rollout_file_name("2026-07-13T00-00-00", thread_id);
+    let old_path = old_home.path().join(file_name.as_str());
+    write_rollout(
+        old_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let current_path = real_home
+        .path()
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string())
+        .join(file_name);
+    write_rollout(
+        current_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: old_path,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(codex_home.as_path(), &reference).await?,
+        fs::canonicalize(current_path)?,
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolver_rejects_file_symlink_that_escapes_codex_home() -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new()?;
+    let outside = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let outside_path = outside.path().join("outside.jsonl");
+    write_rollout(
+        outside_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let symlink_path = home
+        .path()
+        .join("sessions/2026/07/13")
+        .join(rollout_file_name("2026-07-13T00-00-00", thread_id));
+    fs::create_dir_all(symlink_path.parent().expect("sessions directory"))?;
+    symlink(outside_path, symlink_path.as_path())?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: symlink_path,
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference)
+            .await
+            .expect_err("an escaping file symlink must not be opened")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn resolver_rejects_segment_directory_symlink_that_escapes_codex_home() -> io::Result<()> {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new()?;
+    let outside = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let outside_path = outside
+        .path()
+        .join(rollout_file_name("2026-07-13T00-00-00", thread_id));
+    write_rollout(
+        outside_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let segment_directory = home
+        .path()
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string());
+    fs::create_dir_all(segment_directory.parent().expect("thread directory"))?;
+    symlink(outside.path(), segment_directory.as_path())?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: home.path().join("sessions/missing.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference)
+            .await
+            .expect_err("an escaping segment directory must not be enumerated")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolver_rejects_timestamp_path_traversal() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let outside = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let outside_path = outside
+        .path()
+        .join(rollout_file_name("2026-07-13T00-00-00", thread_id));
+    write_rollout(
+        outside_path.as_path(),
+        &[meta_line(thread_id, segment_id, /*ordinal*/ 0)],
+    )?;
+    let reference = RolloutReferenceItem {
+        rollout_id: None,
+        rollout_path: home.path().join("sessions/missing.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: Some("../../../../../../outside".to_string()),
+        segment_id: Some(segment_id),
+        max_depth: 2,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    };
+
+    assert_eq!(
+        resolve_rollout_reference_path(home.path(), &reference)
+            .await
+            .expect_err("timestamp components must not escape approved roots")
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolver_requires_the_referenced_physical_rollout_id() -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
@@ -1608,7 +2073,7 @@ async fn resolver_uses_validated_rotated_compressed_segment() -> io::Result<()> 
 async fn legacy_reference_accepts_matching_recorded_path() -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_id = ThreadId::new();
-    let recorded_path = home.path().join("legacy.jsonl");
+    let recorded_path = active_rollout_path(home.path(), thread_id, "2026-07-13T00-00-00");
     write_rollout(
         recorded_path.as_path(),
         &[
@@ -1768,8 +2233,8 @@ async fn materialization_rejects_reference_cycles() -> io::Result<()> {
     let segment_a = SegmentId::new();
     let thread_b = ThreadId::new();
     let segment_b = SegmentId::new();
-    let path_a = home.path().join("a.jsonl");
-    let path_b = home.path().join("b.jsonl");
+    let path_a = immutable_segment_path(home.path(), thread_a, segment_a, "2026-07-13T00-00-00");
+    let path_b = immutable_segment_path(home.path(), thread_b, segment_b, "2026-07-13T00-01-00");
     write_rollout(
         path_a.as_path(),
         &[
@@ -1798,8 +2263,8 @@ async fn materialization_rejects_legacy_reference_cycles() -> io::Result<()> {
     let home = TempDir::new()?;
     let thread_a = ThreadId::new();
     let thread_b = ThreadId::new();
-    let path_a = home.path().join("legacy-a.jsonl");
-    let path_b = home.path().join("legacy-b.jsonl");
+    let path_a = active_rollout_path(home.path(), thread_a, "2026-07-13T00-00-00");
+    let path_b = active_rollout_path(home.path(), thread_b, "2026-07-13T00-01-00");
     write_rollout(
         path_a.as_path(),
         &[
@@ -1869,14 +2334,31 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
     let fork_thread = ThreadId::new();
     let fork_segment = SegmentId::new();
 
-    let deepest_path = home.path().join("deepest.jsonl");
-    let old_path = home.path().join("old.jsonl");
-    let middle_path = home.path().join("middle.jsonl");
-    let current_path = home.path().join("current.jsonl");
+    let deepest_path = immutable_segment_path(
+        home.path(),
+        thread_id,
+        deepest_segment,
+        "2026-07-13T00-00-00",
+    );
+    let old_path =
+        immutable_segment_path(home.path(), thread_id, old_segment, "2026-07-13T00-01-00");
+    let middle_path = immutable_segment_path(
+        home.path(),
+        thread_id,
+        middle_segment,
+        "2026-07-13T00-02-00",
+    );
+    let current_path = immutable_segment_path(
+        home.path(),
+        thread_id,
+        current_segment,
+        "2026-07-13T00-03-00",
+    );
     let fork_path = home.path().join("fork.jsonl");
 
     let deepest_meta =
         serde_json::to_string(&meta_line(thread_id, deepest_segment, /*ordinal*/ 0))?;
+    fs::create_dir_all(deepest_path.parent().expect("immutable segment directory"))?;
     fs::write(
         deepest_path.as_path(),
         format!("{deepest_meta}\n{{malformed rollout line\n"),
@@ -1996,7 +2478,14 @@ async fn materialization_accepts_reference_chain_longer_than_legacy_limit() -> i
     let paths = identities
         .iter()
         .enumerate()
-        .map(|(index, _)| home.path().join(format!("segment-{index}.jsonl")))
+        .map(|(index, (thread_id, segment_id))| {
+            immutable_segment_path(
+                home.path(),
+                *thread_id,
+                *segment_id,
+                format!("2026-07-13T00-{index:02}-00").as_str(),
+            )
+        })
         .collect::<Vec<_>>();
     for index in 0..identities.len() {
         let (thread_id, segment_id) = identities[index];
@@ -2027,7 +2516,14 @@ async fn materialization_accepts_512_same_thread_segments() -> io::Result<()> {
         .map(|_| SegmentId::new())
         .collect::<Vec<_>>();
     let paths = (0..SEGMENT_COUNT)
-        .map(|index| home.path().join(format!("same-thread-{index}.jsonl")))
+        .map(|index| {
+            immutable_segment_path(
+                home.path(),
+                thread_id,
+                segment_ids[index],
+                "2026-07-13T00-00-00",
+            )
+        })
         .collect::<Vec<_>>();
 
     for index in 0..SEGMENT_COUNT {

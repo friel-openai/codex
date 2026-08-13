@@ -245,6 +245,19 @@ impl RolloutLineage {
         self.segments.as_slice()
     }
 
+    /// Returns whether any segment depends on upstream `SessionMeta.history_base` ancestry.
+    pub(super) async fn requires_copied_history(&self) -> ThreadStoreResult<bool> {
+        for segment in &self.segments {
+            let meta = codex_rollout::read_session_meta_line(segment.rollout_path.as_path())
+                .await
+                .map_err(lineage_io_error)?;
+            if meta.meta.history_base.is_some() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub(super) fn segment_index_for_ordinal(&self, ordinal: u64) -> Option<usize> {
         self.segments
             .iter()
@@ -455,9 +468,13 @@ async fn resolve_path_iteratively(
                     "rollout reference precedes its session metadata",
                 )
             })?;
-            let next_filter_texts = inherited_filter_texts
-                .clone()
-                .or(reference.compacted_replacement_history_filter_texts);
+            let next_filter_texts =
+                codex_rollout::compose_compacted_replacement_history_filter_texts(
+                    inherited_filter_texts.as_deref(),
+                    reference
+                        .compacted_replacement_history_filter_texts
+                        .as_deref(),
+                );
             pending_segments.push(PendingLineageSegment {
                 thread_id: expected_thread_id,
                 rollout_id: expected_rollout_id,
