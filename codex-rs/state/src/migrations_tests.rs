@@ -13,15 +13,46 @@ use super::FRODEX_GOAL_SUPERVISOR_MIGRATION_CHECKSUM;
 use super::FRODEX_GOAL_SUPERVISOR_MIGRATION_DESCRIPTION;
 use super::STATE_MIGRATOR;
 use super::THREAD_HISTORY_MIGRATOR;
-use super::repair_frodex_agent_path_migration_collision;
-use super::repair_frodex_goal_supervisor_state_migration;
-use super::repair_legacy_recency_migration_version;
+use super::repair_frodex_agent_path_migration_collision as repair_frodex_agent_path_migration_collision_on;
+use super::repair_frodex_goal_supervisor_state_migration as repair_frodex_goal_supervisor_state_migration_on;
+use super::repair_legacy_recency_migration_version as repair_legacy_recency_migration_version_on;
 use super::runtime_state_migrator;
 use crate::PINNED_THREAD_SECTION_ID;
 use crate::PINNED_THREAD_SECTION_NAME;
+use crate::sqlite::StateMigrationStep;
+use crate::sqlite::migrate_state_database_with_fault;
 
 const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
 const FRODEX_GOAL_SUPERVISOR_MIGRATION_SQL: &str = "CREATE TABLE thread_goal_supervisor_state (\n    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES threads(id) ON DELETE CASCADE,\n    goal_id TEXT NOT NULL,\n    snoozed_until_ms INTEGER,\n    updated_at_ms INTEGER NOT NULL\n);\n";
+
+async fn repair_frodex_goal_supervisor_state_migration(
+    pool: &sqlx::SqlitePool,
+) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+    repair_frodex_goal_supervisor_state_migration_on(&mut transaction).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn repair_frodex_agent_path_migration_collision(
+    pool: &sqlx::SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    let mut transaction = connection.begin_with("BEGIN IMMEDIATE").await?;
+    repair_frodex_agent_path_migration_collision_on(&mut transaction, migrator).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+async fn repair_legacy_recency_migration_version(
+    pool: &sqlx::SqlitePool,
+    migrator: &Migrator,
+) -> anyhow::Result<()> {
+    let mut connection = pool.acquire().await?;
+    repair_legacy_recency_migration_version_on(&mut connection, migrator).await
+}
 
 fn migrator_through(version: i64) -> Migrator {
     Migrator {
@@ -63,6 +94,35 @@ fn migrator_with_frodex_goal_supervisor_collision(version: i64, sql: &'static st
     Migrator::with_migrations(migrations)
 }
 
+async fn apply_legacy_recency_migration(pool: &sqlx::SqlitePool) {
+    migrator_through(/*version*/ 37)
+        .run(pool)
+        .await
+        .expect("pre-recency migrations should apply");
+    let recency_migration = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .find(|migration| migration.version == 39)
+        .expect("recency migration should exist");
+    let mut legacy_migrations = STATE_MIGRATOR
+        .migrations
+        .iter()
+        .filter(|migration| migration.version <= 37)
+        .cloned()
+        .collect::<Vec<_>>();
+    legacy_migrations.push(Migration::new(
+        38,
+        recency_migration.description.clone(),
+        recency_migration.migration_type,
+        recency_migration.sql.clone(),
+        recency_migration.no_tx,
+    ));
+    Migrator::with_migrations(legacy_migrations)
+        .run(pool)
+        .await
+        .expect("legacy recency migration should apply as version 38");
+}
+
 async fn new_migration_test_pool() -> (std::path::PathBuf, crate::SqliteConfig, sqlx::SqlitePool) {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
@@ -74,6 +134,43 @@ async fn new_migration_test_pool() -> (std::path::PathBuf, crate::SqliteConfig, 
         .await
         .expect("sqlite database should open");
     (sqlite_home, sqlite, pool)
+}
+
+async fn state_database_signature(
+    pool: &sqlx::SqlitePool,
+) -> (
+    Vec<(String, String, String)>,
+    Vec<(i64, String, bool, Vec<u8>)>,
+) {
+    let schema = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+SELECT type, name, COALESCE(sql, '')
+FROM sqlite_schema
+WHERE name NOT LIKE 'sqlite_autoindex_%'
+ORDER BY type, name
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("state schema should load");
+    let ledger_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("migration ledger existence should load")
+        != 0;
+    let ledger = if ledger_exists {
+        sqlx::query_as::<_, (i64, String, bool, Vec<u8>)>(
+            "SELECT version, description, success, checksum FROM _sqlx_migrations ORDER BY version",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("migration ledger should load")
+    } else {
+        Vec::new()
+    };
+    (schema, ledger)
 }
 
 #[tokio::test]
@@ -138,6 +235,60 @@ async fn repairs_exact_frodex_goal_supervisor_migration_33_and_34() {
         pool.close().await;
         std::fs::remove_dir_all(sqlite_home).expect("sqlite home should be removed");
     }
+}
+
+#[tokio::test]
+async fn concurrent_state_starts_repair_goal_supervisor_collision_once() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let first_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let second_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let legacy_pool = first_sqlite
+        .open_read_write_pool(&first_sqlite.state_db_path())
+        .await
+        .expect("legacy state database should open");
+    migrator_with_frodex_goal_supervisor_collision(33, FRODEX_GOAL_SUPERVISOR_MIGRATION_SQL)
+        .run(&legacy_pool)
+        .await
+        .expect("released Frodex migration should apply");
+    legacy_pool.close().await;
+
+    let first_migrator = runtime_state_migrator();
+    let second_migrator = runtime_state_migrator();
+    let (first, second) = tokio::join!(
+        first_sqlite.open_state_db(&first_migrator, /*telemetry_override*/ None),
+        second_sqlite.open_state_db(&second_migrator, /*telemetry_override*/ None),
+    );
+    let first = first.expect("first repaired state open should succeed");
+    let second = second.expect("second repaired state open should succeed");
+    let official_descriptions = sqlx::query_scalar::<_, String>(
+        "SELECT description FROM _sqlx_migrations WHERE version IN (33, 34) ORDER BY version",
+    )
+    .fetch_all(&first)
+    .await
+    .expect("official migration descriptions should load");
+    assert_eq!(
+        official_descriptions,
+        vec![
+            "thread goal stopped statuses".to_string(),
+            "drop thread goals".to_string(),
+        ]
+    );
+    let source_table_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
+    )
+    .fetch_one(&first)
+    .await
+    .expect("legacy source table should count");
+    assert_eq!(source_table_exists, 1);
+    assert!(!sqlite_home.join(".state_5.sqlite.migration.lock").exists());
+    first.close().await;
+    second.close().await;
 }
 
 #[tokio::test]
@@ -553,9 +704,10 @@ async fn official_migration_48_then_concurrent_frodex_starts_are_idempotent() {
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
-    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let state_path = sqlite.state_db_path();
-    let official_pool = sqlite
+    let first_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let second_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = first_sqlite.state_db_path();
+    let official_pool = first_sqlite
         .open_read_write_pool(&state_path)
         .await
         .expect("official state database should open");
@@ -568,8 +720,8 @@ async fn official_migration_48_then_concurrent_frodex_starts_are_idempotent() {
     let first_migrator = runtime_state_migrator();
     let second_migrator = runtime_state_migrator();
     let (first, second) = tokio::join!(
-        sqlite.open_state_db(&first_migrator, /*telemetry_override*/ None),
-        sqlite.open_state_db(&second_migrator, /*telemetry_override*/ None),
+        first_sqlite.open_state_db(&first_migrator, /*telemetry_override*/ None),
+        second_sqlite.open_state_db(&second_migrator, /*telemetry_override*/ None),
     );
     let first = first.expect("first Frodex state open should succeed");
     let second = second.expect("second Frodex state open should succeed");
@@ -593,9 +745,10 @@ async fn concurrent_frodex_starts_repair_released_migration_48_once() {
     let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
         let _ = std::fs::remove_dir_all(sqlite_home);
     });
-    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
-    let state_path = sqlite.state_db_path();
-    let legacy_pool = sqlite
+    let first_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let second_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let state_path = first_sqlite.state_db_path();
+    let legacy_pool = first_sqlite
         .open_read_write_pool(&state_path)
         .await
         .expect("legacy state database should open");
@@ -608,8 +761,8 @@ async fn concurrent_frodex_starts_repair_released_migration_48_once() {
     let first_migrator = runtime_state_migrator();
     let second_migrator = runtime_state_migrator();
     let (first, second) = tokio::join!(
-        sqlite.open_state_db(&first_migrator, /*telemetry_override*/ None),
-        sqlite.open_state_db(&second_migrator, /*telemetry_override*/ None),
+        first_sqlite.open_state_db(&first_migrator, /*telemetry_override*/ None),
+        second_sqlite.open_state_db(&second_migrator, /*telemetry_override*/ None),
     );
     let first = first.expect("first repaired Frodex state open should succeed");
     let second = second.expect("second repaired Frodex state open should succeed");
@@ -627,8 +780,108 @@ async fn concurrent_frodex_starts_repair_released_migration_48_once() {
     .await
     .expect("agent-path indexes should count");
     assert_eq!(matching_indexes, 0);
+    assert!(
+        !sqlite_home.join(".state_5.sqlite.migration.lock").exists(),
+        "state migration must not create a Frodex lock file"
+    );
     first.close().await;
     second.close().await;
+}
+
+#[tokio::test]
+async fn state_migration_faults_roll_back_compatibility_repairs_and_official_migrations() {
+    for fault in [
+        StateMigrationStep::GoalSupervisorCompatibility,
+        StateMigrationStep::AgentPathCompatibility,
+        StateMigrationStep::RecencyCompatibility,
+        StateMigrationStep::OfficialMigrations,
+    ] {
+        let (sqlite_home, _sqlite, pool) = new_migration_test_pool().await;
+        match fault {
+            StateMigrationStep::GoalSupervisorCompatibility => {
+                migrator_with_frodex_goal_supervisor_collision(
+                    33,
+                    FRODEX_GOAL_SUPERVISOR_MIGRATION_SQL,
+                )
+                .run(&pool)
+                .await
+                .expect("released Frodex migration should apply");
+            }
+            StateMigrationStep::RecencyCompatibility => {
+                apply_legacy_recency_migration(&pool).await;
+            }
+            StateMigrationStep::AgentPathCompatibility | StateMigrationStep::OfficialMigrations => {
+                released_frodex_state_migrator()
+                    .run(&pool)
+                    .await
+                    .expect("released Frodex migrations should apply");
+            }
+        }
+        let before = state_database_signature(&pool).await;
+
+        migrate_state_database_with_fault(&pool, &runtime_state_migrator(), fault)
+            .await
+            .expect_err("injected state migration failure should abort startup");
+
+        assert_eq!(
+            state_database_signature(&pool).await,
+            before,
+            "failure after {fault:?} must roll back every state migration change"
+        );
+        pool.close().await;
+        std::fs::remove_dir_all(sqlite_home).expect("sqlite home should be removed");
+    }
+}
+
+#[tokio::test]
+async fn fresh_state_database_creates_no_frodex_migration_lock() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+
+    let pool = sqlite
+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
+        .await
+        .expect("fresh state database should migrate");
+
+    assert!(!sqlite_home.join(".state_5.sqlite.migration.lock").exists());
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn nontransactional_state_migrations_fail_before_schema_mutation() {
+    for global_no_tx in [false, true] {
+        let (sqlite_home, sqlite, pool) = new_migration_test_pool().await;
+        let migration = Migration::new(
+            1,
+            Cow::Borrowed("nontransactional test migration"),
+            MigrationType::Simple,
+            "CREATE TABLE must_not_exist (id INTEGER PRIMARY KEY);".into_sql_str(),
+            /*no_tx*/ !global_no_tx,
+        );
+        let mut migrator = Migrator::with_migrations(vec![migration]);
+        migrator.no_tx = global_no_tx;
+        let before = state_database_signature(&pool).await;
+
+        let error = sqlite
+            .open_state_db(&migrator, /*telemetry_override*/ None)
+            .await
+            .expect_err("nontransactional state migration should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("must all support the startup transaction")
+        );
+        assert_eq!(state_database_signature(&pool).await, before);
+        pool.close().await;
+        std::fs::remove_dir_all(sqlite_home).expect("sqlite home should be removed");
+    }
 }
 
 #[tokio::test]
@@ -1620,34 +1873,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
         .open_read_write_pool(&state_path)
         .await
         .expect("sqlite database should open");
-    migrator_through(/*version*/ 37)
-        .run(&pool)
-        .await
-        .expect("pre-recency migrations should apply");
-
-    let recency_migration = STATE_MIGRATOR
-        .migrations
-        .iter()
-        .find(|migration| migration.version == 39)
-        .expect("recency migration should exist");
-    let mut legacy_migrations = STATE_MIGRATOR
-        .migrations
-        .iter()
-        .filter(|migration| migration.version <= 37)
-        .cloned()
-        .collect::<Vec<_>>();
-    legacy_migrations.push(Migration::new(
-        38,
-        recency_migration.description.clone(),
-        recency_migration.migration_type,
-        recency_migration.sql.clone(),
-        recency_migration.no_tx,
-    ));
-    let legacy_recency_migrator = Migrator::with_migrations(legacy_migrations);
-    legacy_recency_migrator
-        .run(&pool)
-        .await
-        .expect("legacy recency migration should apply as version 38");
+    apply_legacy_recency_migration(&pool).await;
 
     repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
         .await
