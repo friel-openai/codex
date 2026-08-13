@@ -1384,6 +1384,7 @@ async fn frodex_history_apis_ignore_deleted_sixth_segment() -> Result<()> {
             items.push(RolloutItem::RolloutReference(RolloutReferenceItem {
                 rollout_path: paths[previous_index].clone(),
                 thread_id: Some(thread_id),
+                rollout_id: Some(thread_id),
                 rollout_timestamp: None,
                 segment_id: Some(segment_ids[previous_index]),
                 max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
