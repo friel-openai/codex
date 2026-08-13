@@ -1233,6 +1233,137 @@ async fn get_status_returns_not_found_without_manager() {
 }
 
 #[tokio::test]
+async fn list_agents_pages_are_byte_bounded_and_complete() {
+    let harness = AgentControlHarness::new().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+
+    let mut expected_ids = Vec::new();
+    for index in 0..60 {
+        let thread_id = ThreadId::new();
+        expected_ids.push(thread_id);
+        let agent_path = if index == 0 {
+            Some(
+                AgentPath::from_string(format!(
+                    "/root/{}",
+                    "legacy".repeat(LIST_AGENTS_MAX_SERIALIZED_BYTES)
+                ))
+                .expect("legacy overlong path"),
+            )
+        } else {
+            Some(
+                AgentPath::root()
+                    .join(format!("worker_{index:02}").as_str())
+                    .expect("agent path"),
+            )
+        };
+        let metadata = AgentMetadata {
+            agent_id: Some(thread_id),
+            parent_thread_id: Some(root_thread_id),
+            agent_path,
+            last_task_message: Some("x".repeat(4096)),
+            ..Default::default()
+        };
+        metadata.lifecycle.remember_cold_terminal_status(
+            if index % 2 == 0 {
+                AgentStatus::Completed(Some("done".repeat(4096)))
+            } else {
+                AgentStatus::Errored("error".repeat(4096))
+            },
+            true,
+        );
+        harness
+            .control
+            .state
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("spawn slot")
+            .commit(metadata);
+    }
+
+    let mut cursor = None;
+    let mut actual_ids = Vec::new();
+    let mut first_page = None;
+    loop {
+        let page = harness
+            .control
+            .list_agents_page(
+                &SessionSource::Cli,
+                /*path_prefix*/ None,
+                cursor.as_deref(),
+                Some(LIST_AGENTS_MAX_LIMIT),
+            )
+            .await
+            .expect("list_agents page");
+        assert!(
+            serde_json::to_vec(&page).expect("serialize page").len()
+                <= LIST_AGENTS_MAX_SERIALIZED_BYTES
+        );
+        assert_eq!(page.total_count, expected_ids.len());
+        assert!(page.agents.iter().all(|agent| {
+            agent
+                .last_task_message
+                .as_ref()
+                .is_none_or(|message| message.len() <= LIST_AGENTS_TASK_PREVIEW_BYTES)
+        }));
+        assert!(page.agents.iter().all(|agent| match &agent.agent_status {
+            AgentStatus::Completed(Some(message)) | AgentStatus::Errored(message) => {
+                message.len() <= 1024
+            }
+            AgentStatus::Completed(None)
+            | AgentStatus::PendingInit
+            | AgentStatus::Running
+            | AgentStatus::Interrupted
+            | AgentStatus::Shutdown
+            | AgentStatus::NotFound => true,
+        }));
+        first_page.get_or_insert_with(|| page.clone());
+        actual_ids.extend(page.agents.into_iter().map(|agent| agent.agent_id));
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    expected_ids.sort_by_key(ToString::to_string);
+    actual_ids.sort_by_key(ToString::to_string);
+    assert_eq!(actual_ids, expected_ids);
+
+    let page = first_page.expect("list_agents should return a first page");
+    let synthetic_items = synthetic_supervisor_list_agents_items(page.clone());
+    let [
+        RolloutItem::ResponseItem(call),
+        RolloutItem::ResponseItem(result),
+    ] = synthetic_items.as_slice()
+    else {
+        panic!("supervisor boot context should contain one list_agents call and output");
+    };
+    let ResponseItem::FunctionCall { arguments, .. } = &call.item else {
+        panic!("supervisor boot context should start with list_agents");
+    };
+    let ResponseItem::FunctionCallOutput { output, .. } = &result.item else {
+        panic!("supervisor boot context should contain list_agents output");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(arguments.as_str())
+            .expect("list_agents arguments"),
+        serde_json::json!({ "limit": LIST_AGENTS_MAX_LIMIT })
+    );
+    let output = output
+        .text_content()
+        .expect("synthetic list_agents output should be text");
+    assert!(output.len() <= LIST_AGENTS_MAX_SERIALIZED_BYTES);
+    let synthetic_page: ListedAgentsPage =
+        serde_json::from_str(output).expect("synthetic list_agents page");
+    assert_eq!(synthetic_page, page);
+    assert!(!synthetic_page.agents.is_empty());
+    assert!(synthetic_page.agents.len() <= LIST_AGENTS_MAX_LIMIT);
+    assert!(synthetic_page.next_cursor.is_some());
+    assert_eq!(synthetic_page.total_count, expected_ids.len());
+}
+
+#[tokio::test]
 async fn on_event_updates_status_from_task_started() {
     let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: "turn-1".to_string(),
