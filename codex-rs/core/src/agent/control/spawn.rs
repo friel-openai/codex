@@ -589,7 +589,9 @@ impl AgentControl {
             environments: inherited_environments,
             exec_policy: inherited_exec_policy,
         } = inheritance;
-        if options.fork_parent_spawn_call_id.is_none() {
+        let is_goal_supervisor_helper =
+            crate::goal_supervisor::is_goal_supervisor_helper_source(&session_source);
+        if options.fork_parent_spawn_call_id.is_none() && !is_goal_supervisor_helper {
             return Err(CodexErr::Fatal(
                 "spawn_agent fork requires a parent spawn call id".to_string(),
             ));
@@ -647,6 +649,7 @@ impl AgentControl {
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
 
+        let mut supervisor_continuity_history = None;
         let (
             selected_capability_roots,
             mut forked_rollout_items,
@@ -666,10 +669,19 @@ impl AgentControl {
                         _ => None,
                     })
                     .unwrap_or_default();
+                if is_goal_supervisor_helper {
+                    supervisor_continuity_history = Some(logical_history.clone());
+                }
+                let reference_rollout_items = reference_history.get_rollout_items().to_vec();
                 (
                     selected_capability_roots,
-                    logical_history,
-                    Some(reference_history.get_rollout_items().to_vec()),
+                    if is_goal_supervisor_helper {
+                        reference_rollout_items
+                    } else {
+                        logical_history
+                    },
+                    (!is_goal_supervisor_helper)
+                        .then(|| reference_history.get_rollout_items().to_vec()),
                     Some(source_reservation),
                 )
             }
@@ -697,6 +709,9 @@ impl AgentControl {
                     .unwrap_or_default();
                 let mut forked_rollout_items =
                     truncate_rollout_to_last_n_fork_turns(parent_history, *last_n_turns);
+                if is_goal_supervisor_helper {
+                    supervisor_continuity_history = Some(forked_rollout_items.clone());
+                }
                 if let Some(source_session_meta) = source_session_meta {
                     forked_rollout_items.insert(0, RolloutItem::SessionMeta(source_session_meta));
                 }
@@ -781,65 +796,67 @@ impl AgentControl {
 
             true
         };
-        forked_rollout_items.retain_mut(|item| {
-            if !keep_forked_rollout_item(item, preserve_reference_context_item)
-                || destination_history_mode == Some(ThreadHistoryMode::Paginated)
-                    && matches!(
-                        &*item,
-                        RolloutItem::EventMsg(
-                            EventMsg::ItemCompleted(_)
-                                | EventMsg::TokenCount(_)
-                                | EventMsg::ThreadGoalUpdated(_)
-                                | EventMsg::ThreadSettingsApplied(_),
-                        )
-                    )
-            {
-                return false;
-            }
-
-            match item {
-                RolloutItem::ResponseItem(response_item) => retain_forked_item(
-                    &mut response_item.item,
-                    &mut replaced_parent_developer_instructions,
-                ),
-                RolloutItem::Compacted(compacted) => {
-                    if let Some(replacement_history) = compacted.replacement_history.as_mut() {
-                        // Matches before this checkpoint cannot survive its replacement history.
-                        replaced_parent_developer_instructions = false;
-                        replacement_history.retain_mut(|response_item| {
-                            retain_forked_item(
-                                &mut response_item.item,
-                                &mut replaced_parent_developer_instructions,
+        if !is_goal_supervisor_helper {
+            forked_rollout_items.retain_mut(|item| {
+                if !keep_forked_rollout_item(item, preserve_reference_context_item)
+                    || destination_history_mode == Some(ThreadHistoryMode::Paginated)
+                        && matches!(
+                            &*item,
+                            RolloutItem::EventMsg(
+                                EventMsg::ItemCompleted(_)
+                                    | EventMsg::TokenCount(_)
+                                    | EventMsg::ThreadGoalUpdated(_)
+                                    | EventMsg::ThreadSettingsApplied(_),
                             )
-                        });
-                    }
-                    true
+                        )
+                {
+                    return false;
                 }
-                RolloutItem::WorldState(world_state) => {
-                    if multi_agent_version == MultiAgentVersion::V2 {
-                        world_state.state.remove("multi_agent_usage_hint");
+                match item {
+                    RolloutItem::ResponseItem(response_item) => retain_forked_item(
+                        &mut response_item.item,
+                        &mut replaced_parent_developer_instructions,
+                    ),
+                    RolloutItem::Compacted(compacted) => {
+                        if let Some(replacement_history) = compacted.replacement_history.as_mut() {
+                            // Matches before this checkpoint cannot survive its replacement history.
+                            replaced_parent_developer_instructions = false;
+                            replacement_history.retain_mut(|response_item| {
+                                retain_forked_item(
+                                    &mut response_item.item,
+                                    &mut replaced_parent_developer_instructions,
+                                )
+                            });
+                        }
+                        true
                     }
-                    true
+                    RolloutItem::WorldState(world_state) => {
+                        if multi_agent_version == MultiAgentVersion::V2 {
+                            world_state.state.remove("multi_agent_usage_hint");
+                        }
+                        true
+                    }
+                    RolloutItem::EventMsg(_)
+                    | RolloutItem::SessionMeta(_)
+                    | RolloutItem::TurnContext(_)
+                    | RolloutItem::InterAgentCommunication(_)
+                    | RolloutItem::InterAgentCommunicationMetadata { .. }
+                    | RolloutItem::RolloutReference(_) => true,
+                    RolloutItem::SecurityRiskScore(_) => false,
                 }
-                RolloutItem::EventMsg(_)
-                | RolloutItem::SessionMeta(_)
-                | RolloutItem::TurnContext(_)
-                | RolloutItem::InterAgentCommunication(_)
-                | RolloutItem::InterAgentCommunicationMetadata { .. }
-                | RolloutItem::RolloutReference(_) => true,
-                RolloutItem::SecurityRiskScore(_) => false,
+            });
+            if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
+                (reference_rollout_items, unsanitized_parent_history)
+                && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
+            {
+                forked_rollout_items = reference_rollout_items;
             }
-        });
-        if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
-            (reference_rollout_items, unsanitized_parent_history)
-            && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
-        {
-            forked_rollout_items = reference_rollout_items;
         }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.
-        if let Some(subagent_developer_instructions) = subagent_developer_instructions.as_ref()
+        if !is_goal_supervisor_helper
+            && let Some(subagent_developer_instructions) = subagent_developer_instructions.as_ref()
             && preserve_reference_context_item
             && !replaced_parent_developer_instructions
             && !subagent_developer_instructions.is_empty()
@@ -855,7 +872,8 @@ impl AgentControl {
         {
             forked_rollout_items.push(RolloutItem::ResponseItem(developer_message.into()));
         }
-        if preserve_reference_context_item
+        if !is_goal_supervisor_helper
+            && preserve_reference_context_item
             && multi_agent_version == MultiAgentVersion::V2
             && let Some(subagent_usage_hint) = options
                 .multi_agent_v2_usage_hints
@@ -877,6 +895,37 @@ impl AgentControl {
             } else {
                 forked_rollout_items.push(RolloutItem::ResponseItem(assignment.into()));
             }
+        }
+        if is_goal_supervisor_helper {
+            if let Some(role_prompt) =
+                crate::session::load_agent_role_prompt(&config, &session_source).await
+            {
+                forked_rollout_items.push(RolloutItem::ResponseItem(
+                    role_prompt_item(role_prompt).into(),
+                ));
+            }
+            if let Some(state_db) = parent_thread.session.services.state_db.as_ref()
+                && let Ok(Some(parent_goal)) = state_db
+                    .thread_goals()
+                    .get_thread_goal(parent_thread_id)
+                    .await
+            {
+                let goal_id = parent_goal.goal_id.clone();
+                let parent_goal = crate::goal_supervisor::protocol_goal_from_state(parent_goal);
+                forked_rollout_items.push(
+                    crate::goal_supervisor::supervisor_continuity_context_item(
+                        &parent_thread.session,
+                        &goal_id,
+                        &parent_goal,
+                        supervisor_continuity_history.as_deref().unwrap_or_default(),
+                    )
+                    .await,
+                );
+            }
+            forked_rollout_items.extend(
+                self.supervisor_boot_context_items(state, parent_thread_id)
+                    .await,
+            );
         }
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);
@@ -916,5 +965,29 @@ impl AgentControl {
         }
         drop(source_reservation);
         result
+    }
+
+    async fn supervisor_boot_context_items(
+        &self,
+        state: &Arc<ThreadManagerState>,
+        owner_thread_id: ThreadId,
+    ) -> Vec<RolloutItem> {
+        let owner_source = match state.get_thread(owner_thread_id).await {
+            Ok(owner_thread) => {
+                owner_thread
+                    .session
+                    .thread_config_snapshot()
+                    .await
+                    .session_source
+            }
+            Err(_) => SessionSource::Cli,
+        };
+        self.register_session_root(owner_thread_id, owner_source.parent_thread_id());
+        let agents = self
+            .list_agents(&owner_source, /*path_prefix*/ None)
+            .await
+            .unwrap_or_default();
+
+        synthetic_supervisor_list_agents_items(owner_thread_id, agents)
     }
 }

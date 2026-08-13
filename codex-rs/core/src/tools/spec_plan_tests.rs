@@ -2726,6 +2726,30 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 }
 
 #[tokio::test]
+async fn goal_supervisor_keeps_collaboration_tools_when_model_does_not_advertise_v2() {
+    let plan = probe(|turn| {
+        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+        turn.model_info.multi_agent_version = Some(MultiAgentVersion::V1);
+        turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 1,
+            agent_path: Some(
+                AgentPath::try_from("/root/goal_supervisor").expect("supervisor path should parse"),
+            ),
+            agent_nickname: None,
+            agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+        });
+    })
+    .await;
+
+    plan.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
+    plan.assert_registered_contains(&[
+        &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "followup_task").to_string(),
+        &ToolName::namespaced(MULTI_AGENT_V2_NAMESPACE, "list_agents").to_string(),
+    ]);
+}
+
+#[tokio::test]
 async fn code_mode_only_can_expose_namespaced_multi_agent_v2_as_normal_tools() {
     let plan = probe(|turn| {
         set_features(
