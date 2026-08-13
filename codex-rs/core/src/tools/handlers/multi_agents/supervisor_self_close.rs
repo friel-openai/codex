@@ -147,3 +147,15 @@ impl ToolOutput for SupervisorSelfCloseResult {
         tool_output_code_mode_result(self, "close_self")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn close_self_result_ends_the_supervisor_turn() {
+        let result = SupervisorSelfCloseResult { completed: true };
+
+        assert!(result.terminal_no_response());
+    }
+}
