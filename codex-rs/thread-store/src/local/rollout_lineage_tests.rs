@@ -333,6 +333,7 @@ async fn normalizes_rollout_references_and_same_thread_rotations() {
     );
     let mut active_paths = std::collections::HashSet::new();
     let rotated = RolloutLineage {
+        root_rollout_id: parent,
         segments: resolve_path(
             &store,
             parent,
