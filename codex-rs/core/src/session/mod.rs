@@ -2159,9 +2159,18 @@ impl Session {
             .clone()
     }
 
+    pub(crate) async fn effective_session_config(&self) -> Config {
+        let state = self.state.lock().await;
+        Self::build_effective_session_config(&state.session_configuration)
+    }
+
     pub(crate) async fn session_source(&self) -> SessionSource {
         let state = self.state.lock().await;
         state.session_configuration.session_source.clone()
+    }
+
+    pub(crate) async fn has_pending_turn_start_work(&self) -> bool {
+        self.input_queue.has_pending_input(&self.active_turn).await
     }
 
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {

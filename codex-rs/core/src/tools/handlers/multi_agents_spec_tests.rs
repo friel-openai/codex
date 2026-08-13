@@ -390,6 +390,32 @@ fn followup_task_tool_requires_message_and_has_no_output_schema() {
 }
 
 #[test]
+fn supervisor_tools_do_not_mark_parameters_encrypted() {
+    for tool in [
+        create_supervisor_close_self_tool(),
+        create_supervisor_compact_parent_context_tool(),
+        create_supervisor_snooze_tool(),
+    ] {
+        let ToolSpec::Function(ResponsesApiTool {
+            name, parameters, ..
+        }) = tool
+        else {
+            panic!("supervisor tool should be a function tool");
+        };
+        for (property_name, schema) in parameters
+            .properties
+            .as_ref()
+            .expect("supervisor tool should use object params")
+        {
+            assert_eq!(
+                schema.encrypted, None,
+                "{name}.{property_name} should not use encrypted tool parameters"
+            );
+        }
+    }
+}
+
+#[test]
 fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
     let ToolSpec::Function(ResponsesApiTool {
         description,
