@@ -72,6 +72,10 @@ pub(super) fn usage_hint_text(
         return None;
     }
 
+    if crate::goal_supervisor::is_goal_supervisor_helper_source(session_source) {
+        return None;
+    }
+
     let catalog = turn_context
         .model_info()
         .model_messages
