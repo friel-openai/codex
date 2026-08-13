@@ -135,6 +135,10 @@ impl ToolOutput for SupervisorSelfCloseResult {
         true
     }
 
+    fn terminal_no_response(&self) -> bool {
+        true
+    }
+
     fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
         tool_output_response_item(call_id, payload, self, Some(true), "close_self")
     }
