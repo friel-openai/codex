@@ -70,9 +70,9 @@ pub(super) async fn revert(
 
     // HistoryPosition stores byte offsets in plain JSONL, so materialize any compressed
     // immutable lineage before deriving the retained boundary.
-    let mut lineage = store.resolve_rollout_lineage(thread_id).await?;
-    for segment in &mut lineage.segments {
-        segment.rollout_path =
+    let lineage = store.resolve_rollout_lineage(thread_id).await?;
+    for segment in &lineage.segments {
+        let materialized_path =
             codex_rollout::materialize_rollout_for_reference(segment.rollout_path.as_path())
                 .await
                 .map_err(|err| ThreadStoreError::Internal {
@@ -84,10 +84,13 @@ pub(super) async fn revert(
         super::thread_history_materialization::materialize_to_sqlite(
             store,
             segment.rollout_id(),
-            segment.rollout_path.as_path(),
+            materialized_path.as_path(),
         )
         .await?;
     }
+    // Re-resolve after decompression so every segment's byte boundary is measured in the plain
+    // JSONL file that `HistoryPosition` addresses.
+    let lineage = store.resolve_rollout_lineage(thread_id).await?;
     let history_base = paginated_fork::history_base_at_boundary(
         store,
         thread_id,
