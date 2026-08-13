@@ -661,51 +661,66 @@ impl AgentControl {
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
 
-        let (selected_capability_roots, mut forked_rollout_items, source_reservation) =
-            match fork_mode {
-                SpawnAgentForkMode::FullHistory => {
-                    let (reference_history, source_reservation) = state
-                        .reference_backed_full_history(parent_thread_id)
-                        .await?;
-                    let selected_capability_roots =
-                        reference_history.get_selected_capability_roots();
-                    (
-                        selected_capability_roots,
-                        reference_history.get_rollout_items().to_vec(),
-                        Some(source_reservation),
-                    )
-                }
-                SpawnAgentForkMode::LastNTurns(last_n_turns) => {
-                    let parent_history =
-                        load_agent_model_context(&state, parent_thread_id, parent_history_mode)
-                            .await?
-                            .ok_or_else(|| {
-                                CodexErr::Fatal(format!(
-                                    "parent thread history unavailable for fork: {parent_thread_id}"
-                                ))
-                            })?;
-                    let source_session_meta = parent_history.iter().find_map(|item| match item {
-                        RolloutItem::SessionMeta(meta) => Some(meta.clone()),
-                        _ => None,
-                    });
-                    let selected_capability_roots = parent_history
-                        .iter()
-                        .find_map(|item| {
-                            let RolloutItem::SessionMeta(meta_line) = item else {
-                                return None;
-                            };
+        let (
+            selected_capability_roots,
+            mut forked_rollout_items,
+            reference_rollout_items,
+            source_reservation,
+        ) = match fork_mode {
+            SpawnAgentForkMode::FullHistory => {
+                let (reference_history, logical_history, source_reservation) = state
+                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                    .await?;
+                let selected_capability_roots = logical_history
+                    .iter()
+                    .find_map(|item| match item {
+                        RolloutItem::SessionMeta(meta_line) => {
                             Some(meta_line.meta.selected_capability_roots.clone())
-                        })
-                        .unwrap_or_default();
-                    let mut forked_rollout_items =
-                        truncate_rollout_to_last_n_fork_turns(parent_history, *last_n_turns);
-                    if let Some(source_session_meta) = source_session_meta {
-                        forked_rollout_items
-                            .insert(0, RolloutItem::SessionMeta(source_session_meta));
-                    }
-                    (selected_capability_roots, forked_rollout_items, None)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                (
+                    selected_capability_roots,
+                    logical_history,
+                    Some(reference_history.get_rollout_items().to_vec()),
+                    Some(source_reservation),
+                )
+            }
+            SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                let parent_history =
+                    load_agent_model_context(&state, parent_thread_id, parent_history_mode)
+                        .await?
+                        .ok_or_else(|| {
+                            CodexErr::Fatal(format!(
+                                "parent thread history unavailable for fork: {parent_thread_id}"
+                            ))
+                        })?;
+                let source_session_meta = parent_history.iter().find_map(|item| match item {
+                    RolloutItem::SessionMeta(meta) => Some(meta.clone()),
+                    _ => None,
+                });
+                let selected_capability_roots = parent_history
+                    .iter()
+                    .find_map(|item| {
+                        let RolloutItem::SessionMeta(meta_line) = item else {
+                            return None;
+                        };
+                        Some(meta_line.meta.selected_capability_roots.clone())
+                    })
+                    .unwrap_or_default();
+                let mut forked_rollout_items =
+                    truncate_rollout_to_last_n_fork_turns(parent_history, *last_n_turns);
+                if let Some(source_session_meta) = source_session_meta {
+                    forked_rollout_items.insert(0, RolloutItem::SessionMeta(source_session_meta));
                 }
-            };
+                (selected_capability_roots, forked_rollout_items, None, None)
+            }
+        };
+        let unsanitized_parent_history = reference_rollout_items
+            .as_ref()
+            .map(|_| serde_json::to_value(&forked_rollout_items))
+            .transpose()?;
         let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
             if multi_agent_version == MultiAgentVersion::V2 {
                 let parent_config = parent_thread.session.get_config().await;
@@ -827,6 +842,12 @@ impl AgentControl {
                 | RolloutItem::WorldState(_) => true,
             }
         });
+        if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
+            (reference_rollout_items, unsanitized_parent_history)
+            && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
+        {
+            forked_rollout_items = reference_rollout_items;
+        }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
         // context omitted the parent's developer fragment, append the child's override so its
         // instructions still reach the model exactly once.

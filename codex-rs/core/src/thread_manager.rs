@@ -70,6 +70,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnEnvironmentSelection;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_rollout::RolloutLine;
+use codex_rollout::materialize_model_context_rollout_items_from;
 use codex_rollout::materialize_recent_rollout_lines_from;
 use codex_rollout::state_db::StateDbHandle;
 use codex_skills_extension::HostSkillsService;
@@ -1549,11 +1550,36 @@ impl ThreadManagerState {
     pub(crate) async fn reference_backed_full_history(
         &self,
         source_thread_id: ThreadId,
-    ) -> CodexResult<(InitialHistory, ThreadLifecycleReservation)> {
+        codex_home: &std::path::Path,
+    ) -> CodexResult<(InitialHistory, Vec<RolloutItem>, ThreadLifecycleReservation)> {
         let (frozen, reservation) = self
             .snapshot_rollout_segment(source_thread_id, /*expected_rollout_id*/ None)
             .await?;
-        Ok((full_history_from_frozen_segment(frozen), reservation))
+        let history_mode = frozen.source_session_meta.meta.history_mode;
+        let reference_history = full_history_from_frozen_segment(frozen);
+        let lines = reference_history
+            .get_rollout_items()
+            .iter()
+            .cloned()
+            .map(|item| RolloutLine {
+                timestamp: String::new(),
+                ordinal: None,
+                item,
+            })
+            .collect();
+        let logical_history = match history_mode {
+            ThreadHistoryMode::Legacy => {
+                materialize_model_context_rollout_items_from(codex_home, lines).await?
+            }
+            ThreadHistoryMode::Paginated => {
+                materialize_recent_rollout_lines_from(codex_home, lines)
+                    .await?
+                    .into_iter()
+                    .map(|line| line.item)
+                    .collect()
+            }
+        };
+        Ok((reference_history, logical_history, reservation))
     }
 
     async fn reference_backed_snapshot_history(

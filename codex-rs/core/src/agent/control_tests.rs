@@ -52,6 +52,7 @@ use codex_protocol::protocol::TurnAbortReason;
 use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
+use codex_rollout::RolloutRecorder;
 use codex_thread_store::ArchiveThreadParams;
 use codex_thread_store::InMemoryThreadStore;
 use codex_thread_store::LocalThreadStore;
@@ -1467,7 +1468,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
-            child_config,
+            child_config.clone(),
             text_input("child task"),
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
@@ -1565,6 +1566,26 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         strip_response_item_ids(&expected_history),
         "full-history forked child history should replace parent usage hints with the child subagent hint while filtering non-final assistant/tool chatter"
     );
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("sanitized child rollout should flush");
+    let physical_items = RolloutRecorder::load_rollout_items(
+        child_thread
+            .rollout_path()
+            .expect("sanitized child rollout should exist")
+            .as_path(),
+    )
+    .await
+    .expect("load sanitized child rollout")
+    .0;
+    assert!(
+        physical_items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::RolloutReference(_))),
+        "a changed parent prefix must be copied after sanitization instead of persisted by reference"
+    );
     assert_eq!(
         serde_json::to_value(child_thread.session.reference_context_item().await)
             .expect("serialize child reference context item"),
@@ -1637,6 +1658,57 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .shutdown_live_agent(child_thread_id)
         .await
         .expect("child shutdown should submit");
+    let resumed_child_thread_id = harness
+        .control
+        .resume_agent_from_rollout(
+            child_config,
+            child_thread_id,
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                parent_thread_id,
+                depth: 1,
+                agent_path: None,
+                agent_nickname: None,
+                agent_role: None,
+            }),
+        )
+        .await
+        .expect("sanitized child should resume from persisted history");
+    let resumed_child_thread = harness
+        .manager
+        .get_thread(resumed_child_thread_id)
+        .await
+        .expect("resumed sanitized child should be registered");
+    let resumed_history = resumed_child_thread.session.clone_history().await;
+    for retained_text in [
+        "parent seed context",
+        "Child developer instructions.",
+        "parent final answer",
+        "Child subagent guidance.",
+    ] {
+        assert!(
+            history_contains_text(resumed_history.raw_items(), retained_text),
+            "cold resume must retain sanitized inherited text {retained_text:?}"
+        );
+    }
+    for excluded_text in [
+        "Parent root guidance.",
+        "Parent subagent guidance.",
+        "Parent developer instructions.",
+        "parent commentary",
+        "parent unknown phase",
+        "parent trigger message",
+        "parent-reasoning",
+    ] {
+        assert!(
+            !history_contains_text(resumed_history.raw_items(), excluded_text),
+            "cold resume must not restore parent-only text {excluded_text:?} through the old reference"
+        );
+    }
+    let _ = harness
+        .control
+        .shutdown_live_agent(resumed_child_thread_id)
+        .await
+        .expect("resumed child shutdown should submit");
     let _ = harness
         .control
         .shutdown_live_agent(no_hint_child_thread_id)
