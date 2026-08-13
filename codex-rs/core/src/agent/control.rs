@@ -50,6 +50,7 @@ use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
+use serde::Deserialize;
 use serde::Serialize;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -63,7 +64,14 @@ pub(crate) use self::execution::AgentExecutionGuard;
 use self::execution::AgentExecutionLimiter;
 use self::residency::AgentResidency;
 
-const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
+const LIST_AGENTS_DEFAULT_LIMIT: usize = 25;
+const LIST_AGENTS_MAX_LIMIT: usize = 25;
+const LIST_AGENTS_TASK_PREVIEW_BYTES: usize = 256;
+const LIST_AGENTS_MAX_SERIALIZED_BYTES: usize = 12 * 1024;
+const ENVIRONMENT_SUBAGENTS_MAX_RECORDS: usize = 25;
+// The renderer adds indentation and XML escaping. Keep this source projection smaller than the
+// final ContextualUserFragment cap so adversarial nicknames cannot crowd out the omission notice.
+const ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES: usize = 768;
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
 const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
@@ -103,11 +111,20 @@ pub(crate) struct LiveAgent {
     pub(crate) status: AgentStatus,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct ListedAgent {
+    pub(crate) agent_id: ThreadId,
+    pub(crate) parent_agent_id: Option<ThreadId>,
     pub(crate) agent_name: String,
     pub(crate) agent_status: AgentStatus,
     pub(crate) last_task_message: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) struct ListedAgentsPage {
+    pub(crate) agents: Vec<ListedAgent>,
+    pub(crate) next_cursor: Option<String>,
+    pub(crate) total_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -540,22 +557,73 @@ impl AgentControl {
         &self,
         parent_thread_id: ThreadId,
     ) -> String {
-        let Ok(agents) = self.open_thread_spawn_children(parent_thread_id).await else {
+        let Ok(current_members) = self.current_agent_members().await else {
             return String::new();
         };
-
-        agents
+        let direct_members = current_members
             .into_iter()
-            .map(|(thread_id, metadata)| {
-                let reference = metadata
-                    .agent_path
-                    .as_ref()
-                    .map(|agent_path| agent_path.name().to_string())
-                    .unwrap_or_else(|| thread_id.to_string());
-                format_subagent_context_line(reference.as_str(), metadata.agent_nickname.as_deref())
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+            .filter(|member| member.parent_thread_id == parent_thread_id)
+            .collect::<Vec<_>>();
+        let total_count = direct_members.len();
+        if total_count == 0 {
+            return String::new();
+        }
+
+        let mut rendered = String::new();
+        let mut rendered_count = 0_usize;
+        let maximum_truncation_line = format!(
+            "[{total_count} additional current subagents omitted; use list_agents to inspect them]"
+        );
+        for member in direct_members
+            .iter()
+            .take(ENVIRONMENT_SUBAGENTS_MAX_RECORDS)
+        {
+            let reference = member
+                .agent_path
+                .as_ref()
+                .map(|agent_path| agent_path.name().to_string())
+                .unwrap_or_else(|| member.thread_id.to_string());
+            let nickname = self
+                .state
+                .agent_metadata_for_thread(member.thread_id)
+                .and_then(|metadata| metadata.agent_nickname);
+            let line = format_subagent_context_line(reference.as_str(), nickname.as_deref());
+            let next_count = rendered_count.saturating_add(1);
+            let remaining_count = total_count.saturating_sub(next_count);
+            let separator_bytes = usize::from(!rendered.is_empty());
+            let truncation_bytes = if remaining_count == 0 {
+                0
+            } else {
+                1 + maximum_truncation_line.len()
+            };
+            if rendered
+                .len()
+                .saturating_add(separator_bytes)
+                .saturating_add(line.len())
+                .saturating_add(truncation_bytes)
+                > ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES
+            {
+                break;
+            }
+            if !rendered.is_empty() {
+                rendered.push('\n');
+            }
+            rendered.push_str(line.as_str());
+            rendered_count = next_count;
+        }
+
+        if rendered_count < total_count {
+            let truncation_line = format!(
+                "[{} additional current subagents omitted; use list_agents to inspect them]",
+                total_count - rendered_count
+            );
+            if !rendered.is_empty() {
+                rendered.push('\n');
+            }
+            rendered.push_str(truncation_line.as_str());
+        }
+        debug_assert!(rendered.len() <= ENVIRONMENT_SUBAGENTS_MAX_SERIALIZED_BYTES);
+        rendered
     }
 
     pub(crate) async fn list_agents(
@@ -563,7 +631,6 @@ impl AgentControl {
         current_session_source: &SessionSource,
         path_prefix: Option<&str>,
     ) -> CodexResult<Vec<ListedAgent>> {
-        let state = self.upgrade()?;
         let resolved_prefix = path_prefix
             .map(|prefix| {
                 current_session_source
@@ -574,73 +641,90 @@ impl AgentControl {
             })
             .transpose()?;
 
-        let mut live_agents = self.state.live_agents();
-        live_agents.sort_by(|left, right| {
-            left.agent_path
-                .as_deref()
-                .unwrap_or_default()
-                .cmp(right.agent_path.as_deref().unwrap_or_default())
-                .then_with(|| {
-                    left.agent_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_default()
-                        .cmp(&right.agent_id.map(|id| id.to_string()).unwrap_or_default())
-                })
-        });
-
-        let root_path = AgentPath::root();
-        let mut agents = Vec::with_capacity(live_agents.len().saturating_add(1));
-        if resolved_prefix
-            .as_ref()
-            .is_none_or(|prefix| agent_matches_prefix(Some(&root_path), prefix))
-            && let Some(root_thread_id) = self.state.agent_id_for_path(&root_path)
-            && let Ok(root_thread) = state.get_thread(root_thread_id).await
-        {
-            agents.push(ListedAgent {
-                agent_name: root_path.to_string(),
-                agent_status: root_thread.agent_status().await,
-                last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
-            });
-        }
-
-        for metadata in live_agents {
-            let Some(thread_id) = metadata.agent_id else {
-                continue;
-            };
+        let current_members = self.current_agent_members().await?;
+        let mut agents = Vec::with_capacity(current_members.len());
+        for member in current_members {
             if resolved_prefix
                 .as_ref()
-                .is_some_and(|prefix| !agent_matches_prefix(metadata.agent_path.as_ref(), prefix))
+                .is_some_and(|prefix| !agent_matches_prefix(member.agent_path.as_ref(), prefix))
             {
                 continue;
             }
-
-            let agent_status = match state.get_thread(thread_id).await {
-                Ok(thread) => thread.agent_status().await,
-                Err(err)
-                    if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_))
-                        && metadata.lifecycle.is_visible_when_cold() =>
-                {
-                    AgentStatus::Completed(None)
-                }
-                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
-                    continue;
-                }
-                Err(err) => return Err(err),
-            };
-            let agent_name = metadata
+            let agent_name = member
                 .agent_path
                 .as_ref()
                 .map(ToString::to_string)
-                .unwrap_or_else(|| thread_id.to_string());
-            let last_task_message = metadata.last_task_message.clone();
+                .unwrap_or_else(|| member.thread_id.to_string());
             agents.push(ListedAgent {
+                agent_id: member.thread_id,
+                parent_agent_id: Some(member.parent_thread_id),
                 agent_name,
-                agent_status,
-                last_task_message,
+                agent_status: member.status,
+                last_task_message: member
+                    .last_task_message
+                    .as_deref()
+                    .map(bounded_list_agents_preview),
             });
         }
 
         Ok(agents)
+    }
+
+    pub(crate) async fn list_agents_page(
+        &self,
+        current_session_source: &SessionSource,
+        path_prefix: Option<&str>,
+        cursor: Option<&str>,
+        limit: Option<usize>,
+    ) -> CodexResult<ListedAgentsPage> {
+        let agents = self
+            .list_agents(current_session_source, path_prefix)
+            .await?;
+        let total_count = agents.len();
+        let start = match cursor {
+            Some(cursor) => agents
+                .iter()
+                .position(|agent| agent.agent_id.to_string() == cursor)
+                .map(|index| index.saturating_add(1))
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest("list_agents cursor is no longer valid".to_string())
+                })?,
+            None => 0,
+        };
+        let limit = limit
+            .unwrap_or(LIST_AGENTS_DEFAULT_LIMIT)
+            .clamp(1, LIST_AGENTS_MAX_LIMIT);
+        let requested_end = start.saturating_add(limit).min(total_count);
+        let mut end = start;
+        while end < requested_end {
+            let candidate_end = end + 1;
+            let candidate = ListedAgentsPage {
+                agents: agents[start..candidate_end].to_vec(),
+                next_cursor: (candidate_end < total_count)
+                    .then(|| agents[candidate_end - 1].agent_id.to_string()),
+                total_count,
+            };
+            let serialized_len = serde_json::to_vec(&candidate)
+                .map_err(|err| CodexErr::Fatal(format!("failed to serialize list_agents: {err}")))?
+                .len();
+            if serialized_len > LIST_AGENTS_MAX_SERIALIZED_BYTES {
+                if end == start {
+                    return Err(CodexErr::InvalidRequest(format!(
+                        "agent {} exceeds the list_agents response byte limit",
+                        agents[end].agent_id
+                    )));
+                }
+                break;
+            }
+            end = candidate_end;
+        }
+        let next_cursor =
+            (end < total_count).then(|| agents[end.saturating_sub(1)].agent_id.to_string());
+        Ok(ListedAgentsPage {
+            agents: agents[start..end].to_vec(),
+            next_cursor,
+            total_count,
+        })
     }
 
     pub(super) fn prepare_agent_metadata(
@@ -946,17 +1030,28 @@ fn non_empty_task_message(message: String) -> Option<String> {
     (!message.is_empty()).then_some(message)
 }
 
-fn synthetic_supervisor_list_agents_items(
-    owner_thread_id: ThreadId,
-    agents: Vec<ListedAgent>,
-) -> Vec<RolloutItem> {
-    let envelope = serde_json::json!({
-        "source": "pre_injected_agents_list",
-        "generated_at": chrono::Utc::now().timestamp(),
-        "owner_thread_id": owner_thread_id.to_string(),
-        "agents": agents,
+fn bounded_list_agents_preview(message: &str) -> String {
+    bounded_utf8_with_ellipsis(message, LIST_AGENTS_TASK_PREVIEW_BYTES)
+}
+
+fn bounded_utf8_with_ellipsis(message: &str, maximum_bytes: usize) -> String {
+    if message.len() <= maximum_bytes {
+        return message.to_string();
+    }
+    let mut end = maximum_bytes.saturating_sub(3);
+    while !message.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    format!("{}...", &message[..end])
+}
+
+fn synthetic_supervisor_list_agents_items(page: ListedAgentsPage) -> Vec<RolloutItem> {
+    let serialized_page = serde_json::to_string(&page).unwrap_or_else(|error| {
+        tracing::error!(%error, "failed to serialize supervisor agent listing");
+        serde_json::json!({ "error": format!("failed to serialize agent listing: {error}") })
+            .to_string()
     });
-    let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
+    let mut output = FunctionCallOutputPayload::from_text(serialized_page);
     output.success = Some(true);
 
     vec![
@@ -965,7 +1060,7 @@ fn synthetic_supervisor_list_agents_items(
                 id: None,
                 name: "list_agents".to_string(),
                 namespace: None,
-                arguments: "{}".to_string(),
+                arguments: serde_json::json!({ "limit": LIST_AGENTS_MAX_LIMIT }).to_string(),
                 call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
                 encrypted_function_args: None,
                 internal_chat_message_metadata_passthrough: None,

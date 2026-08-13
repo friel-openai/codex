@@ -834,11 +834,16 @@ impl AgentControl {
             Err(_) => SessionSource::Cli,
         };
         self.register_session_root(owner_thread_id, owner_source.parent_thread_id());
-        let agents = self
-            .list_agents(&owner_source, /*path_prefix*/ None)
+        let page = self
+            .list_agents_page(
+                &owner_source,
+                /*path_prefix*/ None,
+                /*cursor*/ None,
+                Some(LIST_AGENTS_MAX_LIMIT),
+            )
             .await
             .unwrap_or_default();
 
-        synthetic_supervisor_list_agents_items(owner_thread_id, agents)
+        synthetic_supervisor_list_agents_items(page)
     }
 }
