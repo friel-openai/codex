@@ -2179,7 +2179,11 @@ impl Session {
     }
 
     pub(crate) async fn has_pending_turn_start_work(&self) -> bool {
-        self.input_queue.has_pending_input(&self.active_turn).await
+        if !self.input_queue.has_pending_mailbox_items().await {
+            return false;
+        }
+        self.input_queue.has_trigger_turn_mailbox_items().await
+            || self.has_outstanding_durable_sleep()
     }
 
     pub(crate) async fn user_instructions(&self) -> Option<codex_extension_api::UserInstructions> {
