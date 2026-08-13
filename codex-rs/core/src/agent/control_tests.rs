@@ -230,38 +230,6 @@ async fn spawned_thread_id_after(
         .expect("spawned thread id should be present")
 }
 
-async fn create_active_thread_goal_for_test(
-    state_db: &StateDbHandle,
-    parent_thread_id: ThreadId,
-    parent_session: &std::sync::Arc<crate::session::session::Session>,
-    objective: &str,
-) -> anyhow::Result<(String, ThreadGoal)> {
-    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
-        parent_thread_id,
-        parent_session
-            .get_config()
-            .await
-            .codex_home
-            .join(format!("{parent_thread_id}.jsonl"))
-            .to_path_buf(),
-        chrono::Utc::now(),
-        SessionSource::Exec,
-    )
-    .build("openai");
-    state_db.upsert_thread(&parent_metadata).await?;
-    let state_goal = state_db
-        .thread_goals()
-        .replace_thread_goal(
-            parent_thread_id,
-            objective,
-            codex_state::ThreadGoalStatus::Active,
-            /*token_budget*/ None,
-        )
-        .await?;
-    let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
-    Ok((state_goal.goal_id, protocol_goal))
-}
-
 async fn wait_for_turn_complete(thread: &CodexThread) {
     timeout(Duration::from_secs(5), async {
         loop {
