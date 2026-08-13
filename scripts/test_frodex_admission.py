@@ -103,6 +103,50 @@ class FrodexAdmissionTests(unittest.TestCase):
         )
         admission.verify_owner_inventory(path, "a" * 40)
 
+    def test_owner_inventory_rejects_stale_queue_cutoff(self) -> None:
+        queue_dir = self.root / "queued"
+        queue_dir.mkdir()
+        (queue_dir / "feature-a.md").write_text("# A\n")
+        path = self.root / "owners.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "candidate_source": "a" * 40,
+                    "queue_cutoff": {
+                        "plans": ["feature-b.md"],
+                        "sha256": admission.queue_plan_digest(["feature-b.md"]),
+                    },
+                    "owners": [{"id": "historical", "required": False}],
+                }
+            )
+        )
+        with self.assertRaisesRegex(admission.AdmissionError, "queue cutoff is stale"):
+            admission.verify_owner_inventory(path, "a" * 40, queue_dir)
+
+    def test_owner_inventory_accepts_exact_queue_cutoff(self) -> None:
+        queue_dir = self.root / "queued"
+        queue_dir.mkdir()
+        (queue_dir / "feature-b-record.md").write_text("# Record\n")
+        (queue_dir / "feature-b.md").write_text("# B\n")
+        (queue_dir / "feature-a.md").write_text("# A\n")
+        plans = ["feature-a.md", "feature-b.md"]
+        path = self.root / "owners.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "candidate_source": "a" * 40,
+                    "queue_cutoff": {
+                        "plans": plans,
+                        "sha256": admission.queue_plan_digest(plans),
+                    },
+                    "owners": [{"id": "historical", "required": False}],
+                }
+            )
+        )
+        admission.verify_owner_inventory(path, "a" * 40, queue_dir)
+
     def test_six_tool_report_requires_exact_order_and_thread_resume(self) -> None:
         report = self.root / "report.json"
         report.write_text(
