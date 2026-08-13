@@ -1043,7 +1043,9 @@ impl ThreadManager {
         mut options: StartThreadOptions,
         forked_from_thread_id: Option<ThreadId>,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&options.config);
+        let (agent_control, _lifecycle_mutation) = self
+            .agent_control_for_initial_history(&options.config, &options.initial_history)
+            .await?;
         let (resumed_session_source, resumed_thread_source) = options
             .initial_history
             .get_resumed_session_sources()
@@ -1127,7 +1129,9 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&config);
+        let (agent_control, _lifecycle_mutation) = self
+            .agent_control_for_initial_history(&config, &initial_history)
+            .await?;
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
@@ -1172,8 +1176,10 @@ impl ThreadManager {
         user_shell_override: crate::shell::Shell,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
-        let agent_control = self.agent_control_for_config(&config);
         let initial_history = self.initial_history_from_rollout_path(rollout_path).await?;
+        let (agent_control, _lifecycle_mutation) = self
+            .agent_control_for_initial_history(&config, &initial_history)
+            .await?;
         let (session_source, thread_source) = initial_history
             .get_resumed_session_sources()
             .unwrap_or_else(|| (self.state.session_source.clone(), None));
@@ -1602,6 +1608,37 @@ impl ThreadManager {
         )
     }
 
+    /// Select the retained registry when a root is resumed after partial archive or delete.
+    ///
+    /// Selection and root creation share `lifecycle_mutation` with membership eviction so a
+    /// resumed root cannot replace the registry while an eviction result is being committed.
+    async fn agent_control_for_initial_history(
+        &self,
+        config: &Config,
+        initial_history: &InitialHistory,
+    ) -> CodexResult<(AgentControl, Option<OwnedMutexGuard<()>>)> {
+        let root_thread_id = match initial_history {
+            InitialHistory::Resumed(resumed)
+                if initial_history.get_resumed_parent_thread_id().is_none() =>
+            {
+                Some(resumed.conversation_id)
+            }
+            InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
+            InitialHistory::Resumed(_) => None,
+        };
+        let Some(root_thread_id) = root_thread_id else {
+            return Ok((self.agent_control_for_config(config), None));
+        };
+        let lifecycle_mutation = self.state.lock_lifecycle_mutation().await;
+        self.state
+            .ensure_current_membership_mutation_allowed([root_thread_id])?;
+        let control = self
+            .state
+            .retained_agent_control(root_thread_id)
+            .unwrap_or_else(|| self.agent_control_for_config(config));
+        Ok((control, Some(lifecycle_mutation)))
+    }
+
     #[cfg(test)]
     pub(crate) fn captured_ops(&self) -> Vec<(ThreadId, Op)> {
         self.state
@@ -1623,10 +1660,6 @@ impl ThreadManager {
 impl ThreadManagerState {
     pub(crate) async fn lock_lifecycle_mutation(&self) -> OwnedMutexGuard<()> {
         Arc::clone(&self.lifecycle_mutation).lock_owned().await
-    }
-
-    pub(crate) fn is_thread_closing(&self, thread_id: ThreadId) -> bool {
-        self.is_thread_under_membership_eviction(thread_id)
     }
 
     /// Updates metadata without requiring a public `ThreadManager` handle.

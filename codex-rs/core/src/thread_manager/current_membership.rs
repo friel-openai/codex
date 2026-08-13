@@ -353,6 +353,26 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Reject a membership mutation whose ownership chain is being archived or deleted.
+    ///
+    /// Callers must hold `lifecycle_mutation` while checking these identities and while committing
+    /// the corresponding registry or graph mutation. The temporary marker outlives the capture
+    /// lock so a mutation that starts after capture fails instead of extending a frozen subtree.
+    pub(crate) fn ensure_current_membership_mutation_allowed(
+        &self,
+        thread_ids: impl IntoIterator<Item = ThreadId>,
+    ) -> CodexResult<()> {
+        if let Some(thread_id) = thread_ids
+            .into_iter()
+            .find(|thread_id| self.is_thread_under_membership_eviction(*thread_id))
+        {
+            return Err(CodexErr::UnsupportedOperation(format!(
+                "thread {thread_id} is being archived or deleted"
+            )));
+        }
+        Ok(())
+    }
+
     fn reconcile_retained_agent_control(
         &self,
         registry_root_thread_id: ThreadId,
@@ -382,6 +402,21 @@ impl ThreadManagerState {
             .iter()
             .map(|(root_thread_id, control)| (*root_thread_id, control.clone()))
             .collect()
+    }
+
+    /// Return the registry retained for a root whose runtime was removed during partial eviction.
+    ///
+    /// The entry stays in the map until the shared registry is empty. A failed root resume must not
+    /// consume the only handle that keeps failed archive or delete candidates current.
+    pub(crate) fn retained_agent_control(
+        &self,
+        registry_root_thread_id: ThreadId,
+    ) -> Option<AgentControl> {
+        self.retained_agent_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&registry_root_thread_id)
+            .cloned()
     }
 
     pub(crate) fn mark_threads_for_membership_eviction(
