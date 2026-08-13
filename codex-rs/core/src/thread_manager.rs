@@ -2143,7 +2143,12 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
+        if let Some(multi_agent_version) =
+            crate::session::configured_or_persisted_multi_agent_version(
+                initial_history,
+                config.multi_agent_version_override(),
+            )
+        {
             return multi_agent_version;
         }
         self.initial_multi_agent_version_for_spawn(
