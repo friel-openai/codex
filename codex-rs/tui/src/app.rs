@@ -224,6 +224,7 @@ mod input;
 mod loaded_threads;
 mod pending_interactive_replay;
 mod permission_shortcuts;
+mod pending_thread_approvals;
 mod pets;
 mod placed_side;
 mod platform_actions;
@@ -258,6 +259,7 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
+pub(crate) use self::thread_events::ThreadEventChannelIdentity;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -637,6 +639,7 @@ pub(crate) struct App {
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+    pending_thread_approval_labels: HashMap<ThreadId, String>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
