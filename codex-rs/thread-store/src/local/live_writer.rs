@@ -580,6 +580,13 @@ pub(super) async fn persist_thread(
     write_and_project(store, thread_id, RolloutWriteOp::Persist).await
 }
 
+pub(super) async fn persist_thread_reserved(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<()> {
+    write_and_project_reserved(store, thread_id, RolloutWriteOp::Persist).await
+}
+
 pub(super) async fn flush_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -647,15 +654,15 @@ pub(super) async fn rollout_path(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<PathBuf> {
-    Ok(store
-        .live_recorders
-        .lock()
-        .await
+    let live_recorders = store.live_recorders.lock().await;
+    let entry = live_recorders
         .get(&thread_id)
-        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
-        .recorder
-        .rollout_path()
-        .to_path_buf())
+        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    Ok(entry
+        .recovery
+        .as_ref()
+        .map(|recovery| recovery.rollout_path.clone())
+        .unwrap_or_else(|| entry.recorder.rollout_path().to_path_buf()))
 }
 
 pub(super) async fn sync_materialized_rollout_path(
@@ -722,7 +729,7 @@ enum RolloutWriteOp {
     Flush,
 }
 
-async fn live_writer_parts(
+pub(super) async fn live_writer_parts(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<(
@@ -731,12 +738,38 @@ async fn live_writer_parts(
     ThreadHistoryMode,
     ThreadPersistenceMode,
 )> {
-    let live_recorders = store.live_recorders.lock().await;
+    let recovery = {
+        let live_recorders = store.live_recorders.lock().await;
+        let entry = live_recorders
+            .get(&thread_id)
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        match entry.recovery.clone() {
+            Some(recovery) => recovery,
+            None => {
+                return Ok((
+                    entry.recorder.clone(),
+                    entry.rollout_id,
+                    entry.history_mode,
+                    entry.persistence_mode,
+                ));
+            }
+        }
+    };
+
+    let recorder = RolloutRecorder::new(
+        &recovery.config,
+        RolloutRecorderParams::resume(recovery.rollout_path),
+    )
+    .await
+    .map_err(thread_store_io_error)?;
+    let mut live_recorders = store.live_recorders.lock().await;
     let entry = live_recorders
-        .get(&thread_id)
+        .get_mut(&thread_id)
         .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+    entry.recorder = recorder.clone();
+    entry.recovery = None;
     Ok((
-        entry.recorder.clone(),
+        recorder,
         entry.rollout_id,
         entry.history_mode,
         entry.persistence_mode,
@@ -752,6 +785,14 @@ async fn write_and_project(
     // shutdown/discard/delete removes it. Keep the lookup defensive so late writes fail after
     // teardown.
     let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
+    write_and_project_reserved(store, thread_id, write_op).await
+}
+
+async fn write_and_project_reserved(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    write_op: RolloutWriteOp,
+) -> ThreadStoreResult<()> {
     let (recorder, rollout_id, history_mode, persistence_mode) =
         live_writer_parts(store, thread_id).await?;
     let sync_rollout_path = matches!(&write_op, RolloutWriteOp::Persist | RolloutWriteOp::Flush);

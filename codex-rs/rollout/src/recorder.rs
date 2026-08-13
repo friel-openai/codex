@@ -135,6 +135,9 @@ pub enum RolloutRecorderParams {
 
 enum RolloutCmd {
     AddItems(Vec<RolloutItem>),
+    BufferedItems {
+        ack: oneshot::Sender<Vec<RolloutItem>>,
+    },
     Persist {
         ack: oneshot::Sender<std::io::Result<()>>,
     },
@@ -1021,6 +1024,29 @@ impl RolloutRecorder {
                     IoError::other(format!("failed to queue rollout items: {e}"))
                 })
             })
+    }
+
+    /// Returns canonical items that have not been written successfully yet.
+    ///
+    /// The response is ordered after every earlier recorder command, so callers can combine it
+    /// with the rollout file while they hold the surrounding thread-writer reservation.
+    pub async fn buffered_canonical_items(&self) -> std::io::Result<Vec<RolloutItem>> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(RolloutCmd::BufferedItems { ack: tx })
+            .await
+            .map_err(|error| {
+                self.writer_task.terminal_failure().unwrap_or_else(|| {
+                    IoError::other(format!("failed to inspect buffered rollout items: {error}"))
+                })
+            })?;
+        rx.await.map_err(|error| {
+            self.writer_task.terminal_failure().unwrap_or_else(|| {
+                IoError::other(format!(
+                    "failed waiting to inspect buffered rollout items: {error}"
+                ))
+            })
+        })
     }
 
     /// Materialize the rollout file and persist all buffered items.
@@ -1944,6 +1970,9 @@ async fn rollout_writer(
             RolloutCmd::AddItems(items) => {
                 state.add_items(items);
                 state.flush_if_materialized().await;
+            }
+            RolloutCmd::BufferedItems { ack } => {
+                let _ = ack.send(state.pending_items.clone());
             }
             RolloutCmd::Persist { ack } => {
                 let _ = ack.send(state.persist().await);
