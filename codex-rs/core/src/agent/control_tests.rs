@@ -75,10 +75,12 @@ use core_test_support::responses::assert_parent_turn;
 use core_test_support::responses::assert_root_turn;
 use core_test_support::responses::ev_completed;
 use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
 use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::sse_failed;
+use core_test_support::responses::sse_response;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
@@ -225,6 +227,49 @@ async fn create_active_thread_goal_for_test(
         .await?;
     let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
     Ok((state_goal.goal_id, protocol_goal))
+}
+
+async fn wait_for_turn_complete(thread: &CodexThread) {
+    timeout(Duration::from_secs(5), async {
+        loop {
+            let event = thread
+                .next_event()
+                .await
+                .expect("event channel should stay open");
+            if matches!(event.msg, EventMsg::TurnComplete(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("turn should complete");
+}
+
+fn request_tool_signatures(body: &serde_json::Value) -> std::collections::BTreeSet<String> {
+    let mut signatures = std::collections::BTreeSet::new();
+    let tools = body["tools"].as_array().expect("tools should be an array");
+    for tool in tools {
+        let tool_type = tool.get("type").and_then(serde_json::Value::as_str);
+        let Some(name) = tool.get("name").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if tool_type == Some("namespace") {
+            let child_tools = tool
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .expect("namespace tools should have child tools");
+            for child_tool in child_tools {
+                let child_name = child_tool
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .expect("child tool should have a name");
+                signatures.insert(format!("{name}.{child_name}"));
+            }
+        } else {
+            signatures.insert(name.to_string());
+        }
+    }
+    signatures
 }
 
 #[test]
@@ -5868,6 +5913,145 @@ async fn goal_supervisor_waits_for_parent_turn_to_finish_inner() {
 }
 
 #[test]
+fn goal_supervisor_finish_serializes_with_the_next_start() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "goal_supervisor_finish_serializes_with_the_next_start",
+        goal_supervisor_finish_serializes_with_the_next_start_inner(),
+    )
+}
+
+async fn goal_supervisor_finish_serializes_with_the_next_start_inner() -> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let delayed_response = Duration::from_secs(30);
+    let request_log = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![
+                ev_response_created("first-supervisor"),
+                ev_completed("first-supervisor"),
+            ]))
+            .set_delay(delayed_response),
+            sse_response(sse(vec![
+                ev_response_created("replacement-supervisor"),
+                ev_completed("replacement-supervisor"),
+            ]))
+            .set_delay(delayed_response),
+            sse_response(sse(vec![
+                ev_response_created("post-followup-supervisor"),
+                ev_completed("post-followup-supervisor"),
+            ]))
+            .set_delay(delayed_response),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread.ensure_rollout_materialized().await;
+    parent_thread.flush_rollout().await?;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires state db");
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Serialize supervisor retirement and replacement.",
+    )
+    .await?;
+    let parent_only = harness.manager.list_thread_ids().await;
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let first_helper_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("first supervisor request should start");
+
+    let transition =
+        crate::goal_supervisor::hold_supervisor_transition_for_test(&parent_thread.session).await;
+    let finish_session = Arc::clone(&parent_thread.session);
+    let finish_task = tokio::spawn(async move {
+        crate::goal_supervisor::finish_supervisor_helper(&finish_session, first_helper_thread_id)
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !finish_task.is_finished(),
+        "supervisor retirement must wait for the lifecycle transition lock"
+    );
+    drop(transition);
+    assert!(
+        finish_task.await.expect("finish task should not panic")?,
+        "the active supervisor should retire"
+    );
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let replacement_thread_id = spawned_thread_id_after(&harness.manager, &parent_only).await;
+    assert_ne!(replacement_thread_id, first_helper_thread_id);
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().len() < 2 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("replacement supervisor request should start");
+
+    crate::goal_supervisor::record_followup_action(
+        &parent_thread.session,
+        &InterAgentCommunication::new(
+            AgentPath::root()
+                .join("goal_supervisor")
+                .expect("supervisor path"),
+            AgentPath::root(),
+            Vec::new(),
+            "continue".to_string(),
+            /*trigger_turn*/ true,
+        ),
+    )
+    .await;
+    assert!(
+        crate::goal_supervisor::finish_supervisor_helper_after_followup(
+            &parent_thread.session,
+            replacement_thread_id,
+        )
+        .await?,
+        "the replacement supervisor should retire after its followup"
+    );
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().len() < 3 {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("idle recheck should replace a supervisor after its delivered followup");
+
+    let _ = harness
+        .manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    Ok(())
+}
+
+#[test]
 fn goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit() {
     run_goal_supervisor_test(
         "goal_supervisor_helper_does_not_consume_multi_agent_v2_thread_limit",
@@ -6238,6 +6422,294 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner() -> anyhow:
         2,
         "the second implicit failure should advance the backoff tier"
     );
+    Ok(())
+}
+
+#[test]
+#[serial(fork_env)]
+fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
+        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(),
+    )
+}
+
+async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let request_log = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("resp-parent"),
+                ev_completed("resp-parent"),
+            ]),
+            sse(vec![
+                ev_response_created("resp-child"),
+                ev_completed("resp-child"),
+            ]),
+        ],
+    )
+    .await;
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::AgentPromptInjection);
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let mcp_server_path = config.codex_home.join("fake_mcp_server.py");
+    std::fs::write(
+        &mcp_server_path,
+        r#"import json
+import sys
+
+def read_message():
+    line = sys.stdin.buffer.readline()
+    if not line:
+        return None
+    return json.loads(line)
+
+def write_message(message):
+    body = json.dumps(message).encode("utf-8")
+    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
+
+while True:
+    message = read_message()
+    if message is None:
+        break
+    method = message.get("method")
+    request_id = message.get("id")
+    if request_id is None:
+        continue
+    if method == "initialize":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": {"name": "fake-mcp", "version": "1.0.0"},
+            },
+        })
+    elif method == "tools/list":
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "result": {
+                "tools": [{
+                    "name": "echo",
+                    "description": "Echo from fake MCP",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": False,
+                    },
+                }],
+            },
+        })
+    else:
+        write_message({
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "error": {"code": -32601, "message": "method not found"},
+        })
+"#,
+    )?;
+    config
+        .mcp_servers
+        .set(std::collections::HashMap::from([(
+            "rmcp".to_string(),
+            McpServerConfig {
+                auth: Default::default(),
+                transport: McpServerTransportConfig::Stdio {
+                    command: "python3".to_string(),
+                    args: vec![mcp_server_path.to_string_lossy().to_string()],
+                    env: None,
+                    env_vars: Vec::new(),
+                    cwd: None,
+                },
+                environment_id: codex_config::DEFAULT_MCP_SERVER_ENVIRONMENT_ID.to_string(),
+                enabled: true,
+                required: false,
+                supports_parallel_tool_calls: false,
+                omit_tools_from: None,
+                disabled_reason: None,
+                oauth: None,
+                startup_timeout_sec: Some(Duration::from_secs(5)),
+                tool_timeout_sec: None,
+                default_tools_approval_mode: None,
+                enabled_tools: None,
+                disabled_tools: None,
+                scopes: None,
+                oauth_resource: None,
+                tools: std::collections::HashMap::new(),
+            },
+        )]))
+        .expect("test config should allow MCP servers");
+
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("sqlite state db should be available");
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let parent_prompt_cache_key = parent_thread.session.prompt_cache_key();
+    let mcp_runtime = Arc::clone(&parent_thread.session.services.mcp_runtime);
+    assert!(
+        mcp_runtime
+            .latest_wait_for_server_ready("rmcp", Duration::from_secs(5))
+            .await,
+        "parent MCP server should become ready before forking"
+    );
+    let parent_mcp_tools = mcp_runtime.latest_list_all_tools().await;
+    assert!(
+        parent_mcp_tools
+            .iter()
+            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
+        "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
+    );
+    parent_thread
+        .submit(text_input("parent seed").into())
+        .await?;
+    wait_for_turn_complete(parent_thread.as_ref()).await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread.session.flush_rollout().await?;
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Supervise the parent with inherited MCP tools.",
+    )
+    .await?;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(&parent_thread.session, &goal_id, &goal)
+        .await?;
+    let child_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    let child_mcp_tool_snapshot = child_thread
+        .session
+        .services
+        .mcp_tool_snapshot
+        .lock()
+        .await
+        .clone()
+        .expect("goal supervisor helper should inherit the parent MCP tool snapshot");
+    assert!(
+        child_mcp_tool_snapshot
+            .tools
+            .iter()
+            .any(|tool| tool.server_name == "rmcp" && tool.tool.name == "echo"),
+        "goal supervisor helper should inherit the parent MCP tool snapshot"
+    );
+
+    wait_for_turn_complete(child_thread.as_ref()).await;
+    let requests = request_log.requests();
+    assert_eq!(requests.len(), 2);
+    let parent_body = requests[0].body_json();
+    let child_body = requests[1].body_json();
+    let parent_input = parent_body["input"]
+        .as_array()
+        .expect("parent input should be an array");
+    let child_input = child_body["input"]
+        .as_array()
+        .expect("child input should be an array");
+    let expected_prompt_cache_key = parent_prompt_cache_key.to_string();
+    assert_eq!(
+        child_body["prompt_cache_key"].as_str(),
+        Some(expected_prompt_cache_key.as_str())
+    );
+    assert_eq!(
+        &child_input[..parent_input.len()],
+        parent_input,
+        "goal supervisor helpers must preserve the exact parent request prefix through the fork point"
+    );
+    let child_suffix = &child_input[parent_input.len()..];
+    assert!(
+        child_suffix.first().is_some_and(|item| {
+            item["role"] == "developer"
+                && item["content"].as_array().is_some_and(|content| {
+                    content.iter().any(|content_item| {
+                        content_item["text"]
+                            .as_str()
+                            .is_some_and(|text| text.contains("You are also a **goal supervisor**"))
+                    })
+                })
+        }),
+        "goal supervisor helpers should append the supervisor role prompt immediately after the inherited parent request prefix: suffix={child_suffix:#?}"
+    );
+    for unexpected_child_context in [
+        "# AGENTS.md instructions",
+        "<permissions instructions>",
+        "<apps_instructions>",
+        "<skills_instructions>",
+        "<plugins_instructions>",
+    ] {
+        assert!(
+            child_suffix.iter().all(|item| {
+                item["content"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .all(|content_item| {
+                        content_item["text"]
+                            .as_str()
+                            .is_none_or(|text| !text.contains(unexpected_child_context))
+                    })
+            }),
+            "goal supervisor helpers must not append fresh child startup context after forking: found {unexpected_child_context} in suffix={child_suffix:#?}"
+        );
+    }
+    assert_eq!(
+        child_body["parallel_tool_calls"], parent_body["parallel_tool_calls"],
+        "goal supervisor helpers must keep the same parallel tool-call setting as their parent"
+    );
+    assert_eq!(
+        child_body["tools"], parent_body["tools"],
+        "goal supervisor helpers must keep the same serialized tool definitions, order, namespaces, and schemas as their parent"
+    );
+    let parent_tool_signatures = request_tool_signatures(&parent_body);
+    let child_tool_signatures = request_tool_signatures(&child_body);
+    assert_eq!(
+        child_tool_signatures, parent_tool_signatures,
+        "goal supervisor helpers must keep the same eager tool surface as their parent"
+    );
+    for expected_tool in [
+        "collaboration.spawn_agent",
+        "collaboration.send_message",
+        "collaboration.followup_task",
+        "collaboration.wait_agent",
+        "collaboration.list_agents",
+        "collaboration.interrupt_agent",
+        "supervisor.close_self",
+        "supervisor.snooze",
+        "supervisor.compact_parent_context",
+    ] {
+        assert!(
+            child_tool_signatures.contains(expected_tool),
+            "expected forked child request to expose `{expected_tool}`; tools={child_tool_signatures:#?}"
+        );
+    }
+    assert!(
+        child_body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["type"].as_str() == Some("tool_search"))
+        }),
+        "the inherited MCP snapshot should be discoverable through tool_search: {child_body:#}"
+    );
+
     Ok(())
 }
 
