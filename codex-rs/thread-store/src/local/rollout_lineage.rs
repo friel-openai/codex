@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use codex_app_server_protocol::ThreadItem;
+use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
@@ -46,6 +47,11 @@ pub(super) struct RolloutLineageSegment {
 /// reconstruction have one lineage implementation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RolloutLineage {
+    /// Physical rollout selected for the logical thread when this lineage was resolved.
+    ///
+    /// Pagination cursors bind to this identity so replacing a thread's selected rollout cannot
+    /// reinterpret an ordinal from the previous rollout as a position in the replacement.
+    pub(super) root_rollout_id: RolloutId,
     pub(super) segments: Vec<RolloutLineageSegment>,
 }
 
@@ -70,7 +76,10 @@ impl LocalThreadStore {
             &mut active_paths,
         )
         .await?;
-        Ok(RolloutLineage { segments })
+        Ok(RolloutLineage {
+            root_rollout_id: resolved.rollout_id,
+            segments,
+        })
     }
 
     pub(super) async fn resolve_rollout_lineage_for_reference(
@@ -197,7 +206,10 @@ impl LocalThreadStore {
             &mut active_paths,
         )
         .await?;
-        Ok(RolloutLineage { segments })
+        Ok(RolloutLineage {
+            root_rollout_id: end.thread_id,
+            segments,
+        })
     }
 }
 
@@ -225,6 +237,10 @@ async fn resolve_rollout_path_by_id(
 }
 
 impl RolloutLineage {
+    pub(super) fn root_rollout_id(&self) -> RolloutId {
+        self.root_rollout_id
+    }
+
     pub(super) fn segments(&self) -> &[RolloutLineageSegment] {
         self.segments.as_slice()
     }

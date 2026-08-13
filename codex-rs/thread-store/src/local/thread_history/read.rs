@@ -41,10 +41,12 @@ pub(super) enum CursorScope {
     ItemsByUpdatedAtOrdinal,
 }
 
+/// A history position bound to one logical thread and its selected physical rollout.
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HistoryCursor {
     pub requested_thread_id: ThreadId,
+    pub root_rollout_id: RolloutId,
     pub rollout_ordinal: u64,
     pub include_anchor: bool,
     pub scope: CursorScope,
@@ -256,6 +258,7 @@ async fn indexed_same_thread_lineage(
     }
 
     Ok(Some(RolloutLineage {
+        root_rollout_id: rollout_id,
         segments: vec![RolloutLineageSegment {
             thread_id,
             rollout_id,
@@ -535,6 +538,7 @@ async fn legacy_turn_cursor_to_index(
     .ok_or_else(|| invalid_cursor(cursor))?;
     serialize_cursor(
         thread_id,
+        thread_id,
         CursorScope::Turns,
         ordinal,
         legacy.include_anchor,
@@ -549,7 +553,7 @@ async fn indexed_turn_cursor_to_legacy(
     let Some(cursor) = cursor else {
         return Ok(None);
     };
-    let indexed = parse_cursor(Some(cursor), thread_id, CursorScope::Turns)?
+    let indexed = parse_cursor(Some(cursor), thread_id, thread_id, CursorScope::Turns)?
         .ok_or_else(|| invalid_cursor(cursor))?;
     let ordinal = i64::try_from(indexed.rollout_ordinal).map_err(|_| invalid_cursor(cursor))?;
     let turn_id = sqlx::query_scalar::<_, String>(
@@ -704,6 +708,7 @@ ORDER BY rollout_ordinal ASC
 pub(super) fn parse_cursor(
     cursor: Option<&str>,
     requested_thread_id: ThreadId,
+    root_rollout_id: RolloutId,
     scope: CursorScope,
 ) -> ThreadStoreResult<Option<HistoryCursor>> {
     let Some(cursor) = cursor else {
@@ -711,7 +716,10 @@ pub(super) fn parse_cursor(
     };
     let cursor_value: HistoryCursor =
         serde_json::from_str(cursor).map_err(|_| invalid_cursor(cursor))?;
-    if cursor_value.requested_thread_id != requested_thread_id || cursor_value.scope != scope {
+    if cursor_value.requested_thread_id != requested_thread_id
+        || cursor_value.root_rollout_id != root_rollout_id
+        || cursor_value.scope != scope
+    {
         return Err(invalid_cursor(cursor));
     }
     Ok(Some(cursor_value))
@@ -719,6 +727,7 @@ pub(super) fn parse_cursor(
 
 pub(super) fn serialize_cursor(
     requested_thread_id: ThreadId,
+    root_rollout_id: RolloutId,
     scope: CursorScope,
     rollout_ordinal: i64,
     include_anchor: bool,
@@ -727,6 +736,7 @@ pub(super) fn serialize_cursor(
         u64::try_from(rollout_ordinal).map_err(|_| invalid_cursor("negative rollout ordinal"))?;
     serde_json::to_string(&HistoryCursor {
         requested_thread_id,
+        root_rollout_id,
         rollout_ordinal,
         include_anchor,
         scope,
