@@ -390,8 +390,8 @@ fn minimal_current_agent_thread(
         parent_thread_id: member.parent_thread_id,
         depth,
         agent_path,
-        agent_nickname: None,
-        agent_role: None,
+        agent_nickname: member.agent_nickname.clone(),
+        agent_role: member.agent_role.clone(),
     });
     let thread_id = member.thread_id.to_string();
     (
@@ -418,8 +418,8 @@ fn minimal_current_agent_thread(
             source: source.clone().into(),
             can_accept_direct_input: None,
             thread_source: Some(codex_app_server_protocol::ThreadSource::Subagent),
-            agent_nickname: None,
-            agent_role: None,
+            agent_nickname: member.agent_nickname.clone(),
+            agent_role: member.agent_role.clone(),
             git_info: None,
             name: None,
             turns: Vec::new(),
@@ -436,6 +436,8 @@ fn minimal_current_agent_thread(
 fn apply_current_agent_member(thread: &mut Thread, member: &CurrentAgentMember) {
     thread.parent_thread_id = Some(member.parent_thread_id.to_string());
     thread.agent_status = Some(member.status.clone().into());
+    thread.agent_nickname.clone_from(&member.agent_nickname);
+    thread.agent_role.clone_from(&member.agent_role);
     apply_current_agent_member_source(&mut thread.source, member);
 }
 
@@ -443,11 +445,15 @@ fn apply_current_agent_member_source(source: &mut SessionSource, member: &Curren
     if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         agent_path,
+        agent_nickname,
+        agent_role,
         ..
     }) = source
     {
         *parent_thread_id = member.parent_thread_id;
         agent_path.clone_from(&member.agent_path);
+        agent_nickname.clone_from(&member.agent_nickname);
+        agent_role.clone_from(&member.agent_role);
     }
 }
 
@@ -458,10 +464,14 @@ fn apply_current_agent_member_core_source(
     if let codex_protocol::protocol::SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         agent_path,
+        agent_nickname,
+        agent_role,
         ..
     }) = source
     {
         *parent_thread_id = member.parent_thread_id;
         agent_path.clone_from(&member.agent_path);
+        agent_nickname.clone_from(&member.agent_nickname);
+        agent_role.clone_from(&member.agent_role);
     }
 }

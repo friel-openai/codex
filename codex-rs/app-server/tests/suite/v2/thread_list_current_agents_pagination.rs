@@ -193,6 +193,7 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
             "message": worker_prompt,
             "task_name": task_name,
             "fork_turns": "none",
+            "agent_type": "explorer",
         }))?;
         let root_prompt_match = root_prompt.clone();
         let spawn_response_id = format!("bulk-root-spawn-{index:02}");
@@ -365,6 +366,7 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
     let mut app_members = Vec::new();
     let mut app_cursor = None;
     let mut app_cursors = std::collections::HashSet::new();
+    let mut cold_identity_checked = false;
     loop {
         let response = list_threads_for_relation(
             &mut mcp,
@@ -376,7 +378,28 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
         )
         .await?;
         for thread in &response.data {
-            app_members.push(normalize_app_current_agent(thread)?);
+            let normalized = normalize_app_current_agent(thread)?;
+            if normalized.path == "/root/bulk_worker_00" {
+                let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                    agent_nickname,
+                    agent_role,
+                    ..
+                }) = &thread.source
+                else {
+                    anyhow::bail!("cold ephemeral relation member must be a thread spawn");
+                };
+                assert!(
+                    agent_nickname
+                        .as_deref()
+                        .is_some_and(|name| !name.is_empty()),
+                    "cold ephemeral relation member must retain its generated nickname"
+                );
+                assert_eq!(agent_role.as_deref(), Some("explorer"));
+                assert_eq!(thread.agent_nickname.as_deref(), agent_nickname.as_deref());
+                assert_eq!(thread.agent_role.as_deref(), agent_role.as_deref());
+                cold_identity_checked = true;
+            }
+            app_members.push(normalized);
         }
         app_cursor = response.next_cursor;
         let Some(cursor) = app_cursor.as_ref() else {
@@ -387,6 +410,10 @@ async fn thread_list_relation_matches_every_list_agents_page_above_default_limit
     model_members.sort();
     app_members.sort();
     assert_eq!(app_members, model_members);
+    assert!(
+        cold_identity_checked,
+        "the oldest evicted ephemeral worker must retain registry identity"
+    );
 
     mcp.wait_for_json_log_event("codex.current_agents.list")
         .await?;
