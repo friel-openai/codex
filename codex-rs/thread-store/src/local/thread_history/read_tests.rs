@@ -913,6 +913,272 @@ async fn list_items_update_ordinals_use_selected_rollout_id() {
 }
 
 #[tokio::test]
+async fn cursors_are_bound_to_the_selected_rollout_generation() {
+    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+    let first_rollout_id = ThreadId::new();
+    let second_rollout_id = ThreadId::new();
+    let first_path = selected_rollout_path(home.path(), thread_id, first_rollout_id);
+    let second_path = selected_rollout_path(home.path(), thread_id, second_rollout_id);
+    write_rollout(first_path.as_path(), thread_id, /*history_base*/ None);
+    write_rollout(second_path.as_path(), thread_id, /*history_base*/ None);
+    select_rollout_path(&store, thread_id, first_path).await;
+
+    let db = history_db(&store).await;
+    for (rollout_id, prefix) in [(first_rollout_id, "first"), (second_rollout_id, "second")] {
+        for (index, ordinal) in [(1, 10), (2, 20)] {
+            let turn_id = format!("{prefix}-turn-{index}");
+            let item_id = format!("{prefix}-item-{index}");
+            insert_turn(
+                db,
+                rollout_id,
+                turn_id.as_str(),
+                ordinal,
+                "completed",
+                /*error_json*/ None,
+                Some(item_id.as_str()),
+                /*final_agent_item_id*/ None,
+            )
+            .await;
+            insert_item(
+                db,
+                rollout_id,
+                turn_id.as_str(),
+                item_id.as_str(),
+                ordinal + 1,
+            )
+            .await;
+        }
+    }
+
+    let first_turn_page = store
+        .list_turns(turn_params(
+            thread_id,
+            /*cursor*/ None,
+            /*page_size*/ 1,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect("first-generation turn page");
+    let first_item_page = store
+        .list_items(item_params(
+            thread_id,
+            /*turn_id*/ None,
+            /*cursor*/ None,
+            /*page_size*/ 1,
+            SortDirection::Asc,
+        ))
+        .await
+        .expect("first-generation item page");
+    let first_updated_item_page = store
+        .list_items(ListItemsParams {
+            page_size: 1,
+            ..updated_item_params(thread_id, /*after_updated_at_ordinal*/ 0)
+        })
+        .await
+        .expect("first-generation updated-item page");
+    let first_search_page = store
+        .search_thread_occurrences(SearchThreadOccurrencesParams {
+            thread_id,
+            search_term: "item".to_string(),
+            cursor: None,
+            page_size: 1,
+        })
+        .await
+        .expect("first-generation search page");
+
+    let first_turn_next = first_turn_page
+        .next_cursor
+        .clone()
+        .expect("first turn page should continue");
+    let decoded: HistoryCursor =
+        serde_json::from_str(first_turn_next.as_str()).expect("decode generated history cursor");
+    assert_eq!(decoded.requested_thread_id, thread_id);
+    assert_eq!(decoded.root_rollout_id, first_rollout_id);
+    let first_search_next = first_search_page
+        .next_cursor
+        .clone()
+        .expect("first search page should continue");
+    let search_cursor_json = serde_json::from_str::<serde_json::Value>(first_search_next.as_str())
+        .expect("decode generated search cursor");
+    assert_eq!(
+        search_cursor_json
+            .get("threadId")
+            .and_then(|value| value.as_str()),
+        Some(thread_id.to_string().as_str())
+    );
+    assert_eq!(
+        search_cursor_json
+            .get("rootRolloutId")
+            .and_then(|value| value.as_str()),
+        Some(first_rollout_id.to_string().as_str())
+    );
+
+    // Appending under one selected rollout does not change its cursor generation.
+    insert_turn(
+        db,
+        first_rollout_id,
+        "first-turn-3",
+        30,
+        "completed",
+        /*error_json*/ None,
+        /*first_user_item_id*/ None,
+        /*final_agent_item_id*/ None,
+    )
+    .await;
+    let continued_first_generation = store
+        .list_turns(turn_params(
+            thread_id,
+            Some(first_turn_next.clone()),
+            /*page_size*/ 3,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect("same-generation cursor should survive append");
+    assert_eq!(
+        turn_ids(&continued_first_generation),
+        vec!["first-turn-2", "first-turn-3"]
+    );
+
+    let mut history_cursors = vec![
+        first_turn_next,
+        first_turn_page
+            .backwards_cursor
+            .expect("turn backwards cursor"),
+        first_item_page.next_cursor.expect("item next cursor"),
+        first_item_page
+            .backwards_cursor
+            .expect("item backwards cursor"),
+        first_updated_item_page
+            .next_cursor
+            .expect("updated-item next cursor"),
+        first_updated_item_page
+            .backwards_cursor
+            .expect("updated-item backwards cursor"),
+        first_search_page.items[0].turn_cursor.clone(),
+    ];
+    let missing_generation_cursor = {
+        let mut value = serde_json::to_value(&decoded).expect("encode history cursor");
+        value
+            .as_object_mut()
+            .expect("history cursor object")
+            .remove("rootRolloutId");
+        serde_json::to_string(&value).expect("encode pre-generation cursor")
+    };
+    let error = store
+        .list_turns(turn_params(
+            thread_id,
+            Some(missing_generation_cursor),
+            /*page_size*/ 1,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect_err("cursor without rollout generation must fail closed");
+    assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    let missing_search_generation_cursor = {
+        let mut value = search_cursor_json;
+        value
+            .as_object_mut()
+            .expect("search cursor object")
+            .remove("rootRolloutId");
+        serde_json::to_string(&value).expect("encode pre-generation search cursor")
+    };
+    let error = store
+        .search_thread_occurrences(SearchThreadOccurrencesParams {
+            thread_id,
+            search_term: "item".to_string(),
+            cursor: Some(missing_search_generation_cursor),
+            page_size: 1,
+        })
+        .await
+        .expect_err("search cursor without rollout generation must fail closed");
+    assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+
+    select_rollout_path(&store, thread_id, second_path).await;
+
+    for cursor in history_cursors.drain(..2) {
+        let error = store
+            .list_turns(turn_params(
+                thread_id,
+                Some(cursor),
+                /*page_size*/ 1,
+                SortDirection::Asc,
+                StoredTurnItemsView::NotLoaded,
+            ))
+            .await
+            .expect_err("turn cursor from replaced rollout must fail");
+        assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    }
+    for cursor in history_cursors.drain(..2) {
+        let error = store
+            .list_items(item_params(
+                thread_id,
+                /*turn_id*/ None,
+                Some(cursor),
+                /*page_size*/ 1,
+                SortDirection::Asc,
+            ))
+            .await
+            .expect_err("item cursor from replaced rollout must fail");
+        assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    }
+    for cursor in history_cursors.drain(..2) {
+        let error = store
+            .list_items(ListItemsParams {
+                cursor: Some(cursor),
+                page_size: 1,
+                ..updated_item_params(thread_id, /*after_updated_at_ordinal*/ 0)
+            })
+            .await
+            .expect_err("updated-item cursor from replaced rollout must fail");
+        assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    }
+    let error = store
+        .list_turns(turn_params(
+            thread_id,
+            history_cursors.pop(),
+            /*page_size*/ 1,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect_err("search turn cursor from replaced rollout must fail");
+    assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    let error = store
+        .search_thread_occurrences(SearchThreadOccurrencesParams {
+            thread_id,
+            search_term: "item".to_string(),
+            cursor: Some(first_search_next),
+            page_size: 1,
+        })
+        .await
+        .expect_err("search cursor from replaced rollout must fail");
+    assert!(matches!(error, ThreadStoreError::InvalidRequest { .. }));
+    let second_turn_page = store
+        .list_turns(turn_params(
+            thread_id,
+            /*cursor*/ None,
+            /*page_size*/ 1,
+            SortDirection::Asc,
+            StoredTurnItemsView::NotLoaded,
+        ))
+        .await
+        .expect("fresh second-generation cursor");
+    assert_eq!(turn_ids(&second_turn_page), vec!["second-turn-1"]);
+    let second_cursor: HistoryCursor = serde_json::from_str(
+        second_turn_page
+            .next_cursor
+            .as_deref()
+            .expect("second generation should continue"),
+    )
+    .expect("decode second-generation cursor");
+    assert_eq!(second_cursor.requested_thread_id, thread_id);
+    assert_eq!(second_cursor.root_rollout_id, second_rollout_id);
+}
+
+#[tokio::test]
 async fn list_history_keeps_legacy_threads_unsupported() {
     let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Legacy).await;
 
@@ -1978,6 +2244,7 @@ async fn lineage_reads_page_across_parent_and_child_segments() {
 
     let gap_cursor = serde_json::to_string(&HistoryCursor {
         requested_thread_id: child_id,
+        root_rollout_id: child_id,
         rollout_ordinal: 6,
         include_anchor: true,
         scope: CursorScope::Turns,
@@ -2246,6 +2513,34 @@ async fn store_with_mode(history_mode: ThreadHistoryMode) -> (TempDir, LocalThre
         .expect("seed thread metadata");
     let store = LocalThreadStore::new(config, Some(runtime));
     (home, store, thread_id)
+}
+
+fn selected_rollout_path(
+    home: &std::path::Path,
+    thread_id: ThreadId,
+    rollout_id: ThreadId,
+) -> std::path::PathBuf {
+    home.join(format!(
+        "sessions/2026/07/16/rollout-2026-07-16T00-00-00-{thread_id}_{rollout_id}.jsonl"
+    ))
+}
+
+async fn select_rollout_path(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: std::path::PathBuf,
+) {
+    let state_db = store.state_db().await.expect("state runtime");
+    let mut metadata = state_db
+        .get_thread(thread_id)
+        .await
+        .expect("read metadata")
+        .expect("thread metadata");
+    metadata.rollout_path = rollout_path;
+    state_db
+        .upsert_thread(&metadata)
+        .await
+        .expect("select rollout generation");
 }
 
 fn write_rollout(
