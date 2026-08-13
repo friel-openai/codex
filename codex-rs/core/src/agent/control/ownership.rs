@@ -325,7 +325,10 @@ impl AgentControl {
     pub(crate) async fn promote_agent(&self, thread_id: ThreadId) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
         let metadata = self.ensure_agent_known(thread_id)?;
-        if metadata.agent_path.as_ref().is_some_and(AgentPath::is_root) {
+        if metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+            || metadata.agent_role.as_deref()
+                == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+        {
             return Err(CodexErr::InvalidRequest(
                 "only a user-visible subagent can be promoted".to_string(),
             ));
