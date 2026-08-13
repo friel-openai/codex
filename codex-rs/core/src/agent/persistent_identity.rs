@@ -157,6 +157,13 @@ impl AgentControl {
         archive_policy: PersistedIdentityArchivePolicy,
     ) -> CodexResult<AgentMetadata> {
         let state = self.upgrade_for_tools()?;
+        let _lifecycle_mutation = state.lock_lifecycle_mutation().await;
+        state.ensure_current_membership_mutation_allowed([
+            current_thread_id,
+            selected_identity.parent_thread_id,
+            selected_identity.thread_id,
+            self.current_membership_root_thread_id(),
+        ])?;
         let archived = if let Some(thread) = state
             .indexed_thread_metadata(selected_identity.thread_id)
             .await

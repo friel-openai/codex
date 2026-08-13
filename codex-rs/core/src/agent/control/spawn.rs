@@ -202,6 +202,19 @@ impl AgentControl {
         options: SpawnAgentOptions,
     ) -> CodexResult<LiveAgent> {
         let state = self.upgrade()?;
+        let membership_parent_thread_id = session_source
+            .as_ref()
+            .and_then(SessionSource::parent_thread_id);
+        let _lifecycle_mutation = if let Some(parent_thread_id) = membership_parent_thread_id {
+            let lifecycle_mutation = state.lock_lifecycle_mutation().await;
+            state.ensure_current_membership_mutation_allowed([
+                parent_thread_id,
+                self.current_membership_root_thread_id(),
+            ])?;
+            Some(lifecycle_mutation)
+        } else {
+            None
+        };
         let multi_agent_version = state
             .effective_multi_agent_version_for_spawn(
                 &InitialHistory::New,

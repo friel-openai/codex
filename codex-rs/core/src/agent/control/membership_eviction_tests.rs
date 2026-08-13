@@ -1,5 +1,17 @@
 use super::*;
 use pretty_assertions::assert_eq;
+use tokio::time::Duration;
+use tokio::time::timeout;
+
+fn child_source(parent_thread_id: ThreadId) -> SessionSource {
+    SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    })
+}
 
 #[tokio::test]
 async fn manager_membership_snapshot_resolves_a_cold_nested_scope_to_its_root() {
@@ -24,9 +36,10 @@ async fn manager_membership_snapshot_resolves_a_cold_nested_scope_to_its_root() 
         .control
         .get_agent_metadata(grandchild_thread_id)
         .expect("grandchild metadata");
-    grandchild_metadata
-        .lifecycle
-        .remember_cold_terminal_status(AgentStatus::Completed(None), true);
+    grandchild_metadata.lifecycle.remember_cold_terminal_status(
+        AgentStatus::Completed(None),
+        /*visible_when_cold*/ true,
+    );
     let state = harness.control.upgrade().expect("manager state");
     harness
         .control
@@ -112,4 +125,110 @@ async fn manager_membership_snapshot_scopes_by_registered_parent_topology() {
     assert!(!snapshot.members.iter().any(|member| {
         member.thread_id == worker_thread_id || member.thread_id == sibling_thread_id
     }));
+}
+
+#[tokio::test]
+async fn archive_or_delete_capture_fences_a_concurrent_spawn_before_thread_creation() {
+    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+    let state = harness.control.upgrade().expect("manager state");
+    let lifecycle_mutation = state.lock_lifecycle_mutation().await;
+    let control = harness.control.clone();
+    let config = harness.config.clone();
+    let mut spawn = tokio::spawn(async move {
+        control
+            .spawn_agent(
+                config,
+                text_input("late child"),
+                Some(child_source(root_thread_id)),
+            )
+            .await
+    });
+
+    assert!(
+        timeout(Duration::from_millis(50), &mut spawn)
+            .await
+            .is_err(),
+        "spawn must wait while archive or delete captures current membership"
+    );
+    state.mark_threads_for_membership_eviction([root_thread_id]);
+    drop(lifecycle_mutation);
+
+    let error = spawn
+        .await
+        .expect("spawn task should not panic")
+        .expect_err("spawn must fail after its parent is fenced");
+    assert!(error.to_string().contains("being archived or deleted"));
+    assert!(
+        harness
+            .manager
+            .current_agent_members(root_thread_id)
+            .await
+            .expect("membership should remain readable")
+            .is_empty()
+    );
+    state.unmark_threads_for_membership_eviction([root_thread_id]);
+}
+
+#[tokio::test]
+async fn archive_or_delete_capture_fences_concurrent_lazy_identity_registration() {
+    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
+    let (root_thread_id, _) = harness.start_thread().await;
+    harness
+        .control
+        .register_session_root(root_thread_id, /*current_parent_thread_id*/ None);
+    let child_thread_id = harness
+        .control
+        .spawn_agent(
+            harness.config.clone(),
+            text_input("persisted child"),
+            Some(child_source(root_thread_id)),
+        )
+        .await
+        .expect("child should spawn before eviction capture");
+    harness
+        .control
+        .evict_current_agent_ids(&[child_thread_id])
+        .await
+        .expect("test child should become a cold persisted identity");
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
+
+    let state = harness.control.upgrade().expect("manager state");
+    let lifecycle_mutation = state.lock_lifecycle_mutation().await;
+    let control = harness.control.clone();
+    let mut registration = tokio::spawn(async move {
+        control
+            .ensure_open_agent_known_by_id(root_thread_id, child_thread_id)
+            .await
+    });
+
+    assert!(
+        timeout(Duration::from_millis(50), &mut registration)
+            .await
+            .is_err(),
+        "lazy registration must wait while archive or delete captures current membership"
+    );
+    state.mark_threads_for_membership_eviction([root_thread_id, child_thread_id]);
+    drop(lifecycle_mutation);
+
+    let error = registration
+        .await
+        .expect("registration task should not panic")
+        .expect_err("lazy registration must fail after its ownership chain is fenced");
+    assert!(error.to_string().contains("being archived or deleted"));
+    assert!(
+        harness
+            .control
+            .get_agent_metadata(child_thread_id)
+            .is_none()
+    );
+    state.unmark_threads_for_membership_eviction([root_thread_id, child_thread_id]);
 }

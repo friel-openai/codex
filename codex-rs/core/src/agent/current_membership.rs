@@ -18,6 +18,10 @@ pub struct CurrentAgentMember {
     pub thread_id: ThreadId,
     pub parent_thread_id: ThreadId,
     pub agent_path: Option<AgentPath>,
+    /// Nickname retained by the root registry after the agent runtime is evicted.
+    pub agent_nickname: Option<String>,
+    /// Role retained by the root registry after the agent runtime is evicted.
+    pub agent_role: Option<String>,
     pub status: AgentStatus,
     pub last_task_message: Option<String>,
 }
@@ -65,6 +69,8 @@ impl AgentControl {
                 thread_id,
                 parent_thread_id,
                 agent_path,
+                agent_nickname: metadata.agent_nickname,
+                agent_role: metadata.agent_role,
                 status: bounded_current_agent_status(status),
                 last_task_message: metadata.last_task_message,
             });
