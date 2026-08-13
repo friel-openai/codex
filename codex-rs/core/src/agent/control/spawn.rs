@@ -362,7 +362,12 @@ impl AgentControl {
                 &config,
             )
             .await;
-        if let Some(session_source) = session_source.as_ref() {
+        let is_goal_supervisor_helper = session_source
+            .as_ref()
+            .is_some_and(crate::goal_supervisor::is_goal_supervisor_helper_source);
+        if let Some(session_source) = session_source.as_ref()
+            && !is_goal_supervisor_helper
+        {
             self.ensure_execution_capacity(multi_agent_version, session_source)?;
         }
         let agent_max_threads = config.effective_agent_max_threads(multi_agent_version);
@@ -387,7 +392,11 @@ impl AgentControl {
         } else {
             agent_max_threads
         };
-        let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        let mut reservation = if is_goal_supervisor_helper {
+            self.state.reserve_uncounted_spawn_slot()
+        } else {
+            self.state.reserve_spawn_slot(reservation_max_threads)?
+        };
         let inheritance = SpawnAgentThreadInheritance {
             environments: self
                 .inherited_environments_for_source(&state, session_source.as_ref())
@@ -542,7 +551,11 @@ impl AgentControl {
                 .await?;
             }
         }
-        if multi_agent_version != MultiAgentVersion::V2 {
+        let is_goal_supervisor_helper = options.fork_mode.is_some()
+            && notification_source
+                .as_ref()
+                .is_some_and(crate::goal_supervisor::is_goal_supervisor_helper_source);
+        if multi_agent_version != MultiAgentVersion::V2 || is_goal_supervisor_helper {
             let child_reference = agent_metadata
                 .agent_path
                 .as_ref()

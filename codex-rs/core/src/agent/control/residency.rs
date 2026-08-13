@@ -253,6 +253,7 @@ fn is_resident_candidate(thread: &CodexThread) -> bool {
 
 pub(super) fn is_resident_session_source(session_source: &SessionSource) -> bool {
     matches!(session_source, SessionSource::SubAgent(_))
+        && !crate::goal_supervisor::is_goal_supervisor_helper_source(session_source)
 }
 
 pub(super) async fn is_unloadable(thread: &CodexThread) -> bool {
