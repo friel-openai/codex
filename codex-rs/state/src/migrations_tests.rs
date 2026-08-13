@@ -24,6 +24,7 @@ use crate::sqlite::migrate_state_database_with_fault;
 
 const CUSTOM_THREAD_SECTION_ID: &str = "01984de2-8f74-7c91-a3b2-5c5e937cf317";
 const FRODEX_GOAL_SUPERVISOR_MIGRATION_SQL: &str = "CREATE TABLE thread_goal_supervisor_state (\n    thread_id TEXT PRIMARY KEY NOT NULL REFERENCES threads(id) ON DELETE CASCADE,\n    goal_id TEXT NOT NULL,\n    snoozed_until_ms INTEGER,\n    updated_at_ms INTEGER NOT NULL\n);\n";
+const STATE_MIGRATION_SUBPROCESS_HOME: &str = "CODEX_STATE_MIGRATION_SUBPROCESS_HOME";
 
 async fn repair_frodex_goal_supervisor_state_migration(
     pool: &sqlx::SqlitePool,
@@ -292,6 +293,136 @@ async fn concurrent_state_starts_repair_goal_supervisor_collision_once() {
     assert!(!sqlite_home.join(".state_5.sqlite.migration.lock").exists());
     first.close().await;
     second.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_state_start_waits_past_busy_timeout_for_writer() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let holder_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let waiting_sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let holder_pool = holder_sqlite
+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
+        .await
+        .expect("initial state database should migrate");
+    let waiting_pool = waiting_sqlite
+        .open_read_write_pool(&waiting_sqlite.state_db_path())
+        .await
+        .expect("waiting state pool should open before migration contention");
+    let mut holder_connection = holder_pool
+        .acquire()
+        .await
+        .expect("holder connection should open");
+    let holder_transaction = holder_connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("holder should acquire the writer slot");
+    let waiting_migrator = runtime_state_migrator();
+    let waiting_pool_for_migration = waiting_pool.clone();
+    let contention_seen = std::sync::Arc::new(tokio::sync::Notify::new());
+    let contention_seen_by_task = contention_seen.clone();
+    let waiting_open = tokio::spawn(async move {
+        crate::sqlite::migrate_state_database_with_contention_hook(
+            &waiting_pool_for_migration,
+            &waiting_migrator,
+            || contention_seen_by_task.notify_one(),
+        )
+        .await
+    });
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(7),
+        contention_seen.notified(),
+    )
+    .await
+    .expect("waiting state migration should observe writer contention");
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    holder_transaction
+        .commit()
+        .await
+        .expect("holder should release the writer slot");
+
+    tokio::time::timeout(std::time::Duration::from_secs(3), waiting_open)
+        .await
+        .expect("waiting state open should retry after its configured busy timeout")
+        .expect("waiting state task should complete")
+        .expect("waiting state open should succeed");
+    waiting_pool.close().await;
+    drop(holder_connection);
+    holder_pool.close().await;
+}
+
+#[tokio::test]
+async fn state_migration_subprocess_opens_database() {
+    let Some(sqlite_home) = std::env::var_os(STATE_MIGRATION_SUBPROCESS_HOME) else {
+        return;
+    };
+    let sqlite_home = std::path::PathBuf::from(sqlite_home);
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
+        .await
+        .expect("subprocess state open should succeed after writer release");
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_process_state_start_waits_for_writer_release() {
+    let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+    tokio::fs::create_dir_all(&sqlite_home)
+        .await
+        .expect("sqlite home should be created");
+    let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+        let _ = std::fs::remove_dir_all(sqlite_home);
+    });
+    let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+    let pool = sqlite
+        .open_state_db(&runtime_state_migrator(), /*telemetry_override*/ None)
+        .await
+        .expect("initial state database should migrate");
+    let mut connection = pool.acquire().await.expect("holder connection should open");
+    let transaction = connection
+        .begin_with("BEGIN IMMEDIATE")
+        .await
+        .expect("holder should acquire the writer slot");
+    let child = std::process::Command::new(
+        std::env::current_exe().expect("state test executable should resolve"),
+    )
+    .arg("--exact")
+    .arg("migrations::tests::state_migration_subprocess_opens_database")
+    .arg("--nocapture")
+    .env(STATE_MIGRATION_SUBPROCESS_HOME, &sqlite_home)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .expect("state migration subprocess should spawn");
+
+    tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
+    transaction
+        .commit()
+        .await
+        .expect("holder should release the writer slot");
+    drop(connection);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output()),
+    )
+    .await
+    .expect("subprocess should finish after writer release")
+    .expect("subprocess waiter should complete")
+    .expect("subprocess output should load");
+    assert!(
+        output.status.success(),
+        "subprocess failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    pool.close().await;
 }
 
 #[tokio::test]
