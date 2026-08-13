@@ -7503,3 +7503,5 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails() 
         .await
         .expect("tree shutdown after partial subtree resume should succeed");
 }
+#[path = "control/membership_eviction_tests.rs"]
+mod membership_eviction_tests;
