@@ -59,6 +59,11 @@ pub async fn open_rollout_line_reader(path: &Path) -> io::Result<RolloutLineRead
     reader::open_once(path).await
 }
 
+/// Opens exactly the requested physical representation without plain-file precedence.
+pub(crate) async fn open_rollout_line_reader_exact(path: &Path) -> io::Result<RolloutLineReader> {
+    reader::open_exact(path.to_path_buf()).await
+}
+
 /// Returns the compressed `.jsonl.zst` path for a rollout path.
 #[cfg(test)]
 pub(crate) fn compressed_rollout_path(path: &Path) -> PathBuf {
@@ -1046,6 +1051,10 @@ mod reader {
         let path = path::existing_rollout_path(path)
             .await
             .unwrap_or_else(|| path.to_path_buf());
+        open_exact(path).await
+    }
+
+    pub(super) async fn open_exact(path: std::path::PathBuf) -> io::Result<RolloutLineReader> {
         if *super::HISTORY_IO_OBSERVATION_ENABLED {
             tracing::event!(
                 target: "codex_history_io",

@@ -294,9 +294,39 @@ impl LocalThreadStore {
         );
         if options.mode == RolloutMigrationMode::Apply {
             let pending_thread_ids = pending_migration_thread_ids(&self.config.codex_home).await?;
+            let mut pending_paths = std::collections::HashMap::new();
+            if let Some(state_db) = &self.state_db {
+                for thread_id in &pending_thread_ids {
+                    let Some(metadata) = state_db
+                        .get_thread(*thread_id)
+                        .await
+                        .map_err(migration_error)?
+                    else {
+                        continue;
+                    };
+                    let Some(existing_path) =
+                        codex_rollout::existing_rollout_path(&metadata.rollout_path).await
+                    else {
+                        continue;
+                    };
+                    if codex_rollout::read_session_meta_line(&existing_path)
+                        .await
+                        .is_ok_and(|session_meta| session_meta.meta.id == *thread_id)
+                    {
+                        pending_paths.insert(
+                            codex_rollout::plain_rollout_path(&existing_path),
+                            *thread_id,
+                        );
+                    }
+                }
+            }
             paths.sort_by_key(|path| {
-                !thread_id_from_rollout_filename(path)
-                    .is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
+                let thread_id = codex_rollout::thread_id_from_path(path).or_else(|| {
+                    pending_paths
+                        .get(&codex_rollout::plain_rollout_path(path))
+                        .copied()
+                });
+                !thread_id.is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
             });
         }
         let total_paths = paths.len();
@@ -329,7 +359,7 @@ impl LocalThreadStore {
         let metadata = match codex_rollout::read_session_meta_line(&path).await {
             Ok(metadata) => metadata,
             Err(error) => {
-                let thread_id = thread_id_from_rollout_filename(&path);
+                let thread_id = codex_rollout::thread_id_from_path(&path);
                 if !matches_selection(&options.thread_ids, thread_id) {
                     return Ok(None);
                 }
@@ -539,8 +569,7 @@ impl LocalThreadStore {
             )));
         }
 
-        let rollout_id = codex_rollout::rollout_id_from_path(rollout_path)
-            .ok_or_else(|| migration_error("rollout path is missing its physical rollout id"))?;
+        let rollout_id = migration_rollout_id(rollout_path, thread_id);
         let compressed = rollout_path_is_compressed(rollout_path);
         let staged_path = staged_rollout_path(rollout_path)?;
         let decompressed_path = compressed
@@ -858,6 +887,34 @@ impl LocalThreadStore {
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ThreadStoreResult<PathBuf> {
         let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
+        let locked_metadata = codex_rollout::read_session_meta_line(rollout_path)
+            .await
+            .map_err(migration_error)?;
+        if locked_metadata.meta.id != thread_id
+            || locked_metadata.meta.history_mode != ThreadHistoryMode::Paginated
+        {
+            return Err(migration_error(
+                "published rollout metadata changed while waiting for the writer lock",
+            ));
+        }
+        if let Some(state_db) = &self.state_db {
+            let selected = state_db
+                .get_thread(thread_id)
+                .await
+                .map_err(migration_error)?
+                .ok_or_else(|| {
+                    migration_error(format!(
+                        "thread {thread_id} is missing its SQLite metadata during recovery"
+                    ))
+                })?;
+            if codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
+                != codex_rollout::plain_rollout_path(rollout_path)
+            {
+                return Err(migration_error(
+                    "selected rollout changed while waiting for published migration recovery",
+                ));
+            }
+        }
         let decompressed_path = rollout_path_is_compressed(rollout_path)
             .then(|| decompressed_staged_rollout_path(rollout_path))
             .transpose()?;
@@ -880,8 +937,7 @@ impl LocalThreadStore {
         } else {
             rollout_path
         };
-        let rollout_id = codex_rollout::rollout_id_from_path(rollout_path)
-            .ok_or_else(|| migration_error("rollout path is missing its physical rollout id"))?;
+        let rollout_id = migration_rollout_id(rollout_path, thread_id);
         let expected_length = tokio::fs::metadata(projection_path)
             .await
             .map_err(migration_error)?
@@ -904,7 +960,7 @@ impl LocalThreadStore {
 
     async fn cleanup_failed_unpublished_migration(
         &self,
-        _thread_id: ThreadId,
+        thread_id: ThreadId,
         rollout_path: &Path,
         journal_path: &Path,
     ) -> ThreadStoreResult<()> {
@@ -914,9 +970,14 @@ impl LocalThreadStore {
         if metadata.meta.history_mode == ThreadHistoryMode::Paginated {
             return Ok(());
         }
+        if metadata.meta.id != thread_id {
+            return Err(migration_error(format!(
+                "rollout metadata changed ownership from {thread_id} to {} during migration cleanup",
+                metadata.meta.id
+            )));
+        }
 
-        let rollout_id = codex_rollout::rollout_id_from_path(rollout_path)
-            .ok_or_else(|| migration_error("rollout path is missing its physical rollout id"))?;
+        let rollout_id = migration_rollout_id(rollout_path, thread_id);
         thread_history::delete_thread(self, rollout_id).await?;
         let staged_path = staged_rollout_path(rollout_path)?;
         remove_file_if_present(&staged_path).await?;
@@ -1150,13 +1211,8 @@ fn rollout_path_is_compressed(path: &Path) -> bool {
         .is_some_and(|name| name.ends_with(".jsonl.zst"))
 }
 
-fn thread_id_from_rollout_filename(path: &Path) -> Option<ThreadId> {
-    let name = path.file_name()?.to_str()?;
-    let stem = name
-        .strip_suffix(".jsonl.zst")
-        .or_else(|| name.strip_suffix(".jsonl"))?;
-    let start = stem.len().checked_sub(36)?;
-    ThreadId::from_string(stem.get(start..)?).ok()
+fn migration_rollout_id(rollout_path: &Path, authenticated_thread_id: ThreadId) -> RolloutId {
+    codex_rollout::rollout_id_from_path(rollout_path).unwrap_or(authenticated_thread_id)
 }
 
 fn migration_outcome(

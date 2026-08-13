@@ -350,6 +350,17 @@ pub(super) async fn delete_thread(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<()> {
+    delete_threads(store, &[thread_id]).await
+}
+
+/// Deletes every projection for the supplied physical rollout IDs in one transaction.
+pub(super) async fn delete_threads(
+    store: &LocalThreadStore,
+    thread_ids: &[ThreadId],
+) -> ThreadStoreResult<()> {
+    if thread_ids.is_empty() {
+        return Ok(());
+    }
     let db_path = store.config.sqlite.thread_history_db_path();
     if !tokio::fs::try_exists(db_path.as_path())
         .await
@@ -363,22 +374,24 @@ pub(super) async fn delete_thread(
         .begin_with("BEGIN IMMEDIATE")
         .await
         .map_err(thread_history_delete_error)?;
-    let thread_id = thread_id.to_string();
-    sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
-        .bind(thread_id.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(thread_history_delete_error)?;
-    sqlx::query("DELETE FROM thread_turns WHERE thread_id = ?")
-        .bind(thread_id.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(thread_history_delete_error)?;
-    sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
-        .bind(thread_id.as_str())
-        .execute(&mut *transaction)
-        .await
-        .map_err(thread_history_delete_error)?;
+    for thread_id in thread_ids {
+        let thread_id = thread_id.to_string();
+        sqlx::query("DELETE FROM thread_items WHERE thread_id = ?")
+            .bind(thread_id.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(thread_history_delete_error)?;
+        sqlx::query("DELETE FROM thread_turns WHERE thread_id = ?")
+            .bind(thread_id.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(thread_history_delete_error)?;
+        sqlx::query("DELETE FROM thread_history_projection_state WHERE thread_id = ?")
+            .bind(thread_id.as_str())
+            .execute(&mut *transaction)
+            .await
+            .map_err(thread_history_delete_error)?;
+    }
     transaction
         .commit()
         .await
