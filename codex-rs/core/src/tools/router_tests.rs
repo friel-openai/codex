@@ -60,6 +60,25 @@ fn tool_log_payload_redacts_plaintext_multi_agent_messages() {
     );
 }
 
+#[test]
+fn ownership_message_tool_uses_plaintext_source() {
+    let call = ToolCall {
+        tool_name: ToolName::namespaced("frodex", "adopt_agent"),
+        call_id: "call-frodex-adopt-agent".to_string(),
+        payload: ToolPayload::Function {
+            arguments: "{}".to_string(),
+        },
+        encrypted_function_args: None,
+    };
+    assert_eq!(call.direct_source(), ToolCallSource::DirectPlaintextMessage);
+
+    let encrypted_call = ToolCall {
+        encrypted_function_args: Some(vec!["message".to_string()]),
+        ..call
+    };
+    assert_eq!(encrypted_call.direct_source(), ToolCallSource::Direct);
+}
+
 impl codex_extension_api::ToolContributor for ExtensionEchoContributor {
     fn tools(
         &self,

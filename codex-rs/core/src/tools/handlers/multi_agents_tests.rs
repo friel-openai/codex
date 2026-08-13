@@ -14,9 +14,11 @@ use crate::session::turn_context::TurnContext;
 use crate::session_prefix::format_inter_agent_completion_message;
 use crate::thread_manager::thread_store_from_config;
 use crate::tools::context::ToolOutput;
+use crate::tools::handlers::multi_agents_v2::AdoptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
 use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+use crate::tools::handlers::multi_agents_v2::PromoteAgentHandler;
 use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
 use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
 use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandlerV2;
@@ -1015,6 +1017,119 @@ async fn multi_agent_v2_spawn_requires_task_name() {
         panic!("missing task_name should surface as a model-facing error");
     };
     assert!(message.contains("missing field `task_name`"));
+}
+
+#[tokio::test]
+async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config
+        .features
+        .enable(Feature::MultiAgentV2)
+        .expect("test config should allow feature update");
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let Err(adopt_error) = AdoptAgentHandler::new(false)
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "adopt_agent",
+            function_payload(json!({
+                "message": "continue the existing thread",
+                "task_name": "adopted_worker",
+                "existing_thread_id": ThreadId::new(),
+            })),
+        ))
+        .await
+    else {
+        panic!("existing-thread adoption must be disabled by default");
+    };
+    let Err(promote_error) = PromoteAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "promote_agent",
+            function_payload(json!({ "target": "worker" })),
+        ))
+        .await
+    else {
+        panic!("subagent promotion must be disabled by default");
+    };
+
+    let expected = FunctionCallError::RespondToModel(
+        "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
+            .to_string(),
+    );
+    assert_eq!(adopt_error, expected);
+    assert_eq!(promote_error, expected);
+}
+
+#[tokio::test]
+async fn multi_agent_v2_adoption_rejects_fork_and_configuration_overrides() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    let root = manager
+        .start_thread(StartThreadOptions::new((*turn.config).clone()))
+        .await
+        .expect("root thread should start");
+    session.services.agent_control = manager.agent_control();
+    session.thread_id = root.thread_id;
+    let mut config = (*turn.config).clone();
+    config.multi_agent_v2.enable_thread_adoption = true;
+    set_turn_config(&mut turn, config);
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    for overrides in [
+        json!({ "fork_turns": "all" }),
+        json!({ "fork_context": true }),
+        json!({ "agent_type": "default" }),
+        json!({ "model": "another-model" }),
+        json!({ "reasoning_effort": "high" }),
+        json!({ "service_tier": "fast" }),
+    ] {
+        let mut arguments = json!({
+            "message": "continue the existing thread",
+            "task_name": "adopted_worker",
+            "existing_thread_id": ThreadId::new(),
+        });
+        arguments
+            .as_object_mut()
+            .expect("adoption arguments should be an object")
+            .extend(
+                overrides
+                    .as_object()
+                    .expect("adoption overrides should be an object")
+                    .clone(),
+            );
+
+        let Err(error) = AdoptAgentHandler::new(false)
+            .handle(invocation(
+                session.clone(),
+                turn.clone(),
+                "adopt_agent",
+                function_payload(arguments),
+            ))
+            .await
+        else {
+            panic!("adoption must reject fork and configuration overrides");
+        };
+        assert_eq!(
+            error,
+            FunctionCallError::RespondToModel(
+                "existing_thread_id cannot be combined with fork, agent type, model, reasoning effort, or service tier overrides".to_string(),
+            )
+        );
+    }
 }
 
 #[tokio::test]
