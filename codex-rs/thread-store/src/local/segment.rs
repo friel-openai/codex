@@ -1,8 +1,15 @@
+#[cfg(test)]
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
 
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
@@ -18,40 +25,724 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
+use futures::FutureExt;
 use serde_json::Value;
 use sha2::Digest as _;
 use sha2::Sha256;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
+#[cfg(test)]
+use tokio::sync::Notify;
+use tracing::warn;
 
+use super::LiveRecorderRecovery;
 use super::LocalThreadStore;
+use super::RolloutWriterReservation;
 use crate::FreezeRolloutSegmentParams;
 use crate::FrozenRolloutSegment;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::ThreadPersistenceMode;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+
+#[cfg(test)]
+static SEGMENT_REOPEN_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+#[cfg(test)]
+static SEGMENT_DURABILITY_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+#[cfg(test)]
+static SEGMENT_PRECOMMIT_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
+    LazyLock::new(|| StdMutex::new(HashSet::new()));
+#[cfg(test)]
+static CHECKPOINT_PERSISTENCE_PAUSES: LazyLock<
+    StdMutex<HashMap<ThreadId, Arc<CheckpointPersistencePause>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) struct CheckpointPersistencePause {
+    pub(super) entered: Notify,
+    pub(super) release: Notify,
+}
+
+#[cfg(test)]
+pub(super) fn inject_next_segment_reopen_failure(thread_id: ThreadId) {
+    SEGMENT_REOPEN_FAILURES
+        .lock()
+        .expect("segment reopen failure mutex")
+        .insert(thread_id);
+}
+
+#[cfg(test)]
+pub(super) fn inject_next_segment_durability_failure(thread_id: ThreadId) {
+    SEGMENT_DURABILITY_FAILURES
+        .lock()
+        .expect("segment durability failure mutex")
+        .insert(thread_id);
+}
+
+#[cfg(test)]
+pub(super) fn inject_next_segment_precommit_failure(thread_id: ThreadId) {
+    SEGMENT_PRECOMMIT_FAILURES
+        .lock()
+        .expect("segment precommit failure mutex")
+        .insert(thread_id);
+}
+
+#[cfg(test)]
+pub(super) fn inject_checkpoint_persistence_pause(
+    thread_id: ThreadId,
+) -> Arc<CheckpointPersistencePause> {
+    let pause = Arc::new(CheckpointPersistencePause {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    CHECKPOINT_PERSISTENCE_PAUSES
+        .lock()
+        .expect("checkpoint persistence pause mutex")
+        .insert(thread_id, Arc::clone(&pause));
+    pause
+}
+
+#[cfg(test)]
+fn take_segment_reopen_failure(thread_id: ThreadId) -> bool {
+    SEGMENT_REOPEN_FAILURES
+        .lock()
+        .expect("segment reopen failure mutex")
+        .remove(&thread_id)
+}
+
+#[cfg(test)]
+fn take_segment_durability_failure(thread_id: ThreadId) -> bool {
+    SEGMENT_DURABILITY_FAILURES
+        .lock()
+        .expect("segment durability failure mutex")
+        .remove(&thread_id)
+}
+
+#[cfg(test)]
+fn take_segment_precommit_failure(thread_id: ThreadId) -> bool {
+    SEGMENT_PRECOMMIT_FAILURES
+        .lock()
+        .expect("segment precommit failure mutex")
+        .remove(&thread_id)
+}
+
+/// Whether a segment freeze replaced the mutable active rollout.
+enum FrozenSegmentPublication {
+    ActiveRolloutUnchanged,
+    ActiveRolloutReplaced(StableRolloutPublication),
+}
+
+/// Internal freeze result retaining the active-rollout commit classification.
+struct FrozenRolloutSegmentResult {
+    frozen: FrozenRolloutSegment,
+    publication: FrozenSegmentPublication,
+}
+
+/// Durability acknowledgement for a visible active-rollout replacement.
+enum StableRolloutPublication {
+    Durable,
+    DurabilityUnknown { error: ThreadStoreError },
+}
+
+/// Publication result for the atomic checkpoint-append fallback.
+enum AtomicCheckpointAppend {
+    Committed,
+    Indeterminate { error: ThreadStoreError },
+}
 
 pub(super) async fn freeze_thread_segment(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     params: FreezeRolloutSegmentParams,
 ) -> ThreadStoreResult<FrozenRolloutSegment> {
-    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
-    freeze_thread_segment_locked(store, thread_id, params).await
+    freeze_thread_segment_for_rollout(store, thread_id, params, /*expected_rollout_id*/ None).await
 }
 
-pub(super) async fn freeze_thread_segment_locked(
+pub(super) async fn freeze_thread_segment_for_rollout(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     params: FreezeRolloutSegmentParams,
+    expected_rollout_id: Option<RolloutId>,
 ) -> ThreadStoreResult<FrozenRolloutSegment> {
-    let live_entry = store
-        .live_recorders
-        .lock()
+    let store_for_freeze = store.clone();
+    let freeze = tokio::spawn(async move {
+        let reservation = reserve_segment_writers(&store_for_freeze, thread_id).await?;
+        freeze_thread_segment_reserved_with_publication(
+            &store_for_freeze,
+            thread_id,
+            params,
+            expected_rollout_id,
+            &reservation,
+        )
         .await
-        .get(&thread_id)
-        .map(|entry| (entry.recorder.clone(), entry.rollout_id, entry.history_mode));
+    });
+    let result = match freeze.await {
+        Ok(result) => result?,
+        Err(error) => {
+            store.live_recorders.lock().await.remove(&thread_id);
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "segment freeze task for thread {thread_id} failed at an indeterminate commit point: {error}"
+                ),
+            });
+        }
+    };
+    match result.publication {
+        FrozenSegmentPublication::ActiveRolloutUnchanged
+        | FrozenSegmentPublication::ActiveRolloutReplaced(StableRolloutPublication::Durable) => {
+            Ok(result.frozen)
+        }
+        FrozenSegmentPublication::ActiveRolloutReplaced(
+            StableRolloutPublication::DurabilityUnknown { error },
+        ) => {
+            store.live_recorders.lock().await.remove(&thread_id);
+            Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "segment rotation for thread {thread_id} committed without a durability acknowledgement; restart before continuing: {error}"
+                ),
+            })
+        }
+    }
+}
+
+/// Reserves every mutable rollout owner reachable from the source before freezing any bytes.
+///
+/// Discovery is repeated after newly found owners are reserved. The final pass therefore reads
+/// every mutable reference while its stable thread ID has both in-process and cross-process writer
+/// ownership. Content-addressed immutable files are scanned for nested references but do not need
+/// a writer reservation themselves.
+async fn reserve_segment_writers(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<RolloutWriterReservation> {
+    let mut thread_ids = vec![thread_id];
+    loop {
+        let reservation = store.reserve_rollout_writers(thread_ids.as_slice()).await?;
+        let live_source = {
+            let live_recorders = store.live_recorders.lock().await;
+            live_recorders.get(&thread_id).map(|entry| {
+                (
+                    entry
+                        .recovery
+                        .as_ref()
+                        .map(|recovery| recovery.rollout_path.clone())
+                        .unwrap_or_else(|| entry.recorder.rollout_path().to_path_buf()),
+                    entry.recorder.clone(),
+                    entry.persistence_mode == ThreadPersistenceMode::Deferred,
+                )
+            })
+        };
+        let (source_path, live_recorder, allow_missing_source) = match live_source {
+            Some((source_path, recorder, allow_missing_source)) => {
+                (source_path, Some(recorder), allow_missing_source)
+            }
+            None => {
+                let source_path =
+                    super::thread_rollout_resolver::resolve_current_including_archived(
+                        store, thread_id,
+                    )
+                    .await?
+                    .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
+                    .path;
+                (source_path, None, false)
+            }
+        };
+        let buffered_items = match live_recorder {
+            Some(recorder) => recorder
+                .buffered_canonical_items()
+                .await
+                .map_err(thread_store_io_error)?,
+            None => Vec::new(),
+        };
+        let mut discovered = discover_mutable_reference_owners(
+            store,
+            source_path.as_path(),
+            allow_missing_source,
+            buffered_items.as_slice(),
+            &reservation,
+        )
+        .await?;
+        discovered.push(thread_id);
+        discovered.sort_unstable_by_key(ThreadId::to_string);
+        discovered.dedup();
+        if discovered
+            .iter()
+            .all(|thread_id| reservation.contains(*thread_id))
+        {
+            return Ok(reservation);
+        }
+        thread_ids = discovered;
+    }
+}
+
+async fn discover_mutable_reference_owners(
+    store: &LocalThreadStore,
+    source_path: &Path,
+    allow_missing_source: bool,
+    buffered_items: &[RolloutItem],
+    reservation: &RolloutWriterReservation,
+) -> ThreadStoreResult<Vec<ThreadId>> {
+    let mut owners = Vec::new();
+    let mut pending = vec![source_path.to_path_buf()];
+    let mut pending_references = buffered_items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::RolloutReference(reference) => Some(reference.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    loop {
+        if let Some(path) = pending.pop() {
+            let Some(path) = codex_rollout::existing_rollout_path(path.as_path()).await else {
+                if allow_missing_source && path == source_path {
+                    continue;
+                }
+                return Err(ThreadStoreError::Internal {
+                    message: format!("referenced rollout {} does not exist", path.display()),
+                });
+            };
+            if !visited.insert(path.clone()) {
+                continue;
+            }
+            let (lines, _thread_id, _parse_errors) =
+                RolloutRecorder::load_rollout_lines(path.as_path())
+                    .await
+                    .map_err(thread_store_io_error)?;
+            pending_references.extend(lines.into_iter().filter_map(|line| match line.item {
+                RolloutItem::RolloutReference(reference) => Some(reference),
+                _ => None,
+            }));
+            continue;
+        }
+        let Some(reference) = pending_references.pop() else {
+            break;
+        };
+        let referenced_thread_id =
+            reference
+                .thread_id
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "rollout reference {} is missing thread_id",
+                        reference.rollout_path.display()
+                    ),
+                })?;
+        let recorded_immutable = reference_has_valid_recorded_immutable_candidate(
+            store,
+            &reference,
+            referenced_thread_id,
+        )
+        .await;
+        if !recorded_immutable && !reservation.contains(referenced_thread_id) {
+            owners.push(referenced_thread_id);
+            continue;
+        }
+        let resolved = codex_rollout::resolve_rollout_reference_path(
+            store.config.codex_home.as_path(),
+            &reference,
+        )
+        .await
+        .map_err(thread_store_io_error)?;
+        let immutable = is_immutable_segment_path(
+            store.config.codex_home.as_path(),
+            resolved.as_path(),
+            referenced_thread_id,
+            reference.segment_id,
+        );
+        if !immutable {
+            owners.push(referenced_thread_id);
+            // The next discovery pass owns this predecessor before reading it and revalidates the
+            // complete graph under the expanded reservation.
+            if !reservation.contains(referenced_thread_id) {
+                continue;
+            }
+        }
+        pending.push(resolved);
+    }
+    Ok(owners)
+}
+
+async fn reference_has_valid_recorded_immutable_candidate(
+    store: &LocalThreadStore,
+    reference: &RolloutReferenceItem,
+    thread_id: ThreadId,
+) -> bool {
+    let Some(candidate) =
+        codex_rollout::existing_rollout_path(reference.rollout_path.as_path()).await
+    else {
+        return false;
+    };
+    if !is_immutable_segment_path(
+        store.config.codex_home.as_path(),
+        candidate.as_path(),
+        thread_id,
+        reference.segment_id,
+    ) {
+        return false;
+    }
+    let (Ok(canonical_home), Ok(canonical_candidate)) = (
+        fs::canonicalize(store.config.codex_home.as_path()).await,
+        fs::canonicalize(candidate.as_path()).await,
+    ) else {
+        return false;
+    };
+    let expected_directory = canonical_home
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(
+            reference
+                .segment_id
+                .map(|segment_id| segment_id.to_string())
+                .unwrap_or_else(|| "initial".to_string()),
+        );
+    if !canonical_candidate.starts_with(expected_directory) {
+        return false;
+    }
+    let Ok(metadata) = fs::symlink_metadata(candidate.as_path()).await else {
+        return false;
+    };
+    if !metadata.file_type().is_file() {
+        return false;
+    }
+    let Ok(session_meta) = codex_rollout::read_session_meta_line(candidate.as_path()).await else {
+        return false;
+    };
+    session_meta.meta.id == thread_id
+        && session_meta.meta.segment_id == reference.segment_id
+        && reference.rollout_id.is_none_or(|rollout_id| {
+            codex_rollout::rollout_id_from_path(
+                codex_rollout::plain_rollout_path(candidate.as_path()).as_path(),
+            ) == Some(rollout_id)
+        })
+}
+
+pub(super) async fn freeze_thread_segment_reserved(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    params: FreezeRolloutSegmentParams,
+    expected_rollout_id: Option<RolloutId>,
+    reservation: &RolloutWriterReservation,
+) -> ThreadStoreResult<FrozenRolloutSegment> {
+    let result = freeze_thread_segment_reserved_with_publication(
+        store,
+        thread_id,
+        params,
+        expected_rollout_id,
+        reservation,
+    )
+    .await?;
+    match result.publication {
+        FrozenSegmentPublication::ActiveRolloutUnchanged
+        | FrozenSegmentPublication::ActiveRolloutReplaced(StableRolloutPublication::Durable) => {
+            Ok(result.frozen)
+        }
+        FrozenSegmentPublication::ActiveRolloutReplaced(
+            StableRolloutPublication::DurabilityUnknown { error },
+        ) => Err(ThreadStoreError::Conflict {
+            message: format!(
+                "segment rotation for thread {thread_id} committed without a durability acknowledgement; restart before continuing: {error}"
+            ),
+        }),
+    }
+}
+
+/// Persists a rotation checkpoint without treating a post-publication failure as unpublished.
+///
+/// The spawned owner keeps the commit classification alive if its caller is cancelled. Any panic
+/// is indeterminate because it may have happened immediately after the atomic replacement.
+pub(super) async fn persist_segment_checkpoint(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    params: FreezeRolloutSegmentParams,
+) -> SegmentCheckpointPersistenceOutcome {
+    if params.is_snapshot() {
+        return SegmentCheckpointPersistenceOutcome::NotCommitted {
+            error: ThreadStoreError::InvalidRequest {
+                message: "a segment-state checkpoint must replace the active rollout".to_string(),
+            },
+        };
+    }
+    let store_for_persistence = store.clone();
+    let result = tokio::spawn(async move {
+        let reservation = match reserve_segment_writers(&store_for_persistence, thread_id).await {
+            Ok(reservation) => reservation,
+            Err(error) => {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted { error };
+            }
+        };
+        #[cfg(test)]
+        let pause = {
+            CHECKPOINT_PERSISTENCE_PAUSES
+                .lock()
+                .expect("checkpoint persistence pause mutex")
+                .remove(&thread_id)
+        };
+        #[cfg(test)]
+        if let Some(pause) = pause {
+            pause.entered.notify_one();
+            pause.release.notified().await;
+        }
+        let result = AssertUnwindSafe(freeze_thread_segment_reserved_with_publication(
+            &store_for_persistence,
+            thread_id,
+            params.clone(),
+            /*expected_rollout_id*/ None,
+            &reservation,
+        ))
+        .catch_unwind()
+        .await;
+        match result {
+            Ok(Ok(result)) => match result.publication {
+                FrozenSegmentPublication::ActiveRolloutReplaced(
+                    StableRolloutPublication::Durable,
+                ) => SegmentCheckpointPersistenceOutcome::Committed,
+                FrozenSegmentPublication::ActiveRolloutReplaced(
+                    StableRolloutPublication::DurabilityUnknown { error },
+                ) => SegmentCheckpointPersistenceOutcome::Indeterminate { error },
+                FrozenSegmentPublication::ActiveRolloutUnchanged => {
+                    SegmentCheckpointPersistenceOutcome::NotCommitted {
+                        error: ThreadStoreError::Internal {
+                            message: "checkpoint rotation left the active rollout unchanged"
+                                .to_string(),
+                        },
+                    }
+                }
+            },
+            Ok(Err(rotation_error)) => {
+                warn!(%thread_id, %rotation_error, "segment rotation failed before commit; atomically appending the checkpoint");
+                match append_checkpoint_atomically_reserved(
+                    &store_for_persistence,
+                    thread_id,
+                    &params,
+                )
+                .await
+                {
+                    Ok(AtomicCheckpointAppend::Committed) => {
+                        SegmentCheckpointPersistenceOutcome::Committed
+                    }
+                    Ok(AtomicCheckpointAppend::Indeterminate { error }) => {
+                        SegmentCheckpointPersistenceOutcome::Indeterminate {
+                            error: ThreadStoreError::Internal {
+                                message: format!(
+                                    "segment rotation failed: {rotation_error}; atomic checkpoint append committed but durability is indeterminate: {error}"
+                                ),
+                            },
+                        }
+                    }
+                    Err(append_error) => SegmentCheckpointPersistenceOutcome::NotCommitted {
+                        error: ThreadStoreError::Internal {
+                            message: format!(
+                                "segment rotation failed: {rotation_error}; atomic checkpoint append failed without changing the active rollout: {append_error}"
+                            ),
+                        },
+                    },
+                }
+            }
+            Err(_) => SegmentCheckpointPersistenceOutcome::Indeterminate {
+                error: ThreadStoreError::Internal {
+                    message: format!(
+                        "checkpoint persistence for thread {thread_id} panicked at an indeterminate commit point"
+                    ),
+                },
+            },
+        }
+    })
+    .await;
+
+    match result {
+        Ok(outcome) => outcome,
+        Err(error) => SegmentCheckpointPersistenceOutcome::Indeterminate {
+            error: ThreadStoreError::Internal {
+                message: format!(
+                    "checkpoint persistence task for thread {thread_id} failed at an indeterminate commit point: {error}"
+                ),
+            },
+        },
+    }
+}
+
+async fn append_checkpoint_atomically_reserved(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    params: &FreezeRolloutSegmentParams,
+) -> ThreadStoreResult<AtomicCheckpointAppend> {
+    let (recorder, rollout_id, history_mode, _persistence_mode) =
+        super::live_writer::live_writer_parts(store, thread_id).await?;
+    recorder.persist().await.map_err(thread_store_io_error)?;
+    {
+        let mut live_recorders = store.live_recorders.lock().await;
+        let entry = live_recorders
+            .get_mut(&thread_id)
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        entry.persistence_mode = ThreadPersistenceMode::Durable;
+    }
+    recorder.flush().await.map_err(thread_store_io_error)?;
+
+    let stable_path = codex_rollout::plain_rollout_path(recorder.rollout_path());
+    let source_path = codex_rollout::existing_rollout_path(stable_path.as_path())
+        .await
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: format!("thread {thread_id} does not have a readable active rollout"),
+        })?;
+    if source_path != stable_path {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "atomic checkpoint append requires a materialized active rollout for thread {thread_id}"
+            ),
+        });
+    }
+
+    let staged_path = staged_rollout_path(stable_path.as_path());
+    if let Err(error) = copy_active_rollout(source_path.as_path(), staged_path.as_path()).await {
+        let _ = fs::remove_file(staged_path.as_path()).await;
+        return Err(error);
+    }
+    let staged_meta = match codex_rollout::read_session_meta_line(staged_path.as_path()).await {
+        Ok(meta) => meta,
+        Err(error) => {
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            return Err(thread_store_io_error(error));
+        }
+    };
+    let config = rollout_config(store, &staged_meta.meta);
+    let staged_recorder =
+        match RolloutRecorder::new(&config, RolloutRecorderParams::resume(staged_path.clone()))
+            .await
+        {
+            Ok(recorder) => recorder,
+            Err(error) => {
+                let _ = fs::remove_file(staged_path.as_path()).await;
+                return Err(thread_store_io_error(error));
+            }
+        };
+    let items = codex_rollout::persisted_rollout_items(params.initial_items(), history_mode);
+    let stage_result = async {
+        staged_recorder
+            .record_canonical_items(items.as_slice())
+            .await
+            .map_err(thread_store_io_error)?;
+        staged_recorder
+            .flush()
+            .await
+            .map_err(thread_store_io_error)?;
+        staged_recorder
+            .shutdown()
+            .await
+            .map_err(thread_store_io_error)
+    }
+    .await;
+    if let Err(error) = stage_result {
+        let _ = staged_recorder.shutdown().await;
+        let _ = fs::remove_file(staged_path.as_path()).await;
+        return Err(error);
+    }
+
+    {
+        let mut live_recorders = store.live_recorders.lock().await;
+        let entry = live_recorders
+            .get_mut(&thread_id)
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        entry.recovery = Some(LiveRecorderRecovery {
+            config: config.clone(),
+            rollout_path: stable_path.clone(),
+        });
+    }
+    if let Err(error) = recorder.shutdown().await {
+        let _ = fs::remove_file(staged_path.as_path()).await;
+        return Err(thread_store_io_error(error));
+    }
+    let publication = match replace_stable_rollout(staged_path.clone(), stable_path.clone()).await {
+        Ok(publication) => publication,
+        Err(error) => {
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to atomically replace rollout {} with staged checkpoint {}: {error}",
+                    stable_path.display(),
+                    staged_path.display()
+                ),
+            });
+        }
+    };
+    if let StableRolloutPublication::DurabilityUnknown { error } = publication {
+        return Ok(AtomicCheckpointAppend::Indeterminate { error });
+    }
+
+    if let Some(entry) = store.live_recorders.lock().await.get_mut(&thread_id) {
+        entry.history_mode = history_mode;
+        entry.persistence_mode = ThreadPersistenceMode::Durable;
+    }
+    if let Err(error) = super::live_writer::live_writer_parts(store, thread_id).await {
+        warn!(%thread_id, %error, "checkpoint append committed; live writer will reopen on its next operation");
+    }
+    if let Err(error) =
+        super::live_writer::sync_materialized_rollout_path(store, thread_id, stable_path.as_path())
+            .await
+    {
+        warn!(%thread_id, %error, "checkpoint append committed but rollout-path synchronization failed");
+    }
+    match history_mode {
+        ThreadHistoryMode::Paginated => {
+            if let Err(error) = super::thread_history_materialization::materialize_to_sqlite(
+                store,
+                rollout_id,
+                stable_path.as_path(),
+            )
+            .await
+            {
+                warn!(%thread_id, %error, "checkpoint append committed but paginated projection repair failed");
+            }
+        }
+        ThreadHistoryMode::Legacy => {
+            if let Ok((reopened, _, _, _)) =
+                super::live_writer::live_writer_parts(store, thread_id).await
+                && let Err(error) = super::live_writer::project_segmented_legacy_rollout(
+                    store, thread_id, &reopened,
+                )
+                .await
+            {
+                warn!(%thread_id, %error, "checkpoint append committed but legacy projection repair failed");
+            }
+        }
+    }
+    Ok(AtomicCheckpointAppend::Committed)
+}
+
+async fn copy_active_rollout(source_path: &Path, staged_path: &Path) -> ThreadStoreResult<()> {
+    let mut source = fs::File::open(source_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    let mut staged = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(staged_path)
+        .await
+        .map_err(thread_store_io_error)?;
+    tokio::io::copy(&mut source, &mut staged)
+        .await
+        .map_err(thread_store_io_error)?;
+    staged.sync_all().await.map_err(thread_store_io_error)
+}
+
+async fn freeze_thread_segment_reserved_with_publication(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    params: FreezeRolloutSegmentParams,
+    expected_rollout_id: Option<RolloutId>,
+    reservation: &RolloutWriterReservation,
+) -> ThreadStoreResult<FrozenRolloutSegmentResult> {
+    debug_assert!(reservation.contains(thread_id));
+    let has_live_entry = store.live_recorders.lock().await.contains_key(&thread_id);
+    let live_entry = if has_live_entry {
+        let (recorder, rollout_id, history_mode, _persistence_mode) =
+            super::live_writer::live_writer_parts(store, thread_id).await?;
+        Some((recorder, rollout_id, history_mode))
+    } else {
+        None
+    };
     if let Some((recorder, _rollout_id, _history_mode)) = live_entry.as_ref() {
         recorder.persist().await.map_err(thread_store_io_error)?;
         {
@@ -62,6 +753,12 @@ pub(super) async fn freeze_thread_segment_locked(
             entry.persistence_mode = ThreadPersistenceMode::Durable;
         }
         recorder.flush().await.map_err(thread_store_io_error)?;
+    }
+    #[cfg(test)]
+    if take_segment_precommit_failure(thread_id) {
+        return Err(ThreadStoreError::Internal {
+            message: "injected segment precommit failure".to_string(),
+        });
     }
 
     let (source_rollout_id, recorded_path) = match live_entry.as_ref() {
@@ -77,6 +774,13 @@ pub(super) async fn freeze_thread_segment_locked(
             (resolved.rollout_id, resolved.path)
         }
     };
+    if expected_rollout_id.is_some_and(|expected| expected != source_rollout_id) {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "rollout path does not select the current rollout for thread {thread_id}"
+            ),
+        });
+    }
     let source_path = codex_rollout::existing_rollout_path(recorded_path.as_path())
         .await
         .ok_or_else(|| ThreadStoreError::Internal {
@@ -98,13 +802,22 @@ pub(super) async fn freeze_thread_segment_locked(
     if params.is_snapshot()
         && let Some(reference) = existing_reference
     {
-        let reference =
-            stabilize_rollout_reference(store, reference, &mut HashSet::new(), /*depth*/ 0).await?;
-        return Ok(FrozenRolloutSegment {
+        let reference = stabilize_rollout_reference(
+            store,
             reference,
-            source_session_meta: source_meta,
-            history_mode,
-            next_rollout_ordinal,
+            &mut HashSet::new(),
+            /*depth*/ 0,
+            reservation,
+        )
+        .await?;
+        return Ok(FrozenRolloutSegmentResult {
+            frozen: FrozenRolloutSegment {
+                reference,
+                source_session_meta: source_meta,
+                history_mode,
+                next_rollout_ordinal,
+            },
+            publication: FrozenSegmentPublication::ActiveRolloutUnchanged,
         });
     }
 
@@ -122,20 +835,23 @@ pub(super) async fn freeze_thread_segment_locked(
             Some(segment_id),
         )
         .await?;
-        return Ok(FrozenRolloutSegment {
-            reference: RolloutReferenceItem {
-                rollout_id: Some(source_rollout_id),
-                rollout_path: immutable_path,
-                thread_id: Some(thread_id),
-                rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
-                segment_id: Some(segment_id),
-                max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
-                nth_user_message: None,
-                compacted_replacement_history_filter_texts: None,
+        return Ok(FrozenRolloutSegmentResult {
+            frozen: FrozenRolloutSegment {
+                reference: RolloutReferenceItem {
+                    rollout_id: Some(source_rollout_id),
+                    rollout_path: immutable_path,
+                    thread_id: Some(thread_id),
+                    rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
+                    segment_id: Some(segment_id),
+                    max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                    nth_user_message: None,
+                    compacted_replacement_history_filter_texts: None,
+                },
+                source_session_meta: source_meta,
+                history_mode,
+                next_rollout_ordinal,
             },
-            source_session_meta: source_meta,
-            history_mode,
-            next_rollout_ordinal,
+            publication: FrozenSegmentPublication::ActiveRolloutUnchanged,
         });
     }
 
@@ -277,81 +993,128 @@ pub(super) async fn freeze_thread_segment_locked(
         .map_err(thread_store_io_error)?;
 
     if let Some((recorder, _rollout_id, _history_mode)) = live_entry.as_ref() {
+        {
+            let mut live_recorders = store.live_recorders.lock().await;
+            let entry = live_recorders
+                .get_mut(&thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            entry.recovery = Some(LiveRecorderRecovery {
+                config: config.clone(),
+                rollout_path: stable_path.clone(),
+            });
+        }
         recorder.shutdown().await.map_err(thread_store_io_error)?;
     }
-    if let Err(err) = replace_stable_rollout(staged_path.clone(), stable_path.clone()).await {
-        if live_entry.is_some()
-            && let Ok(recorder) =
-                RolloutRecorder::new(&config, RolloutRecorderParams::resume(stable_path.clone()))
-                    .await
-            && let Some(entry) = store.live_recorders.lock().await.get_mut(&thread_id)
-        {
-            entry.recorder = recorder;
+    let publication = match replace_stable_rollout(staged_path.clone(), stable_path.clone()).await {
+        Ok(publication) => publication,
+        Err(err) => {
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            if live_entry.is_some()
+                && let Err(reopen_error) =
+                    super::live_writer::live_writer_parts(store, thread_id).await
+            {
+                warn!(%thread_id, %reopen_error, "failed to recover live writer after unpublished segment rotation");
+            }
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to atomically replace rollout {} with {}: {err}",
+                    stable_path.display(),
+                    staged_path.display()
+                ),
+            });
         }
-        let _ = fs::remove_file(staged_path.as_path()).await;
-        return Err(ThreadStoreError::Internal {
-            message: format!(
-                "failed to atomically replace rollout {} with {}: {err}",
-                stable_path.display(),
-                staged_path.display()
-            ),
-        });
-    }
-    if source_path != stable_path {
+    };
+    #[cfg(test)]
+    let publication = if take_segment_durability_failure(thread_id) {
+        StableRolloutPublication::DurabilityUnknown {
+            error: ThreadStoreError::Internal {
+                message: "injected segment durability failure".to_string(),
+            },
+        }
+    } else {
+        publication
+    };
+    if matches!(&publication, StableRolloutPublication::Durable) && source_path != stable_path {
         match fs::remove_file(source_path.as_path()).await {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-            Err(err) => return Err(thread_store_io_error(err)),
+            Err(err) => {
+                warn!(%thread_id, %err, "segment rotation committed but old compressed rollout remains")
+            }
         }
     }
 
     if live_entry.is_some() {
-        let recorder =
-            RolloutRecorder::new(&config, RolloutRecorderParams::resume(stable_path.clone()))
+        if let Some(entry) = store.live_recorders.lock().await.get_mut(&thread_id) {
+            entry.history_mode = history_mode;
+            entry.persistence_mode = ThreadPersistenceMode::Durable;
+        }
+        #[cfg(test)]
+        let injected_reopen_failure = take_segment_reopen_failure(thread_id);
+        #[cfg(not(test))]
+        let injected_reopen_failure = false;
+        let reopen_result = if injected_reopen_failure {
+            Err(ThreadStoreError::Internal {
+                message: "injected segment recorder reopen failure".to_string(),
+            })
+        } else {
+            super::live_writer::live_writer_parts(store, thread_id)
                 .await
-                .map_err(thread_store_io_error)?;
-        let mut live_recorders = store.live_recorders.lock().await;
-        let entry = live_recorders
-            .get_mut(&thread_id)
-            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-        entry.recorder = recorder;
-        entry.history_mode = history_mode;
-        entry.persistence_mode = ThreadPersistenceMode::Durable;
+                .map(|_| ())
+        };
+        if let Err(err) = reopen_result {
+            warn!(%thread_id, %err, "segment rotation committed; live writer will reopen on its next operation");
+        }
     }
 
-    super::live_writer::sync_materialized_rollout_path(store, thread_id, stable_path.as_path())
-        .await?;
+    if let Err(err) =
+        super::live_writer::sync_materialized_rollout_path(store, thread_id, stable_path.as_path())
+            .await
+    {
+        warn!(%thread_id, %err, "segment rotation committed but rollout-path synchronization failed");
+    }
 
     if matches!(history_mode, ThreadHistoryMode::Paginated) {
-        super::thread_history::reset_projection_for_replacement(
-            store,
-            source_rollout_id,
-            initial_rollout_ordinal,
-        )
-        .await?;
-        super::thread_history_materialization::materialize_to_sqlite(
-            store,
-            source_rollout_id,
-            stable_path.as_path(),
-        )
-        .await?;
+        let projection_result = async {
+            super::thread_history::reset_projection_for_replacement(
+                store,
+                source_rollout_id,
+                initial_rollout_ordinal,
+            )
+            .await?;
+            super::thread_history_materialization::materialize_to_sqlite(
+                store,
+                source_rollout_id,
+                stable_path.as_path(),
+            )
+            .await
+        }
+        .await;
+        if let Err(err) = projection_result {
+            warn!(%thread_id, %err, "segment rotation committed but paginated projection repair failed");
+        }
     } else if let (Some(builder), Some(next_projection_ordinal)) =
         (legacy_projection_builder, legacy_next_projection_ordinal)
     {
-        super::thread_history::reset_projection_for_replacement(
+        let reset_result = super::thread_history::reset_projection_for_replacement(
             store,
             source_rollout_id,
             next_projection_ordinal,
         )
-        .await?;
-        let mut builder = builder.lock_owned().await;
-        let result = super::thread_history_materialization::materialize_legacy_to_sqlite(
-            store,
-            source_rollout_id,
-            stable_path.as_path(),
-            &mut builder,
-        )
         .await;
+        let mut builder = builder.lock_owned().await;
+        let result = match reset_result {
+            Ok(()) => {
+                super::thread_history_materialization::materialize_legacy_to_sqlite(
+                    store,
+                    source_rollout_id,
+                    stable_path.as_path(),
+                    &mut builder,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
         if let Err(error) = result {
             builder.reset();
             drop(builder);
@@ -361,19 +1124,26 @@ pub(super) async fn freeze_thread_segment_locked(
                 source_rollout_id,
             )
             .await;
-            return Err(error);
+            warn!(%thread_id, %error, "segment rotation committed but legacy projection repair failed");
         }
     }
 
-    Ok(FrozenRolloutSegment {
-        reference,
-        source_session_meta: source_meta,
-        history_mode,
-        next_rollout_ordinal,
+    Ok(FrozenRolloutSegmentResult {
+        frozen: FrozenRolloutSegment {
+            reference,
+            source_session_meta: source_meta,
+            history_mode,
+            next_rollout_ordinal,
+        },
+        publication: FrozenSegmentPublication::ActiveRolloutReplaced(publication),
     })
 }
 
-pub(super) async fn freeze_paginated_prefix_locked(
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the persisted fork boundary and its combined writer reservation are explicit"
+)]
+pub(super) async fn freeze_paginated_prefix_reserved(
     store: &LocalThreadStore,
     source_thread_id: ThreadId,
     source_rollout_path: &Path,
@@ -382,7 +1152,10 @@ pub(super) async fn freeze_paginated_prefix_locked(
     prefix_rollout_path: &Path,
     end_ordinal_exclusive: u64,
     end_byte_offset: u64,
+    reservation: &RolloutWriterReservation,
 ) -> ThreadStoreResult<FrozenRolloutSegment> {
+    debug_assert!(reservation.contains(source_thread_id));
+    debug_assert!(reservation.contains(prefix_thread_id));
     let (source_session_meta, _, _, _, _) =
         validate_source_rollout(source_rollout_path, source_thread_id).await?;
     let history_mode = source_session_meta.meta.history_mode;
@@ -470,6 +1243,7 @@ pub(super) async fn freeze_paginated_prefix_locked(
             reference.clone(),
             &mut HashSet::new(),
             /*depth*/ 0,
+            reservation,
         )
         .await?;
     }
@@ -520,6 +1294,7 @@ async fn stabilize_rollout_reference(
     reference: RolloutReferenceItem,
     active_references: &mut HashSet<(ThreadId, RolloutId, Option<SegmentId>)>,
     depth: usize,
+    reservation: &RolloutWriterReservation,
 ) -> ThreadStoreResult<RolloutReferenceItem> {
     let mut inserted_references = Vec::new();
     let result = stabilize_rollout_reference_iteratively(
@@ -528,6 +1303,7 @@ async fn stabilize_rollout_reference(
         active_references,
         &mut inserted_references,
         depth,
+        reservation,
     )
     .await;
     for identity in inserted_references {
@@ -542,6 +1318,7 @@ async fn stabilize_rollout_reference_iteratively(
     active_references: &mut HashSet<(ThreadId, RolloutId, Option<SegmentId>)>,
     inserted_references: &mut Vec<(ThreadId, RolloutId, Option<SegmentId>)>,
     depth: usize,
+    reservation: &RolloutWriterReservation,
 ) -> ThreadStoreResult<RolloutReferenceItem> {
     let mut frames = vec![
         load_stabilization_frame(
@@ -550,6 +1327,7 @@ async fn stabilize_rollout_reference_iteratively(
             active_references,
             inserted_references,
             depth,
+            reservation,
         )
         .await?,
     ];
@@ -584,6 +1362,7 @@ async fn stabilize_rollout_reference_iteratively(
                     active_references,
                     inserted_references,
                     graph_depth,
+                    reservation,
                 )
                 .await?,
             );
@@ -659,6 +1438,7 @@ async fn load_stabilization_frame(
     active_references: &mut HashSet<(ThreadId, RolloutId, Option<SegmentId>)>,
     inserted_references: &mut Vec<(ThreadId, RolloutId, Option<SegmentId>)>,
     graph_depth: usize,
+    reservation: &RolloutWriterReservation,
 ) -> ThreadStoreResult<StabilizationFrame> {
     if graph_depth >= MAX_ROLLOUT_REFERENCE_DEPTH {
         return Err(ThreadStoreError::Internal {
@@ -694,6 +1474,19 @@ async fn load_stabilization_frame(
         codex_rollout::resolve_rollout_reference_path(&store.config.codex_home, &reference)
             .await
             .map_err(thread_store_io_error)?;
+    if !is_immutable_segment_path(
+        store.config.codex_home.as_path(),
+        resolved_path.as_path(),
+        thread_id,
+        reference.segment_id,
+    ) && !reservation.contains(thread_id)
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "mutable rollout predecessor for thread {thread_id} is outside the writer reservation"
+            ),
+        });
+    }
     let (lines, loaded_thread_id, parse_errors) =
         RolloutRecorder::load_rollout_lines(resolved_path.as_path())
             .await
@@ -849,11 +1642,7 @@ async fn install_snapshot_segment(
         .map_err(thread_store_io_error)?;
     let temporary_path = immutable_segment_temporary_path(destination);
     let write_result = async {
-        let mut temporary_file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(temporary_path.as_path())
-            .await?;
+        let mut temporary_file = create_immutable_segment_file(temporary_path.as_path()).await?;
         for encoded in canonical_snapshot_lines(lines, segment_id).map_err(io::Error::other)? {
             temporary_file.write_all(encoded.as_slice()).await?;
             temporary_file.write_all(b"\n").await?;
@@ -1006,11 +1795,7 @@ async fn install_immutable_segment(source: &Path, destination: &Path) -> ThreadS
     let temporary_path = immutable_segment_temporary_path(destination);
     let copy_result = async {
         let mut source_file = fs::File::open(source).await?;
-        let mut temporary_file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(temporary_path.as_path())
-            .await?;
+        let mut temporary_file = create_immutable_segment_file(temporary_path.as_path()).await?;
         tokio::io::copy(&mut source_file, &mut temporary_file).await?;
         temporary_file.sync_all().await
     }
@@ -1049,6 +1834,17 @@ async fn commit_immutable_segment(
         match fs::hard_link(temporary_path.as_path(), destination).await {
             Ok(()) => {}
             Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
+                let metadata = fs::symlink_metadata(destination)
+                    .await
+                    .map_err(thread_store_io_error)?;
+                if !metadata.file_type().is_file() {
+                    return Err(ThreadStoreError::Conflict {
+                        message: format!(
+                            "immutable rollout segment {} already exists but is not a regular file",
+                            destination.display()
+                        ),
+                    });
+                }
                 if !files_equal(temporary_path.as_path(), destination).await? {
                     // The existing segment may already be referenced. Never replace its contents
                     // while recovering an interrupted rotation; fail closed instead.
@@ -1069,6 +1865,18 @@ async fn commit_immutable_segment(
                 });
             }
         }
+        let destination_metadata = fs::symlink_metadata(destination)
+            .await
+            .map_err(thread_store_io_error)?;
+        if !destination_metadata.file_type().is_file() {
+            return Err(ThreadStoreError::Conflict {
+                message: format!(
+                    "immutable rollout segment {} changed before synchronization",
+                    destination.display()
+                ),
+            });
+        }
+        sync_immutable_destination(destination.to_path_buf(), destination_metadata).await?;
         #[cfg(unix)]
         tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
             .await
@@ -1083,6 +1891,69 @@ async fn commit_immutable_segment(
     .await;
     let _ = fs::remove_file(temporary_path.as_path()).await;
     result
+}
+
+async fn sync_immutable_destination(
+    destination: PathBuf,
+    expected_metadata: std::fs::Metadata,
+) -> ThreadStoreResult<()> {
+    tokio::task::spawn_blocking(move || {
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            use std::os::unix::fs::OpenOptionsExt;
+            use std::os::unix::fs::PermissionsExt;
+
+            options.custom_flags(libc::O_NOFOLLOW);
+            let file = options.open(destination.as_path())?;
+            let opened_metadata = file.metadata()?;
+            if opened_metadata.dev() != expected_metadata.dev()
+                || opened_metadata.ino() != expected_metadata.ino()
+            {
+                return Err(io::Error::other(format!(
+                    "immutable rollout segment {} changed before synchronization",
+                    destination.display()
+                )));
+            }
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+            file.sync_all()
+        }
+        #[cfg(not(unix))]
+        {
+            let file = options.open(destination.as_path())?;
+            if !file.metadata()?.file_type().is_file() {
+                return Err(io::Error::other(format!(
+                    "immutable rollout segment {} changed before synchronization",
+                    destination.display()
+                )));
+            }
+            file.sync_all()
+        }
+    })
+    .await
+    .map_err(|error| ThreadStoreError::Internal {
+        message: format!("failed to join immutable segment synchronization: {error}"),
+    })?
+    .map_err(thread_store_io_error)
+}
+
+async fn create_immutable_segment_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        options.mode(0o600);
+    }
+    let file = options.open(path).await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))
+            .await?;
+    }
+    Ok(file)
 }
 
 async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
@@ -1119,16 +1990,56 @@ async fn files_equal(left: &Path, right: &Path) -> ThreadStoreResult<bool> {
     }
 }
 
-async fn replace_stable_rollout(staged: PathBuf, stable: PathBuf) -> io::Result<()> {
+async fn replace_stable_rollout(
+    staged: PathBuf,
+    stable: PathBuf,
+) -> io::Result<StableRolloutPublication> {
     let staged_for_write = staged.clone();
     let stable_for_write = stable.clone();
-    tokio::task::spawn_blocking(move || {
+    let replace_result = tokio::task::spawn_blocking(move || {
         let contents = std::fs::read_to_string(staged_for_write.as_path())?;
         codex_utils_path::write_atomically(stable_for_write.as_path(), contents.as_str())
     })
-    .await
-    .map_err(|err| io::Error::other(format!("failed to join rollout replacement: {err}")))??;
+    .await;
+    match replace_result {
+        Ok(result) => result?,
+        Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
+        Err(error) => panic!("rollout replacement task was cancelled: {error}"),
+    }
     let _ = fs::remove_file(staged).await;
+    let publication = match sync_stable_rollout_publication(stable.as_path()).await {
+        Ok(()) => StableRolloutPublication::Durable,
+        Err(error) => StableRolloutPublication::DurabilityUnknown { error },
+    };
+    Ok(publication)
+}
+
+async fn sync_stable_rollout_publication(stable: &Path) -> ThreadStoreResult<()> {
+    fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(stable)
+        .await
+        .map_err(thread_store_io_error)?
+        .sync_all()
+        .await
+        .map_err(thread_store_io_error)?;
+    let parent =
+        stable
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| ThreadStoreError::Internal {
+                message: format!("rollout {} does not have a parent", stable.display()),
+            })?;
+    #[cfg(unix)]
+    tokio::task::spawn_blocking(move || std::fs::File::open(parent)?.sync_all())
+        .await
+        .map_err(|error| ThreadStoreError::Internal {
+            message: format!("failed to join rollout directory sync: {error}"),
+        })?
+        .map_err(thread_store_io_error)?;
+    #[cfg(not(unix))]
+    let _ = parent;
     Ok(())
 }
 

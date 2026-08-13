@@ -28,18 +28,27 @@ use tokio::io::AsyncWriteExt;
 
 use super::super::LocalThreadStore;
 use super::super::test_support::test_config;
+use super::super::writer_lock::WriterLockCoordinator;
+use super::inject_checkpoint_persistence_pause;
+use super::inject_next_segment_durability_failure;
+use super::inject_next_segment_precommit_failure;
+use super::inject_next_segment_reopen_failure;
 use super::install_immutable_segment;
 use super::snapshot_segment_id;
 use super::stabilize_rollout_reference;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
+use crate::ForkBoundary;
 use crate::FreezeRolloutSegmentParams;
 use crate::LiveThread;
 use crate::PersistContext;
+use crate::PrepareForkParams;
 use crate::ResumeThreadParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadPersistenceMode;
 use crate::ThreadStore;
+use crate::ThreadStoreError;
 
 #[tokio::test]
 async fn deferred_live_thread_stays_pathless_until_freeze_materializes_its_canonical_journal() {
@@ -246,6 +255,242 @@ async fn live_freeze_installs_immutable_prefix_and_isolates_later_appends() {
 }
 
 #[tokio::test]
+async fn committed_checkpoint_reopen_failure_recovers_without_duplicate_replacement() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(
+        test_config(home.path()),
+        /*state_db*/ None,
+    ));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create live thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist live thread");
+    live_thread
+        .append_items(&[user_message_item("before checkpoint")])
+        .await
+        .expect("append source history");
+    live_thread.flush().await.expect("flush source history");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+
+    inject_next_segment_reopen_failure(thread_id);
+    let outcome = live_thread
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
+            "checkpoint replacement",
+        )]))
+        .await;
+    assert!(matches!(
+        outcome,
+        SegmentCheckpointPersistenceOutcome::Committed
+    ));
+
+    live_thread
+        .append_items(&[user_message_item("after checkpoint")])
+        .await
+        .expect("lazy recorder recovery must permit the next append");
+    live_thread.flush().await.expect("flush recovered writer");
+    let items = RolloutRecorder::load_rollout_items(stable_path.as_path())
+        .await
+        .expect("read checkpoint rollout")
+        .0;
+    assert_eq!(message_count(&items, "checkpoint replacement"), 1);
+    assert!(has_message(&items, "after checkpoint"));
+}
+
+#[tokio::test]
+async fn precommit_rotation_failure_atomically_appends_the_checkpoint_once() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(
+        test_config(home.path()),
+        /*state_db*/ None,
+    ));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create live thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist live thread");
+    live_thread
+        .append_items(&[user_message_item("before fallback")])
+        .await
+        .expect("append source history");
+    live_thread.flush().await.expect("flush source history");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+
+    inject_next_segment_precommit_failure(thread_id);
+    let outcome = live_thread
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
+            "atomic fallback checkpoint",
+        )]))
+        .await;
+    assert!(matches!(
+        outcome,
+        SegmentCheckpointPersistenceOutcome::Committed
+    ));
+    live_thread
+        .append_items(&[user_message_item("after fallback")])
+        .await
+        .expect("append after atomic fallback");
+    live_thread.flush().await.expect("flush recovered writer");
+    let items = RolloutRecorder::load_rollout_items(stable_path.as_path())
+        .await
+        .expect("read fallback rollout")
+        .0;
+    assert_eq!(message_count(&items, "atomic fallback checkpoint"), 1);
+    assert!(has_message(&items, "before fallback"));
+    assert!(has_message(&items, "after fallback"));
+    assert!(
+        !items
+            .iter()
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_))),
+        "precommit fallback must leave the active rollout unsegmented"
+    );
+}
+
+#[tokio::test]
+async fn cancelling_checkpoint_caller_does_not_cancel_checkpoint_persistence() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(
+        test_config(home.path()),
+        /*state_db*/ None,
+    ));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create live thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist live thread");
+    live_thread
+        .append_items(&[user_message_item("before cancelled caller")])
+        .await
+        .expect("append source history");
+    live_thread.flush().await.expect("flush source history");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+
+    let pause = inject_checkpoint_persistence_pause(thread_id);
+    let checkpoint_owner = live_thread.clone();
+    let caller = tokio::spawn(async move {
+        checkpoint_owner
+            .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![
+                user_message_item("checkpoint after caller cancellation"),
+            ]))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
+        .await
+        .expect("checkpoint persistence owner must acquire its reservation");
+    caller.abort();
+    let _ = caller.await;
+    pause.release.notify_one();
+
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let items = RolloutRecorder::load_rollout_items(stable_path.as_path())
+                .await
+                .expect("read active rollout while waiting for checkpoint")
+                .0;
+            if message_count(&items, "checkpoint after caller cancellation") == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("detached checkpoint owner must finish after caller cancellation");
+
+    live_thread
+        .append_items(&[user_message_item("after cancelled caller")])
+        .await
+        .expect("append after detached checkpoint owner completes");
+    live_thread.flush().await.expect("flush recovered writer");
+    let items = RolloutRecorder::load_rollout_items(stable_path.as_path())
+        .await
+        .expect("read checkpoint rollout")
+        .0;
+    assert_eq!(
+        message_count(&items, "checkpoint after caller cancellation"),
+        1
+    );
+    assert!(has_message(&items, "after cancelled caller"));
+}
+
+#[tokio::test]
+async fn indeterminate_checkpoint_fences_later_persistence_without_duplicate_replacement() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(
+        test_config(home.path()),
+        /*state_db*/ None,
+    ));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create live thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist live thread");
+    live_thread
+        .append_items(&[user_message_item("before indeterminate checkpoint")])
+        .await
+        .expect("append source history");
+    live_thread.flush().await.expect("flush source history");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+
+    inject_next_segment_durability_failure(thread_id);
+    let outcome = live_thread
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
+            "indeterminate replacement",
+        )]))
+        .await;
+    assert!(matches!(
+        outcome,
+        SegmentCheckpointPersistenceOutcome::Indeterminate { .. }
+    ));
+    let error = live_thread
+        .append_items(&[user_message_item("must not append")])
+        .await
+        .expect_err("indeterminate checkpoint must fence later persistence");
+    assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+    let items = RolloutRecorder::load_rollout_items(stable_path.as_path())
+        .await
+        .expect("read indeterminate checkpoint rollout")
+        .0;
+    assert_eq!(message_count(&items, "indeterminate replacement"), 1);
+    assert!(!has_message(&items, "must not append"));
+}
+
+#[tokio::test]
 async fn paginated_rotation_installs_the_exact_source_bytes() {
     let home = TempDir::new().expect("temp dir");
     let store = state_backed_store(home.path()).await;
@@ -279,6 +524,223 @@ async fn paginated_rotation_installs_the_exact_source_bytes() {
             .await
             .expect("read immutable paginated segment"),
         source_bytes
+    );
+}
+
+#[tokio::test]
+async fn external_writer_lock_rejects_segment_publication_and_fork_preparation() {
+    let home = TempDir::new().expect("temp dir");
+    let store = state_backed_store(home.path()).await;
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .expect("create paginated thread");
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist paginated metadata");
+    append_message(&store, thread_id, "locked source").await;
+    store.flush_thread(thread_id).await.expect("flush source");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+    let stable_bytes = tokio::fs::read(stable_path.as_path())
+        .await
+        .expect("read stable source");
+    store
+        .shutdown_thread(thread_id)
+        .await
+        .expect("release store writer");
+
+    let competing = Arc::new(WriterLockCoordinator::new(home.path()));
+    let _competing_writer = competing
+        .acquire(thread_id)
+        .expect("acquire external writer lock");
+
+    for params in [
+        FreezeRolloutSegmentParams::snapshot(),
+        FreezeRolloutSegmentParams::rotate(Vec::new()),
+    ] {
+        let error = store
+            .freeze_thread_segment(thread_id, params)
+            .await
+            .expect_err("external writer must reject segment publication");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+    }
+    for boundary in [
+        ForkBoundary::Latest,
+        ForkBoundary::BeforeTurn("unread-turn".to_string()),
+    ] {
+        let error = store
+            .prepare_fork(PrepareForkParams {
+                thread_id,
+                boundary,
+            })
+            .await
+            .expect_err("external writer must reject fork preparation");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+    }
+
+    assert_eq!(
+        tokio::fs::read(stable_path.as_path())
+            .await
+            .expect("read unchanged source"),
+        stable_bytes
+    );
+    assert!(
+        !tokio::fs::try_exists(
+            home.path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        )
+        .await
+        .expect("check immutable root")
+    );
+}
+
+#[tokio::test]
+async fn direct_snapshot_reserves_a_mutable_referenced_owner_in_uuid_order() {
+    let low = ThreadId::from_string("00000000-0000-4000-8000-000000000001").expect("low thread id");
+    let high =
+        ThreadId::from_string("ffffffff-ffff-4fff-bfff-ffffffffffff").expect("high thread id");
+    for (child_id, parent_id) in [(low, high), (high, low)] {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        store
+            .create_thread(create_params(parent_id, ThreadHistoryMode::Legacy))
+            .await
+            .expect("create parent");
+        store
+            .persist_thread(parent_id, PersistContext::Standard)
+            .await
+            .expect("persist parent");
+        append_message(&store, parent_id, "mutable parent").await;
+        store.flush_thread(parent_id).await.expect("flush parent");
+        let parent_path = store
+            .live_rollout_path(parent_id)
+            .await
+            .expect("parent path");
+        let parent_segment_id = codex_rollout::read_session_meta_line(parent_path.as_path())
+            .await
+            .expect("read parent metadata")
+            .meta
+            .segment_id;
+
+        store
+            .create_thread(create_params(child_id, ThreadHistoryMode::Legacy))
+            .await
+            .expect("create child");
+        store
+            .persist_thread(child_id, PersistContext::Standard)
+            .await
+            .expect("persist child");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id: child_id,
+                items: vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+                    rollout_id: Some(parent_id),
+                    rollout_path: parent_path,
+                    thread_id: Some(parent_id),
+                    rollout_timestamp: None,
+                    segment_id: parent_segment_id,
+                    max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+                    nth_user_message: None,
+                    compacted_replacement_history_filter_texts: None,
+                })],
+            })
+            .await
+            .expect("append mutable parent reference");
+        store.flush_thread(child_id).await.expect("flush child");
+        store
+            .shutdown_thread(parent_id)
+            .await
+            .expect("release parent writer");
+        store
+            .shutdown_thread(child_id)
+            .await
+            .expect("release child writer");
+
+        let competing = Arc::new(WriterLockCoordinator::new(home.path()));
+        let _parent_writer = competing
+            .acquire(parent_id)
+            .expect("acquire external parent writer");
+        let error = store
+            .freeze_thread_segment(child_id, FreezeRolloutSegmentParams::snapshot())
+            .await
+            .expect_err("mutable parent writer must reject direct snapshot");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert!(
+            !tokio::fs::try_exists(
+                home.path()
+                    .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            )
+            .await
+            .expect("check immutable root")
+        );
+    }
+}
+
+#[tokio::test]
+async fn direct_snapshot_does_not_reserve_a_valid_immutable_referenced_owner() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let parent_id = ThreadId::new();
+    store
+        .create_thread(create_params(parent_id, ThreadHistoryMode::Legacy))
+        .await
+        .expect("create parent");
+    store
+        .persist_thread(parent_id, PersistContext::Standard)
+        .await
+        .expect("persist parent");
+    append_message(&store, parent_id, "immutable parent").await;
+    let parent = store
+        .freeze_thread_segment(parent_id, FreezeRolloutSegmentParams::snapshot())
+        .await
+        .expect("snapshot parent");
+    store
+        .shutdown_thread(parent_id)
+        .await
+        .expect("release parent writer");
+
+    let child_id = ThreadId::new();
+    store
+        .create_thread(create_params(child_id, ThreadHistoryMode::Legacy))
+        .await
+        .expect("create child");
+    store
+        .persist_thread(child_id, PersistContext::Standard)
+        .await
+        .expect("persist child");
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id: child_id,
+            items: vec![RolloutItem::RolloutReference(parent.reference.clone())],
+        })
+        .await
+        .expect("append immutable parent reference");
+    store.flush_thread(child_id).await.expect("flush child");
+    store
+        .shutdown_thread(child_id)
+        .await
+        .expect("release child writer");
+
+    let competing = Arc::new(WriterLockCoordinator::new(home.path()));
+    let _parent_writer = competing
+        .acquire(parent_id)
+        .expect("acquire external parent writer");
+    let child_snapshot = store
+        .freeze_thread_segment(child_id, FreezeRolloutSegmentParams::snapshot())
+        .await
+        .expect("immutable parent must not require its current writer lock");
+    assert_eq!(
+        child_snapshot.reference.rollout_path,
+        parent.reference.rollout_path
+    );
+    assert_eq!(
+        child_snapshot.reference.segment_id,
+        parent.reference.segment_id
     );
 }
 
@@ -797,11 +1259,16 @@ async fn snapshot_stabilizes_512_same_thread_segments() {
         compacted_replacement_history_filter_texts: None,
     };
     let mut active_references = std::collections::HashSet::new();
+    let reservation = store
+        .reserve_rollout_writers(&[])
+        .await
+        .expect("reserve immutable snapshot traversal");
     let stabilized = stabilize_rollout_reference(
         &store,
         root_reference.clone(),
         &mut active_references,
         /*depth*/ 0,
+        &reservation,
     )
     .await
     .expect("ordinary immutable segments must not exhaust fork depth");
@@ -861,6 +1328,7 @@ async fn snapshot_stabilizes_512_same_thread_segments() {
         overflow_reference,
         &mut active_references,
         /*depth*/ 0,
+        &reservation,
     )
     .await
     .expect("same-thread snapshots must remain readable beyond 512 segments");
@@ -882,12 +1350,17 @@ async fn snapshot_rejects_cross_thread_references_past_fork_depth_limit() {
         nth_user_message: None,
         compacted_replacement_history_filter_texts: None,
     };
+    let reservation = store
+        .reserve_rollout_writers(&[])
+        .await
+        .expect("reserve bounded traversal");
 
     let error = stabilize_rollout_reference(
         &store,
         reference,
         &mut std::collections::HashSet::new(),
         codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+        &reservation,
     )
     .await
     .expect_err("fork depth must remain bounded");
@@ -937,6 +1410,17 @@ async fn snapshots_after_append_get_new_identity_and_unchanged_snapshots_reuse_i
     assert_ne!(first.reference.rollout_path, second.reference.rollout_path);
     assert_eq!(third.reference.segment_id, second.reference.segment_id);
     assert_eq!(third.reference.rollout_path, second.reference.rollout_path);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = tokio::fs::metadata(second.reference.rollout_path.as_path())
+            .await
+            .expect("read snapshot permissions")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
     let installed_lines =
         RolloutRecorder::load_rollout_lines(second.reference.rollout_path.as_path())
             .await
@@ -994,12 +1478,12 @@ async fn snapshot_identity_ignores_source_segment_id_and_object_insertion_order(
     first.push(RolloutLine {
         timestamp: "2026-07-14T00:00:00Z".to_string(),
         ordinal: None,
-        item: RolloutItem::WorldState(WorldStateItem::full(first_state.into())),
+        item: RolloutItem::WorldState(WorldStateItem::full(first_state)),
     });
     second.push(RolloutLine {
         timestamp: "2026-07-14T00:00:00Z".to_string(),
         ordinal: None,
-        item: RolloutItem::WorldState(WorldStateItem::full(second_state.into())),
+        item: RolloutItem::WorldState(WorldStateItem::full(second_state)),
     });
 
     assert_eq!(
@@ -1207,16 +1691,44 @@ async fn legacy_rotation_rejects_malformed_rollout_reference_records() {
 
 #[tokio::test]
 async fn immutable_install_copies_source_and_rejects_different_existing_contents() {
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     let home = TempDir::new().expect("temp dir");
     let source = home.path().join("source.jsonl");
     let destination = home.path().join("segments").join("segment.jsonl");
     tokio::fs::write(source.as_path(), b"frozen prefix")
         .await
         .expect("write source");
+    #[cfg(unix)]
+    tokio::fs::set_permissions(source.as_path(), std::fs::Permissions::from_mode(0o664))
+        .await
+        .expect("make source permissive");
 
     install_immutable_segment(source.as_path(), destination.as_path())
         .await
         .expect("install immutable copy");
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            tokio::fs::metadata(source.as_path())
+                .await
+                .expect("read source permissions")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o664
+        );
+        assert_eq!(
+            tokio::fs::metadata(destination.as_path())
+                .await
+                .expect("read destination permissions")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
     tokio::fs::write(source.as_path(), b"mutated source")
         .await
         .expect("mutate source");
@@ -1230,19 +1742,114 @@ async fn immutable_install_copies_source_and_rejects_different_existing_contents
     tokio::fs::write(source.as_path(), b"frozen prefix")
         .await
         .expect("restore identical source");
+    #[cfg(unix)]
+    tokio::fs::set_permissions(
+        destination.as_path(),
+        std::fs::Permissions::from_mode(0o664),
+    )
+    .await
+    .expect("make identical destination permissive");
     install_immutable_segment(source.as_path(), destination.as_path())
         .await
         .expect("accept identical immutable copy");
+    #[cfg(unix)]
+    assert_eq!(
+        tokio::fs::metadata(destination.as_path())
+            .await
+            .expect("read repaired destination permissions")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
 
     tokio::fs::write(source.as_path(), b"different prefix")
         .await
         .expect("write conflicting source");
+    #[cfg(unix)]
+    tokio::fs::set_permissions(
+        destination.as_path(),
+        std::fs::Permissions::from_mode(0o664),
+    )
+    .await
+    .expect("make conflicting destination permissive");
+    let destination_before_conflict = tokio::fs::read(destination.as_path())
+        .await
+        .expect("read destination before conflict");
     let err = install_immutable_segment(source.as_path(), destination.as_path())
         .await
         .expect_err("reject conflicting immutable copy");
     assert!(
         err.to_string().contains("different contents"),
         "unexpected error: {err}"
+    );
+    assert_eq!(
+        tokio::fs::read(destination.as_path())
+            .await
+            .expect("read destination after conflict"),
+        destination_before_conflict
+    );
+    #[cfg(unix)]
+    assert_eq!(
+        tokio::fs::metadata(destination.as_path())
+            .await
+            .expect("read conflicting destination permissions")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o664
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn immutable_install_rejects_existing_symlink_without_mutating_its_target() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().expect("temp dir");
+    let source = home.path().join("source.jsonl");
+    let target = home.path().join("external-target.jsonl");
+    let destination = home.path().join("segments").join("segment.jsonl");
+    tokio::fs::write(source.as_path(), b"same bytes")
+        .await
+        .expect("write source");
+    tokio::fs::write(target.as_path(), b"same bytes")
+        .await
+        .expect("write external target");
+    tokio::fs::set_permissions(target.as_path(), std::fs::Permissions::from_mode(0o664))
+        .await
+        .expect("make target permissive");
+    tokio::fs::create_dir_all(destination.parent().expect("destination parent"))
+        .await
+        .expect("create destination parent");
+    symlink(target.as_path(), destination.as_path()).expect("create destination symlink");
+
+    let error = install_immutable_segment(source.as_path(), destination.as_path())
+        .await
+        .expect_err("immutable publication must reject a destination symlink");
+    assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+    assert!(
+        tokio::fs::symlink_metadata(destination.as_path())
+            .await
+            .expect("read destination symlink")
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(
+        tokio::fs::read(target.as_path())
+            .await
+            .expect("read unchanged target"),
+        b"same bytes"
+    );
+    assert_eq!(
+        tokio::fs::metadata(target.as_path())
+            .await
+            .expect("read unchanged target mode")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o664
     );
 }
 
@@ -1720,6 +2327,18 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
             RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == message
         )
     })
+}
+
+fn message_count(items: &[RolloutItem], message: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == message
+            )
+        })
+        .count()
 }
 
 async fn append_malformed_historical_records(path: &Path) {

@@ -9,6 +9,12 @@ use codex_rollout::RolloutLine;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::LazyLock;
+#[cfg(test)]
+use std::sync::Mutex as StdMutex;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::sync::OwnedRwLockReadGuard;
 
 use super::LocalThreadStore;
@@ -34,6 +40,32 @@ use crate::ThreadStoreResult;
 enum ForkResponseHistory {
     Full,
     ModelContext,
+}
+
+#[cfg(test)]
+static LINEAGE_PERSISTENCE_PAUSES: LazyLock<
+    StdMutex<HashMap<codex_protocol::ThreadId, Arc<LineagePersistencePause>>>,
+> = LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(super) struct LineagePersistencePause {
+    pub(super) entered: Notify,
+    pub(super) release: Notify,
+}
+
+#[cfg(test)]
+pub(super) fn inject_lineage_persistence_pause(
+    thread_id: codex_protocol::ThreadId,
+) -> Arc<LineagePersistencePause> {
+    let pause = Arc::new(LineagePersistencePause {
+        entered: Notify::new(),
+        release: Notify::new(),
+    });
+    LINEAGE_PERSISTENCE_PAUSES
+        .lock()
+        .expect("lineage persistence pause mutex")
+        .insert(thread_id, Arc::clone(&pause));
+    pause
 }
 
 pub(super) async fn prepare(
@@ -173,19 +205,6 @@ async fn prepare_with_response_history(
     } = params;
     let interrupt_if_open = matches!(&boundary, ForkBoundary::Latest);
     let mut source_reservation = Some(store.live_writer_locks.reserve_lifecycle(thread_id).await);
-    if let Some(expected_rollout_id) = expected_rollout_id {
-        let selected =
-            super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
-                .await?
-                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-        if selected.rollout_id != expected_rollout_id {
-            return Err(ThreadStoreError::InvalidRequest {
-                message: format!(
-                    "rollout path does not select the current rollout for thread {thread_id}"
-                ),
-            });
-        }
-    }
     if matches!(boundary, ForkBoundary::Latest) {
         let indexed_store = store.clone();
         let indexed_reservation = source_reservation
@@ -198,6 +217,7 @@ async fn prepare_with_response_history(
                 thread_id,
                 response_history,
                 supplied_context,
+                expected_rollout_id,
                 &mut reservation,
             )
             .await?;
@@ -218,33 +238,26 @@ async fn prepare_with_response_history(
     // Keep the source reserved until persistence and lineage materialization finish, even if the
     // caller cancels fork preparation.
     let lineage_store = store.clone();
-    let (lineage, source_writer_guard, source_reservation, source_projection_was_missing) =
+    let (lineage, writer_reservation, source_reservation, source_projection_was_missing) =
         tokio::spawn(async move {
-            let source_projection_was_missing =
-                match super::thread_rollout_resolver::resolve_current_including_archived(
-                    &lineage_store,
-                    thread_id,
-                )
-                .await?
-                {
-                    Some(source_rollout) => super::thread_history::projection_state(
-                        &lineage_store,
-                        source_rollout.rollout_id,
-                    )
-                    .await?
-                    .is_none(),
-                    None => true,
-                };
-            match live_writer::persist_thread(&lineage_store, thread_id).await {
-                Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
-                Err(err) => return Err(err),
-            }
-            let (lineage, source_writer_guard) = lineage_store
-                .resolve_rollout_lineage_for_reference(thread_id)
+            let (lineage, writer_reservation, source_projection_was_missing) = lineage_store
+                .resolve_rollout_lineage_for_reference(thread_id, expected_rollout_id)
                 .await?;
+            #[cfg(test)]
+            let pause = {
+                LINEAGE_PERSISTENCE_PAUSES
+                    .lock()
+                    .expect("lineage persistence pause mutex")
+                    .remove(&thread_id)
+            };
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.entered.notify_one();
+                pause.release.notified().await;
+            }
             Ok::<_, ThreadStoreError>((
                 lineage,
-                source_writer_guard,
+                writer_reservation,
                 source_reservation,
                 source_projection_was_missing,
             ))
@@ -284,11 +297,6 @@ async fn prepare_with_response_history(
             {
                 continue;
             }
-            let _ancestor_writer_guard = if segment.thread_id() == thread_id {
-                None
-            } else {
-                Some(store.live_writer_locks.lock(segment.thread_id()).await)
-            };
             super::thread_history_materialization::materialize_to_sqlite(
                 store,
                 segment.rollout_id(),
@@ -419,32 +427,39 @@ async fn prepare_with_response_history(
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
-    let prefix_writer_guard = if prefix_thread_id == thread_id {
-        None
-    } else {
-        Some(store.live_writer_locks.lock(prefix_thread_id).await)
-    };
-    let frozen_segment = if indexed_root_latest {
-        super::segment::freeze_thread_segment_locked(
-            store,
-            thread_id,
-            FreezeRolloutSegmentParams::snapshot(),
-        )
-        .await?
-    } else {
-        super::segment::freeze_paginated_prefix_locked(
-            store,
-            thread_id,
-            source_rollout_path.as_path(),
-            prefix_thread_id,
-            prefix_rollout_id,
-            prefix_rollout_path.as_path(),
-            prefix_end.end_ordinal_exclusive,
-            end_byte_offset,
-        )
-        .await?
-    };
-    drop(prefix_writer_guard);
+    // The detached owner retains every writer reservation until immutable publication finishes,
+    // even if the request that initiated fork preparation is cancelled.
+    let publication_store = store.clone();
+    let (frozen_segment, writer_reservation) = tokio::spawn(async move {
+        let frozen_segment = if indexed_root_latest {
+            super::segment::freeze_thread_segment_reserved(
+                &publication_store,
+                thread_id,
+                FreezeRolloutSegmentParams::snapshot(),
+                expected_rollout_id,
+                &writer_reservation,
+            )
+            .await?
+        } else {
+            super::segment::freeze_paginated_prefix_reserved(
+                &publication_store,
+                thread_id,
+                source_rollout_path.as_path(),
+                prefix_thread_id,
+                prefix_rollout_id,
+                prefix_rollout_path.as_path(),
+                prefix_end.end_ordinal_exclusive,
+                end_byte_offset,
+                &writer_reservation,
+            )
+            .await?
+        };
+        Ok::<_, ThreadStoreError>((frozen_segment, writer_reservation))
+    })
+    .await
+    .map_err(|error| ThreadStoreError::Internal {
+        message: format!("failed to publish fork segment: {error}"),
+    })??;
     let latest_model_context =
         Arc::new(model_context::load_for_fork(lineage.clone(), Some(latest_position)).await?);
     let model_context = if history_base == Some(latest_position) {
@@ -476,7 +491,7 @@ async fn prepare_with_response_history(
         ),
         ForkResponseHistory::ModelContext => (Arc::clone(&model_context), None),
     };
-    drop(source_writer_guard);
+    drop(writer_reservation);
 
     let mut prepared = PreparedFork::new(
         thread_id,
@@ -608,8 +623,10 @@ async fn try_prepare_indexed_latest_fork(
     thread_id: codex_protocol::ThreadId,
     response_history: ForkResponseHistory,
     supplied_context: Option<(Arc<Vec<ResponseItemEnvelope>>, HistoryPosition)>,
+    expected_rollout_id: Option<RolloutId>,
     source_reservation: &mut Option<OwnedRwLockReadGuard<()>>,
 ) -> ThreadStoreResult<Option<PreparedFork>> {
+    let writer_reservation = store.reserve_rollout_writers(&[thread_id]).await?;
     if store.state_db.is_none() {
         return Ok(None);
     }
@@ -617,17 +634,23 @@ async fn try_prepare_indexed_latest_fork(
     else {
         return Ok(None);
     };
+    if expected_rollout_id.is_some_and(|expected| expected != resolved.rollout_id) {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "rollout path does not select the current rollout for thread {thread_id}"
+            ),
+        });
+    }
     if super::thread_history::projection_state(store, resolved.rollout_id)
         .await?
         .is_none()
     {
         return Ok(None);
     }
-    match live_writer::persist_thread(store, thread_id).await {
+    match live_writer::persist_thread_reserved(store, thread_id).await {
         Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
         Err(error) => return Err(error),
     }
-    let source_writer_guard = store.live_writer_locks.lock(thread_id).await;
     let Some(state_db) = store.state_db().await else {
         return Ok(None);
     };
@@ -822,16 +845,18 @@ async fn try_prepare_indexed_latest_fork(
         None
     };
 
-    let frozen_segment = super::segment::freeze_thread_segment_locked(
+    let frozen_segment = super::segment::freeze_thread_segment_reserved(
         store,
         thread_id,
         FreezeRolloutSegmentParams::snapshot(),
+        expected_rollout_id,
+        &writer_reservation,
     )
     .await?;
     if frozen_segment.next_rollout_ordinal != Some(position.end_ordinal_exclusive) {
         return Ok(None);
     }
-    drop(source_writer_guard);
+    drop(writer_reservation);
     let reservation = source_reservation
         .take()
         .ok_or_else(missing_source_reservation)?;

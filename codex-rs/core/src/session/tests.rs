@@ -4196,7 +4196,8 @@ async fn start_new_context_window_assigns_and_persists_item_ids() {
 
     session
         .start_new_context_window(&step_context, world_state)
-        .await;
+        .await
+        .expect("persist new context window");
 
     let live_history = session.clone_history().await;
     assert!(live_history.raw_items().next().is_some());
@@ -5621,7 +5622,8 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
                 window_ids,
             },
         )
-        .await;
+        .await
+        .expect("persist compacted history");
 
     let current_path = session
         .current_rollout_path()
@@ -7059,6 +7061,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
+        persistence_restart_required: std::sync::atomic::AtomicBool::new(false),
     };
     let per_turn_config =
         session.build_per_turn_config(&session_configuration, session_configuration.cwd().clone());
@@ -9270,6 +9273,7 @@ where
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
         next_internal_sub_id: AtomicU64::new(0),
+        persistence_restart_required: std::sync::atomic::AtomicBool::new(false),
     });
     let per_turn_config =
         session.build_per_turn_config(&session_configuration, session_configuration.cwd().clone());

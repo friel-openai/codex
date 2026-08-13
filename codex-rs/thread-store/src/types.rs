@@ -29,6 +29,8 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::Serializer;
 
+use crate::ThreadStoreError;
+
 mod optional_option {
     use super::*;
 
@@ -179,6 +181,21 @@ pub struct AppendThreadItemsParams {
 pub struct FreezeRolloutSegmentParams {
     mode: FreezeRolloutSegmentMode,
     initial_items: Vec<RolloutItem>,
+}
+
+/// Authoritative result of persisting one segment-state checkpoint.
+///
+/// `NotCommitted` guarantees that no checkpoint item became durable. `Indeterminate` means the
+/// store cannot prove whether the checkpoint became authoritative, so the live thread must reject
+/// later persistence until it is reopened from durable history.
+#[derive(Debug)]
+pub enum SegmentCheckpointPersistenceOutcome {
+    /// The complete checkpoint is durable and authoritative.
+    Committed,
+    /// No checkpoint item became durable.
+    NotCommitted { error: ThreadStoreError },
+    /// The store cannot determine whether the checkpoint became authoritative.
+    Indeterminate { error: ThreadStoreError },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

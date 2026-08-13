@@ -1681,26 +1681,29 @@ impl ThreadManagerState {
                 )
             })?;
         let reservation = local_store.reserve_thread_lifecycle(thread_id).await;
-        if let Some(expected_rollout_id) = expected_rollout_id {
-            let selected_rollout_id = local_store
-                .current_rollout_id(thread_id)
-                .await
-                .map_err(|error| CodexErr::Fatal(error.to_string()))?
-                .ok_or(CodexErr::ThreadNotFound(thread_id))?;
-            if selected_rollout_id != expected_rollout_id {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "rollout path does not select the current rollout for thread {thread_id}"
-                )));
+        let frozen = match expected_rollout_id {
+            Some(expected_rollout_id) => {
+                local_store
+                    .freeze_thread_segment_for_rollout(
+                        thread_id,
+                        expected_rollout_id,
+                        FreezeRolloutSegmentParams::snapshot(),
+                    )
+                    .await
+            }
+            None => {
+                local_store
+                    .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+                    .await
             }
         }
-        let frozen = local_store
-            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
-            .await
-            .map_err(|err| {
-                CodexErr::Fatal(format!(
-                    "failed to freeze rollout segment for {thread_id}: {err}"
-                ))
-            })?;
+        .map_err(|err| match err {
+            ThreadStoreError::ThreadNotFound { thread_id } => CodexErr::ThreadNotFound(thread_id),
+            ThreadStoreError::InvalidRequest { message } => CodexErr::InvalidRequest(message),
+            err => CodexErr::Fatal(format!(
+                "failed to freeze rollout segment for {thread_id}: {err}"
+            )),
+        })?;
         Ok((frozen, reservation))
     }
 
