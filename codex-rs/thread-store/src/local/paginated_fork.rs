@@ -452,7 +452,18 @@ async fn prepare_with_response_history(
     } else {
         Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?)
     };
+    let copied_history = if lineage.requires_copied_history().await? {
+        Some(Arc::new(
+            model_context::load_full_for_fork(lineage.clone(), history_base).await?,
+        ))
+    } else {
+        None
+    };
     let (response_history, projected_response_turns) = match response_history {
+        ForkResponseHistory::Full if copied_history.is_some() => (
+            Arc::clone(copied_history.as_ref().expect("copied history is present")),
+            None,
+        ),
         ForkResponseHistory::Full if indexed_root_latest => (
             Arc::clone(&model_context),
             Some(Arc::new(
@@ -477,6 +488,7 @@ async fn prepare_with_response_history(
         interrupt_if_open,
         source_reservation,
     );
+    prepared.copied_history = copied_history;
     prepared.projected_response_turns = projected_response_turns;
     Ok(prepared)
 }
