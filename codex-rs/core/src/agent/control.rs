@@ -34,6 +34,7 @@ use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -65,6 +66,7 @@ use self::residency::AgentResidency;
 const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
+const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
 
 mod completion;
 mod execution;
@@ -879,6 +881,54 @@ fn last_task_message_from_communication(communication: &InterAgentCommunication)
 
 fn non_empty_task_message(message: String) -> Option<String> {
     (!message.is_empty()).then_some(message)
+}
+
+fn synthetic_supervisor_list_agents_items(
+    owner_thread_id: ThreadId,
+    agents: Vec<ListedAgent>,
+) -> Vec<RolloutItem> {
+    let envelope = serde_json::json!({
+        "source": "pre_injected_agents_list",
+        "generated_at": chrono::Utc::now().timestamp(),
+        "owner_thread_id": owner_thread_id.to_string(),
+        "agents": agents,
+    });
+    let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
+    output.success = Some(true);
+
+    vec![
+        RolloutItem::ResponseItem(
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "list_agents".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+        RolloutItem::ResponseItem(
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                output,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+    ]
+}
+
+fn role_prompt_item(prompt: String) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText { text: prompt }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
 }
 
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {
