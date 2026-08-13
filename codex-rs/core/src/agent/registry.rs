@@ -103,8 +103,9 @@ impl AgentLifecycle {
             .cold_terminal_status
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
-        self.visible_when_cold
-            .store(visible_when_cold, Ordering::Release);
+        if visible_when_cold {
+            self.mark_visible_when_cold();
+        }
     }
 
     pub(crate) fn cold_terminal_status(&self) -> Option<AgentStatus> {
@@ -112,6 +113,13 @@ impl AgentLifecycle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone()
+    }
+
+    pub(crate) fn clear_cold_terminal_status(&self) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
     }
 
     pub(crate) fn try_start_completion_watcher(
