@@ -396,6 +396,13 @@ impl AgentControl {
                 .inherited_exec_policy_for_source(&state, session_source.as_ref(), &config)
                 .await,
         };
+        let mut options = options;
+        if options.environments.is_none() {
+            options.environments = inheritance
+                .environments
+                .as_ref()
+                .map(TurnEnvironmentSnapshot::to_spawn_selections);
+        }
         let (session_source, mut agent_metadata) = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
