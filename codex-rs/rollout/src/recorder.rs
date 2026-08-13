@@ -46,8 +46,8 @@ use super::list::ThreadListConfig;
 use super::list::ThreadListLayout;
 use super::list::ThreadSortKey;
 use super::list::ThreadsPage;
-use super::list::get_threads;
-use super::list::get_threads_in_root;
+use super::list::get_threads_in_root_with_state_db;
+use super::list::get_threads_with_state_db;
 use super::list::parse_cursor;
 use super::list::parse_timestamp_uuid_from_filename;
 use super::metadata;
@@ -549,6 +549,7 @@ impl RolloutRecorder {
                     default_provider,
                     archived,
                     search_term,
+                    state_db_ctx.as_deref(),
                 )
                 .await?
             }
@@ -564,6 +565,7 @@ impl RolloutRecorder {
                     default_provider,
                     archived,
                     search_term,
+                    state_db_ctx.as_deref(),
                 )
                 .await?
             }
@@ -816,7 +818,7 @@ impl RolloutRecorder {
 
         let mut cursor = cursor.cloned();
         loop {
-            let page = get_threads(
+            let page = get_threads_with_state_db(
                 codex_home,
                 page_size,
                 cursor.as_ref(),
@@ -825,6 +827,7 @@ impl RolloutRecorder {
                 model_providers,
                 cwd_filter.as_ref().map(std::slice::from_ref),
                 default_provider,
+                state_db_ctx.as_deref(),
             )
             .await?;
             if let Some(path) = select_resume_path(&page, filter_cwd, default_provider).await {
@@ -1460,6 +1463,7 @@ async fn list_threads_from_files_desc(
     default_provider: &str,
     archived: bool,
     search_term: Option<&str>,
+    state_db: Option<&StateRuntime>,
 ) -> std::io::Result<ThreadsPage> {
     if let Some(search_term) = search_term {
         let mut matching_items = Vec::new();
@@ -1479,6 +1483,7 @@ async fn list_threads_from_files_desc(
                 cwd_filters,
                 default_provider,
                 archived,
+                state_db,
             )
             .await?;
             scanned_files = scanned_files.saturating_add(page.num_scanned_files);
@@ -1521,6 +1526,7 @@ async fn list_threads_from_files_desc(
         cwd_filters,
         default_provider,
         archived,
+        state_db,
     )
     .await
 }
@@ -1536,10 +1542,11 @@ async fn list_threads_from_files_desc_unfiltered(
     cwd_filters: Option<&[PathBuf]>,
     default_provider: &str,
     archived: bool,
+    state_db: Option<&StateRuntime>,
 ) -> std::io::Result<ThreadsPage> {
     if archived {
         let root = codex_home.join(ARCHIVED_SESSIONS_SUBDIR);
-        get_threads_in_root(
+        get_threads_in_root_with_state_db(
             root,
             page_size,
             cursor,
@@ -1551,10 +1558,12 @@ async fn list_threads_from_files_desc_unfiltered(
                 default_provider,
                 layout: ThreadListLayout::Flat,
             },
+            state_db,
+            Some(true),
         )
         .await
     } else {
-        get_threads(
+        get_threads_with_state_db(
             codex_home,
             page_size,
             cursor,
@@ -1563,6 +1572,7 @@ async fn list_threads_from_files_desc_unfiltered(
             model_providers,
             cwd_filters,
             default_provider,
+            state_db,
         )
         .await
     }
@@ -1580,6 +1590,7 @@ async fn list_threads_from_files_asc(
     default_provider: &str,
     archived: bool,
     search_term: Option<&str>,
+    state_db: Option<&StateRuntime>,
 ) -> std::io::Result<ThreadsPage> {
     let mut all_items = Vec::new();
     let mut scanned_files = 0usize;
@@ -1598,6 +1609,7 @@ async fn list_threads_from_files_asc(
             default_provider,
             archived,
             /*search_term*/ None,
+            state_db,
         )
         .await?;
         scanned_files = scanned_files.saturating_add(page.num_scanned_files);
