@@ -377,18 +377,13 @@ async fn validate_frodex_agent_path_predecessor_ledger(
     )
     .fetch_all(&mut *connection)
     .await?;
-    let legacy_goal_supervisor_table_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM sqlite_schema WHERE type = 'table' AND name = 'thread_goal_supervisor_state'",
-    )
-    .fetch_one(&mut *connection)
-    .await?
-        != 0;
     let expected_predecessors = migrator
         .migrations
         .iter()
         .filter(|migration| migration.version < LEGACY_FRODEX_AGENT_PATH_MIGRATION_VERSION)
         .collect::<Vec<_>>();
     let mut row_index = 0;
+    let mut missing_goal_supervisor_version = None;
     for expected in expected_predecessors {
         let row = rows.get(row_index);
         let row_version = row
@@ -411,15 +406,23 @@ async fn validate_frodex_agent_path_predecessor_ledger(
             row_index += 1;
             continue;
         }
-        if !legacy_goal_supervisor_table_exists || !matches!(expected.version, 33 | 34) {
+        if !matches!(expected.version, 33 | 34) || missing_goal_supervisor_version.is_some() {
             bail!(
                 "refusing to repair Frodex migration 48 because predecessor migration {} is missing",
                 expected.version
             );
         }
+        missing_goal_supervisor_version = Some(expected.version);
     }
     if row_index != rows.len() {
         bail!("refusing to repair Frodex migration 48 because its predecessor ledger is unknown");
+    }
+    if missing_goal_supervisor_version.is_some() {
+        validate_frodex_goal_supervisor_state_table_on(connection)
+            .await
+            .context(
+                "refusing to repair Frodex migration 48 with an unauthenticated goal supervisor predecessor",
+            )?;
     }
     Ok(())
 }
