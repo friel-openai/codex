@@ -68,6 +68,7 @@ pub mod exec_env;
 mod exec_policy;
 #[cfg(test)]
 mod git_info_tests;
+mod goal_supervisor;
 mod guardian;
 mod hook_mcp_executor;
 mod hook_runtime;
