@@ -17,6 +17,7 @@ use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SegmentStateCheckpoint;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -172,6 +173,11 @@ pub struct CompactedItem {
     /// `thread/resume` can restore token usage totals from this field without scanning arbitrarily
     /// far past the compaction.
     pub latest_token_usage_record: Option<TokenUsageRecord>,
+    /// Certifies that this compaction and its adjacent state records form a complete current-state
+    /// checkpoint for the active rollout segment.
+    ///
+    /// Older compactions omit this field and continue to require recursive rollout replay.
+    pub segment_state_checkpoint: Option<SegmentStateCheckpoint>,
 }
 
 impl Serialize for CompactedItem {
