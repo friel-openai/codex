@@ -1551,6 +1551,43 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    /// Updates metadata without requiring a public `ThreadManager` handle.
+    ///
+    /// Agent ownership transitions hold only the shared manager state while they move loaded and
+    /// cold descendants between `AgentControl` instances. Loaded threads must remain ordered with
+    /// rollout writes, while cold threads must update the backing store directly.
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> CodexResult<StoredThread> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support metadata updates: {thread_id}"
+                )));
+            }
+            return thread
+                .update_thread_metadata(patch, include_archived)
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+        }
+        self.thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch,
+                include_archived,
+            })
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => thread_store_metadata_update_error(thread_id, err),
+            })
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
     }
