@@ -91,6 +91,9 @@ pub(super) async fn revert(
         )
         .await?;
     }
+    // Re-resolve after decompression so every segment's byte boundary is measured in the plain
+    // JSONL file that `HistoryPosition` addresses.
+    let lineage = store.resolve_rollout_lineage(thread_id).await?;
     let history_base = paginated_fork::history_base_at_boundary(
         store,
         thread_id,
