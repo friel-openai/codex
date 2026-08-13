@@ -36,6 +36,33 @@ use crate::recorder::RolloutRecorder;
 /// Bounds cross-thread and nth-user-message fork nesting during rollout expansion.
 pub const MAX_ROLLOUT_REFERENCE_DEPTH: usize = 256;
 
+/// Composes inherited and local compaction filters in their application order.
+///
+/// An outer reference constrains every segment below it. A nested reference adds its own
+/// constraints for the nested segment only, so inherited entries remain first and duplicate text
+/// is retained only at its first occurrence. `Some(Vec::new())` remains distinct from `None`
+/// because it records that a reference explicitly carried an empty filter list.
+pub fn compose_compacted_replacement_history_filter_texts(
+    inherited: Option<&[String]>,
+    local: Option<&[String]>,
+) -> Option<Vec<String>> {
+    if inherited.is_none() && local.is_none() {
+        return None;
+    }
+
+    let mut composed = Vec::new();
+    for text in inherited
+        .unwrap_or_default()
+        .iter()
+        .chain(local.unwrap_or_default())
+    {
+        if !composed.contains(text) {
+            composed.push(text.clone());
+        }
+    }
+    Some(composed)
+}
+
 /// Selects whether reference expansion follows the complete graph or only the recent segment
 /// window used for replay.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -333,7 +360,9 @@ pub async fn resolve_rollout_reference_path(
 ) -> io::Result<PathBuf> {
     let identity = reference_identity(reference)?;
 
-    if let Some(path) = validated_candidate(reference.rollout_path.as_path(), identity).await? {
+    if let Some(path) =
+        validated_candidate(codex_home, reference.rollout_path.as_path(), identity).await?
+    {
         return Ok(path);
     }
 
@@ -347,6 +376,7 @@ pub async fn resolve_rollout_reference_path(
             .join(identity.thread_id().to_string())
             .join(identity.segment_key());
         if let Some(path) = find_valid_candidate_in_directory(
+            codex_home,
             directory.as_path(),
             identity,
             expected_file_name.as_deref(),
@@ -389,12 +419,15 @@ pub async fn resolve_rollout_reference_path(
         };
         if let Some(active_path) =
             rollout_path_for_timestamp_file(codex_home, rollout_timestamp, file_name.as_str())
-            && let Some(path) = validated_candidate(active_path.as_path(), identity).await?
+            && let Some(path) =
+                validated_candidate(codex_home, active_path.as_path(), identity).await?
         {
             return Ok(path);
         }
         let archived_path = codex_home.join(ARCHIVED_SESSIONS_SUBDIR).join(file_name);
-        if let Some(path) = validated_candidate(archived_path.as_path(), identity).await? {
+        if let Some(path) =
+            validated_candidate(codex_home, archived_path.as_path(), identity).await?
+        {
             return Ok(path);
         }
     }
@@ -755,12 +788,13 @@ async fn expand_lines(
         let referenced_meta = canonical_session_meta(&referenced_lines)?;
         validate_identity(referenced_meta, identity, path.as_path())?;
         let referenced_thread_id = referenced_meta.meta.id;
-        let filter_texts = frame.inherited_filter_texts.clone().or_else(|| {
+        let filter_texts = compose_compacted_replacement_history_filter_texts(
+            frame.inherited_filter_texts.as_deref(),
             reference
                 .compacted_replacement_history_filter_texts
-                .as_ref()
-                .map(|filter_texts| Arc::<[String]>::from(filter_texts.clone()))
-        });
+                .as_deref(),
+        )
+        .map(Arc::<[String]>::from);
 
         frames.push(ExpansionFrame {
             materialized: Vec::with_capacity(referenced_lines.len().saturating_sub(1)),
@@ -820,10 +854,17 @@ fn reference_identity(reference: &RolloutReferenceItem) -> io::Result<ReferenceI
 }
 
 async fn validated_candidate(
+    codex_home: &Path,
     path: &Path,
     identity: ReferenceIdentity,
 ) -> io::Result<Option<PathBuf>> {
+    if approved_reference_root_path(codex_home, path).is_none() {
+        return Ok(None);
+    }
     let Some(path) = compression::existing_rollout_path(path).await else {
+        return Ok(None);
+    };
+    let Some(path) = canonical_approved_reference_path(codex_home, path.as_path()).await? else {
         return Ok(None);
     };
     let meta = match read_candidate_session_meta(path.as_path()).await {
@@ -869,10 +910,19 @@ async fn read_candidate_session_meta(path: &Path) -> io::Result<SessionMetaLine>
 }
 
 async fn find_valid_candidate_in_directory(
+    codex_home: &Path,
     directory: &Path,
     identity: ReferenceIdentity,
     expected_file_name: Option<&std::ffi::OsStr>,
 ) -> io::Result<Option<PathBuf>> {
+    if canonical_approved_reference_path(codex_home, directory)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    // Keep the CODEX_HOME spelling when enumerating. `codex_home` itself may be a symlink, while
+    // every candidate is canonicalized again before it is opened.
     let mut entries = match tokio::fs::read_dir(directory).await {
         Ok(entries) => entries,
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -891,7 +941,7 @@ async fn find_valid_candidate_in_directory(
         }) {
             continue;
         }
-        if let Some(path) = validated_candidate(rollout_file.path(), identity).await?
+        if let Some(path) = validated_candidate(codex_home, rollout_file.path(), identity).await?
             && !candidates.contains(&path)
         {
             candidates.push(path);
@@ -911,6 +961,61 @@ async fn find_valid_candidate_in_directory(
             ),
         )),
     }
+}
+
+async fn canonical_approved_reference_path(
+    codex_home: &Path,
+    path: &Path,
+) -> io::Result<Option<PathBuf>> {
+    let Some(root) = approved_reference_root_path(codex_home, path) else {
+        return Ok(None);
+    };
+    let canonical_home = match tokio::fs::canonicalize(codex_home).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    let root_metadata = match tokio::fs::symlink_metadata(root.as_path()).await {
+        Ok(metadata) => metadata,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if root_metadata.file_type().is_symlink() {
+        return Ok(None);
+    }
+    let canonical_root = match tokio::fs::canonicalize(root.as_path()).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    if !canonical_root.starts_with(&canonical_home) {
+        return Ok(None);
+    }
+    let canonical_path = match tokio::fs::canonicalize(path).await {
+        Ok(path) => path,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(err),
+    };
+    Ok(canonical_path
+        .starts_with(canonical_root)
+        .then_some(canonical_path))
+}
+
+fn approved_reference_root_path(codex_home: &Path, path: &Path) -> Option<PathBuf> {
+    [
+        SESSIONS_SUBDIR,
+        ARCHIVED_SESSIONS_SUBDIR,
+        ROTATED_ROLLOUT_SEGMENTS_SUBDIR,
+    ]
+    .into_iter()
+    .map(|subdir| codex_home.join(subdir))
+    .find(|root| {
+        path.strip_prefix(root).ok().is_some_and(|relative| {
+            relative
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)))
+        })
+    })
 }
 
 /// Mutable legacy rollouts can contain a torn ordinary record after a failed disk write.
