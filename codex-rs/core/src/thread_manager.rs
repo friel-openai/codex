@@ -121,6 +121,22 @@ const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
 mod current_membership;
 pub use current_membership::CurrentAgentMembershipHandle;
 
+fn persisted_thread_environment_selections(
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(&event.thread_settings)
+            }
+            _ => None,
+        })
+        .and_then(|settings| settings.environments.clone())
+        .map(|selections| selections.environments)
+}
+
 /// Test-only override for enabling thread-manager behaviors used by integration
 /// tests.
 ///
@@ -210,6 +226,8 @@ struct ForkHistory {
     snapshot: Option<ForkSnapshot>,
     initial_history: InitialHistory,
     model_history_override: Option<Vec<RolloutItem>>,
+    /// Latest durable settings context when the response boundary selects older history.
+    settings_history_override: Option<Arc<Vec<RolloutItem>>>,
     shared_model_response_items: Option<Arc<Vec<codex_history::ResponseItemEnvelope>>>,
     shared_model_state: Option<ForkModelState>,
 }
@@ -1183,6 +1201,8 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        let environments =
+            persisted_thread_environment_selections(initial_history.get_rollout_items());
         let (agent_control, _lifecycle_mutation) = self
             .agent_control_for_initial_history(&config, &initial_history)
             .await?;
@@ -1195,6 +1215,7 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            environments,
             ..StartThreadOptions::new(config)
         };
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
@@ -1423,6 +1444,7 @@ impl ThreadManager {
                 snapshot: Some(snapshot.into()),
                 initial_history: history,
                 model_history_override: None,
+                settings_history_override: None,
                 shared_model_response_items: None,
                 shared_model_state: None,
             },
@@ -1546,6 +1568,7 @@ impl ThreadManager {
                     snapshot: None,
                     initial_history: history,
                     model_history_override: Some(model_history_override),
+                    settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                     shared_model_response_items,
                     shared_model_state,
                 },
@@ -1572,6 +1595,7 @@ impl ThreadManager {
             snapshot,
             initial_history: history,
             model_history_override,
+            settings_history_override,
             shared_model_response_items,
             shared_model_state,
         } = fork_history;
@@ -1650,6 +1674,13 @@ impl ThreadManager {
             let response_history = Arc::new(history.get_rollout_items().to_vec());
             (history, response_history, None)
         };
+        let environments = settings_history_override
+            .as_deref()
+            .map(|history| persisted_thread_environment_selections(history))
+            .unwrap_or_else(|| match model_history_override.as_deref() {
+                Some(model_history) => persisted_thread_environment_selections(model_history),
+                None => persisted_thread_environment_selections(response_history.as_ref()),
+            });
         let agent_control = self.agent_control_for_config(&config);
         let options = StartThreadOptions {
             initial_history: history,
@@ -1657,6 +1688,7 @@ impl ThreadManager {
             parent_trace,
             client_mcp_extensions,
             reserved_thread_id,
+            environments,
             ..StartThreadOptions::new(config)
         };
         let mut request =
@@ -2498,10 +2530,8 @@ impl ThreadManagerState {
         } = options;
         let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
         let thread_source = initial_history.get_resumed_thread_source();
-        let environments = inherited_environments
-            .as_ref()
-            .filter(|_| initial_history.get_multi_agent_version() == Some(MultiAgentVersion::V2))
-            .map(TurnEnvironmentSnapshot::to_selections);
+        let environments =
+            persisted_thread_environment_selections(initial_history.get_rollout_items());
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),
