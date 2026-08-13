@@ -2126,20 +2126,23 @@ async fn paginated_fork_rollout_file_open_count(
             items.extend([
                 RolloutItem::Compacted(CompactedItem {
                     message: "latest indexed parent checkpoint".to_string(),
-                    replacement_history: Some(vec![ResponseItem::Message {
-                        id: None,
-                        role: "user".to_string(),
-                        content: vec![ContentItem::InputText {
-                            text: "checkpoint replacement history".to_string(),
-                        }],
-                        phase: None,
-                        internal_chat_message_metadata_passthrough: None,
-                    }
-                    .into()]),
+                    replacement_history: Some(vec![
+                        ResponseItem::Message {
+                            id: None,
+                            role: "user".to_string(),
+                            content: vec![ContentItem::InputText {
+                                text: "checkpoint replacement history".to_string(),
+                            }],
+                            phase: None,
+                            internal_chat_message_metadata_passthrough: None,
+                        }
+                        .into(),
+                    ]),
                     window_number: Some(1),
                     first_window_id: None,
                     previous_window_id: None,
                     window_id: None,
+                    segment_state_checkpoint: None,
                 }),
                 RolloutItem::TurnContext(TurnContextItem {
                     turn_id: Some(turn_id.clone()),
