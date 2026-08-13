@@ -727,6 +727,77 @@ async fn unknown_migration_48_predecessor_fails_without_mutation() {
 }
 
 #[tokio::test]
+async fn missing_goal_supervisor_predecessors_fail_without_mutation() {
+    for corrupt_table in [false, true] {
+        let sqlite_home = crate::runtime::test_support::unique_temp_dir();
+        tokio::fs::create_dir_all(&sqlite_home)
+            .await
+            .expect("sqlite home should be created");
+        let _cleanup = scopeguard::guard(sqlite_home.clone(), |sqlite_home| {
+            let _ = std::fs::remove_dir_all(sqlite_home);
+        });
+        let sqlite = crate::SqliteConfig::new_for_testing(sqlite_home.as_path().abs());
+        let state_path = sqlite.state_db_path();
+        let pool = sqlite
+            .open_read_write_pool(&state_path)
+            .await
+            .expect("state database should open");
+        released_frodex_state_migrator()
+            .run(&pool)
+            .await
+            .expect("released Frodex migrations should apply");
+        if corrupt_table {
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = 33")
+                .execute(&pool)
+                .await
+                .expect("one goal supervisor predecessor row should be removed");
+        } else {
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version IN (33, 34)")
+                .execute(&pool)
+                .await
+                .expect("both goal supervisor predecessor rows should be removed");
+        }
+        if corrupt_table {
+            sqlx::query("CREATE TABLE thread_goal_supervisor_state (thread_id TEXT PRIMARY KEY)")
+                .execute(&pool)
+                .await
+                .expect("incompatible legacy table should install");
+        } else {
+            sqlx::query(super::FRODEX_GOAL_SUPERVISOR_STATE_TABLE_SQL)
+                .execute(&pool)
+                .await
+                .expect("released legacy table should install");
+        }
+
+        repair_frodex_agent_path_migration_collision(&pool, &runtime_state_migrator())
+            .await
+            .expect_err("unauthenticated predecessor exception should fail closed");
+        let appearance_columns = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_table_info('thread_sections') WHERE name = 'appearance'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("appearance columns should count");
+        let legacy_indexes = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pragma_index_list('threads') WHERE name = 'idx_threads_agent_path'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy indexes should count");
+        let description = sqlx::query_scalar::<_, String>(
+            "SELECT description FROM _sqlx_migrations WHERE version = 48",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("legacy migration 48 should load");
+        assert_eq!(appearance_columns, 0);
+        assert_eq!(legacy_indexes, 1);
+        assert_eq!(description, "threads agent path index");
+        pool.close().await;
+    }
+}
+
+#[tokio::test]
 async fn released_frodex_migration_48_with_missing_index_fails_closed() {
     let sqlite_home = crate::runtime::test_support::unique_temp_dir();
     tokio::fs::create_dir_all(&sqlite_home)
