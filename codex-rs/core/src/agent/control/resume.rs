@@ -376,7 +376,12 @@ impl AgentControl {
             agent_nickname,
             agent_role,
         });
-        let mut reservation = self.state.reserve_spawn_slot(/*max_threads*/ None)?;
+        let mut reservation =
+            if crate::goal_supervisor::is_goal_supervisor_helper_source(&session_source) {
+                self.state.reserve_uncounted_spawn_slot()
+            } else {
+                self.state.reserve_spawn_slot(/*max_threads*/ None)?
+            };
         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth,
@@ -484,7 +489,12 @@ impl AgentControl {
         } else {
             agent_max_threads
         };
-        let mut reservation = self.state.reserve_spawn_slot(reservation_max_threads)?;
+        let mut reservation =
+            if crate::goal_supervisor::is_goal_supervisor_helper_source(&session_source) {
+                self.state.reserve_uncounted_spawn_slot()
+            } else {
+                self.state.reserve_spawn_slot(reservation_max_threads)?
+            };
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,

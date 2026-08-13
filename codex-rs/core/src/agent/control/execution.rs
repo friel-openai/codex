@@ -102,6 +102,7 @@ fn is_execution_limited(
 ) -> bool {
     multi_agent_version == MultiAgentVersion::V2
         && matches!(session_source, SessionSource::SubAgent(_))
+        && !crate::goal_supervisor::is_goal_supervisor_helper_source(session_source)
 }
 
 #[cfg(test)]
