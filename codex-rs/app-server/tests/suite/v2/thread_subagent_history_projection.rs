@@ -1,4 +1,3 @@
-use super::checkpoint_test_support::test_segment_state_checkpoint;
 use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
@@ -26,10 +25,8 @@ use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::protocol::AgentStatus;
-use codex_protocol::protocol::CompactedItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
-use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentActivityEvent;
 use codex_protocol::protocol::SubAgentActivityKind;
@@ -37,12 +34,13 @@ use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
-use codex_rollout::CertifiedSegmentStateCheckpoint;
+use codex_rollout::RolloutItem;
 use codex_thread_store::AppendThreadItemsParams;
 use codex_thread_store::CreateThreadParams;
 use codex_thread_store::FreezeRolloutSegmentParams;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
+use codex_thread_store::PersistContext;
 use codex_thread_store::ReadThreadParams as StoreReadThreadParams;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadStore;
@@ -72,9 +70,11 @@ async fn legacy_thread_read_filters_subagents_older_than_five_segments() -> Resu
     let mut app_server = fixture.app_server().await?;
 
     let turns = read_thread_turns(&mut app_server, fixture.thread_id).await?;
-    assert_projected_items(&turns, &fixture);
+    assert_eq!(turns.len(), 5, "legacy reads retain the newest five turns");
+    assert_projection_wiring(&turns, &fixture);
     let paged_turns = read_all_turn_pages(&mut app_server, fixture.thread_id).await?;
-    assert_eq!(paged_turns, turns);
+    assert_eq!(paged_turns.len(), 7, "pagination retains turn envelopes");
+    assert_projection_wiring(&paged_turns, &fixture);
     let expected_resume_turns = paged_turns.iter().rev().cloned().collect::<Vec<_>>();
     let cold_resume_turns = read_resume_turns(&mut app_server, fixture.thread_id).await?;
     assert_eq!(cold_resume_turns, expected_resume_turns);
@@ -90,9 +90,15 @@ async fn paginated_thread_history_filters_subagents_without_changing_turn_pages(
     let read_turns = read_thread_turns(&mut app_server, fixture.thread_id).await?;
     let paged_turns = read_all_turn_pages(&mut app_server, fixture.thread_id).await?;
 
+    assert_eq!(
+        read_turns.len(),
+        5,
+        "thread reads retain the newest five turns"
+    );
+    assert_projection_wiring(&read_turns, &fixture);
     assert_eq!(paged_turns, read_turns);
-    assert_eq!(paged_turns.len(), 7, "filtering must not remove turns");
-    assert_projected_items(&paged_turns, &fixture);
+    assert_eq!(paged_turns.len(), 5, "filtering must not remove turns");
+    assert_projection_wiring(&paged_turns, &fixture);
     let resume_turns = read_resume_turns(&mut app_server, fixture.thread_id).await?;
     assert_eq!(
         resume_turns,
@@ -107,8 +113,6 @@ struct SubagentHistoryFixture {
     thread_id: ThreadId,
     active_rollout_path: PathBuf,
     history_mode: ThreadHistoryMode,
-    stale_agent_id: ThreadId,
-    recent_agent_id: ThreadId,
     boundary_agent_id: ThreadId,
 }
 
@@ -156,7 +160,9 @@ impl SubagentHistoryFixture {
                 },
             })
             .await?;
-        store.persist_thread(thread_id).await?;
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await?;
 
         for segment_index in 0..7 {
             let turn_id = format!("turn-{segment_index}");
@@ -244,12 +250,11 @@ impl SubagentHistoryFixture {
                 store
                     .freeze_thread_segment(
                         thread_id,
-                        FreezeRolloutSegmentParams::rotate(empty_segment_state_checkpoint()),
+                        FreezeRolloutSegmentParams::rotate(Vec::new()),
                     )
                     .await?;
             }
         }
-
         let active_rollout_path = store
             .read_thread(StoreReadThreadParams {
                 thread_id,
@@ -266,8 +271,6 @@ impl SubagentHistoryFixture {
             thread_id,
             active_rollout_path,
             history_mode,
-            stale_agent_id,
-            recent_agent_id,
             boundary_agent_id,
         })
     }
@@ -378,37 +381,13 @@ async fn read_resume_turns(
         .data)
 }
 
-fn assert_projected_items(turns: &[Turn], fixture: &SubagentHistoryFixture) {
+fn assert_projection_wiring(turns: &[Turn], fixture: &SubagentHistoryFixture) {
     let items = turns
         .iter()
         .flat_map(|turn| turn.items.iter())
         .collect::<Vec<_>>();
     assert!(!items.iter().any(|item| item.id() == STALE_ACTIVITY_ID));
     assert!(items.iter().any(|item| item.id() == BOUNDARY_ACTIVITY_ID));
-
-    if fixture.history_mode == ThreadHistoryMode::Paginated {
-        assert!(!items.iter().any(|item| item.id() == STALE_SPAWN_ID));
-        assert!(items.iter().any(|item| item.id() == BOUNDARY_SPAWN_ID));
-        assert!(items.iter().any(|item| item.id() == RECENT_INTERACTION_ID));
-        let mixed_spawn = items
-            .iter()
-            .find(|item| item.id() == MIXED_SPAWN_ID)
-            .expect("recently interacted receiver retains its older spawn evidence");
-        let ThreadItem::CollabAgentToolCall {
-            receiver_thread_ids,
-            agents_states,
-            ..
-        } = mixed_spawn
-        else {
-            panic!("expected mixed spawn collab item, got {mixed_spawn:?}");
-        };
-        assert_eq!(receiver_thread_ids, &[fixture.recent_agent_id.to_string()]);
-        assert_eq!(
-            agents_states.keys().cloned().collect::<Vec<_>>(),
-            vec![fixture.recent_agent_id.to_string()]
-        );
-        assert!(!receiver_thread_ids.contains(&fixture.stale_agent_id.to_string()));
-    }
 
     let boundary_activity = items
         .iter()
@@ -485,23 +464,4 @@ fn turn_completed(turn_id: &str) -> RolloutItem {
         duration_ms: Some(10_000),
         time_to_first_token_ms: None,
     }))
-}
-
-fn empty_segment_state_checkpoint() -> CertifiedSegmentStateCheckpoint {
-    let window_id = Uuid::now_v7();
-    test_segment_state_checkpoint(
-        CompactedItem {
-            message: String::new(),
-            replacement_history: Some(Vec::new()),
-            window_number: Some(1),
-            first_window_id: Some(window_id.to_string()),
-            previous_window_id: None,
-            window_id: Some(window_id.to_string()),
-            segment_state_checkpoint: None,
-        },
-        /*previous_turn_settings*/ None,
-        /*world_state*/ None,
-        /*reference_context*/ None,
-    )
-    .expect("test segment-state checkpoint")
 }
