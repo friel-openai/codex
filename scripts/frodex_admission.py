@@ -247,7 +247,22 @@ def verify_candidate_version(codex: Path, expected_version: str) -> None:
         )
 
 
-def verify_owner_inventory(path: Path, expected_source: str) -> dict[str, Any]:
+def queue_plan_names(queue_dir: Path) -> list[str]:
+    return sorted(
+        path.name
+        for path in queue_dir.glob("*.md")
+        if not path.name.endswith("-record.md")
+    )
+
+
+def queue_plan_digest(plans: list[str]) -> str:
+    payload = "".join(f"{plan}\n" for plan in plans).encode()
+    return hashlib.sha256(payload).hexdigest()
+
+
+def verify_owner_inventory(
+    path: Path, expected_source: str, queue_dir: Path | None = None
+) -> dict[str, Any]:
     inventory = load_json(path)
     if (
         not isinstance(inventory, dict)
@@ -259,6 +274,23 @@ def verify_owner_inventory(path: Path, expected_source: str) -> dict[str, Any]:
     owners = inventory.get("owners")
     if not isinstance(owners, list) or not owners:
         raise AdmissionError("owner inventory must contain at least one owner")
+
+    if queue_dir is not None:
+        cutoff = inventory.get("queue_cutoff")
+        if not isinstance(cutoff, dict):
+            raise AdmissionError("owner inventory is missing its queue cutoff")
+        recorded_plans = cutoff.get("plans")
+        if (
+            not isinstance(recorded_plans, list)
+            or not recorded_plans
+            or not all(isinstance(item, str) and item for item in recorded_plans)
+        ):
+            raise AdmissionError("owner inventory queue cutoff has invalid plans")
+        current_plans = queue_plan_names(queue_dir)
+        if recorded_plans != current_plans:
+            raise AdmissionError("owner inventory queue cutoff is stale")
+        if cutoff.get("sha256") != queue_plan_digest(current_plans):
+            raise AdmissionError("owner inventory queue cutoff digest is invalid")
 
     seen: set[str] = set()
     for owner in owners:
@@ -682,7 +714,10 @@ def admit(args: argparse.Namespace) -> int:
         platform_name,
     )
     verify_source_checkout(source_repo, args.expected_source)
-    owners = verify_owner_inventory(owner_inventory_path, args.expected_source)
+    queue_dir = Path(args.queue_dir).resolve(strict=True)
+    owners = verify_owner_inventory(
+        owner_inventory_path, args.expected_source, queue_dir
+    )
     root = ensure_admission_root(Path(args.output_root) / archive_digest)
     evidence = root / "evidence"
     evidence.mkdir(mode=0o700)
@@ -772,6 +807,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-source", required=True)
     parser.add_argument("--expected-version", required=True)
     parser.add_argument("--owner-inventory", required=True)
+    parser.add_argument("--queue-dir", required=True)
     parser.add_argument("--cases", required=True)
     parser.add_argument("--output-root", default="/build/frodex-admission")
     parser.add_argument("--platform")
