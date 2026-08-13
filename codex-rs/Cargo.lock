@@ -4319,6 +4319,7 @@ dependencies = [
 name = "codex-thread-store"
 version = "0.0.0"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "codex-app-server-protocol",
  "codex-extension-items",
