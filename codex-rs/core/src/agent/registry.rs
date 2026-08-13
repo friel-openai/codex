@@ -3,6 +3,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
 use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
@@ -41,9 +42,15 @@ struct ActiveAgents {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct AgentMetadata {
     pub(crate) agent_id: Option<ThreadId>,
+    /// Immediate owner in the current root-scoped agent tree.
+    pub(crate) parent_thread_id: Option<ThreadId>,
+    /// Depth recorded by the authoritative open ownership path.
+    pub(crate) depth: Option<i32>,
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
+    /// Whether this identity belongs to an ephemeral thread with no persisted ownership edge.
+    pub(crate) ephemeral: bool,
     pub(crate) last_task_message: Option<String>,
     /// Serializes loaded/cold transitions for this addressable agent. The lock lives with the
     /// registry entry so unloading the heavy `CodexThread` does not permit concurrent reloads.
@@ -57,6 +64,8 @@ pub(crate) struct AgentLifecycle {
     transition: Arc<AsyncMutex<()>>,
     /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
     visible_when_cold: AtomicBool,
+    /// Preserves a terminal status after the heavy thread state is unloaded.
+    cold_terminal_status: Mutex<Option<AgentStatus>>,
     /// Prevents duplicate completion watchers for one registered agent.
     completion_watcher_active: AtomicBool,
     /// Wakes input delivery after the active completion watcher finishes its transition.
@@ -83,6 +92,26 @@ impl AgentLifecycle {
 
     pub(crate) fn is_visible_when_cold(&self) -> bool {
         self.visible_when_cold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn remember_cold_terminal_status(
+        &self,
+        status: AgentStatus,
+        visible_when_cold: bool,
+    ) {
+        *self
+            .cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(status);
+        self.visible_when_cold
+            .store(visible_when_cold, Ordering::Release);
+    }
+
+    pub(crate) fn cold_terminal_status(&self) -> Option<AgentStatus> {
+        self.cold_terminal_status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn try_start_completion_watcher(
@@ -160,6 +189,71 @@ fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
 }
 
 impl AgentRegistry {
+    pub(crate) fn registered_subtree_thread_ids(&self, root_thread_id: ThreadId) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut children = HashMap::<ThreadId, Vec<ThreadId>>::new();
+        for metadata in active_agents.agent_tree.values() {
+            let (Some(thread_id), Some(parent_thread_id)) =
+                (metadata.agent_id, metadata.parent_thread_id)
+            else {
+                continue;
+            };
+            children
+                .entry(parent_thread_id)
+                .or_default()
+                .push(thread_id);
+        }
+        let mut subtree = vec![root_thread_id];
+        let mut stack = children.remove(&root_thread_id).unwrap_or_default();
+        let mut visited = HashSet::from([root_thread_id]);
+        while let Some(thread_id) = stack.pop() {
+            if !visited.insert(thread_id) {
+                continue;
+            }
+            subtree.push(thread_id);
+            stack.extend(children.remove(&thread_id).unwrap_or_default());
+        }
+        subtree
+    }
+
+    /// Return registered ephemeral descendants whose parent chain stays within `owned_thread_ids`.
+    pub(crate) fn registered_ephemeral_descendants_within(
+        &self,
+        owned_thread_ids: &HashSet<ThreadId>,
+    ) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut included = owned_thread_ids.clone();
+        let mut descendants = Vec::new();
+        loop {
+            let mut changed = false;
+            for metadata in active_agents.agent_tree.values() {
+                let (Some(thread_id), Some(parent_thread_id)) =
+                    (metadata.agent_id, metadata.parent_thread_id)
+                else {
+                    continue;
+                };
+                if metadata.ephemeral
+                    && included.contains(&parent_thread_id)
+                    && included.insert(thread_id)
+                {
+                    descendants.push(thread_id);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        descendants.sort_by_key(ToString::to_string);
+        descendants
+    }
+
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,
@@ -251,6 +345,26 @@ impl AgentRegistry {
             .get(&thread_id)
             .and_then(|path| active_agents.agent_tree.get(path))
             .cloned()
+    }
+
+    pub(crate) fn registered_path_prefix_thread_ids(
+        &self,
+        agent_path: &AgentPath,
+    ) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active_agents
+            .agent_tree
+            .iter()
+            .filter_map(|(registered_path, metadata)| {
+                let suffix = agent_path.as_str().strip_prefix(registered_path)?;
+                (suffix.is_empty() || suffix.starts_with('/'))
+                    .then_some(metadata.agent_id)
+                    .flatten()
+            })
+            .collect()
     }
 
     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
