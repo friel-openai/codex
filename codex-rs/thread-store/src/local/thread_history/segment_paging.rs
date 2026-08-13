@@ -1,3 +1,4 @@
+use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use sqlx::FromRow;
 use sqlx::QueryBuilder;
@@ -50,7 +51,13 @@ pub(super) async fn page_turn_rows(
     direction: SortDirection,
     items_view: StoredTurnItemsView,
 ) -> ThreadStoreResult<SegmentPage<StoredTurnRow>> {
-    let cursor = parse_cursor(cursor, requested_thread_id, CursorScope::Turns)?;
+    let root_rollout_id = lineage.root_rollout_id();
+    let cursor = parse_cursor(
+        cursor,
+        requested_thread_id,
+        root_rollout_id,
+        CursorScope::Turns,
+    )?;
     let mut rows = Vec::new();
     for (segment_index, segment, segment_cursor) in
         segments_from_cursor(lineage, direction, cursor.as_ref())?
@@ -167,7 +174,13 @@ LEFT JOIN thread_items AS final_agent
                 .collect::<ThreadStoreResult<Vec<_>>>()?,
         );
     }
-    finish_page(requested_thread_id, CursorScope::Turns, rows, page_size)
+    finish_page(
+        requested_thread_id,
+        root_rollout_id,
+        CursorScope::Turns,
+        rows,
+        page_size,
+    )
 }
 
 /// Reads a complete legacy projection without resolving its immutable predecessors.
@@ -178,7 +191,12 @@ pub(super) async fn page_indexed_turn_rows(
     page_size: usize,
     direction: SortDirection,
 ) -> ThreadStoreResult<SegmentPage<StoredTurnRow>> {
-    let cursor = parse_cursor(cursor, requested_thread_id, CursorScope::Turns)?;
+    let cursor = parse_cursor(
+        cursor,
+        requested_thread_id,
+        requested_thread_id,
+        CursorScope::Turns,
+    )?;
     if !cursor_belongs_to_requested_projection(
         pool,
         requested_thread_id,
@@ -235,7 +253,13 @@ WHERE thread_id =
         .into_iter()
         .map(stored_turn_row)
         .collect::<ThreadStoreResult<Vec<_>>>()?;
-    finish_page(requested_thread_id, CursorScope::Turns, rows, page_size)
+    finish_page(
+        requested_thread_id,
+        requested_thread_id,
+        CursorScope::Turns,
+        rows,
+        page_size,
+    )
 }
 
 /// Reads items belonging to a complete legacy projection without expanding its lineage.
@@ -248,7 +272,12 @@ pub(super) async fn page_indexed_item_rows(
     direction: SortDirection,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
     let scope = CursorScope::ItemsByCreatedAtOrdinal;
-    let cursor = parse_cursor(cursor, requested_thread_id, scope.clone())?;
+    let cursor = parse_cursor(
+        cursor,
+        requested_thread_id,
+        requested_thread_id,
+        scope.clone(),
+    )?;
     if !cursor_belongs_to_requested_projection(pool, requested_thread_id, scope, cursor.as_ref())
         .await?
     {
@@ -281,6 +310,7 @@ WHERE thread_id =
         .map(stored_thread_item_row)
         .collect::<ThreadStoreResult<Vec<_>>>()?;
     finish_page(
+        requested_thread_id,
         requested_thread_id,
         CursorScope::ItemsByCreatedAtOrdinal,
         rows,
@@ -396,6 +426,7 @@ pub(super) async fn page_item_rows(
         return page_updated_item_rows(
             pool,
             segment.rollout_id(),
+            lineage.root_rollout_id(),
             params,
             after_updated_at_ordinal,
         )
@@ -404,6 +435,7 @@ pub(super) async fn page_item_rows(
     let cursor = parse_cursor(
         params.cursor.as_deref(),
         params.thread_id,
+        lineage.root_rollout_id(),
         CursorScope::ItemsByCreatedAtOrdinal,
     )?;
     let mut rows = Vec::new();
@@ -460,6 +492,7 @@ WHERE thread_id =
     }
     finish_page(
         params.thread_id,
+        lineage.root_rollout_id(),
         CursorScope::ItemsByCreatedAtOrdinal,
         rows,
         params.page_size,
@@ -469,12 +502,14 @@ WHERE thread_id =
 async fn page_updated_item_rows(
     pool: &sqlx::SqlitePool,
     rollout_id: ThreadId,
+    root_rollout_id: RolloutId,
     params: &ListItemsParams,
     after_updated_at_ordinal: u64,
 ) -> ThreadStoreResult<SegmentPage<StoredThreadItemRow>> {
     let cursor = parse_cursor(
         params.cursor.as_deref(),
         params.thread_id,
+        root_rollout_id,
         CursorScope::ItemsByUpdatedAtOrdinal,
     )?;
     let mut query = QueryBuilder::<Sqlite>::new(
@@ -523,6 +558,7 @@ WHERE thread_id =
         .collect::<ThreadStoreResult<Vec<_>>>()?;
     finish_page(
         params.thread_id,
+        root_rollout_id,
         CursorScope::ItemsByUpdatedAtOrdinal,
         rows,
         params.page_size,
@@ -630,6 +666,7 @@ fn remaining_limit(page_size: usize, row_count: usize) -> ThreadStoreResult<i64>
 
 fn finish_page<T: HasPosition>(
     requested_thread_id: ThreadId,
+    root_rollout_id: RolloutId,
     scope: CursorScope,
     mut rows: Vec<T>,
     page_size: usize,
@@ -641,6 +678,7 @@ fn finish_page<T: HasPosition>(
         .map(|row| {
             serialize_cursor(
                 requested_thread_id,
+                root_rollout_id,
                 scope.clone(),
                 row.position().rollout_ordinal,
                 /*include_anchor*/ true,
@@ -652,6 +690,7 @@ fn finish_page<T: HasPosition>(
             .map(|row| {
                 serialize_cursor(
                     requested_thread_id,
+                    root_rollout_id,
                     scope,
                     row.position().rollout_ordinal,
                     /*include_anchor*/ false,
@@ -758,6 +797,7 @@ mod tests {
     fn cursor_selects_same_thread_segment_by_ordinal_range() {
         let thread_id = ThreadId::default();
         let lineage = RolloutLineage {
+            root_rollout_id: thread_id,
             segments: vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(10)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(20)),
@@ -765,6 +805,7 @@ mod tests {
         };
         let cursor = HistoryCursor {
             requested_thread_id: thread_id,
+            root_rollout_id: thread_id,
             rollout_ordinal: 12,
             include_anchor: false,
             scope: CursorScope::ItemsByCreatedAtOrdinal,
@@ -782,6 +823,7 @@ mod tests {
     fn cursor_rejects_overlapping_same_thread_segments() {
         let thread_id = ThreadId::default();
         let lineage = RolloutLineage {
+            root_rollout_id: thread_id,
             segments: vec![
                 segment(thread_id, "first", /*start_ordinal*/ 1, Some(20)),
                 segment(thread_id, "second", /*start_ordinal*/ 10, Some(30)),
@@ -789,6 +831,7 @@ mod tests {
         };
         let cursor = HistoryCursor {
             requested_thread_id: thread_id,
+            root_rollout_id: thread_id,
             rollout_ordinal: 12,
             include_anchor: false,
             scope: CursorScope::ItemsByCreatedAtOrdinal,
