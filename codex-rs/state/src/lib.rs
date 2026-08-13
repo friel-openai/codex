@@ -58,6 +58,7 @@ pub use model::ThreadRelationFilter;
 pub use model::ThreadSection;
 pub use model::ThreadSectionAppearance;
 pub use model::ThreadSectionsPage;
+pub use model::ThreadSpawnDescendantIdentity;
 pub use model::ThreadsPage;
 pub use runtime::ExternalAgentConfigImportDetailsRecord;
 pub use runtime::ExternalAgentConfigImportFailureRecord;
