@@ -2,9 +2,11 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::TRAILING_OUTPUT_GRACE;
+use super::process_chunk;
 use super::spawn_exit_watcher;
 use super::split_valid_utf8_prefix_with_max;
 use super::start_streaming_output;
+use crate::exec::MAX_EXEC_OUTPUT_DELTAS_PER_CALL;
 use crate::session::tests::make_session_and_context_with_rx;
 use crate::unified_exec::UnifiedExecContext;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
@@ -68,6 +70,219 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
 }
 
 #[tokio::test]
+async fn streaming_output_does_not_apply_a_cumulative_byte_limit() {
+    const PREVIOUS_CUMULATIVE_LIMIT: usize = 1024 * 1024;
+    const CALL_ID: &str = "streaming-output-without-cumulative-limit-test";
+
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut pending = VecDeque::new();
+    let mut emitted_deltas = 0;
+    let output = vec![b'a'; PREVIOUS_CUMULATIVE_LIMIT + 1];
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(output.clone()),
+    )
+    .await;
+
+    let mut streamed_bytes = 0;
+    while let Ok(event) = rx_event.try_recv() {
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == CALL_ID
+        {
+            streamed_bytes += delta.chunk.len();
+        }
+    }
+
+    assert_eq!(streamed_bytes, output.len());
+    assert_eq!(transcript.lock().await.total_bytes(), output.len());
+}
+
+#[tokio::test]
+async fn streaming_output_streams_invalid_and_multibyte_data() {
+    const CALL_ID: &str = "streaming-output-invalid-utf8-boundary-test";
+
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut pending = VecDeque::new();
+    let mut emitted_deltas = 0;
+    let output = vec![0xff, b'a', 0xc3, 0xa9];
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(output.clone()),
+    )
+    .await;
+
+    let mut streamed_chunks = Vec::new();
+    while let Ok(event) = rx_event.try_recv() {
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == CALL_ID
+        {
+            streamed_chunks.push(delta.chunk);
+        }
+    }
+
+    assert_eq!(streamed_chunks, vec![vec![0xff], vec![b'a', 0xc3, 0xa9]]);
+    assert_eq!(emitted_deltas, 2);
+    assert!(pending.is_empty());
+
+    let transcript = transcript.lock().await;
+    assert_eq!(transcript.total_bytes(), output.len());
+    assert_eq!(transcript.to_bytes(), output);
+}
+
+#[tokio::test]
+async fn streaming_output_buffers_multibyte_characters_across_chunks() {
+    const CALL_ID: &str = "streaming-output-split-utf8-boundary-test";
+
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut pending = VecDeque::new();
+    let mut emitted_deltas = 0;
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(vec![0xc3]),
+    )
+    .await;
+
+    assert_eq!(pending, VecDeque::from(vec![0xc3]));
+    assert_eq!(emitted_deltas, 0);
+    assert_eq!(transcript.lock().await.total_bytes(), 0);
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(vec![0xa9]),
+    )
+    .await;
+
+    assert!(pending.is_empty());
+    assert_eq!(emitted_deltas, 1);
+    let event = rx_event.try_recv().expect("streamed multibyte output");
+    let EventMsg::ExecCommandOutputDelta(delta) = event.msg else {
+        panic!("expected output delta");
+    };
+    assert_eq!(delta.call_id, CALL_ID);
+    assert_eq!(delta.chunk, vec![0xc3, 0xa9]);
+    assert_eq!(transcript.lock().await.to_bytes(), vec![0xc3, 0xa9]);
+}
+
+#[tokio::test]
+async fn streaming_output_flushes_an_incomplete_multibyte_character_on_close() -> anyhow::Result<()>
+{
+    let StreamingOutputHarness {
+        process,
+        stdout_tx,
+        exit_tx,
+        transcript,
+        context,
+        rx_event,
+    } = streaming_output_harness().await?;
+    let output_drained = process.output_drained_notify();
+    let drained = output_drained.notified();
+    tokio::pin!(drained);
+
+    stdout_tx.send(vec![0xc3]).expect("send incomplete UTF-8");
+    drop(stdout_tx);
+    exit_tx.send(0).expect("send exit");
+    (&mut drained).await;
+
+    let mut streamed_chunks = Vec::new();
+    while let Ok(event) = rx_event.try_recv() {
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == context.call_id
+        {
+            streamed_chunks.push(delta.chunk);
+        }
+    }
+
+    assert_eq!(streamed_chunks, vec![vec![0xc3]]);
+    assert_eq!(transcript.lock().await.to_bytes(), vec![0xc3]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn streaming_output_limits_event_count_without_truncating_the_transcript()
+-> anyhow::Result<()> {
+    const CALL_ID: &str = "streaming-output-event-count-test";
+    const POST_CAP_MARKER: &[u8] = b"Z";
+
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut pending = VecDeque::new();
+    let mut emitted_deltas = MAX_EXEC_OUTPUT_DELTAS_PER_CALL - 1;
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(vec![b'a']),
+    )
+    .await;
+
+    loop {
+        let event = rx_event.recv().await.expect("streamed output event");
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == CALL_ID
+        {
+            assert_eq!(delta.chunk.as_slice(), b"a");
+            break;
+        }
+    }
+    assert_eq!(emitted_deltas, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
+
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(POST_CAP_MARKER.to_vec()),
+    )
+    .await;
+    assert_eq!(emitted_deltas, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
+
+    while let Ok(event) = rx_event.try_recv() {
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg {
+            assert_ne!(delta.call_id, CALL_ID);
+        }
+    }
+
+    let transcript = transcript.lock().await;
+    assert_eq!(transcript.total_bytes(), b"a".len() + POST_CAP_MARKER.len());
+    assert!(transcript.to_bytes().ends_with(POST_CAP_MARKER));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
@@ -110,18 +325,22 @@ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyho
 async fn streaming_output_keeps_grace_as_fallback_without_close() -> anyhow::Result<()> {
     let StreamingOutputHarness {
         process,
-        stdout_tx: _stdout_tx,
+        stdout_tx,
         exit_tx,
-        ..
+        transcript,
+        context,
+        rx_event,
     } = streaming_output_harness().await?;
     let output_drained = process.output_drained_notify();
     let drained = output_drained.notified();
     tokio::pin!(drained);
 
     tokio::time::pause();
+    stdout_tx.send(vec![0xc3]).expect("send incomplete UTF-8");
     let exited_at = Instant::now();
     exit_tx.send(0).expect("send exit");
     (&mut drained).await;
+    drop(stdout_tx);
     let elapsed = Instant::now().saturating_duration_since(exited_at);
     tokio::time::resume();
 
@@ -130,6 +349,18 @@ async fn streaming_output_keeps_grace_as_fallback_without_close() -> anyhow::Res
             && elapsed <= TRAILING_OUTPUT_GRACE + Duration::from_millis(10),
         "missing output close should use the grace fallback: {elapsed:?}"
     );
+
+    let mut streamed_chunks = Vec::new();
+    while let Ok(event) = rx_event.try_recv() {
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == context.call_id
+        {
+            streamed_chunks.push(delta.chunk);
+        }
+    }
+
+    assert_eq!(streamed_chunks, vec![vec![0xc3]]);
+    assert_eq!(transcript.lock().await.to_bytes(), vec![0xc3]);
 
     Ok(())
 }

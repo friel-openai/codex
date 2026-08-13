@@ -119,7 +119,7 @@ pub(crate) fn start_streaming_output(
                         &session_ref,
                         &turn_ref,
                         &mut emitted_deltas,
-                        chunk,
+                        Some(chunk),
                     ).await;
                 }
             }
@@ -147,11 +147,22 @@ pub(crate) fn start_streaming_output(
                     &session_ref,
                     &turn_ref,
                     &mut emitted_deltas,
-                    chunk,
+                    Some(chunk),
                 )
                 .await;
             }
         }
+
+        process_chunk(
+            &mut pending,
+            &transcript,
+            &call_id,
+            &session_ref,
+            &turn_ref,
+            &mut emitted_deltas,
+            /*chunk*/ None,
+        )
+        .await;
         output_drained.notify_one();
     });
 }
@@ -243,10 +254,19 @@ async fn process_chunk(
     session_ref: &Arc<Session>,
     turn_ref: &Arc<TurnContext>,
     emitted_deltas: &mut usize,
-    chunk: Vec<u8>,
+    chunk: Option<Vec<u8>>,
 ) {
-    pending.extend(chunk);
-    while let Some(prefix) = split_valid_utf8_prefix(pending) {
+    let flush_incomplete = chunk.is_none();
+    if let Some(chunk) = chunk {
+        pending.extend(chunk);
+    }
+    while let Some(prefix) = split_valid_utf8_prefix(pending).or_else(|| {
+        if flush_incomplete && !pending.is_empty() {
+            Some(pending.drain(..1).collect())
+        } else {
+            None
+        }
+    }) {
         {
             let mut guard = transcript.lock().await;
             guard.push_chunk(prefix.to_vec());
@@ -384,9 +404,15 @@ fn split_valid_utf8_prefix_with_max(
     }
 
     let max_len = buffer.len().min(max_bytes);
+    if max_len == 0 {
+        return None;
+    }
+    let whole_buffer = max_len == buffer.len();
     let split = match std::str::from_utf8(&buffer.make_contiguous()[..max_len]) {
         Ok(_) => max_len,
-        Err(error) => error.valid_up_to().max(1),
+        Err(error) if error.valid_up_to() > 0 => error.valid_up_to(),
+        Err(error) if whole_buffer && error.error_len().is_none() => return None,
+        Err(_) => 1,
     };
     Some(buffer.drain(..split).collect())
 }
