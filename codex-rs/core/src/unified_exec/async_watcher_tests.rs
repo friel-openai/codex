@@ -1,7 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use super::StreamedOutputBudget;
 use super::TRAILING_OUTPUT_GRACE;
 use super::process_chunk;
 use super::spawn_exit_watcher;
@@ -18,7 +17,6 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_sandboxing::SandboxType;
-use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 
 use pretty_assertions::assert_eq;
 use tokio::time::Duration;
@@ -72,59 +70,48 @@ async fn streaming_output_harness() -> anyhow::Result<StreamingOutputHarness> {
 }
 
 #[tokio::test]
-async fn streaming_output_limits_event_bytes_without_truncating_the_transcript()
--> anyhow::Result<()> {
-    const MULTIBYTE_SUFFIX: &str = "ééé";
-    const OUTPUT_TAIL: &[u8] = b"UNSTREAMED-TAIL";
+async fn streaming_output_does_not_apply_a_cumulative_byte_limit() {
+    const PREVIOUS_CUMULATIVE_LIMIT: usize = 1024 * 1024;
+    const CALL_ID: &str = "streaming-output-without-cumulative-limit-test";
 
-    let StreamingOutputHarness {
-        process,
-        stdout_tx,
-        exit_tx,
-        transcript,
-        context: _context,
-        rx_event,
-    } = streaming_output_harness().await?;
-    let output_drained = process.output_drained_notify();
-    let drained = output_drained.notified();
-    tokio::pin!(drained);
+    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
+    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
+    let mut pending = VecDeque::new();
+    let mut emitted_deltas = 0;
+    let output = vec![b'a'; PREVIOUS_CUMULATIVE_LIMIT + 1];
 
-    let mut output = vec![b'a'; DEFAULT_OUTPUT_BYTES_CAP - MULTIBYTE_SUFFIX.len() + 1];
-    output.extend_from_slice(MULTIBYTE_SUFFIX.as_bytes());
-    output.extend_from_slice(OUTPUT_TAIL);
-    stdout_tx.send(output.clone()).expect("send output");
-    drop(stdout_tx);
-    exit_tx.send(0).expect("send exit");
-    (&mut drained).await;
+    process_chunk(
+        &mut pending,
+        &transcript,
+        CALL_ID,
+        &session,
+        &turn,
+        &mut emitted_deltas,
+        Some(output.clone()),
+    )
+    .await;
 
-    let mut emitted_bytes = 0;
+    let mut streamed_bytes = 0;
     while let Ok(event) = rx_event.try_recv() {
-        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg {
-            std::str::from_utf8(&delta.chunk).expect("valid UTF-8 output delta");
-            emitted_bytes += delta.chunk.len();
+        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg
+            && delta.call_id == CALL_ID
+        {
+            streamed_bytes += delta.chunk.len();
         }
     }
-    assert_eq!(emitted_bytes, DEFAULT_OUTPUT_BYTES_CAP - 1);
 
-    let transcript = transcript.lock().await;
-    assert_eq!(transcript.total_bytes(), output.len());
-    assert!(transcript.omitted_bytes() > 0);
-    assert!(transcript.to_bytes().ends_with(OUTPUT_TAIL));
-
-    Ok(())
+    assert_eq!(streamed_bytes, output.len());
+    assert_eq!(transcript.lock().await.total_bytes(), output.len());
 }
 
 #[tokio::test]
-async fn streaming_output_caps_invalid_and_multibyte_data_at_character_boundaries() {
+async fn streaming_output_streams_invalid_and_multibyte_data() {
     const CALL_ID: &str = "streaming-output-invalid-utf8-boundary-test";
 
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let mut pending = VecDeque::new();
-    let mut budget = StreamedOutputBudget {
-        emitted_bytes: DEFAULT_OUTPUT_BYTES_CAP - 3,
-        emitted_events: 0,
-    };
+    let mut emitted_deltas = 0;
     let output = vec![0xff, b'a', 0xc3, 0xa9];
 
     process_chunk(
@@ -133,7 +120,7 @@ async fn streaming_output_caps_invalid_and_multibyte_data_at_character_boundarie
         CALL_ID,
         &session,
         &turn,
-        &mut budget,
+        &mut emitted_deltas,
         Some(output.clone()),
     )
     .await;
@@ -147,9 +134,8 @@ async fn streaming_output_caps_invalid_and_multibyte_data_at_character_boundarie
         }
     }
 
-    assert_eq!(streamed_chunks, vec![vec![0xff], vec![b'a']]);
-    assert_eq!(budget.emitted_bytes, DEFAULT_OUTPUT_BYTES_CAP);
-    assert_eq!(budget.emitted_events, 2);
+    assert_eq!(streamed_chunks, vec![vec![0xff], vec![b'a', 0xc3, 0xa9]]);
+    assert_eq!(emitted_deltas, 2);
     assert!(pending.is_empty());
 
     let transcript = transcript.lock().await;
@@ -158,16 +144,13 @@ async fn streaming_output_caps_invalid_and_multibyte_data_at_character_boundarie
 }
 
 #[tokio::test]
-async fn streaming_output_buffers_multibyte_characters_across_chunks_at_the_byte_limit() {
+async fn streaming_output_buffers_multibyte_characters_across_chunks() {
     const CALL_ID: &str = "streaming-output-split-utf8-boundary-test";
 
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let mut pending = VecDeque::new();
-    let mut budget = StreamedOutputBudget {
-        emitted_bytes: DEFAULT_OUTPUT_BYTES_CAP - 1,
-        emitted_events: 0,
-    };
+    let mut emitted_deltas = 0;
 
     process_chunk(
         &mut pending,
@@ -175,14 +158,13 @@ async fn streaming_output_buffers_multibyte_characters_across_chunks_at_the_byte
         CALL_ID,
         &session,
         &turn,
-        &mut budget,
+        &mut emitted_deltas,
         Some(vec![0xc3]),
     )
     .await;
 
     assert_eq!(pending, VecDeque::from(vec![0xc3]));
-    assert_eq!(budget.emitted_bytes, DEFAULT_OUTPUT_BYTES_CAP - 1);
-    assert_eq!(budget.emitted_events, 0);
+    assert_eq!(emitted_deltas, 0);
     assert_eq!(transcript.lock().await.total_bytes(), 0);
 
     process_chunk(
@@ -191,19 +173,19 @@ async fn streaming_output_buffers_multibyte_characters_across_chunks_at_the_byte
         CALL_ID,
         &session,
         &turn,
-        &mut budget,
+        &mut emitted_deltas,
         Some(vec![0xa9]),
     )
     .await;
 
     assert!(pending.is_empty());
-    assert_eq!(budget.emitted_bytes, DEFAULT_OUTPUT_BYTES_CAP);
-    assert_eq!(budget.emitted_events, 0);
-    while let Ok(event) = rx_event.try_recv() {
-        if let EventMsg::ExecCommandOutputDelta(delta) = event.msg {
-            assert_ne!(delta.call_id, CALL_ID);
-        }
-    }
+    assert_eq!(emitted_deltas, 1);
+    let event = rx_event.try_recv().expect("streamed multibyte output");
+    let EventMsg::ExecCommandOutputDelta(delta) = event.msg else {
+        panic!("expected output delta");
+    };
+    assert_eq!(delta.call_id, CALL_ID);
+    assert_eq!(delta.chunk, vec![0xc3, 0xa9]);
     assert_eq!(transcript.lock().await.to_bytes(), vec![0xc3, 0xa9]);
 }
 
@@ -251,10 +233,7 @@ async fn streaming_output_limits_event_count_without_truncating_the_transcript()
     let (session, turn, rx_event) = make_session_and_context_with_rx().await;
     let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
     let mut pending = VecDeque::new();
-    let mut budget = StreamedOutputBudget {
-        emitted_bytes: 0,
-        emitted_events: MAX_EXEC_OUTPUT_DELTAS_PER_CALL - 1,
-    };
+    let mut emitted_deltas = MAX_EXEC_OUTPUT_DELTAS_PER_CALL - 1;
 
     process_chunk(
         &mut pending,
@@ -262,7 +241,7 @@ async fn streaming_output_limits_event_count_without_truncating_the_transcript()
         CALL_ID,
         &session,
         &turn,
-        &mut budget,
+        &mut emitted_deltas,
         Some(vec![b'a']),
     )
     .await;
@@ -276,7 +255,7 @@ async fn streaming_output_limits_event_count_without_truncating_the_transcript()
             break;
         }
     }
-    assert_eq!(budget.emitted_events, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
+    assert_eq!(emitted_deltas, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
 
     process_chunk(
         &mut pending,
@@ -284,12 +263,11 @@ async fn streaming_output_limits_event_count_without_truncating_the_transcript()
         CALL_ID,
         &session,
         &turn,
-        &mut budget,
+        &mut emitted_deltas,
         Some(POST_CAP_MARKER.to_vec()),
     )
     .await;
-    assert_eq!(budget.emitted_events, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
-    assert_eq!(budget.emitted_bytes, b"a".len());
+    assert_eq!(emitted_deltas, MAX_EXEC_OUTPUT_DELTAS_PER_CALL);
 
     while let Ok(event) = rx_event.try_recv() {
         if let EventMsg::ExecCommandOutputDelta(delta) = event.msg {
