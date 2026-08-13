@@ -1077,7 +1077,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId) 
 }
 
 #[tokio::test]
-async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout() {
+async fn selected_v2_agent_metadata_uses_indexed_identity_without_reading_rollout() {
     let harness = AgentControlHarness::new().await;
     let (parent_thread_id, _) = harness.start_thread().await;
     let state_db = harness
@@ -1158,8 +1158,19 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 
     harness
         .control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    assert!(
+        harness
+            .control
+            .state
+            .agent_metadata_for_thread(indexed_thread_id)
+            .is_none()
+    );
+    harness
+        .control
+        .ensure_open_agent_known_by_id(parent_thread_id, indexed_thread_id)
+        .await
+        .expect("selected indexed agent should register lazily");
 
     let indexed_metadata = harness
         .control
@@ -1173,6 +1184,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
         Some("indexed-name")
     );
 
+    harness
+        .control
+        .ensure_open_agent_known_by_id(parent_thread_id, anonymous_thread_id)
+        .await
+        .expect("selected anonymous agent should register lazily");
     let anonymous_metadata = harness
         .control
         .state
@@ -1920,11 +1936,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
     assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
     assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
     assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
-    resumed_control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
     for thread_id in [worker_thread_id, sibling_thread_id] {
-        assert!(resumed_control.ensure_agent_known(thread_id).is_ok());
+        resumed_control
+            .ensure_open_agent_known_by_id(parent_thread_id, thread_id)
+            .await
+            .expect("selected persisted agent should register lazily");
     }
 
     resumed_control
@@ -5821,17 +5837,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
     }
     harness
         .control
-        .restore_v2_agent_metadata(&harness.config, parent_thread_id)
-        .await;
-    assert!(
-        harness
-            .control
-            .state
-            .agent_id_for_path(&supervisor_path)
-            .is_some_and(|thread_id| stale_helper_thread_ids.contains(&thread_id)),
-        "cold restore should reproduce the stale canonical path collision"
-    );
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
     for stale_helper_thread_id in stale_helper_thread_ids {
+        assert!(
+            harness
+                .control
+                .state
+                .agent_metadata_for_thread(stale_helper_thread_id)
+                .is_none(),
+            "persisted stale helpers must remain lazy"
+        );
         assert_eq!(
             harness.control.get_status(stale_helper_thread_id).await,
             AgentStatus::NotFound,
