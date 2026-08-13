@@ -9,9 +9,9 @@ use codex_app_server_protocol::Turn;
 use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::RolloutItem;
-use codex_protocol::protocol::RolloutLine;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 
 const UNFILTERED_SEGMENT_COUNT: usize = 5;
 
