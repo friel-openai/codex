@@ -633,6 +633,19 @@ pub(crate) fn resolve_multi_agent_version(
         })
 }
 
+pub(crate) fn configured_or_persisted_multi_agent_version(
+    conversation_history: &InitialHistory,
+    configured_multi_agent_version: Option<MultiAgentVersion>,
+) -> Option<MultiAgentVersion> {
+    if configured_multi_agent_version == Some(MultiAgentVersion::Disabled) {
+        return configured_multi_agent_version;
+    }
+
+    conversation_history
+        .get_multi_agent_version()
+        .or(configured_multi_agent_version)
+}
+
 async fn initial_rollout_ordinal(
     history: &InitialHistory,
     history_mode: ThreadHistoryMode,
@@ -895,7 +908,12 @@ impl Session {
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
         let configured_config = Arc::clone(&config);
-        let multi_agent_version = config.multi_agent_version_override().or_else(|| {
+        let configured_multi_agent_version = config.multi_agent_version_override();
+        let multi_agent_version = configured_or_persisted_multi_agent_version(
+            &conversation_history,
+            configured_multi_agent_version,
+        )
+        .or_else(|| {
             resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
         });
         let history_mode = conversation_history.get_history_mode(
