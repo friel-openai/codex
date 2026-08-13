@@ -6,7 +6,6 @@ use std::time::Duration;
 
 const INTERNAL_HELPER_TURN_END_TIMEOUT: Duration = Duration::from_secs(10);
 const INTERNAL_HELPER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(20);
-const GOAL_SUPERVISOR_ROLE_NAME: &str = "goal_supervisor";
 
 /// Shuts down an internal helper after its terminal tool result and `TurnComplete` are durable.
 ///
@@ -206,7 +205,7 @@ impl AgentControl {
                     agent_role: Some(ref agent_role),
                     ..
                 }) if source_parent_thread_id == parent_thread_id
-                    && agent_role == GOAL_SUPERVISOR_ROLE_NAME
+                    && agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
             )
         {
             return true;
@@ -228,7 +227,7 @@ impl AgentControl {
                 agent_role: Some(ref agent_role),
                 ..
             }) if source_parent_thread_id == parent_thread_id
-                && agent_role == GOAL_SUPERVISOR_ROLE_NAME
+                && agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
         )
     }
 
@@ -247,7 +246,169 @@ impl AgentControl {
         else {
             return None;
         };
-        (agent_role == GOAL_SUPERVISOR_ROLE_NAME).then_some(parent_thread_id)
+        (agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+            .then_some(parent_thread_id)
+    }
+
+    pub(crate) async fn finish_goal_supervisor_helper_after_followup(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> bool {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return false;
+        };
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        match crate::goal_supervisor::finish_supervisor_helper_after_followup(
+            &parent_thread.session,
+            helper_thread_id,
+        )
+        .await
+        {
+            Ok(finished) => finished,
+            Err(err) => {
+                warn!("failed to finish goal supervisor helper {helper_thread_id}: {err}");
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn finish_goal_supervisor_helper(&self, helper_thread_id: ThreadId) -> bool {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return false;
+        };
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        match crate::goal_supervisor::finish_supervisor_helper(
+            &parent_thread.session,
+            helper_thread_id,
+        )
+        .await
+        {
+            Ok(finished) => finished,
+            Err(err) => {
+                warn!("failed to finish goal supervisor helper {helper_thread_id}: {err}");
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn defer_failed_goal_supervisor_helper(
+        &self,
+        parent_thread_id: ThreadId,
+        helper_thread_id: ThreadId,
+        terminal_status: AgentStatus,
+    ) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        match crate::goal_supervisor::defer_failed_supervisor_helper(
+            &parent_thread.session,
+            helper_thread_id,
+            terminal_status,
+        )
+        .await
+        {
+            Ok(deferred) => deferred,
+            Err(err) => {
+                warn!("failed to defer goal supervisor helper {helper_thread_id}: {err}");
+                false
+            }
+        }
+    }
+
+    pub(crate) async fn record_goal_supervisor_followup_action(
+        &self,
+        parent_thread_id: ThreadId,
+        delivered_parent_message: &InterAgentCommunication,
+    ) -> bool {
+        let Ok(state) = self.upgrade() else {
+            return false;
+        };
+        let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
+            return false;
+        };
+        crate::goal_supervisor::record_followup_action(
+            &parent_thread.session,
+            delivered_parent_message,
+        )
+        .await;
+        true
+    }
+
+    pub(crate) async fn snooze_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+        delay_seconds: u64,
+        reason: Option<&str>,
+    ) -> Option<u64> {
+        let parent_thread_id = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await?;
+        let state = self.upgrade().ok()?;
+        let parent_thread = state.get_thread(parent_thread_id).await.ok()?;
+        match crate::goal_supervisor::snooze_supervisor_helper(
+            &parent_thread.session,
+            helper_thread_id,
+            delay_seconds,
+            reason,
+        )
+        .await
+        {
+            Ok(delay_seconds) => delay_seconds,
+            Err(err) => {
+                warn!("failed to snooze goal supervisor helper {helper_thread_id}: {err}");
+                None
+            }
+        }
+    }
+
+    pub(crate) async fn compact_parent_for_goal_supervisor_helper(
+        &self,
+        helper_thread_id: ThreadId,
+    ) -> CodexResult<SupervisorParentCompactionResult> {
+        let Some(parent_thread_id) = self
+            .goal_supervisor_parent_for_helper(helper_thread_id)
+            .await
+        else {
+            return Ok(SupervisorParentCompactionResult::NotSupervisorHelper);
+        };
+        let state = self.upgrade()?;
+        let parent_thread = state.get_thread(parent_thread_id).await?;
+        if parent_thread.session.active_turn.lock().await.is_some() {
+            return Ok(SupervisorParentCompactionResult::ParentBusy { parent_thread_id });
+        }
+
+        let submission_id = state
+            .send_op(
+                parent_thread_id,
+                Op::Compact,
+                /*parent_turn_id*/ None,
+                /*root_turn_id*/ None,
+            )
+            .await?;
+        crate::goal_supervisor::record_compact_parent_context_action(&parent_thread.session).await;
+        Ok(SupervisorParentCompactionResult::Submitted {
+            parent_thread_id,
+            submission_id,
+        })
     }
 
     /// Mark `agent_id` as explicitly closed in persisted spawn-edge state, then shut down the
