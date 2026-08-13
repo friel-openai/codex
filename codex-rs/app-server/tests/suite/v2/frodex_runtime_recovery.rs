@@ -36,7 +36,9 @@ fn candidate_builder(codex_home: &Path) -> TestAppServerBuilder {
         .with_codex_home(codex_home)
         .with_env_overrides(&[("OPENAI_API_KEY", Some("synthetic-acceptance-key"))]);
     match std::env::var_os("FRODEX_ACCEPTANCE_CODEX") {
-        Some(program) => builder.with_program_and_prefix_args(Path::new(&program), &["app-server"]),
+        Some(program) => builder
+            .with_program_and_prefix_args(Path::new(&program), &["app-server"])
+            .with_plugin_startup_tasks(),
         None => builder,
     }
 }
