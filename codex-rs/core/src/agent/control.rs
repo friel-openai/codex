@@ -69,6 +69,7 @@ const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
 const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
 
 mod completion;
+mod current_membership;
 mod execution;
 mod legacy;
 mod ownership;
@@ -144,7 +145,7 @@ pub(crate) struct AgentControl {
     manager: Weak<ThreadManagerState>,
     /// Captured at construction so delegates retain their manager's allocation policy.
     thread_id_generator: ThreadIdGenerator,
-    state: Arc<AgentRegistry>,
+    pub(super) state: Arc<AgentRegistry>,
     agent_residency: Arc<AgentResidency>,
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
@@ -162,6 +163,45 @@ impl Default for AgentControl {
 }
 
 impl AgentControl {
+    pub(crate) fn current_membership_root_thread_id(&self) -> ThreadId {
+        self.state
+            .agent_id_for_path(&AgentPath::root())
+            .unwrap_or_else(|| ThreadId::from(self.session_id))
+    }
+
+    pub(crate) fn current_membership_subtree_thread_ids(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> Vec<ThreadId> {
+        self.state.registered_subtree_thread_ids(root_thread_id)
+    }
+
+    pub(crate) fn current_membership_descendant_parents(
+        &self,
+        root_thread_id: ThreadId,
+    ) -> HashMap<ThreadId, ThreadId> {
+        self.state
+            .registered_subtree_thread_ids(root_thread_id)
+            .into_iter()
+            .filter(|thread_id| *thread_id != root_thread_id)
+            .filter_map(|thread_id| {
+                let parent_thread_id = self
+                    .state
+                    .agent_metadata_for_thread(thread_id)?
+                    .parent_thread_id?;
+                Some((thread_id, parent_thread_id))
+            })
+            .collect()
+    }
+
+    pub(crate) fn has_current_agent_members(&self) -> bool {
+        !self.state.live_agents().is_empty()
+    }
+
+    pub(crate) fn shares_current_agent_registry(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+
     /// Construct a new `AgentControl` that can spawn/message agents via the given manager state.
     pub(crate) fn new(
         manager: Weak<ThreadManagerState>,
@@ -466,7 +506,7 @@ impl AgentControl {
 
     pub(crate) async fn resolve_agent_reference(
         &self,
-        _current_thread_id: ThreadId,
+        current_thread_id: ThreadId,
         current_session_source: &SessionSource,
         agent_reference: &str,
     ) -> CodexResult<ThreadId> {
@@ -476,13 +516,14 @@ impl AgentControl {
         let agent_path = current_agent_path
             .resolve(agent_reference)
             .map_err(CodexErr::UnsupportedOperation)?;
-        if let Some(thread_id) = self.state.agent_id_for_path(&agent_path) {
-            return Ok(thread_id);
-        }
-        Err(CodexErr::UnsupportedOperation(format!(
-            "live agent path `{}` not found",
-            agent_path.as_str()
-        )))
+        let metadata = self
+            .ensure_open_agent_known_by_path(current_thread_id, &agent_path)
+            .await?;
+        metadata.agent_id.ok_or_else(|| {
+            CodexErr::Fatal(format!(
+                "resolved agent path `{agent_path}` without a thread id"
+            ))
+        })
     }
 
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.
@@ -602,7 +643,7 @@ impl AgentControl {
         Ok(agents)
     }
 
-    fn prepare_agent_metadata(
+    pub(super) fn prepare_agent_metadata(
         &self,
         reservation: &mut crate::agent::registry::SpawnReservation,
         config: &Config,
@@ -624,6 +665,7 @@ impl AgentControl {
             agent_path,
             agent_nickname,
             agent_role,
+            ephemeral: config.ephemeral,
             last_task_message: None,
             ..Default::default()
         })
@@ -642,13 +684,15 @@ impl AgentControl {
         if depth == 1 {
             self.state.register_root_thread(parent_thread_id);
         }
-        let agent_metadata = self.prepare_agent_metadata(
+        let mut agent_metadata = self.prepare_agent_metadata(
             reservation,
             config,
             agent_path,
             agent_role,
             preferred_agent_nickname,
         )?;
+        agent_metadata.parent_thread_id = Some(parent_thread_id);
+        agent_metadata.depth = Some(depth);
         let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id,
             depth,
@@ -712,6 +756,25 @@ impl AgentControl {
         }
 
         Some(Arc::clone(&parent_thread.session.services.exec_policy))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn register_current_only_agent_for_test(
+        &self,
+        agent_id: ThreadId,
+        parent_thread_id: ThreadId,
+        depth: i32,
+    ) {
+        self.state
+            .reserve_spawn_slot(/*max_threads*/ None)
+            .expect("current-only test identity should reserve a slot")
+            .commit(AgentMetadata {
+                agent_id: Some(agent_id),
+                parent_thread_id: Some(parent_thread_id),
+                depth: Some(depth),
+                ephemeral: false,
+                ..Default::default()
+            });
     }
 
     async fn open_thread_spawn_children(
