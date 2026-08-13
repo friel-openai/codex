@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
+use std::time::Instant;
 
+use chrono::Utc;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
@@ -32,8 +35,11 @@ use crate::ThreadPersistenceMode;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use crate::TouchRootThreadRecencyParams;
 use crate::UpdateThreadMetadataParams;
 use crate::thread_metadata_sync::ThreadMetadataSync;
+
+const BACKGROUND_ROOT_RECENCY_INTERVAL: Duration = Duration::from_secs(60 * 60);
 
 /// Handle for an active thread's persistence lifecycle.
 ///
@@ -49,6 +55,8 @@ pub struct LiveThread {
     persistence_mode: Arc<Mutex<ThreadPersistenceMode>>,
     /// Rejects later persistence after a checkpoint may have committed ambiguously.
     persistence_restart_required: Arc<AtomicBool>,
+    pending_root_recency_touch: Arc<Mutex<bool>>,
+    next_root_recency_touch_attempt: Arc<Mutex<Option<Instant>>>,
     persistence_telemetry: RolloutPersistenceTelemetry,
 }
 
@@ -145,6 +153,8 @@ impl LiveThread {
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
             persistence_mode: Arc::new(Mutex::new(persistence_mode)),
             persistence_restart_required: Arc::new(AtomicBool::new(false)),
+            pending_root_recency_touch: Arc::new(Mutex::new(false)),
+            next_root_recency_touch_attempt: Arc::new(Mutex::new(None)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -242,6 +252,8 @@ impl LiveThread {
             metadata_sync: Arc::new(Mutex::new(metadata_sync)),
             persistence_mode: Arc::new(Mutex::new(ThreadPersistenceMode::Durable)),
             persistence_restart_required: Arc::new(AtomicBool::new(false)),
+            pending_root_recency_touch: Arc::new(Mutex::new(false)),
+            next_root_recency_touch_attempt: Arc::new(Mutex::new(None)),
             persistence_telemetry: RolloutPersistenceTelemetry::new(thread_id),
         })
     }
@@ -262,6 +274,7 @@ impl LiveThread {
         if items.is_empty() {
             return Ok(());
         }
+        *self.pending_root_recency_touch.lock().await = true;
         let update = self
             .metadata_sync
             .lock()
@@ -283,7 +296,53 @@ impl LiveThread {
                 .await
                 .mark_pending_update_applied(&update);
         }
+        self.flush_pending_root_recency_touch().await;
         Ok(())
+    }
+
+    async fn flush_pending_root_recency_touch(&self) {
+        {
+            let mut pending = self.pending_root_recency_touch.lock().await;
+            if !*pending {
+                return;
+            }
+            *pending = false;
+        }
+        let now = Instant::now();
+        let should_wait = {
+            let mut next_attempt = self.next_root_recency_touch_attempt.lock().await;
+            if next_attempt.is_some_and(|next_attempt| now < next_attempt) {
+                true
+            } else {
+                *next_attempt = None;
+                false
+            }
+        };
+        if should_wait {
+            return;
+        }
+
+        match self
+            .thread_store
+            .touch_root_thread_recency(TouchRootThreadRecencyParams {
+                descendant_thread_id: self.thread_id,
+                activity_at: Utc::now(),
+                minimum_interval: BACKGROUND_ROOT_RECENCY_INTERVAL,
+            })
+            .await
+        {
+            Ok(retry_after) => {
+                let retry_after = retry_after.unwrap_or(BACKGROUND_ROOT_RECENCY_INTERVAL);
+                *self.next_root_recency_touch_attempt.lock().await = now.checked_add(retry_after);
+            }
+            Err(err) => {
+                *self.pending_root_recency_touch.lock().await = true;
+                warn!(
+                    "failed to advance root recency for {}: {err}",
+                    self.thread_id
+                );
+            }
+        }
     }
 
     async fn persist_appended_items(
@@ -330,7 +389,9 @@ impl LiveThread {
             .await?;
         *persistence_mode = ThreadPersistenceMode::Durable;
         drop(persistence_mode);
-        self.flush_pending_metadata_update().await
+        self.flush_pending_metadata_update().await?;
+        self.flush_pending_root_recency_touch().await;
+        Ok(())
     }
 
     #[expect(
@@ -346,7 +407,9 @@ impl LiveThread {
         }
         drop(persistence_mode);
         self.flush_pending_metadata_update_for_existing_history()
-            .await
+            .await?;
+        self.flush_pending_root_recency_touch().await;
+        Ok(())
     }
 
     /// Returns whether this thread should remain memory-only until explicitly persisted.
@@ -389,6 +452,7 @@ impl LiveThread {
         let frozen = freeze_result.map(Some)?;
         drop(persistence_mode);
         self.flush_pending_metadata_update().await?;
+        self.flush_pending_root_recency_touch().await;
         Ok(frozen)
     }
 
@@ -521,6 +585,9 @@ impl LiveThread {
         } else {
             Ok(())
         };
+        if matches!(*persistence_mode, ThreadPersistenceMode::Durable) {
+            self.flush_pending_root_recency_touch().await;
+        }
         let shutdown_result = self.thread_store.shutdown_thread(self.thread_id).await;
         match (metadata_result, shutdown_result) {
             (Err(metadata_error), Err(shutdown_error)) => Err(ThreadStoreError::Internal {
