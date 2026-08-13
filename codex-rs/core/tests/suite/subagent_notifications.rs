@@ -1094,6 +1094,7 @@ async fn spawned_child_receives_forked_parent_context(
 
     let child_request = wait_for_request_with_model(&child_request_log, REQUESTED_MODEL).await?;
     assert!(child_request.body_contains_text(TURN_0_FORK_PROMPT));
+    assert!(child_request.body_contains_text("# Subagent Assignment"));
     let child_body = child_request.body_json();
     let original_parent_turn_id = parent_body["client_metadata"]["turn_id"]
         .as_str()
