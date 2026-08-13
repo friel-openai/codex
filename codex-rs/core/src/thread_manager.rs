@@ -1,5 +1,7 @@
 use crate::CodexAppsToolsCache;
 use crate::agent::AgentControl;
+use crate::agent::CurrentAgentMember;
+use crate::agent::CurrentAgentMembershipSnapshot;
 use crate::attestation::AttestationProvider;
 use crate::codex_thread::CodexThread;
 use crate::config::Config;
@@ -56,6 +58,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
+use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::MultiAgentVersion;
@@ -104,6 +107,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::instrument;
@@ -112,6 +117,9 @@ use tracing::warn;
 const THREAD_CREATED_CHANNEL_CAPACITY: usize = 1024;
 // Reject pathological selected cwd values at the environment-selection boundary.
 const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
+
+mod current_membership;
+pub use current_membership::CurrentAgentMembershipHandle;
 
 /// Test-only override for enabling thread-manager behaviors used by integration
 /// tests.
@@ -419,6 +427,12 @@ pub(crate) struct ResumeThreadWithHistoryOptions {
 /// function to require an `Arc<&Self>`.
 pub(crate) struct ThreadManagerState {
     threads: Arc<RwLock<HashMap<ThreadId, Arc<CodexThread>>>>,
+    /// Serializes ownership changes and registry commits across every root in this manager.
+    lifecycle_mutation: Arc<AsyncMutex<()>>,
+    /// Threads fenced while archive or delete commits current membership.
+    temporary_membership_eviction_thread_ids: std::sync::Mutex<HashMap<ThreadId, usize>>,
+    /// Root registries with cold current members but no loaded runtime carrying the control.
+    retained_agent_controls: std::sync::Mutex<HashMap<ThreadId, AgentControl>>,
     thread_created_tx: broadcast::Sender<ThreadId>,
     thread_id_generator: ThreadIdGenerator,
     auth_manager: Arc<AuthManager>,
@@ -548,6 +562,9 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager,
@@ -694,6 +711,9 @@ impl ThreadManager {
         Self {
             state: Arc::new(ThreadManagerState {
                 threads: Arc::new(RwLock::new(HashMap::new())),
+                lifecycle_mutation: Arc::new(AsyncMutex::new(())),
+                temporary_membership_eviction_thread_ids: std::sync::Mutex::new(HashMap::new()),
+                retained_agent_controls: std::sync::Mutex::new(HashMap::new()),
                 thread_created_tx,
                 thread_id_generator: default_thread_id_generator(),
                 models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -996,6 +1016,64 @@ impl ThreadManager {
         }
 
         Ok(subtree_thread_ids)
+    }
+
+    /// Returns whether a loaded thread's recorded parent chain reaches `ancestor_thread_id`.
+    ///
+    /// Loaded parents are read from memory. Unloaded intermediates are resolved by thread ID from
+    /// the thread store so callers do not depend on a complete spawn-edge index for older homes.
+    pub async fn loaded_thread_descends_from(
+        &self,
+        thread_id: ThreadId,
+        ancestor_thread_id: ThreadId,
+    ) -> CodexResult<bool> {
+        let Ok(thread) = self.get_thread(thread_id).await else {
+            return Ok(false);
+        };
+        let mut parent_thread_id = thread
+            .session_configured()
+            .parent_thread_id
+            .or_else(|| thread.session_source.parent_thread_id());
+        let mut visited = HashSet::from([thread_id]);
+        while let Some(parent_id) = parent_thread_id {
+            if parent_id == ancestor_thread_id {
+                return Ok(true);
+            }
+            if !visited.insert(parent_id) {
+                return Ok(false);
+            }
+            if let Ok(loaded_parent) = self.get_thread(parent_id).await {
+                parent_thread_id = loaded_parent
+                    .session_configured()
+                    .parent_thread_id
+                    .or_else(|| loaded_parent.session_source.parent_thread_id());
+                continue;
+            }
+            let stored_parent = match self
+                .state
+                .read_stored_thread(ReadThreadParams {
+                    thread_id: parent_id,
+                    include_archived: true,
+                    include_history: false,
+                })
+                .await
+            {
+                Ok(stored_parent) => stored_parent,
+                Err(err)
+                    if matches!(
+                        err.details(),
+                        codex_protocol::error::CodexErrorDetails::ThreadNotFound(_)
+                    ) =>
+                {
+                    return Ok(false);
+                }
+                Err(err) => return Err(err),
+            };
+            parent_thread_id = stored_parent
+                .parent_thread_id
+                .or_else(|| stored_parent.source.parent_thread_id());
+        }
+        Ok(false)
     }
 
     pub async fn start_thread(&self, options: StartThreadOptions) -> CodexResult<NewThread> {
@@ -1621,6 +1699,14 @@ impl ThreadManager {
 }
 
 impl ThreadManagerState {
+    pub(crate) async fn lock_lifecycle_mutation(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.lifecycle_mutation).lock_owned().await
+    }
+
+    pub(crate) fn is_thread_closing(&self, thread_id: ThreadId) -> bool {
+        self.is_thread_under_membership_eviction(thread_id)
+    }
+
     /// Updates metadata without requiring a public `ThreadManager` handle.
     ///
     /// Agent ownership transitions hold only the shared manager state while they move loaded and
