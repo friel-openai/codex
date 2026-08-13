@@ -1340,7 +1340,13 @@ impl ThreadHistoryBuilder {
     /// This keeps compaction-only legacy turns from being dropped by
     /// `finish_current_turn` when they have no renderable items and were not
     /// explicitly opened.
-    fn handle_compacted(&mut self, _payload: &CompactedItem) {
+    fn handle_compacted(&mut self, payload: &CompactedItem) {
+        // Fork and rollback checkpoints use Compacted as a persisted state baseline, not as a
+        // user-visible compaction turn. Real compactions retain their summary message and remain
+        // visible even though both records carry the same checkpoint descriptor.
+        if payload.message.is_empty() && payload.segment_state_checkpoint.is_some() {
+            return;
+        }
         self.ensure_turn().saw_compaction = true;
     }
 
@@ -3978,6 +3984,7 @@ mod tests {
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
+                segment_state_checkpoint: None,
             }),
             RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-compact".into(),
