@@ -68,6 +68,12 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::user_input::UserInput;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use core_test_support::TempDirExt;
+use core_test_support::responses::ev_completed;
+use core_test_support::responses::ev_response_created;
+use core_test_support::responses::mount_response_sequence;
+use core_test_support::responses::sse;
+use core_test_support::responses::sse_response;
+use core_test_support::responses::start_mock_server;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
@@ -76,6 +82,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::sleep;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
@@ -1584,11 +1591,13 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
         agent_nickname: None,
         agent_role: None,
     });
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
 
     let Err(err) = FollowupTaskHandlerV2
         .handle(invocation(
-            Arc::new(session),
-            Arc::new(turn),
+            Arc::clone(&session),
+            Arc::clone(&turn),
             "followup_task",
             function_payload(json!({
                 "target": "/root",
@@ -1606,6 +1615,27 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
             "Follow-up tasks can't target the root agent".to_string()
         )
     );
+    let Err(err) = FollowupTaskHandlerV2
+        .handle(invocation(
+            Arc::clone(&session),
+            Arc::clone(&turn),
+            "followup_task",
+            function_payload(json!({
+                "target": "parent",
+                "message": "run this",
+            })),
+        ))
+        .await
+    else {
+        panic!("followup_task should reject the parent alias from an ordinary child");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "Only supervisor check-in threads can use followup_task with target `parent`; use send_message for parent updates."
+                .to_string()
+        )
+    );
     let root_ops = manager
         .captured_ops()
         .into_iter()
@@ -1617,6 +1647,182 @@ async fn multi_agent_v2_followup_task_rejects_root_target_from_child() {
             .iter()
             .any(|op| matches!(op, Op::InterAgentCommunication { .. }))
     );
+}
+
+#[test]
+fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper() -> anyhow::Result<()>
+{
+    std::thread::Builder::new()
+        .name("goal-supervisor-followup-handler".to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build goal supervisor test runtime")
+                .block_on(
+                    multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper_inner(
+                    ),
+                )
+        })
+        .expect("spawn goal supervisor test thread")
+        .join()
+        .unwrap_or_else(|err| std::panic::resume_unwind(err))
+}
+
+async fn multi_agent_v2_goal_supervisor_followup_targets_parent_and_retires_helper_inner()
+-> anyhow::Result<()> {
+    let server = start_mock_server().await;
+    let request_log = mount_response_sequence(
+        &server,
+        (0..1)
+            .map(|index| {
+                let response_id = format!("supervisor-followup-{index}");
+                sse_response(sse(vec![
+                    ev_response_created(&response_id),
+                    ev_completed(&response_id),
+                ]))
+                .set_delay(Duration::from_secs(30))
+            })
+            .collect(),
+    )
+    .await;
+    let (_session, turn) = make_session_and_context().await;
+    let mut config = (*turn.config).clone();
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    let _ = config.features.enable(Feature::MultiAgentV2);
+    let _ = config.features.enable(Feature::Sqlite);
+    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
+    config.model_provider.supports_websockets = false;
+    let state_db = init_state_db(&config)
+        .await
+        .expect("sqlite state should initialize");
+    let manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        config.model_provider.clone(),
+        config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        Some(state_db.clone()),
+    );
+    let root = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("root thread should start");
+    root.thread.ensure_rollout_materialized().await;
+    root.thread.flush_rollout().await?;
+    let metadata = codex_state::ThreadMetadataBuilder::new(
+        root.thread_id,
+        root.thread
+            .rollout_path()
+            .expect("root rollout should be materialized"),
+        chrono::Utc::now(),
+        SessionSource::Exec,
+    )
+    .build("openai");
+    state_db.upsert_thread(&metadata).await?;
+    let state_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            root.thread_id,
+            "Continue the active goal after the followup.",
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let goal_id = state_goal.goal_id.clone();
+    let goal = crate::goal_supervisor::protocol_goal_from_state(state_goal);
+    let before_thread_ids = manager.list_thread_ids().await;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &root.thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await?;
+    let helper_thread_id = {
+        let mut added = manager
+            .list_thread_ids()
+            .await
+            .into_iter()
+            .filter(|id| !before_thread_ids.contains(id))
+            .collect::<Vec<_>>();
+        assert_eq!(added.len(), 1);
+        added.pop().expect("goal supervisor helper should be added")
+    };
+    timeout(Duration::from_secs(5), async {
+        while request_log.requests().is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("goal supervisor request should start");
+    let helper = manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("goal supervisor helper should be loaded");
+    let helper_path = helper
+        .session
+        .session_source()
+        .await
+        .get_agent_path()
+        .expect("goal supervisor helper should have an agent path");
+    let output = FollowupTaskHandlerV2
+        .handle(invocation(
+            Arc::clone(&helper.session),
+            helper.session.new_default_turn().await,
+            "followup_task",
+            function_payload(json!({
+                "target": "parent",
+                "message": "continue the active goal",
+            })),
+        ))
+        .await
+        .expect("goal supervisor followup should succeed");
+
+    assert!(output.terminal_no_response());
+    assert!(manager.captured_ops().iter().any(|(thread_id, op)| {
+        *thread_id == root.thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication { communication }
+                    if communication.author == helper_path
+                        && communication.recipient == AgentPath::root()
+                        && communication.trigger_turn
+            )
+    }));
+    timeout(Duration::from_secs(5), async {
+        while manager.get_thread(helper_thread_id).await.is_ok() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("successful followup should retire the active goal supervisor helper");
+
+    let continuity = crate::goal_supervisor::supervisor_continuity_context_item(
+        &root.thread.session,
+        goal_id.as_str(),
+        &goal,
+        &[],
+    )
+    .await;
+    let RolloutItem::ResponseItem(continuity) = continuity else {
+        anyhow::bail!("goal supervisor continuity should be a response item");
+    };
+    assert!(matches!(
+        continuity.item,
+        ResponseItem::Message { content, .. }
+            if content.iter().any(|item| matches!(
+                item,
+                ContentItem::InputText { text }
+                    if text.contains("\"kind\": \"followup_task\"")
+            ))
+    ));
+
+    let _ = manager
+        .shutdown_all_threads_bounded(Duration::from_secs(5))
+        .await;
+    Ok(())
 }
 
 #[tokio::test]
