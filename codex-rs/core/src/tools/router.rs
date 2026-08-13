@@ -50,6 +50,10 @@ impl ToolCall {
                 .encrypted_function_args
                 .as_ref()
                 .is_none_or(Vec::is_empty),
+            (Some("supervisor"), "followup_parent") => self
+                .encrypted_function_args
+                .as_ref()
+                .is_none_or(Vec::is_empty),
             _ => false,
         };
         if is_plaintext_message {
@@ -167,6 +171,16 @@ impl ToolRouter {
                 ..
             } => {
                 let tool_name = ToolName::new(namespace, name).with_default_namespace();
+                if tool_name == ToolName::namespaced("supervisor", "followup_parent")
+                    && encrypted_function_args
+                        .as_ref()
+                        .is_some_and(|args| !args.is_empty())
+                {
+                    return Err(FunctionCallError::RespondToModel(
+                        "supervisor.followup_parent does not accept encrypted arguments"
+                            .to_string(),
+                    ));
+                }
                 Ok(Some(ToolCall {
                     tool_name,
                     call_id,
