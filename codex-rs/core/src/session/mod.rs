@@ -1703,11 +1703,6 @@ impl Session {
                     .iter()
                     .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
-                let mut persisted_rollout_items = rollout_items
-                    .iter()
-                    .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
-                    .cloned()
-                    .collect::<Vec<_>>();
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
                         Some(model_history) => model_history,
@@ -1781,7 +1776,7 @@ impl Session {
                         turn_context.model_info.truncation_policy.into(),
                     );
                 }
-                let _startup_rollout_items = startup_response_items
+                let mut startup_rollout_items = startup_response_items
                     .into_iter()
                     .map(ResponseItemEnvelope::new)
                     .map(RolloutItem::ResponseItem)
@@ -1799,10 +1794,20 @@ impl Session {
                 let thread_settings_applied =
                     RolloutItem::EventMsg(thread_settings::applied_event(self).await);
                 if is_paginated_subagent && !has_rollout_reference {
-                    self.persist_rollout_items(&[thread_settings_applied]).await;
+                    let mut persisted_rollout_items = vec![thread_settings_applied];
+                    persisted_rollout_items.append(&mut startup_rollout_items);
+                    self.persist_initial_rollout_items(&persisted_rollout_items)
+                        .await?;
                 } else {
+                    let mut persisted_rollout_items = rollout_items
+                        .iter()
+                        .filter(|item| !matches!(item, RolloutItem::SessionMeta(_)))
+                        .cloned()
+                        .collect::<Vec<_>>();
                     persisted_rollout_items.push(thread_settings_applied);
-                    self.persist_rollout_items(&persisted_rollout_items).await;
+                    persisted_rollout_items.append(&mut startup_rollout_items);
+                    self.persist_initial_rollout_items(&persisted_rollout_items)
+                        .await?;
                 }
                 if let Some(live_thread) = self.live_thread()
                     && !live_thread.is_persistence_deferred().await
@@ -4326,6 +4331,30 @@ impl Session {
         {
             error!("failed to record rollout items: {e:#}");
         }
+    }
+
+    async fn persist_initial_rollout_items(&self, items: &[RolloutItem]) -> CodexResult<()> {
+        let Some(live_thread) = self.live_thread() else {
+            if self
+                .state
+                .lock()
+                .await
+                .session_configuration
+                .is_system_ephemeral()
+            {
+                return Ok(());
+            }
+            return Err(CodexErr::Fatal(format!(
+                "thread {} does not have a live rollout writer during startup",
+                self.thread_id()
+            )));
+        };
+        live_thread.append_items(items).await.map_err(|err| {
+            CodexErr::Fatal(format!(
+                "failed to persist initial history for thread {}: {err}",
+                self.thread_id()
+            ))
+        })
     }
 
     pub(crate) async fn clone_history(&self) -> ContextManager {

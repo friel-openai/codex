@@ -139,7 +139,7 @@ async fn handle_spawn_agent(
             root_turn_id: turn.turn_metadata_state.root_turn_id(),
             environments: Some(step_context.environments.to_spawn_selections()),
             multi_agent_v2_usage_hints: None,
-            initial_task_message: None,
+            initial_task_message: Some(prompt.clone()),
         },
     ))
     .await

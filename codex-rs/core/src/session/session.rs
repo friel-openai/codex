@@ -143,6 +143,16 @@ pub(crate) struct SessionConfiguration {
 }
 
 impl SessionConfiguration {
+    pub(super) fn is_system_ephemeral(&self) -> bool {
+        self.original_config_do_not_use.ephemeral
+            && matches!(
+                self.thread_source.as_ref(),
+                Some(ThreadSource::Feature(feature)) if feature == "system"
+            )
+    }
+}
+
+impl SessionConfiguration {
     pub(super) fn cwd(&self) -> &AbsolutePathBuf {
         &self.legacy_fallback_cwd
     }
