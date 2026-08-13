@@ -24,6 +24,7 @@ pub use code_mode::augment_tool_spec_for_code_mode;
 pub use code_mode::code_mode_name_for_tool_name;
 pub use code_mode::collect_code_mode_exec_prompt_tool_definitions;
 pub use code_mode::collect_code_mode_tool_definitions;
+pub use code_mode::tool_spec_has_encrypted_input;
 pub use code_mode::tool_spec_to_code_mode_tool_definition;
 pub use codex_protocol::ToolName;
 pub use dynamic_tool::parse_dynamic_tool;
