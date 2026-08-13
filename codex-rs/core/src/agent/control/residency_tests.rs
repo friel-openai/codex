@@ -29,6 +29,28 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tokio::time::timeout;
 
+#[test]
+fn goal_supervisor_helper_is_not_an_agent_resident() {
+    let parent_thread_id = ThreadId::new();
+    let worker_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let supervisor_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string()),
+    });
+
+    assert!(is_resident_session_source(&worker_source));
+    assert!(!is_resident_session_source(&supervisor_source));
+}
+
 #[tokio::test]
 async fn residency_slot_reservation_unloads_oldest_idle_v2_agent() {
     assert_residency_slot_unloads_oldest_idle_agent(MultiAgentVersion::V2).await;

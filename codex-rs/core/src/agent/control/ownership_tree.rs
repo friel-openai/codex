@@ -307,13 +307,19 @@ impl AgentControl {
                 .agent_nickname
                 .clone()
                 .or_else(|| descendant.original_source.get_nickname());
-            let mut reservation = self.state.reserve_spawn_slot(
-                descendant.original_config.effective_agent_max_threads(
-                    descendant
-                        .original_config
-                        .multi_agent_version_from_features(),
-                ),
-            )?;
+            let is_goal_supervisor =
+                role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME);
+            let mut reservation = if is_goal_supervisor {
+                self.state.reserve_uncounted_spawn_slot()
+            } else {
+                self.state.reserve_spawn_slot(
+                    descendant.original_config.effective_agent_max_threads(
+                        descendant
+                            .original_config
+                            .multi_agent_version_from_features(),
+                    ),
+                )?
+            };
             let (session_source, mut metadata) = self.prepare_thread_spawn(
                 &mut reservation,
                 &descendant.original_config,
@@ -386,10 +392,14 @@ impl AgentControl {
         }
 
         for prepared_descendant in prepared.descendants {
-            prepared_descendant
-                .metadata
-                .lifecycle
-                .mark_visible_when_cold();
+            if prepared_descendant.metadata.agent_role.as_deref()
+                != Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+            {
+                prepared_descendant
+                    .metadata
+                    .lifecycle
+                    .mark_visible_when_cold();
+            }
             prepared_descendant
                 .reservation
                 .commit(prepared_descendant.metadata);
@@ -462,10 +472,23 @@ impl AgentControl {
                 .get_agent_metadata(descendant.thread_id)
                 .is_none()
             {
-                let mut reservation = descendant
-                    .original_control
-                    .state
-                    .reserve_spawn_slot(/*max_threads*/ None)?;
+                let role = descendant
+                    .original_metadata
+                    .agent_role
+                    .clone()
+                    .or_else(|| descendant.original_source.get_agent_role());
+                let mut reservation =
+                    if role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME) {
+                        descendant
+                            .original_control
+                            .state
+                            .reserve_uncounted_spawn_slot()
+                    } else {
+                        descendant
+                            .original_control
+                            .state
+                            .reserve_spawn_slot(/*max_threads*/ None)?
+                    };
                 let original_path = descendant
                     .original_metadata
                     .agent_path
@@ -473,11 +496,6 @@ impl AgentControl {
                     .map(AgentPath::try_from)
                     .transpose()
                     .map_err(CodexErr::InvalidRequest)?;
-                let role = descendant
-                    .original_metadata
-                    .agent_role
-                    .clone()
-                    .or_else(|| descendant.original_source.get_agent_role());
                 let (_, mut metadata) = descendant.original_control.prepare_thread_spawn(
                     &mut reservation,
                     &descendant.original_config,

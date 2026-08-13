@@ -154,11 +154,15 @@ impl AgentControl {
         child_agent_path: Option<AgentPath>,
     ) -> bool {
         let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
+            parent_thread_id,
+            agent_role,
+            ..
         })) = session_source
         else {
             return false;
         };
+        let is_goal_supervisor_helper =
+            agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME);
         let lifecycle = self
             .get_agent_metadata(child_thread_id)
             .map(|metadata| metadata.lifecycle)
@@ -188,7 +192,11 @@ impl AgentControl {
                 child_uses_multi_agent_v2 && child_agent_path.is_some();
 
             loop {
-                while !completion_watcher_status_is_terminal(&status, uses_inter_agent_completion) {
+                while !completion_watcher_status_is_terminal_for_agent(
+                    &status,
+                    uses_inter_agent_completion,
+                    is_goal_supervisor_helper,
+                ) {
                     let Some(receiver) = status_rx.as_mut() else {
                         status = control.get_status(child_thread_id).await;
                         break;
@@ -199,7 +207,21 @@ impl AgentControl {
                     }
                     status = receiver.borrow().clone();
                 }
-                if !completion_watcher_status_is_terminal(&status, uses_inter_agent_completion) {
+                if !completion_watcher_status_is_terminal_for_agent(
+                    &status,
+                    uses_inter_agent_completion,
+                    is_goal_supervisor_helper,
+                ) {
+                    return;
+                }
+                if is_goal_supervisor_helper {
+                    let _ = control
+                        .defer_failed_goal_supervisor_helper(
+                            parent_thread_id,
+                            child_thread_id,
+                            status.clone(),
+                        )
+                        .await;
                     return;
                 }
 
@@ -322,5 +344,33 @@ fn completion_watcher_status_is_terminal(
         is_final(status)
     } else {
         is_legacy_completion_status(status)
+    }
+}
+
+fn completion_watcher_status_is_terminal_for_agent(
+    status: &AgentStatus,
+    uses_inter_agent_completion: bool,
+    is_goal_supervisor_helper: bool,
+) -> bool {
+    (is_goal_supervisor_helper && matches!(status, AgentStatus::Interrupted))
+        || completion_watcher_status_is_terminal(status, uses_inter_agent_completion)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interrupted_goal_supervisor_is_terminal_for_completion_watcher() {
+        assert!(completion_watcher_status_is_terminal_for_agent(
+            &AgentStatus::Interrupted,
+            /*uses_inter_agent_completion*/ true,
+            /*is_goal_supervisor_helper*/ true,
+        ));
+        assert!(!completion_watcher_status_is_terminal_for_agent(
+            &AgentStatus::Interrupted,
+            /*uses_inter_agent_completion*/ true,
+            /*is_goal_supervisor_helper*/ false,
+        ));
     }
 }

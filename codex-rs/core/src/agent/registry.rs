@@ -155,6 +155,10 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
     depth > max_depth
 }
 
+fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+    agent_metadata.agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+}
+
 impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
@@ -200,6 +204,7 @@ impl AgentRegistry {
                 .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                        && !is_uncounted_agent_metadata(&metadata)
                 })
         };
         if removed_counted_agent {
