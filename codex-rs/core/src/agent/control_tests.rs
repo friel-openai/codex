@@ -416,10 +416,16 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
             (thread_id == helper_thread_id)
                 .then_some(op)
                 .and_then(|op| match op {
-                    Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
-                        UserInput::Text { text, .. } => Some(text),
-                        _ => None,
-                    }),
+                    Op::TurnInput { request, .. } => match request.input {
+                        codex_protocol::turn_input::TurnInput::UserInput { content, .. } => {
+                            content.into_iter().find_map(|item| match item {
+                                UserInput::Text { text, .. } => Some(text),
+                                _ => None,
+                            })
+                        }
+                        codex_protocol::turn_input::TurnInput::ResponseItem(_)
+                        | codex_protocol::turn_input::TurnInput::InterAgentCommunication(_) => None,
+                    },
                     _ => None,
                 })
         })
@@ -7037,7 +7043,7 @@ while True:
         "parent MCP manager should expose live MCP tools before forking: tools={parent_mcp_tools:#?}"
     );
     parent_thread
-        .submit(text_input("parent seed").into())
+        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
         .await?;
     wait_for_turn_complete(parent_thread.as_ref()).await;
     parent_thread
