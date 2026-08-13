@@ -40,7 +40,9 @@ use codex_rollout::StateDbHandle;
 use codex_state::SqliteConfig;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
@@ -76,6 +78,7 @@ use crate::ResumeThreadParams;
 use crate::RevertThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::SortDirection;
 use crate::StoredModelContext;
 use crate::StoredThread;
@@ -130,6 +133,11 @@ pub struct LocalThreadStore {
 
 struct LiveRecorderEntry {
     recorder: RolloutRecorder,
+    /// Reopens the committed stable rollout before the next live operation.
+    ///
+    /// Segment rotation installs this before shutting down the previous recorder so cancellation
+    /// or a transient post-commit reopen failure cannot reuse a recorder whose task has exited.
+    recovery: Option<LiveRecorderRecovery>,
     // Rollout projection rows are keyed by immutable rollout ID, not the stable thread ID used
     // to find this live writer.
     rollout_id: ThreadId,
@@ -150,6 +158,30 @@ struct LiveRecorderEntry {
     // A resumed legacy writer rebuilds reducer state from complete canonical
     // lineage before its first append, not from bounded model context.
     legacy_history_builder_needs_rebuild: bool,
+}
+
+/// Information needed to reopen a live recorder after active-rollout replacement.
+#[derive(Clone)]
+struct LiveRecorderRecovery {
+    config: codex_rollout::RolloutConfig,
+    rollout_path: PathBuf,
+}
+
+/// Exclusive ownership of the mutable rollout files for a set of stable thread IDs.
+///
+/// Callers acquire the in-process mutexes first and the cross-process writer locks second, both in
+/// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
+/// entry supplies that half of the reservation until the in-process mutex is released.
+struct RolloutWriterReservation {
+    thread_ids: Vec<ThreadId>,
+    _in_process_guards: Vec<OwnedMutexGuard<()>>,
+    _cross_process_guards: Vec<WriterLockGuard>,
+}
+
+impl RolloutWriterReservation {
+    fn contains(&self, thread_id: ThreadId) -> bool {
+        self.thread_ids.contains(&thread_id)
+    }
 }
 
 #[derive(Default)]
@@ -357,6 +389,22 @@ impl LocalThreadStore {
         segment::freeze_thread_segment(self, thread_id, params).await
     }
 
+    /// Freezes a thread only while the expected physical rollout remains selected.
+    pub async fn freeze_thread_segment_for_rollout(
+        &self,
+        thread_id: ThreadId,
+        expected_rollout_id: codex_protocol::RolloutId,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<FrozenRolloutSegment> {
+        segment::freeze_thread_segment_for_rollout(
+            self,
+            thread_id,
+            params,
+            Some(expected_rollout_id),
+        )
+        .await
+    }
+
     /// Freezes a paginated fork without reading history excluded from its response.
     pub async fn prepare_fork_without_response_history(
         &self,
@@ -521,6 +569,25 @@ impl LocalThreadStore {
         Ok(writer_locks)
     }
 
+    async fn reserve_rollout_writers(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<RolloutWriterReservation> {
+        let mut thread_ids = thread_ids.to_vec();
+        thread_ids.sort_unstable_by_key(ThreadId::to_string);
+        thread_ids.dedup();
+        let mut in_process_guards = Vec::with_capacity(thread_ids.len());
+        for &thread_id in &thread_ids {
+            in_process_guards.push(self.live_writer_locks.lock(thread_id).await);
+        }
+        let cross_process_guards = self.acquire_writer_locks(thread_ids.as_slice()).await?;
+        Ok(RolloutWriterReservation {
+            thread_ids,
+            _in_process_guards: in_process_guards,
+            _cross_process_guards: cross_process_guards,
+        })
+    }
+
     async fn insert_live_recorder(
         &self,
         thread_id: ThreadId,
@@ -537,6 +604,7 @@ impl LocalThreadStore {
             Entry::Vacant(entry) => {
                 entry.insert(LiveRecorderEntry {
                     recorder,
+                    recovery: None,
                     rollout_id,
                     history_mode,
                     writer_lock,
@@ -699,6 +767,14 @@ impl ThreadStore for LocalThreadStore {
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::append_items(self, params).await })
+    }
+
+    fn persist_segment_checkpoint(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> Pin<Box<dyn Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>> {
+        Box::pin(async move { segment::persist_segment_checkpoint(self, thread_id, params).await })
     }
 
     fn persist_thread(
@@ -2036,7 +2112,10 @@ mod tests {
             })
             .await
             .expect_err("external rollouts cannot be referenced by thread id");
-        assert!(error.to_string().contains("must be in Codex home"));
+        assert!(
+            error.to_string().contains("must be in Codex home"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]

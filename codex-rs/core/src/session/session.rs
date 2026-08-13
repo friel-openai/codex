@@ -28,6 +28,7 @@ use codex_protocol::protocol::ThreadSource;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_skills::SkillError;
 use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::Semaphore;
 
 const CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS_ENV: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
@@ -72,6 +73,8 @@ pub(crate) struct Session {
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) next_internal_sub_id: AtomicU64,
+    /// Rejects later turns after checkpoint persistence becomes indeterminate.
+    pub(super) persistence_restart_required: AtomicBool,
 }
 
 #[derive(Clone)]
@@ -1396,6 +1399,7 @@ impl Session {
                 services,
                 git_enrichment_policy,
                 next_internal_sub_id: AtomicU64::new(0),
+                persistence_restart_required: AtomicBool::new(false),
             });
             if let Some(network_policy_decider_session) = network_policy_decider_session {
                 let mut guard = network_policy_decider_session.write().await;

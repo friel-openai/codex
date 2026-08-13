@@ -47,7 +47,9 @@ use tempfile::TempDir;
 
 use super::super::LocalThreadStore;
 use super::super::LocalThreadStoreConfig;
+use super::super::paginated_fork::inject_lineage_persistence_pause;
 use super::super::test_support::test_config;
+use super::super::writer_lock::WriterLockCoordinator;
 use crate::AppendThreadItemsParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
@@ -65,6 +67,7 @@ use crate::StoredTurnStatus;
 use crate::ThreadPersistenceMetadata;
 use crate::ThreadSortKey;
 use crate::ThreadStore;
+use crate::ThreadStoreError;
 
 #[tokio::test]
 async fn paginated_history_without_state_db_does_not_initialize_sqlite() {
@@ -1373,6 +1376,85 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
 }
 
 #[tokio::test]
+async fn bounded_cross_thread_fork_reserves_every_mutable_lineage_owner_in_uuid_order() {
+    let low = ThreadId::from_string("00000000-0000-4000-8000-000000000001").expect("low thread id");
+    let high =
+        ThreadId::from_string("ffffffff-ffff-4fff-bfff-ffffffffffff").expect("high thread id");
+    for (source_id, child_id) in [(low, high), (high, low)] {
+        let home = TempDir::new().expect("temp dir");
+        let store = projection_store(home.path()).await;
+        create_paginated_thread(&store, source_id).await;
+        store
+            .persist_thread(source_id, PersistContext::Standard)
+            .await
+            .expect("persist source metadata");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id: source_id,
+                items: vec![
+                    turn_started("source-turn"),
+                    user_message("source message"),
+                    turn_completed("source-turn"),
+                ],
+            })
+            .await
+            .expect("append source turn");
+        store.flush_thread(source_id).await.expect("flush source");
+        let source_path = store
+            .live_rollout_path(source_id)
+            .await
+            .expect("source rollout path");
+        let (_, source_end_byte_offset) =
+            rollout_line_byte_offsets(source_path.as_path(), /*ordinal*/ 3);
+        create_paginated_subagent_thread(
+            &store,
+            child_id,
+            Some(HistoryPosition {
+                thread_id: source_id,
+                end_ordinal_exclusive: 4,
+                end_byte_offset: u64::try_from(source_end_byte_offset).expect("source byte offset"),
+            }),
+            /*subagent_history_start_ordinal*/ None,
+        )
+        .await;
+        store
+            .persist_thread(child_id, PersistContext::Standard)
+            .await
+            .expect("persist child metadata");
+        store
+            .shutdown_thread(source_id)
+            .await
+            .expect("release source writer");
+        store
+            .shutdown_thread(child_id)
+            .await
+            .expect("release child writer");
+
+        let competing = Arc::new(WriterLockCoordinator::new(home.path()));
+        let _source_writer = competing
+            .acquire(source_id)
+            .expect("acquire external source writer");
+        let error = store
+            .prepare_fork(PrepareForkParams {
+                thread_id: child_id,
+                boundary: ForkBoundary::ThroughTurn("source-turn".to_string()),
+            })
+            .await
+            .expect_err("external prefix writer must reject bounded fork publication");
+        assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+        assert!(
+            !tokio::fs::try_exists(
+                home.path()
+                    .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            )
+            .await
+            .expect("check immutable root"),
+            "fork conflict must occur before immutable publication"
+        );
+    }
+}
+
+#[tokio::test]
 async fn named_fork_boundaries_reject_invisible_and_noncanonical_turns() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
@@ -2557,7 +2639,7 @@ async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_fini
         .expect("shutdown source");
     compress_rollout(source_path.as_path());
 
-    let ancestor_writer_guard = store.live_writer_locks.lock(ancestor_thread_id).await;
+    let pause = inject_lineage_persistence_pause(source_thread_id);
     let preparation_store = store.clone();
     let preparation = tokio::spawn(async move {
         preparation_store
@@ -2567,13 +2649,13 @@ async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_fini
             })
             .await
     });
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !source_path.exists() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("detached lineage task should materialize the source");
+    tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
+        .await
+        .expect("detached lineage task should materialize the source");
+    assert!(
+        source_path.exists(),
+        "lineage owner must materialize the source"
+    );
     preparation.abort();
     assert!(
         preparation
@@ -2592,7 +2674,7 @@ async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_fini
         }
         _ = tokio::task::yield_now() => {}
     }
-    drop(ancestor_writer_guard);
+    pause.release.notify_one();
     delete
         .await
         .expect("delete source after lineage materialization finishes");
