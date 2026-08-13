@@ -370,81 +370,6 @@ impl AgentControlHarness {
     }
 }
 
-async fn spawned_thread_id_after(
-    manager: &ThreadManager,
-    before_thread_ids: &[ThreadId],
-) -> ThreadId {
-    let mut spawned_thread_ids = manager
-        .list_thread_ids()
-        .await
-        .into_iter()
-        .filter(|thread_id| !before_thread_ids.contains(thread_id))
-        .collect::<Vec<_>>();
-    spawned_thread_ids.sort_by_key(ToString::to_string);
-    assert_eq!(
-        spawned_thread_ids.len(),
-        1,
-        "supervisor startup should add exactly one helper thread"
-    );
-    spawned_thread_ids
-        .pop()
-        .expect("supervisor helper thread id should be present")
-}
-
-async fn create_active_thread_goal_for_test(
-    state_db: &StateDbHandle,
-    parent_thread_id: ThreadId,
-    parent_session: &Arc<crate::session::session::Session>,
-    objective: &str,
-) -> anyhow::Result<(String, ThreadGoal)> {
-    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
-        parent_thread_id,
-        parent_session
-            .get_config()
-            .await
-            .codex_home
-            .join(format!("{parent_thread_id}.jsonl"))
-            .to_path_buf(),
-        chrono::Utc::now(),
-        SessionSource::Exec,
-    )
-    .build("openai");
-    state_db.upsert_thread(&parent_metadata).await?;
-    let state_goal = state_db
-        .thread_goals()
-        .replace_thread_goal(
-            parent_thread_id,
-            objective,
-            codex_state::ThreadGoalStatus::Active,
-            /*token_budget*/ None,
-        )
-        .await?;
-    let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
-    Ok((state_goal.goal_id, protocol_goal))
-}
-
-fn run_goal_supervisor_test<F, T>(name: &'static str, future: F) -> T
-where
-    F: std::future::Future<Output = T> + Send + 'static,
-    T: Send + 'static,
-{
-    let test_thread = std::thread::Builder::new()
-        .name(name.to_string())
-        .stack_size(32 * 1024 * 1024)
-        .spawn(|| {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("build goal supervisor test runtime")
-                .block_on(future)
-        })
-        .expect("spawn goal supervisor test thread");
-    match test_thread.join() {
-        Ok(result) => result,
-        Err(err) => std::panic::resume_unwind(err),
-    }
-}
-
 struct EnvVarGuard {
     key: &'static str,
     original: Option<OsString>,
@@ -622,10 +547,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
             (thread_id == helper_thread_id)
                 .then_some(op)
                 .and_then(|op| match op {
-                    Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
-                        UserInput::Text { text, .. } => Some(text),
-                        _ => None,
-                    }),
+                    Op::TurnInput { request, .. } => match request.input {
+                        codex_protocol::turn_input::TurnInput::UserInput { content, .. } => {
+                            content.into_iter().find_map(|item| match item {
+                                UserInput::Text { text, .. } => Some(text),
+                                _ => None,
+                            })
+                        }
+                        codex_protocol::turn_input::TurnInput::ResponseItem(_)
+                        | codex_protocol::turn_input::TurnInput::InterAgentCommunication(_) => None,
+                    },
                     _ => None,
                 })
         })
@@ -761,6 +692,26 @@ async fn wait_for_recorded_user_message(thread: &CodexThread, needle: &str) {
     })
     .await
     .expect("timed out waiting for user message recording");
+}
+
+fn history_text_match_count<'a>(
+    history_items: impl IntoIterator<Item = &'a ResponseItem>,
+    needle: &str,
+) -> usize {
+    history_items
+        .into_iter()
+        .filter(|item| {
+            let ResponseItem::Message { content, .. } = item else {
+                return false;
+            };
+            content.iter().any(|content_item| match content_item {
+                ContentItem::InputText { text } | ContentItem::OutputText { text } => {
+                    text.contains(needle)
+                }
+                ContentItem::InputImage { .. } | ContentItem::InputAudio { .. } => false,
+            })
+        })
+        .count()
 }
 
 fn history_contains_assistant_inter_agent_communication<'a>(
@@ -2739,21 +2690,23 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .flush_rollout()
         .await
         .expect("parent rollout should flush");
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
     let child_thread_id = harness
         .control
         .spawn_agent_with_metadata(
             child_config.clone(),
             text_input("child task"),
-            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            })),
+            Some(child_source.clone()),
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                initial_task_message: Some("child task".to_string()),
                 ..Default::default()
             },
         )
@@ -2834,6 +2787,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         },
+        subagent_assignment_item(&child_source, "child task".to_string()),
     ];
     assert_eq!(
         strip_response_item_ids(&history_items),
@@ -2938,17 +2892,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         .expect("child shutdown should submit");
     let resumed_child_thread_id = harness
         .control
-        .resume_agent_from_rollout(
-            child_config,
-            child_thread_id,
-            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-                parent_thread_id,
-                depth: 1,
-                agent_path: None,
-                agent_nickname: None,
-                agent_role: None,
-            }),
-        )
+        .resume_agent_from_rollout(child_config, child_thread_id, child_source)
         .await
         .expect("sanitized child should resume from persisted history");
     let resumed_child_thread = harness
@@ -2962,6 +2906,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
         "Child developer instructions.",
         "parent final answer",
         "Child subagent guidance.",
+        "# Subagent Assignment",
+        "Your direct assignment from your parent agent is:\n\nchild task",
     ] {
         assert!(
             history_contains_text(resumed_history.raw_items(), retained_text),
@@ -3725,6 +3671,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
             SpawnAgentOptions {
                 fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                initial_task_message: Some("child task".to_string()),
                 ..Default::default()
             },
         )
@@ -3742,6 +3689,11 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
         history_contains_text(history.raw_items(), "unflushed final answer"),
         "forked child history should include unflushed assistant final answers after flushing the parent rollout"
     );
+    assert_eq!(
+        history_text_match_count(history.raw_items(), "# Subagent Assignment"),
+        1,
+        "forked child history should contain one explicit assignment"
+    );
 
     let _ = harness
         .control
@@ -3752,6 +3704,121 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
         .submit(Op::Shutdown {})
         .await
         .expect("parent shutdown should submit");
+}
+
+#[tokio::test]
+async fn reference_backed_fork_persists_assignment_after_settings_across_resume() {
+    let harness = AgentControlHarness::new_with_multi_agent_v1().await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    parent_thread
+        .session
+        .ensure_rollout_materialized(PersistContext::Standard)
+        .await;
+    parent_thread
+        .session
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+    let child_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: None,
+        agent_nickname: None,
+        agent_role: None,
+    });
+    let child_thread_id = harness
+        .control
+        .spawn_agent_with_metadata(
+            harness.config.clone(),
+            text_input("child task"),
+            Some(child_source.clone()),
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some("synthetic-spawn-call".to_string()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                initial_task_message: Some("child task".to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("reference-backed fork should spawn")
+        .thread_id;
+    let child_thread = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("child thread should be registered");
+    child_thread.ensure_rollout_materialized().await;
+    child_thread
+        .flush_rollout()
+        .await
+        .expect("child rollout should flush");
+
+    let physical_items = RolloutRecorder::load_rollout_items(
+        child_thread
+            .rollout_path()
+            .expect("child rollout should exist")
+            .as_path(),
+    )
+    .await
+    .expect("load child rollout")
+    .0;
+    let reference_index = physical_items
+        .iter()
+        .position(|item| matches!(item, RolloutItem::RolloutReference(_)))
+        .expect("child should preserve the parent reference");
+    let settings_index = physical_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(_))
+            )
+        })
+        .expect("child should persist effective settings");
+    let assignment_index = physical_items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                RolloutItem::ResponseItem(envelope)
+                    if history_contains_text([&envelope.item], "# Subagent Assignment")
+            )
+        })
+        .expect("child should persist its assignment");
+    assert!(reference_index < settings_index && settings_index < assignment_index);
+    let live_history = child_thread.session.clone_history().await;
+    assert_eq!(
+        history_text_match_count(live_history.raw_items(), "# Subagent Assignment"),
+        1
+    );
+
+    harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
+        .expect("child shutdown should submit");
+    harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, child_source)
+        .await
+        .expect("child should resume");
+    let resumed_child = harness
+        .manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("resumed child should be registered");
+    let resumed_history = resumed_child.session.clone_history().await;
+    assert_eq!(
+        history_text_match_count(resumed_history.raw_items(), "# Subagent Assignment"),
+        1,
+        "cold resume should retain exactly one explicit assignment"
+    );
+
+    let _ = harness.control.shutdown_live_agent(child_thread_id).await;
+    let _ = parent_thread.submit(Op::Shutdown {}).await;
 }
 
 #[tokio::test]
