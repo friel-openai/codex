@@ -2315,6 +2315,7 @@ impl ThreadManagerState {
         &self,
         config: Config,
         initial_history: InitialHistory,
+        fork_startup_items: ForkStartupItems,
         history_mode: Option<ThreadHistoryMode>,
         agent_control: AgentControl,
         session_source: SessionSource,
@@ -2342,6 +2343,7 @@ impl ThreadManagerState {
             ThreadSpawnRequest::new(options, Arc::clone(&self.auth_manager), agent_control);
         request.parent_thread_id = parent_thread_id;
         request.forked_from_thread_id = forked_from_thread_id;
+        request.fork_startup_items = fork_startup_items;
         request.inherited_environments = inherited_environments;
         request.inherited_exec_policy = inherited_exec_policy;
         request.inherited_thread_state = inherited_thread_state;

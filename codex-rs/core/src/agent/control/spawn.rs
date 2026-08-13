@@ -719,6 +719,8 @@ impl AgentControl {
             };
         let mut preserve_reference_context_item =
             matches!(fork_mode, SpawnAgentForkMode::FullHistory);
+        let defer_reference_backed_child_suffix = preserve_reference_context_item;
+        let mut deferred_child_tail_items = Vec::new();
         if preserve_reference_context_item {
             for item in forked_rollout_items.iter().rev() {
                 let RolloutItem::Compacted(compacted) = item else {
@@ -857,6 +859,14 @@ impl AgentControl {
                 subagent_usage_hint_message.into(),
             ));
         }
+        if let Some(initial_task_message) = options.initial_task_message.clone() {
+            let assignment = subagent_assignment_item(&session_source, initial_task_message);
+            if defer_reference_backed_child_suffix {
+                deferred_child_tail_items.push(assignment);
+            } else {
+                forked_rollout_items.push(RolloutItem::ResponseItem(assignment.into()));
+            }
+        }
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);
 
@@ -876,6 +886,7 @@ impl AgentControl {
             .fork_thread_with_source(
                 config.clone(),
                 InitialHistory::Forked(forked_rollout_items),
+                crate::session::ForkStartupItems::new(Vec::new(), deferred_child_tail_items),
                 destination_history_mode,
                 self.clone(),
                 session_source,
