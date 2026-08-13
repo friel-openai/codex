@@ -1,7 +1,6 @@
 use super::augment_tool_spec_for_code_mode;
 use super::code_mode_name_for_tool_name;
 use super::collect_code_mode_tool_definitions;
-use super::tool_spec_has_encrypted_input;
 use super::tool_spec_to_code_mode_tool_definition;
 use crate::AdditionalProperties;
 use crate::FreeformTool;
@@ -233,7 +232,6 @@ fn encrypted_input_tools_are_excluded_from_code_mode_definitions() {
         ],
     });
 
-    assert!(tool_spec_has_encrypted_input(&spec));
     assert_eq!(
         collect_code_mode_tool_definitions([&spec])
             .into_iter()

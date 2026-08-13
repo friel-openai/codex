@@ -329,7 +329,6 @@ pub(crate) fn finalize_tool_router(
     tool_search_handler_cache: &ToolSearchHandlerCache,
 ) -> CodexResult<ToolRouter> {
     apply_direct_model_only_namespace_overrides(turn_context, &mut registry);
-    apply_encrypted_input_exposure_policy(&mut registry);
     let code_mode_enabled = matches!(
         effective_tool_mode(turn_context),
         ToolMode::CodeMode | ToolMode::CodeModeOnly
@@ -457,31 +456,6 @@ pub(crate) fn finalize_tool_router(
     }
 
     Ok(ToolRouter::from_parts(registry, model_visible_specs))
-}
-
-fn apply_encrypted_input_exposure_policy(registry: &mut ToolRegistry) {
-    for tool in registry.entries_mut() {
-        let owned_spec;
-        let spec = if let Some(spec) = tool.runtime.immutable_spec() {
-            spec.as_ref()
-        } else {
-            owned_spec = tool.runtime.spec();
-            &owned_spec
-        };
-        if !codex_tools::tool_spec_has_encrypted_input(spec) {
-            continue;
-        }
-        // The Responses backend supplies encrypted arguments. Nested code mode has no encryption
-        // primitive, so it must keep these tools on a model-mediated exposure.
-        tool.exposure = match tool.exposure {
-            ToolExposure::Direct => ToolExposure::DirectModelOnly,
-            ToolExposure::Deferred => ToolExposure::DeferredModelOnly,
-            ToolExposure::CodeModeOnly => ToolExposure::Hidden,
-            ToolExposure::DirectModelOnly
-            | ToolExposure::DeferredModelOnly
-            | ToolExposure::Hidden => tool.exposure,
-        };
-    }
 }
 
 fn apply_direct_model_only_namespace_overrides(
