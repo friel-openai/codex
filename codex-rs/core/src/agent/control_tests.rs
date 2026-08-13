@@ -47,6 +47,7 @@ use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
+use codex_protocol::protocol::ThreadGoal;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
@@ -78,6 +79,9 @@ use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::responses::strip_response_item_ids;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use tempfile::TempDir;
 use tokio::time::Duration;
 use tokio::time::sleep;
@@ -285,6 +289,308 @@ impl AgentControlHarness {
             .expect("child spawn should succeed")
             .thread_id
     }
+}
+
+async fn spawned_thread_id_after(
+    manager: &ThreadManager,
+    before_thread_ids: &[ThreadId],
+) -> ThreadId {
+    let mut spawned_thread_ids = manager
+        .list_thread_ids()
+        .await
+        .into_iter()
+        .filter(|thread_id| !before_thread_ids.contains(thread_id))
+        .collect::<Vec<_>>();
+    spawned_thread_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        spawned_thread_ids.len(),
+        1,
+        "supervisor startup should add exactly one helper thread"
+    );
+    spawned_thread_ids
+        .pop()
+        .expect("supervisor helper thread id should be present")
+}
+
+async fn create_active_thread_goal_for_test(
+    state_db: &StateDbHandle,
+    parent_thread_id: ThreadId,
+    parent_session: &Arc<crate::session::session::Session>,
+    objective: &str,
+) -> anyhow::Result<(String, ThreadGoal)> {
+    let parent_metadata = codex_state::ThreadMetadataBuilder::new(
+        parent_thread_id,
+        parent_session
+            .get_config()
+            .await
+            .codex_home
+            .join(format!("{parent_thread_id}.jsonl"))
+            .to_path_buf(),
+        chrono::Utc::now(),
+        SessionSource::Exec,
+    )
+    .build("openai");
+    state_db.upsert_thread(&parent_metadata).await?;
+    let state_goal = state_db
+        .thread_goals()
+        .replace_thread_goal(
+            parent_thread_id,
+            objective,
+            codex_state::ThreadGoalStatus::Active,
+            /*token_budget*/ None,
+        )
+        .await?;
+    let protocol_goal = crate::goal_supervisor::protocol_goal_from_state(state_goal.clone());
+    Ok((state_goal.goal_id, protocol_goal))
+}
+
+fn run_goal_supervisor_test<F, T>(name: &'static str, future: F) -> T
+where
+    F: std::future::Future<Output = T> + Send + 'static,
+    T: Send + 'static,
+{
+    let test_thread = std::thread::Builder::new()
+        .name(name.to_string())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build goal supervisor test runtime")
+                .block_on(future)
+        })
+        .expect("spawn goal supervisor test thread");
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(err) => std::panic::resume_unwind(err),
+    }
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &OsStr) -> Self {
+        let original = std::env::var_os(key);
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+fn assert_goal_supervisor_boot_history<'a>(
+    history: impl Clone + IntoIterator<Item = &'a ResponseItem>,
+    supervisor_prompt: &str,
+    generic_subagent_hint: &str,
+) {
+    assert!(
+        history_contains_text(history.clone(), "parent seed context"),
+        "goal supervisor helper should inherit the parent conversation prefix"
+    );
+    let supervisor_prompt_count = history
+        .clone()
+        .into_iter()
+        .filter(|item| {
+            matches!(
+                item,
+                ResponseItem::Message { role, content, .. }
+                    if role == "developer"
+                        && content.iter().any(|content_item| matches!(
+                            content_item,
+                            ContentItem::InputText { text } if text == supervisor_prompt
+                        ))
+            )
+        })
+        .count();
+    assert_eq!(
+        supervisor_prompt_count, 1,
+        "goal supervisor role prompt should be injected exactly once"
+    );
+    assert!(
+        history_contains_text(history.clone(), "# Goal Supervisor Continuity"),
+        "goal supervisor helper should receive durable continuity context"
+    );
+    assert!(
+        history.clone().into_iter().any(|item| matches!(
+            item,
+            ResponseItem::FunctionCall { name, call_id, .. }
+                if name == "list_agents" && call_id == "synthetic_supervisor_list_agents"
+        )),
+        "goal supervisor helper should receive a synthetic list_agents call"
+    );
+    assert!(
+        history.clone().into_iter().any(|item| matches!(
+            item,
+            ResponseItem::FunctionCallOutput { call_id, .. }
+                if call_id == "synthetic_supervisor_list_agents"
+        )),
+        "goal supervisor helper should receive the synthetic list_agents output"
+    );
+    assert!(
+        !history_contains_text(history, generic_subagent_hint),
+        "goal supervisor helper should not receive generic subagent usage guidance"
+    );
+}
+
+#[test]
+#[serial(fork_env)]
+fn goal_supervisor_full_history_bootstrap_survives_cold_resume() {
+    run_goal_supervisor_test(
+        "goal_supervisor_full_history_bootstrap_survives_cold_resume",
+        goal_supervisor_full_history_bootstrap_survives_cold_resume_inner(),
+    );
+}
+
+async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+    const MATERIALIZE_EPHEMERAL_ROLLOUTS: &str = "CODEX_MATERIALIZE_EPHEMERAL_ROLLOUTS";
+    const GENERIC_SUBAGENT_HINT: &str = "generic subagent guidance must not reach the supervisor";
+    let _materialize_ephemeral_rollouts =
+        EnvVarGuard::set(MATERIALIZE_EPHEMERAL_ROLLOUTS, OsStr::new("1"));
+
+    let (home, mut config) = test_config().await;
+    let _ = config.features.enable(Feature::AgentPromptInjection);
+    let _ = config.features.enable(Feature::Goals);
+    let _ = config.features.enable(Feature::GoalSupervisor);
+    config.multi_agent_v2.subagent_usage_hint_text = Some(GENERIC_SUBAGENT_HINT.to_string());
+    let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
+    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    parent_thread
+        .inject_user_message_without_turn("parent seed context".to_string())
+        .await;
+    parent_thread.ensure_rollout_materialized().await;
+    parent_thread
+        .flush_rollout()
+        .await
+        .expect("parent rollout should flush");
+
+    let state_db = harness
+        .state_db
+        .as_ref()
+        .expect("goal supervisor test requires state db");
+    let (goal_id, goal) = create_active_thread_goal_for_test(
+        state_db,
+        parent_thread_id,
+        &parent_thread.session,
+        "Ship the active user goal.",
+    )
+    .await
+    .expect("active goal should persist");
+    let before_thread_ids = harness.manager.list_thread_ids().await;
+
+    crate::goal_supervisor::maybe_start_supervisor_checkin(
+        &parent_thread.session,
+        goal_id.as_str(),
+        &goal,
+    )
+    .await
+    .expect("active goal should spawn a goal supervisor helper");
+
+    let helper_thread_id = spawned_thread_id_after(&harness.manager, &before_thread_ids).await;
+    let helper_thread = harness
+        .manager
+        .get_thread(helper_thread_id)
+        .await
+        .expect("goal supervisor helper should be registered");
+    let helper_snapshot = helper_thread.config_snapshot().await;
+    let helper_source = helper_snapshot.session_source.clone();
+    let expected_path = AgentPath::root()
+        .join(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+        .expect("canonical goal supervisor path");
+    assert!(matches!(
+        &helper_source,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: source_parent_thread_id,
+            agent_path: Some(agent_path),
+            agent_role: Some(agent_role),
+            ..
+        }) if *source_parent_thread_id == parent_thread_id
+            && agent_path == &expected_path
+            && agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
+    ));
+    assert_eq!(
+        helper_thread.session.prompt_cache_key(),
+        parent_thread.session.prompt_cache_key(),
+        "internal goal supervisor helper should reuse the parent prompt cache key"
+    );
+
+    let supervisor_prompt =
+        crate::session::load_supervisor_agent_prompt(&harness.config.codex_home).await;
+    let helper_history = helper_thread.session.clone_history().await;
+    assert_goal_supervisor_boot_history(
+        helper_history.raw_items(),
+        &supervisor_prompt,
+        GENERIC_SUBAGENT_HINT,
+    );
+    let captured_assignment = harness
+        .manager
+        .captured_ops()
+        .into_iter()
+        .find_map(|(thread_id, op)| {
+            (thread_id == helper_thread_id)
+                .then_some(op)
+                .and_then(|op| match op {
+                    Op::UserInput { items, .. } => items.into_iter().find_map(|item| match item {
+                        UserInput::Text { text, .. } => Some(text),
+                        _ => None,
+                    }),
+                    _ => None,
+                })
+        })
+        .expect("goal supervisor assignment should be submitted as user input");
+    assert!(captured_assignment.contains("# Goal Supervisor Assignment"));
+    assert!(captured_assignment.contains("Ship the active user goal."));
+    assert!(
+        !captured_assignment.contains(&supervisor_prompt),
+        "role prompt should not be duplicated in the user assignment"
+    );
+
+    helper_thread
+        .flush_rollout()
+        .await
+        .expect("materialized goal supervisor rollout should flush");
+    assert!(
+        helper_thread.rollout_path().is_some(),
+        "debug materialization should give the ephemeral helper a durable rollout"
+    );
+    harness
+        .control
+        .shutdown_live_agent(helper_thread_id)
+        .await
+        .expect("goal supervisor helper should shut down before cold resume");
+
+    let mut helper_config = config;
+    helper_config.ephemeral = true;
+    let resumed_helper_id = harness
+        .control
+        .resume_agent_from_rollout(helper_config, helper_thread_id, helper_source)
+        .await
+        .expect("materialized goal supervisor helper should cold resume");
+    assert_eq!(resumed_helper_id, helper_thread_id);
+    let resumed_helper = harness
+        .manager
+        .get_thread(resumed_helper_id)
+        .await
+        .expect("cold-resumed goal supervisor helper should be registered");
+    let resumed_history = resumed_helper.session.clone_history().await;
+    assert_goal_supervisor_boot_history(
+        resumed_history.raw_items(),
+        &supervisor_prompt,
+        GENERIC_SUBAGENT_HINT,
+    );
 }
 
 async fn persisted_originator(thread: &CodexThread) -> String {
