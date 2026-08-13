@@ -6,6 +6,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
@@ -159,6 +160,7 @@ use codex_thread_store::LocalThreadStore;
 use codex_thread_store::PersistContext;
 use codex_thread_store::ReadThreadParams;
 use codex_thread_store::ResumeThreadParams;
+use codex_thread_store::SegmentCheckpointPersistenceOutcome;
 use codex_thread_store::ThreadPersistenceMetadata;
 use codex_thread_store::ThreadPersistenceMode;
 use codex_thread_store::ThreadStore;
@@ -3852,7 +3854,7 @@ impl Session {
         reference_context_item: Option<TurnContextItem>,
         world_state_baseline: Option<Arc<WorldState>>,
         metadata: CompactedHistoryMetadata,
-    ) {
+    ) -> CodexResult<()> {
         for envelope in &mut items {
             Self::assign_missing_response_item_id(&mut envelope.item);
         }
@@ -3868,49 +3870,88 @@ impl Session {
                 .map(|id| id.to_string()),
             window_id: Some(metadata.window_ids.window_id.to_string()),
         };
-        // Compaction starts a new history window, so its WorldState baseline must be full.
-        let mut world_state_item = None;
-        {
-            let mut state = self.state.lock().await;
-            state.replace_annotated_history(items, reference_context_item.clone());
-            if let Some(world_state) = world_state_baseline {
-                let snapshot = world_state.snapshot();
-                world_state_item = Some(WorldStateItem::full(snapshot.clone().into_object()));
-                state.history.set_world_state_baseline(snapshot);
-            }
-        }
+        // Compaction starts a new history window, so its WorldState baseline must be full. Keep
+        // the current in-memory history intact until checkpoint persistence proves whether the
+        // replacement became durable.
+        let world_state_snapshot = world_state_baseline.map(|world_state| world_state.snapshot());
+        let world_state_item = world_state_snapshot
+            .as_ref()
+            .map(|snapshot| WorldStateItem::full(snapshot.clone().into_object()));
 
         let mut replacement_items = vec![RolloutItem::Compacted(compacted_item)];
         if let Some(world_state_item) = world_state_item {
             replacement_items.push(RolloutItem::WorldState(world_state_item));
         }
-        if let Some(turn_context_item) = reference_context_item {
+        if let Some(turn_context_item) = reference_context_item.clone() {
             replacement_items.push(RolloutItem::TurnContext(turn_context_item));
         }
-        let rotated = if let Some(live_thread) = self.live_thread() {
-            match live_thread
-                .freeze_local_segment(FreezeRolloutSegmentParams::rotate(
-                    replacement_items.clone(),
-                ))
-                .await
-            {
-                Ok(Some(_)) => true,
-                Ok(None) => false,
-                Err(err) => {
-                    warn!("failed to rotate rollout segment after compaction: {err}");
-                    false
-                }
+        let checkpoint_outcome = if let Some(live_thread) = self.live_thread() {
+            if self.persistence_restart_required() {
+                return Err(CodexErr::Fatal(
+                    "compacted-history persistence requires the thread to be restarted".to_string(),
+                ));
             }
+            // Keep the session fenced while publication is in flight. If this future is
+            // cancelled, the detached LiveThread publication owner may still commit the
+            // checkpoint, so only the code paths that establish a consistent durable and
+            // in-memory state may clear this flag.
+            self.persistence_restart_required
+                .store(true, Ordering::Release);
+            Some(
+                live_thread
+                    .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(
+                        replacement_items.clone(),
+                    ))
+                    .await,
+            )
         } else {
-            false
+            None
         };
-        if !rotated {
-            self.persist_rollout_items(&replacement_items).await;
+        let persisted_checkpoint = checkpoint_outcome.is_some();
+        match checkpoint_outcome {
+            Some(SegmentCheckpointPersistenceOutcome::Committed) => {}
+            Some(SegmentCheckpointPersistenceOutcome::NotCommitted { error }) => {
+                self.persistence_restart_required
+                    .store(false, Ordering::Release);
+                warn!(%error, "failed to persist compacted history without changing durable history");
+                return Err(CodexErr::Fatal(format!(
+                    "failed to persist compacted history without changing durable history: {error}"
+                )));
+            }
+            Some(SegmentCheckpointPersistenceOutcome::Indeterminate { error }) => {
+                self.require_restart_after_checkpoint_failure();
+                warn!(%error, "compacted-history persistence is indeterminate; restart is required before later persistence");
+                return Err(CodexErr::Fatal(format!(
+                    "compacted-history persistence is indeterminate; restart the thread before continuing: {error}"
+                )));
+            }
+            None => self.persist_rollout_items(&replacement_items).await,
         }
         {
             let mut state = self.state.lock().await;
+            state.replace_annotated_history(items, reference_context_item);
+            if let Some(snapshot) = world_state_snapshot {
+                state.history.set_world_state_baseline(snapshot);
+            }
             state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
         }
+        if persisted_checkpoint {
+            self.persistence_restart_required
+                .store(false, Ordering::Release);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn persistence_restart_required(&self) -> bool {
+        self.persistence_restart_required.load(Ordering::Acquire)
+            || self
+                .live_thread()
+                .is_some_and(LiveThread::persistence_restart_required)
+    }
+
+    fn require_restart_after_checkpoint_failure(&self) {
+        self.persistence_restart_required
+            .store(true, Ordering::Release);
     }
 
     pub fn enabled(&self, feature: Feature) -> bool {
@@ -4228,6 +4269,10 @@ impl Session {
 
     #[tracing::instrument(level = "trace", skip_all, fields(item_count = items.len()))]
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        if self.persistence_restart_required() {
+            error!("failed to record rollout items: thread persistence requires a restart");
+            return;
+        }
         if let Some(live_thread) = self.live_thread()
             && let Err(e) = live_thread.append_items(items).await
         {
@@ -4309,7 +4354,7 @@ impl Session {
         &self,
         step_context: &StepContext,
         world_state: Arc<WorldState>,
-    ) -> u64 {
+    ) -> CodexResult<u64> {
         let turn_context = step_context.turn.as_ref();
         let retained_client_developer_messages =
             if self.enabled(Feature::RetainClientDeveloperMessages) {
@@ -4351,9 +4396,9 @@ impl Session {
                 window_ids,
             },
         )
-        .await;
+        .await?;
         self.recompute_token_usage(turn_context).await;
-        window_number
+        Ok(window_number)
     }
 
     pub(crate) async fn reference_context_item(&self) -> Option<TurnContextItem> {

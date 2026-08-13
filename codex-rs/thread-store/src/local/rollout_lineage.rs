@@ -18,6 +18,7 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 
 use super::LocalThreadStore;
+use super::RolloutWriterReservation;
 use super::thread_rollout_resolver;
 use crate::StoredThreadItem;
 use crate::ThreadStoreError;
@@ -85,8 +86,94 @@ impl LocalThreadStore {
     pub(super) async fn resolve_rollout_lineage_for_reference(
         &self,
         requested_thread_id: ThreadId,
-    ) -> ThreadStoreResult<(RolloutLineage, tokio::sync::OwnedMutexGuard<()>)> {
-        let source_writer_guard = self.live_writer_locks.lock(requested_thread_id).await;
+        expected_rollout_id: Option<codex_protocol::RolloutId>,
+    ) -> ThreadStoreResult<(RolloutLineage, RolloutWriterReservation, bool)> {
+        let mut thread_ids = vec![requested_thread_id];
+        let mut source_projection_state = None;
+        loop {
+            let reservation = self.reserve_rollout_writers(thread_ids.as_slice()).await?;
+            let mut source = thread_rollout_resolver::resolve_current_including_archived(
+                self,
+                requested_thread_id,
+            )
+            .await?;
+            if source.is_none() {
+                // A deferred empty thread has no rollout path until persistence runs. Materialize
+                // only that missing source while its writer is reserved; persisting an existing
+                // source here would repair stale projection state before fork fallback inspects it.
+                match super::live_writer::persist_thread_reserved(self, requested_thread_id).await {
+                    Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+                source = thread_rollout_resolver::resolve_current_including_archived(
+                    self,
+                    requested_thread_id,
+                )
+                .await?;
+            }
+            let source = source
+                .ok_or_else(|| malformed_lineage(requested_thread_id, "missing source rollout"))?;
+            if expected_rollout_id.is_some_and(|expected| expected != source.rollout_id) {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: format!(
+                        "rollout path does not select the current rollout for thread {requested_thread_id}"
+                    ),
+                });
+            }
+            super::helpers::scoped_rollout_path(
+                self.config.codex_home.clone(),
+                source.path.as_path(),
+                "Codex home",
+            )?;
+            if source_projection_state
+                .as_ref()
+                .is_none_or(|(rollout_id, _)| *rollout_id != source.rollout_id)
+            {
+                source_projection_state = Some((
+                    source.rollout_id,
+                    super::thread_history::projection_state(self, source.rollout_id)
+                        .await?
+                        .is_none(),
+                ));
+            }
+            let lineage = self.resolve_rollout_lineage(requested_thread_id).await?;
+            let mut discovered_ids = lineage
+                .segments
+                .iter()
+                .map(|segment| segment.thread_id)
+                .collect::<Vec<_>>();
+            discovered_ids.push(requested_thread_id);
+            discovered_ids.sort_unstable_by_key(ThreadId::to_string);
+            discovered_ids.dedup();
+            if discovered_ids
+                .iter()
+                .all(|thread_id| reservation.contains(*thread_id))
+            {
+                let lineage = self
+                    .materialize_rollout_lineage_for_reference(
+                        requested_thread_id,
+                        lineage,
+                        &reservation,
+                    )
+                    .await?;
+                return Ok((
+                    lineage,
+                    reservation,
+                    source_projection_state
+                        .map(|(_, was_missing)| was_missing)
+                        .unwrap_or(true),
+                ));
+            }
+            thread_ids = discovered_ids;
+        }
+    }
+
+    async fn materialize_rollout_lineage_for_reference(
+        &self,
+        requested_thread_id: ThreadId,
+        mut lineage: RolloutLineage,
+        reservation: &RolloutWriterReservation,
+    ) -> ThreadStoreResult<RolloutLineage> {
         let source =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
                 .await?
@@ -96,13 +183,8 @@ impl LocalThreadStore {
             source.path.as_path(),
             "Codex home",
         )?;
-        let mut lineage = self.resolve_rollout_lineage(requested_thread_id).await?;
         for segment in lineage.segments.iter_mut().rev() {
-            let _writer_guard = if segment.thread_id == requested_thread_id {
-                None
-            } else {
-                Some(self.live_writer_locks.lock(segment.thread_id).await)
-            };
+            debug_assert!(reservation.contains(segment.thread_id));
             let rollout_path = codex_rollout::existing_rollout_path(segment.rollout_path.as_path())
                 .await
                 .unwrap_or_else(|| segment.rollout_path.clone());
@@ -120,8 +202,8 @@ impl LocalThreadStore {
                             rollout_path.display()
                         ),
                     })?;
-            // Only the source was locked before lineage resolution. Another thread's previously
-            // computed boundary is trustworthy only when its immutable segment identity matches.
+            // A previously computed boundary is reusable only when it still names the same
+            // immutable segment under the combined writer reservation.
             let reusable_end_byte_offset = if materialized_path == segment.rollout_path
                 && segment.end_ordinal_exclusive.is_some()
                 && let Some(end_byte_offset) = segment.end_byte_offset
@@ -181,7 +263,7 @@ impl LocalThreadStore {
             };
             segment.rollout_path = materialized_path;
         }
-        Ok((lineage, source_writer_guard))
+        Ok(lineage)
     }
 
     pub(super) async fn resolve_rollout_lineage_at(

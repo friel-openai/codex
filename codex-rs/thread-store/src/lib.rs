@@ -81,6 +81,7 @@ pub use types::RevertThreadParams;
 pub use types::SearchTextRange;
 pub use types::SearchThreadOccurrencesParams;
 pub use types::SearchThreadsParams;
+pub use types::SegmentCheckpointPersistenceOutcome;
 pub use types::SortDirection;
 pub use types::StoredModelContext;
 pub use types::StoredThread;

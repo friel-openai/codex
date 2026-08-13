@@ -324,8 +324,8 @@ async fn fork_lineage_preserves_validated_unordinaled_ancestor_cutoff() {
         Some(parent_end.end_byte_offset),
     );
 
-    let (prepared, _source_writer_guard) = store
-        .resolve_rollout_lineage_for_reference(child)
+    let (prepared, _writer_reservation, _projection_was_missing) = store
+        .resolve_rollout_lineage_for_reference(child, /*expected_rollout_id*/ None)
         .await
         .expect("prepare child lineage for a fork reference");
 
