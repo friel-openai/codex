@@ -1188,6 +1188,22 @@ pub(crate) async fn fire_scheduled_supervisor_wakeup_for_test(session: &Arc<Sess
     }
 }
 
+#[cfg(test)]
+pub(crate) fn supervisor_wakeup_generation_for_test(session: &Session) -> u64 {
+    session
+        .goal_supervisor_runtime
+        .wakeup_generation
+        .load(Ordering::SeqCst)
+}
+
+#[cfg(test)]
+pub(crate) async fn fire_supervisor_wakeup_generation_for_test(
+    session: &Arc<Session>,
+    generation: u64,
+) {
+    fire_scheduled_supervisor_wakeup(session, generation).await;
+}
+
 pub(crate) fn protocol_goal_from_state(goal: codex_state::ThreadGoal) -> ThreadGoal {
     ThreadGoal {
         thread_id: goal.thread_id,
