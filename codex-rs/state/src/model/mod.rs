@@ -10,6 +10,7 @@ mod thread_metadata;
 
 pub use backfill_state::BackfillState;
 pub use backfill_state::BackfillStatus;
+pub use graph::DirectionalThreadSpawnEdge;
 pub use graph::DirectionalThreadSpawnEdgeStatus;
 pub use log::LogEntry;
 pub use log::LogQuery;
