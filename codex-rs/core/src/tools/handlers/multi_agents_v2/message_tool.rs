@@ -125,7 +125,7 @@ pub(crate) async fn handle_message_string_tool(
         message,
         &source,
         mode.trigger_turn(),
-    );
+    )?;
     let kind = match mode {
         MessageDeliveryMode::QueueOnly => AgentCommunicationKind::Message,
         MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
