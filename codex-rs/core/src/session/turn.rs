@@ -1784,8 +1784,8 @@ async fn run_sampling_request(
     let mut original_input = None;
     let mut executed_tool_calls_by_output = HashMap::new();
     loop {
-        // A retry is a new provider request attempt. Unsafe partial output from an attempt is not
-        // allowed to disappear behind a later retry: an unsafe attempt returns immediately.
+        // A routing profile must not hide unsafe partial output behind a later model change.
+        // Ordinary same-model retries rebuild the request from committed local history.
         let reroute_safe = Arc::new(AtomicBool::new(true));
         let interrupted_response = Arc::new(AtomicBool::new(false));
         let prompt_input = if let Some(input) = initial_input.take() {
@@ -1863,7 +1863,9 @@ async fn run_sampling_request(
             original_input = Some(prompt.input);
         }
 
-        if !attempt_reroute_safe || !err.is_retryable() {
+        let routing_profile_blocks_retry =
+            turn_context.model_profile.is_some() && !attempt_reroute_safe;
+        if routing_profile_blocks_retry || !err.is_retryable() {
             return Err(SamplingRequestFailure {
                 error: err,
                 reroute_safe: attempt_reroute_safe,
