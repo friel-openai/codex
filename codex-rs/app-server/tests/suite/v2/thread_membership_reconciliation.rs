@@ -252,6 +252,7 @@ async fn list_current_members(
                 source_kinds: None,
                 archived: None,
                 section_id: None,
+                project_id: None,
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
@@ -298,6 +299,7 @@ async fn wait_for_completed_current_tree(
                     source_kinds: None,
                     archived: None,
                     section_id: None,
+                    project_id: None,
                     cwd: None,
                     use_state_db_only: true,
                     search_term: None,
@@ -509,8 +511,10 @@ async fn build_current_tree() -> Result<CurrentTreeFixture> {
     let branch_b_id = ThreadId::from_string(&branch_b.id)?;
     start_turn_and_wait(&mut app, branch_a_id, BRANCH_A_PROMPT).await?;
     start_turn_and_wait(&mut app, branch_b_id, BRANCH_B_PROMPT).await?;
-    let branch_a_members = wait_for_completed_current_tree(&app, branch_a_id, 1).await?;
-    let branch_b_members = wait_for_completed_current_tree(&app, branch_b_id, 1).await?;
+    let branch_a_members =
+        wait_for_completed_current_tree(&app, branch_a_id, /*expected_count*/ 1).await?;
+    let branch_b_members =
+        wait_for_completed_current_tree(&app, branch_b_id, /*expected_count*/ 1).await?;
     let branch_a_leaf_id = *branch_a_members
         .values()
         .next()
@@ -653,7 +657,8 @@ async fn build_current_tree() -> Result<CurrentTreeFixture> {
             "adoption call {call_id} returned {output}"
         );
     }
-    let ids_by_path = wait_for_completed_current_tree(&app, root_thread_id, 4).await?;
+    let ids_by_path =
+        wait_for_completed_current_tree(&app, root_thread_id, /*expected_count*/ 4).await?;
 
     assert_eq!(
         list_current_members(&app, root_thread_id).await?,
