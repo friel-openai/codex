@@ -29,9 +29,16 @@ impl LocalThreadStore {
         plan: &LegacyLineageMigrationPlan,
     ) -> ThreadStoreResult<()> {
         validate_segment_migration(plan)?;
-        for dependency in &plan.history_bases {
-            let lineage = self.resolve_rollout_lineage_at(dependency.position).await?;
-            if lineage.root_rollout_id != dependency.rollout_id {
+        for position in plan
+            .sources
+            .iter()
+            .filter_map(|source| match source.predecessor.as_ref() {
+                Some(LegacyLineagePredecessor::HistoryBase(position)) => Some(*position),
+                _ => None,
+            })
+        {
+            let lineage = self.resolve_rollout_lineage_at(position).await?;
+            if lineage.root_rollout_id != position.thread_id {
                 return Err(migration_error(
                     "history_base validation resolved another physical rollout",
                 ));
@@ -238,9 +245,10 @@ impl LocalThreadStore {
                     .as_ref()
                     .ok_or_else(|| migration_error("lineage target is missing its staged path"))?;
                 thread_history::delete_thread(self, target.rollout_id).await?;
-                thread_history::reset_projection_for_replacement(
+                prepare_lineage_target_projection(
                     self,
                     target.rollout_id,
+                    staged_path,
                     target.start_ordinal.ok_or_else(|| {
                         migration_error("lineage target is missing its start ordinal")
                     })?,
@@ -411,12 +419,6 @@ impl LocalThreadStore {
                         "outdated lineage target is missing its projection start ordinal",
                     )
                 })?;
-                thread_history::reset_projection_for_replacement(
-                    self,
-                    target.rollout_id,
-                    start_ordinal,
-                )
-                .await?;
                 let projection_path = if target
                     .path
                     .extension()
@@ -428,6 +430,13 @@ impl LocalThreadStore {
                 } else {
                     target.path.clone()
                 };
+                prepare_lineage_target_projection(
+                    self,
+                    target.rollout_id,
+                    projection_path.as_path(),
+                    start_ordinal,
+                )
+                .await?;
                 self.project_rollout_in_batches(
                     target.rollout_id,
                     projection_path.as_path(),
@@ -448,6 +457,23 @@ impl LocalThreadStore {
             .await
             .map_err(migration_error)?;
         sync_parent_directory(journal_path).await
+    }
+}
+
+async fn prepare_lineage_target_projection(
+    store: &LocalThreadStore,
+    rollout_id: codex_protocol::RolloutId,
+    rollout_path: &Path,
+    start_ordinal: u64,
+) -> ThreadStoreResult<()> {
+    let session_meta = codex_rollout::read_session_meta_line(rollout_path)
+        .await
+        .map_err(migration_error)?;
+    if session_meta.meta.history_base.is_some() {
+        thread_history::begin_incomplete_paginated_projection(store, rollout_id, start_ordinal)
+            .await
+    } else {
+        thread_history::reset_projection_for_replacement(store, rollout_id, start_ordinal).await
     }
 }
 

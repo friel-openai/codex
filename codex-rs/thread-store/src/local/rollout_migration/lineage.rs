@@ -171,6 +171,111 @@ pub(super) async fn plan_legacy_lineage(
     })
 }
 
+/// Reports whether a selected Paginated lineage still contains a `RolloutReference` that native
+/// `history_base` can represent without filtering or truncation.
+pub(super) async fn contains_convertible_rollout_reference(
+    codex_home: &Path,
+    selected_path: &Path,
+) -> ThreadStoreResult<bool> {
+    let mut source_path = codex_rollout::existing_rollout_path(selected_path)
+        .await
+        .ok_or_else(|| migration_error("selected rollout does not exist"))?;
+    let mut active = HashSet::new();
+    let mut rollout_paths_by_id = None;
+    // A native history can contain thousands of same-thread segments. Keep this walk iterative so
+    // polling the migration inspection does not recurse once per `history_base` edge.
+    loop {
+        let canonical_path = tokio::fs::canonicalize(source_path.as_path())
+            .await
+            .map_err(migration_error)?;
+        if !active.insert(canonical_path) {
+            return Err(migration_error(format!(
+                "rollout migration lineage contains a cycle at {}",
+                source_path.display()
+            )));
+        }
+        match inspect_predecessor(source_path.as_path()).await? {
+            Some(LegacyLineagePredecessor::RolloutReference(reference)) => {
+                return Ok(reference_is_history_base_compatible(&reference));
+            }
+            Some(LegacyLineagePredecessor::HistoryBase(position)) => {
+                if rollout_paths_by_id.is_none() {
+                    rollout_paths_by_id = Some(
+                        codex_rollout::index_rollout_paths_by_rollout_id(codex_home)
+                            .await
+                            .map_err(migration_error)?,
+                    );
+                }
+                let path = rollout_paths_by_id
+                    .as_ref()
+                    .and_then(|paths| paths.get(&position.thread_id))
+                    .cloned()
+                    .ok_or_else(|| {
+                        migration_error(format!(
+                            "rollout migration history_base source {} does not exist",
+                            position.thread_id
+                        ))
+                    })?;
+                let session_meta = codex_rollout::read_session_meta_line(path.as_path())
+                    .await
+                    .map_err(migration_error)?;
+                let rollout_id = codex_rollout::rollout_id_from_path(
+                    codex_rollout::plain_rollout_path(path.as_path()).as_path(),
+                )
+                .unwrap_or(session_meta.meta.id);
+                if rollout_id != position.thread_id {
+                    return Err(migration_error(
+                        "rollout migration history_base resolved another physical rollout",
+                    ));
+                }
+                if session_meta.meta.history_mode != ThreadHistoryMode::Paginated {
+                    return Err(migration_error(
+                        "rollout migration history_base source is not Paginated",
+                    ));
+                }
+                source_path = path;
+            }
+            None => return Ok(false),
+        }
+    }
+}
+
+pub(super) async fn has_leading_filtered_rollout_reference(path: &Path) -> ThreadStoreResult<bool> {
+    Ok(matches!(
+        inspect_predecessor(path).await?,
+        Some(LegacyLineagePredecessor::RolloutReference(reference))
+            if !reference_is_history_base_compatible(&reference)
+    ))
+}
+
+async fn inspect_predecessor(path: &Path) -> ThreadStoreResult<Option<LegacyLineagePredecessor>> {
+    let session_meta = codex_rollout::read_session_meta_line(path)
+        .await
+        .map_err(migration_error)?;
+    if let Some(position) = session_meta.meta.history_base {
+        return Ok(Some(LegacyLineagePredecessor::HistoryBase(position)));
+    }
+    let mut reader = codex_rollout::open_rollout_line_reader(path)
+        .await
+        .map_err(migration_error)?;
+    let mut saw_session_meta = false;
+    while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
+        let Ok(line) = serde_json::from_str::<RolloutLine>(raw.as_str()) else {
+            continue;
+        };
+        match line.item {
+            RolloutItem::SessionMeta(_) if !saw_session_meta => saw_session_meta = true,
+            RolloutItem::SessionMeta(_) => {}
+            RolloutItem::RolloutReference(reference) if saw_session_meta => {
+                return Ok(Some(LegacyLineagePredecessor::RolloutReference(reference)));
+            }
+            _ if saw_session_meta => return Ok(None),
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 async fn initial_legacy_replay_positions(
     codex_home: &Path,
     source: &LegacyLineageSource,
@@ -228,15 +333,20 @@ pub(super) fn validate_segment_migration(
             ));
         }
         match source.predecessor.as_ref() {
-            Some(LegacyLineagePredecessor::HistoryBase(position))
-                if index != 0
-                    || plan.history_bases.len() != 1
-                    || plan.history_bases[0].position != *position =>
-            {
-                return Err(migration_error(
-                    "lineage migration history_base must be the authenticated oldest boundary",
-                ));
-            }
+            Some(LegacyLineagePredecessor::HistoryBase(position)) => match index {
+                0 if plan.history_bases.len() == 1
+                    && plan.history_bases[0].position == *position => {}
+                index
+                    if index > 0
+                        && plan.sources.get(index - 1).is_some_and(|predecessor| {
+                            predecessor.rollout_id == position.thread_id
+                        }) => {}
+                _ => {
+                    return Err(migration_error(
+                        "lineage migration history_base does not match its authenticated predecessor",
+                    ));
+                }
+            },
             Some(LegacyLineagePredecessor::RolloutReference(reference)) => {
                 let dependency = plan
                     .reference_dependencies
@@ -431,103 +541,112 @@ async fn plan_source(
     history_bases: &mut Vec<LegacyHistoryBaseDependency>,
     reference_dependencies: &mut Vec<LegacyReferenceDependency>,
 ) -> ThreadStoreResult<()> {
-    let canonical_path = tokio::fs::canonicalize(source.path.as_path())
-        .await
-        .map_err(migration_error)?;
-    if planned.contains(&canonical_path) {
-        return Ok(());
-    }
-    if !active.insert(canonical_path.clone()) {
-        return Err(migration_error(format!(
-            "rollout migration lineage contains a cycle at {}",
-            source.path.display()
-        )));
-    }
-
-    match source.predecessor.clone() {
-        Some(LegacyLineagePredecessor::RolloutReference(reference)) => {
-            let predecessor_path =
-                codex_rollout::resolve_rollout_reference_path(codex_home, &reference)
-                    .await
-                    .map_err(migration_error)?;
-            let predecessor = inspect_source(predecessor_path.as_path()).await?;
-            if !reference_is_history_base_compatible(&reference)
-                && predecessor.session_meta.meta.history_mode == ThreadHistoryMode::Paginated
-            {
-                let segment_id = predecessor.session_meta.meta.segment_id.ok_or_else(|| {
-                    migration_error(
-                        "filtered Paginated reference dependency is missing an immutable segment id",
-                    )
-                })?;
-                let end_ordinal_exclusive =
-                    paginated_end_ordinal(predecessor.path.as_path()).await?;
-                reference_dependencies.push(LegacyReferenceDependency {
-                    successor_rollout_id: source.rollout_id,
-                    thread_id: predecessor.session_meta.meta.id,
-                    rollout_id: predecessor.rollout_id,
-                    segment_id,
-                    path: predecessor.path,
-                    end_ordinal_exclusive,
-                    byte_count: predecessor.byte_count,
-                    record_count: predecessor.record_count,
-                    sha256: predecessor.sha256,
-                });
-            } else {
-                Box::pin(plan_source(
-                    codex_home,
-                    predecessor,
-                    active,
-                    planned,
-                    sources,
-                    history_bases,
-                    reference_dependencies,
-                ))
-                .await?;
-            }
+    let mut source = source;
+    let mut pending = Vec::new();
+    // A lineage has at most one predecessor per source. Collect that chain explicitly so a deep
+    // migration does not create one nested `Future::poll` frame per rollout segment.
+    loop {
+        let canonical_path = tokio::fs::canonicalize(source.path.as_path())
+            .await
+            .map_err(migration_error)?;
+        if planned.contains(&canonical_path) {
+            break;
         }
-        Some(LegacyLineagePredecessor::HistoryBase(position)) => {
-            if !history_bases.is_empty() {
-                return Err(migration_error(
-                    "lineage migration contains more than one history_base boundary",
-                ));
-            }
-            let path =
-                codex_rollout::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
-                    .await
-                    .map_err(migration_error)?
-                    .ok_or_else(|| {
-                        migration_error(format!(
-                            "rollout migration history_base source {} does not exist",
-                            position.thread_id
-                        ))
+        if !active.insert(canonical_path.clone()) {
+            return Err(migration_error(format!(
+                "rollout migration lineage contains a cycle at {}",
+                source.path.display()
+            )));
+        }
+
+        let predecessor = source.predecessor.clone();
+        let successor_rollout_id = source.rollout_id;
+        pending.push((canonical_path, source));
+        match predecessor {
+            Some(LegacyLineagePredecessor::RolloutReference(reference)) => {
+                let predecessor_path =
+                    codex_rollout::resolve_rollout_reference_path(codex_home, &reference)
+                        .await
+                        .map_err(migration_error)?;
+                let predecessor = inspect_source(predecessor_path.as_path()).await?;
+                if !reference_is_history_base_compatible(&reference)
+                    && predecessor.session_meta.meta.history_mode == ThreadHistoryMode::Paginated
+                {
+                    let segment_id = predecessor.session_meta.meta.segment_id.ok_or_else(|| {
+                        migration_error(
+                            "filtered Paginated reference dependency is missing an immutable segment id",
+                        )
                     })?;
-            let dependency = inspect_source(path.as_path()).await?;
-            if dependency.rollout_id != position.thread_id {
-                return Err(migration_error(
-                    "rollout migration history_base resolved another physical rollout",
-                ));
+                    let end_ordinal_exclusive =
+                        paginated_end_ordinal(predecessor.path.as_path()).await?;
+                    reference_dependencies.push(LegacyReferenceDependency {
+                        successor_rollout_id,
+                        thread_id: predecessor.session_meta.meta.id,
+                        rollout_id: predecessor.rollout_id,
+                        segment_id,
+                        path: predecessor.path,
+                        end_ordinal_exclusive,
+                        byte_count: predecessor.byte_count,
+                        record_count: predecessor.record_count,
+                        sha256: predecessor.sha256,
+                    });
+                    break;
+                }
+                source = predecessor;
             }
-            if dependency.session_meta.meta.history_mode != ThreadHistoryMode::Paginated {
-                return Err(migration_error(
-                    "rollout migration history_base source is not Paginated",
-                ));
+            Some(LegacyLineagePredecessor::HistoryBase(position)) => {
+                if !history_bases.is_empty() {
+                    return Err(migration_error(
+                        "lineage migration contains more than one history_base boundary",
+                    ));
+                }
+                let path =
+                    codex_rollout::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
+                        .await
+                        .map_err(migration_error)?
+                        .ok_or_else(|| {
+                            migration_error(format!(
+                                "rollout migration history_base source {} does not exist",
+                                position.thread_id
+                            ))
+                        })?;
+                let dependency = inspect_source(path.as_path()).await?;
+                if dependency.rollout_id != position.thread_id {
+                    return Err(migration_error(
+                        "rollout migration history_base resolved another physical rollout",
+                    ));
+                }
+                if dependency.session_meta.meta.history_mode != ThreadHistoryMode::Paginated {
+                    return Err(migration_error(
+                        "rollout migration history_base source is not Paginated",
+                    ));
+                }
+                if contains_convertible_rollout_reference(codex_home, dependency.path.as_path())
+                    .await?
+                {
+                    source = dependency;
+                } else {
+                    history_bases.push(LegacyHistoryBaseDependency {
+                        position,
+                        thread_id: dependency.session_meta.meta.id,
+                        rollout_id: dependency.rollout_id,
+                        path: dependency.path,
+                        byte_count: dependency.byte_count,
+                        record_count: dependency.record_count,
+                        sha256: dependency.sha256,
+                    });
+                    break;
+                }
             }
-            history_bases.push(LegacyHistoryBaseDependency {
-                position,
-                thread_id: dependency.session_meta.meta.id,
-                rollout_id: dependency.rollout_id,
-                path: dependency.path,
-                byte_count: dependency.byte_count,
-                record_count: dependency.record_count,
-                sha256: dependency.sha256,
-            });
+            None => break,
         }
-        None => {}
     }
 
-    active.remove(&canonical_path);
-    planned.insert(canonical_path);
-    sources.push(source.into_plan_source());
+    while let Some((canonical_path, source)) = pending.pop() {
+        active.remove(&canonical_path);
+        planned.insert(canonical_path);
+        sources.push(source.into_plan_source());
+    }
     Ok(())
 }
 

@@ -248,26 +248,45 @@ async fn rebuild_registered(
         let active_path = codex_rollout::existing_rollout_path(active.rollout_path())
             .await
             .ok_or_else(|| projection_error("selected active rollout is unavailable"))?;
-        if active_path.extension().and_then(|value| value.to_str()) == Some("zst") {
-            discard_staging(store, staging_thread_id, staging_guard).await?;
-            return Err(projection_error("selected active rollout is compressed"));
+        let active_is_compressed =
+            active_path.extension().and_then(|value| value.to_str()) == Some("zst");
+        if active_is_compressed {
+            let archived = store
+                .state_db
+                .as_ref()
+                .ok_or_else(|| projection_error("projection rebuild requires SQLite metadata"))?
+                .get_thread(thread_id)
+                .await
+                .map_err(|error| {
+                    projection_error(format!("failed to read archived thread metadata: {error}"))
+                })?
+                .is_some_and(|metadata| metadata.archived_at.is_some());
+            if !archived {
+                discard_staging(store, staging_thread_id, staging_guard).await?;
+                return Err(projection_error("selected active rollout is compressed"));
+            }
+        } else {
+            // An unarchived active rollout may have appended after the lineage snapshot. Catch its
+            // projection up while the writer is reserved before publishing the staged rows.
+            thread_history_materialization::materialize_to_sqlite(
+                store,
+                staging_thread_id,
+                active_path.as_path(),
+            )
+            .await?;
         }
-        thread_history_materialization::materialize_to_sqlite(
-            store,
-            staging_thread_id,
-            active_path.as_path(),
-        )
-        .await?;
         let staged_state = thread_history::projection_state(store, staging_thread_id)
             .await?
             .ok_or_else(|| projection_error("staged projection has no checkpoint"))?;
-        let active_len = tokio::fs::metadata(active_path.as_path())
-            .await
-            .map_err(projection_io_error)?
-            .len();
-        if staged_state.next_byte_offset != active_len {
-            discard_staging(store, staging_thread_id, staging_guard).await?;
-            continue;
+        if !active_is_compressed {
+            let active_len = tokio::fs::metadata(active_path.as_path())
+                .await
+                .map_err(projection_io_error)?
+                .len();
+            if staged_state.next_byte_offset != active_len {
+                discard_staging(store, staging_thread_id, staging_guard).await?;
+                continue;
+            }
         }
         thread_history::publish_staged_projection(store, selected.rollout_id, staging_thread_id)
             .await?;
