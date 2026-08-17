@@ -7,6 +7,7 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SessionMetaLine;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 
@@ -33,26 +34,33 @@ pub(super) enum GoalSupervisorLineageProvenance {
 }
 
 impl GoalSupervisorLineageProvenance {
+    /// Applies one physical rollout's persisted identity to inherited lineage provenance.
+    pub(super) fn continued_through_session_meta(self, meta: &SessionMetaLine) -> Self {
+        if meta.meta.model_provider.as_deref() != Some("openai") {
+            return Self::Untrusted;
+        }
+        let inherited_same_thread = matches!(
+            self,
+            Self::AffectedAlpha6 { thread_id } if thread_id == meta.meta.id
+        );
+        if meta.meta.cli_version == AFFECTED_CLI_VERSION || inherited_same_thread {
+            Self::AffectedAlpha6 {
+                thread_id: meta.meta.id,
+            }
+        } else {
+            Self::Untrusted
+        }
+    }
+
     pub(super) fn continued_through(self, lines: &[RolloutLine]) -> Self {
         let Some(meta) = lines.iter().find_map(|line| match &line.item {
-            RolloutItem::SessionMeta(meta) => Some(&meta.meta),
+            RolloutItem::SessionMeta(meta) => Some(meta),
             _ => None,
         }) else {
             // Callers may split one already-classified physical file at rejected JSONL records.
             return self;
         };
-        if meta.model_provider.as_deref() != Some("openai") {
-            return Self::Untrusted;
-        }
-        let inherited_same_thread = matches!(
-            self,
-            Self::AffectedAlpha6 { thread_id } if thread_id == meta.id
-        );
-        if meta.cli_version == AFFECTED_CLI_VERSION || inherited_same_thread {
-            Self::AffectedAlpha6 { thread_id: meta.id }
-        } else {
-            Self::Untrusted
-        }
+        self.continued_through_session_meta(meta)
     }
 
     /// Carries affected provenance only across a canonical, unfiltered same-thread rotation.

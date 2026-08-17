@@ -185,6 +185,7 @@ pub(super) async fn resume_thread(
     } else {
         store.writer_lock_coordinator.acquire(params.thread_id)?
     };
+    super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
     let cwd = params
         .metadata
         .cwd
