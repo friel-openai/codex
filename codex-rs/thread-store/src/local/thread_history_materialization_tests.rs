@@ -13,6 +13,11 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
@@ -20,27 +25,36 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
+use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -316,10 +330,10 @@ async fn legacy_projection_materializes_visible_messages_without_rollout_ordinal
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("first question")),
-            rollout_line(None, legacy_agent_message("first answer")),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first question")),
+            rollout_line(/*ordinal*/ None, legacy_agent_message("first answer")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -410,14 +424,14 @@ async fn legacy_projection_materializes_inter_agent_communication() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("first question")),
-            rollout_line(None, policy_rejected_item),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first question")),
+            rollout_line(/*ordinal*/ None, policy_rejected_item),
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::InterAgentCommunication(communication.clone()),
             ),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -474,7 +488,7 @@ async fn legacy_projection_preserves_item_ids_across_streaming_batches() {
             legacy_agent_message(&format!("answer {index}")),
             turn_completed(&turn_id),
         ] {
-            suffix.push_str(&rollout_line(None, item));
+            suffix.push_str(&rollout_line(/*ordinal*/ None, item));
             suffix.push('\n');
         }
     }
@@ -536,8 +550,14 @@ async fn legacy_projection_materializes_implicit_completed_turn_summary() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n",
-            rollout_line(None, legacy_user_message("implicit question")),
-            rollout_line(None, legacy_agent_message("implicit answer")),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_user_message("implicit question")
+            ),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_agent_message("implicit answer")
+            ),
         ),
     );
 
@@ -589,9 +609,12 @@ async fn legacy_projection_materializes_implicit_commentary_without_a_final_answ
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n",
-            rollout_line(None, legacy_user_message("implicit question")),
             rollout_line(
-                None,
+                /*ordinal*/ None,
+                legacy_user_message("implicit question")
+            ),
+            rollout_line(
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "implicit commentary".to_string(),
                     phase: Some(MessagePhase::Commentary),
@@ -658,17 +681,17 @@ async fn legacy_projection_does_not_report_commentary_as_a_final_answer() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("question")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("question")),
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "progress update".to_string(),
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
                 })),
             ),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -727,9 +750,9 @@ async fn legacy_projection_skips_repeated_segment_metadata() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n",
-            rollout_line(None, legacy_user_message("first segment")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first segment")),
             segment_metadata,
-            rollout_line(None, legacy_user_message("next segment")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("next segment")),
         ),
     );
 
@@ -791,8 +814,11 @@ async fn legacy_projection_waits_for_complete_rollout_lines() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("partial message")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_user_message("partial message")
+            ),
         ),
     );
 
@@ -854,7 +880,7 @@ async fn legacy_projection_removes_rolled_back_turns_and_items_transactionally()
             legacy_agent_message(message),
             turn_completed(turn_id),
         ] {
-            suffix.push_str(&rollout_line(None, item));
+            suffix.push_str(&rollout_line(/*ordinal*/ None, item));
             suffix.push('\n');
         }
     }
@@ -869,7 +895,7 @@ async fn legacy_projection_removes_rolled_back_turns_and_items_transactionally()
         &format!(
             "{}\n",
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                     num_turns: 1,
                 })),
@@ -1239,6 +1265,85 @@ WHERE thread_id = ?
     .await
     .expect("read projection state");
     assert_eq!(projection_state, (rollout_len, 5));
+}
+
+#[tokio::test]
+async fn paginated_projection_streams_across_multiple_byte_batches() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist session metadata");
+
+    let payload = "x".repeat(20 * 1024);
+    let mut items = Vec::with_capacity(302);
+    items.push(turn_started("large-turn"));
+    for index in 0..300 {
+        items.push(completed_item(
+            thread_id,
+            "large-turn",
+            TurnItem::AgentMessage(AgentMessageItem {
+                id: format!("large-agent-{index:03}"),
+                content: vec![AgentMessageContent::Text {
+                    text: format!("{index:03}:{payload}"),
+                }],
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            }),
+        ));
+    }
+    items.push(turn_completed("large-turn"));
+    store
+        .append_items(AppendThreadItemsParams { thread_id, items })
+        .await
+        .expect("append multi-batch paginated history");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("large rollout path");
+    let rollout_len = fs::metadata(rollout_path)
+        .expect("large rollout metadata")
+        .len();
+    assert!(
+        rollout_len > 4 * 1024 * 1024,
+        "fixture must cross the projection byte-batch boundary"
+    );
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let projected_items = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM thread_items WHERE thread_id = ? AND turn_id = 'large-turn'",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("count multi-batch projected items");
+    assert_eq!(projected_items, 300);
+    let item_ids = sqlx::query_scalar::<_, String>(
+        "SELECT item_id FROM thread_items WHERE thread_id = ? AND turn_id = 'large-turn' ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read multi-batch projected item ids");
+    assert_eq!(
+        item_ids.first().map(String::as_str),
+        Some("large-agent-000")
+    );
+    assert_eq!(item_ids.last().map(String::as_str), Some("large-agent-299"));
+    assert_eq!(
+        projection_state(&pool, thread_id).await,
+        (
+            i64::try_from(rollout_len).expect("rollout length fits SQLite"),
+            303,
+        )
+    );
 }
 
 #[tokio::test]
@@ -1756,6 +1861,76 @@ async fn paginated_fork_without_response_history_reuses_bounded_model_context() 
 }
 
 #[tokio::test]
+async fn segmented_paginated_explicit_fork_fails_closed_without_a_recent_checkpoint() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+
+    for index in 0..7 {
+        let turn_id = format!("turn-{index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id.as_str()),
+                    user_message(format!("message {index}").as_str()),
+                    turn_completed(turn_id.as_str()),
+                ],
+            })
+            .await
+            .expect("append segmented turn");
+        if index < 6 {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate without a checkpoint");
+        }
+    }
+    store
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                "active checkpoint",
+            )),
+        )
+        .await
+        .expect("publish a certified active checkpoint");
+
+    let missing_checkpoint = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-3".to_string()),
+        })
+        .await
+        .expect_err("an explicit fork must not replay an uncheckpointed lineage");
+    assert!(
+        matches!(
+            missing_checkpoint,
+            ThreadStoreError::InvalidRequest { ref message }
+                if message.contains("migrate the history before forking at that boundary")
+        ),
+        "unexpected error: {missing_checkpoint:?}"
+    );
+
+    let ancient_boundary = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-0".to_string()),
+        })
+        .await
+        .expect_err("an explicit fork must not scan beyond the recent segment window");
+    assert!(
+        matches!(
+            ancient_boundary,
+            ThreadStoreError::InvalidRequest { ref message }
+                if message.contains("migrate the history before forking at that boundary")
+        ),
+        "unexpected error: {ancient_boundary:?}"
+    );
+}
+
+#[tokio::test]
 async fn indexed_latest_fork_preserves_authoritative_context_and_projected_parent_turns() {
     for segment_count in [8, 32, 128] {
         let home = TempDir::new().expect("temp dir");
@@ -1867,7 +2042,15 @@ async fn indexed_latest_fork_preserves_authoritative_context_and_projected_paren
             assert_eq!(turn.items.len(), 1);
             assert_eq!(turn.items[0].item_id, format!("item-{index}"));
         }
-        assert_eq!(prepared.frozen_segment.reference.thread_id, Some(thread_id));
+        assert_eq!(
+            prepared
+                .frozen_segment
+                .as_ref()
+                .expect("durable fork freezes its source")
+                .reference
+                .thread_id,
+            Some(thread_id)
+        );
 
         let side = store
             .prepare_fork_without_response_history_with_model_context(
@@ -1970,14 +2153,8 @@ async fn indexed_latest_fork_replays_uncompacted_model_context_once() {
         prepared.model_context.as_slice(),
         "uncompacted message 3"
     ));
-    assert_eq!(
-        prepared
-            .projected_response_turns
-            .as_ref()
-            .expect("reuse projected parent response instead of replaying twice")
-            .len(),
-        4
-    );
+    assert!(prepared.projected_response_turns.is_none());
+    assert!(prepared.copied_history.is_none());
 }
 
 #[tokio::test]
@@ -2315,6 +2492,7 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         .persist_thread(thread_id, PersistContext::Standard)
         .await
         .expect("persist paginated source metadata");
+    let mut predecessor_reference = None;
     for index in 0..3 {
         let turn_id = format!("turn-{index}");
         store
@@ -2338,10 +2516,18 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
             .await
             .expect("append projected source turn");
         if index < 2 {
-            store
+            let frozen = store
                 .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
                 .await
                 .expect("rotate projected source segment");
+            if predecessor_reference.is_none() {
+                predecessor_reference = Some((
+                    frozen.reference,
+                    frozen
+                        .next_rollout_ordinal
+                        .expect("sealed predecessor ordinal boundary"),
+                ));
+            }
         }
     }
     index_paginated_source_metadata(&store, thread_id).await;
@@ -2355,10 +2541,39 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse canonical source rollout");
-    match &mut lines[1].item {
-        RolloutItem::RolloutReference(reference) => reference.nth_user_message = Some(1),
-        _ => panic!("expected leading same-thread rollout reference"),
+    match &mut lines[0].item {
+        RolloutItem::SessionMeta(session_meta) => session_meta
+            .meta
+            .history_base
+            .take()
+            .expect("native same-thread history base"),
+        _ => panic!("expected leading session metadata"),
+    };
+    let (mut predecessor_reference, predecessor_end_ordinal) =
+        predecessor_reference.expect("sealed predecessor reference");
+    predecessor_reference.nth_user_message = Some(1);
+    lines[0].ordinal = Some(predecessor_end_ordinal);
+    for (offset, line) in lines[1..].iter_mut().enumerate() {
+        let offset = u64::try_from(offset).expect("compatibility ordinal offset");
+        line.ordinal = Some(
+            predecessor_end_ordinal
+                .checked_add(offset)
+                .and_then(|ordinal| ordinal.checked_add(2))
+                .expect("compatibility ordinal overflow"),
+        );
     }
+    lines.insert(
+        1,
+        RolloutLine {
+            timestamp: lines[0].timestamp.clone(),
+            ordinal: Some(
+                predecessor_end_ordinal
+                    .checked_add(1)
+                    .expect("compatibility reference ordinal overflow"),
+            ),
+            item: RolloutItem::RolloutReference(predecessor_reference),
+        },
+    );
     let encoded = lines
         .iter()
         .map(serde_json::to_string)
@@ -2368,19 +2583,12 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         + "\n";
     fs::write(active_path.as_path(), encoded.as_bytes())
         .expect("replace source rollout with inherited user cutoff");
-    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
-        home.path().abs(),
-    ))
-    .await
-    .expect("open projected thread history");
-    sqlx::query(
-        "UPDATE thread_history_projection_state SET next_rollout_byte_offset = ? WHERE thread_id = ?",
-    )
-    .bind(i64::try_from(encoded.len()).expect("source length"))
-    .bind(thread_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("update source projection byte checkpoint");
+    assert!(
+        store
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("rebuild filtered compatibility projection")
+    );
 
     let prepared = store
         .prepare_fork(PrepareForkParams {
@@ -2915,7 +3123,13 @@ async fn prepared_fork_reserves_source_until_child_reference_is_durable() {
     ));
     let frozen_items = super::super::read_thread::load_history_items(
         home.path(),
-        prepared.frozen_segment.reference.rollout_path.as_path(),
+        prepared
+            .frozen_segment
+            .as_ref()
+            .expect("durable prepared fork freezes its source")
+            .reference
+            .rollout_path
+            .as_path(),
     )
     .await
     .expect("materialize the exact prepared reference");
@@ -3568,7 +3782,7 @@ SELECT
 }
 
 #[tokio::test]
-async fn synchronized_catch_up_does_not_replay_old_rows() {
+async fn out_of_band_projection_update_requires_canonical_rebuild() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -3600,7 +3814,16 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
         .await
         .expect("catch up synchronized rollout");
 
-    assert_eq!(projection_state(&pool, thread_id).await, before);
+    assert_eq!(
+        projection_state(&pool, thread_id).await,
+        (-1 - before.0, before.1)
+    );
+    assert!(
+        !store
+            .has_history_projection(thread_id)
+            .await
+            .expect("reject externally modified projection")
+    );
     let status =
         sqlx::query_scalar::<_, String>("SELECT status FROM thread_turns WHERE thread_id = ?")
             .bind(thread_id.to_string())
@@ -3608,6 +3831,20 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
             .await
             .expect("read projected turn");
     assert_eq!(status, "sentinel");
+    assert!(
+        store
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("rebuild externally modified projection")
+    );
+    assert_eq!(projection_state(&pool, thread_id).await, before);
+    let status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM thread_turns WHERE thread_id = ?")
+            .bind(thread_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("read rebuilt turn");
+    assert_eq!(status, "inProgress");
 }
 
 #[tokio::test]
