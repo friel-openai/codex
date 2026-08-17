@@ -14,6 +14,7 @@ use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMetaLine;
 
 use crate::ARCHIVED_SESSIONS_SUBDIR;
+use crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR;
 use crate::RolloutItem;
 use crate::RolloutLine;
 use crate::SESSIONS_SUBDIR;
@@ -97,6 +98,7 @@ impl RolloutReferenceIndex {
                         .insert(history_base.thread_id);
                 }
                 if let Some(reference) = leading_reference
+                    && !references_detached_segment(codex_home, &reference)
                     && let Some(referenced_rollout_id) =
                         reference.rollout_id.or(reference.thread_id)
                 {
@@ -163,6 +165,25 @@ impl RolloutReferenceIndex {
             .filter(move |(_, rollout)| rollout.thread_id == thread_id)
             .map(|(rollout_id, rollout)| (*rollout_id, rollout.path.as_path()))
     }
+}
+
+/// Immutable snapshot references protect the snapshot path, not the mutable rollout that supplied
+/// its bytes. The snapshot lives outside the active and archived roots maintained by compression
+/// and thread deletion, so indexing its source rollout ID would incorrectly pin that mutable file.
+fn references_detached_segment(codex_home: &Path, reference: &RolloutReferenceItem) -> bool {
+    let (Some(thread_id), Some(segment_id)) = (reference.thread_id, reference.segment_id) else {
+        return false;
+    };
+    let expected_parent = codex_home
+        .join(ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string());
+    let Ok(relative_path) = reference.rollout_path.strip_prefix(expected_parent) else {
+        return false;
+    };
+    let mut components = relative_path.components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
 }
 
 async fn read_direct_reference_metadata(
