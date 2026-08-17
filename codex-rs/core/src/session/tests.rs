@@ -3767,7 +3767,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             .history
             .set_world_state_baseline(world_state.snapshot());
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
     }
     let source_model_state = source
         .capture_fork_model_state(&source_response_items)
@@ -3789,42 +3789,43 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         )
         .await?;
 
-    let mut child_state = child.state.lock().await;
-    assert!(Arc::ptr_eq(
-        &child_state.history.shared_annotated_items(),
-        &source_response_items
-    ));
-    assert!(
-        child_state.history.shared_annotated_items()[0]
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.client_authored)
-    );
-    assert_eq!(
-        child_state.reference_context_item(),
-        Some(reference_context_item)
-    );
-    assert_eq!(
-        child_state.previous_turn_settings(),
-        Some(previous_turn_settings)
-    );
-    assert_eq!(child_state.token_info(), Some(authoritative_tokens));
-    assert_eq!(
-        child_state.token_info_and_rate_limits().1,
-        Some(authoritative_rate_limits.clone())
-    );
-    assert_eq!(child_state.auto_compact_window_number(), 7);
-    assert_eq!(child_state.auto_compact_window_ids(), window_ids);
-    assert_eq!(child_state.history.history_version(), 1);
-    assert!(
-        child_state
-            .history
-            .update_world_state(&world_state)
-            .1
-            .is_none(),
-        "an unchanged parent world-state baseline must not be reintroduced"
-    );
-    drop(child_state);
+    {
+        let mut child_state = child.state.lock().await;
+        assert!(Arc::ptr_eq(
+            &child_state.history.shared_annotated_items(),
+            &source_response_items
+        ));
+        assert!(
+            child_state.history.shared_annotated_items()[0]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.client_authored)
+        );
+        assert_eq!(
+            child_state.reference_context_item(),
+            Some(reference_context_item)
+        );
+        assert_eq!(
+            child_state.previous_turn_settings(),
+            Some(previous_turn_settings)
+        );
+        assert_eq!(child_state.token_info(), Some(authoritative_tokens));
+        assert_eq!(
+            child_state.token_info_and_rate_limits().1,
+            Some(authoritative_rate_limits.clone())
+        );
+        assert_eq!(child_state.auto_compact_window_number(), 7);
+        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+        assert_eq!(child_state.history.history_version(), 1);
+        assert!(
+            child_state
+                .history
+                .update_world_state(&world_state)
+                .1
+                .is_none(),
+            "an unchanged parent world-state baseline must not be reintroduced"
+        );
+    }
 
     child.flush_rollout().await?;
     let child_rollout_path = child
@@ -3959,7 +3960,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
             .set_world_state_baseline(world_state.snapshot());
         state.set_token_info(Some(token_info.clone()));
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
     }
 
     let expected_position = store
@@ -4002,6 +4003,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
             /*thread_source*/ None,
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
         )
         .await?;
 
@@ -4303,6 +4305,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
             /*thread_source*/ None,
             /*parent_trace*/ None,
             ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
         )
         .await?;
     if use_shared_model_history {
@@ -8532,7 +8535,9 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
 async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
     let (session, _turn_context, rx) = make_session_and_context_with_rx().await;
     let original_personality = session.thread_config_snapshot().await.personality;
-    let admission = session.checkpoint_admission_lock.lock().await;
+    let admission = Arc::clone(&session.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
     let task_session = Arc::clone(&session);
     let update = tokio::spawn(async move {
         thread_settings::update(

@@ -1560,6 +1560,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
             items.push(RolloutItem::Compacted(CompactedItem {
                 message: "indexed Legacy resume checkpoint".to_string(),
                 replacement_history: Some(Vec::new()),
+                mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
                 previous_window_id: None,
@@ -1576,6 +1577,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                 approvals_reviewer: None,
                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
                 permission_profile: None,
+                active_permission_profile: None,
                 network: None,
                 file_system_sandbox_policy: None,
                 model: "mock-model".to_string(),

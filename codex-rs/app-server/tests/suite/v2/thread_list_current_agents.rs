@@ -248,7 +248,7 @@ async fn list_threads_for_relation(
         limit,
         model_providers,
         source_kinds,
-        None,
+        /*archived*/ None,
     )
     .await
 }
@@ -278,6 +278,7 @@ async fn list_threads_for_relation_with_archived(
             source_kinds,
             archived,
             section_id: None,
+            project_id: None,
             cwd: None,
             use_state_db_only: true,
             search_term: None,

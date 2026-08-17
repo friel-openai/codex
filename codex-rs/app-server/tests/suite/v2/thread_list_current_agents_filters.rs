@@ -227,7 +227,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
     )
     .await?;
     let section = state_db
-        .create_thread_section("Current Workers", None)
+        .create_thread_section("Current Workers", /*appearance*/ None)
         .await?;
     let mut persisted_metadata = state_db
         .get_thread(persisted_worker_id)
@@ -243,7 +243,11 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
     );
     assert!(
         state_db
-            .move_thread_to_section(persisted_worker_id, Some(&section.id), None)
+            .move_thread_to_section(
+                persisted_worker_id,
+                Some(&section.id),
+                /*before_thread_id*/ None
+            )
             .await?
     );
 
@@ -259,6 +263,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
                 source_kinds: None,
                 archived: None,
                 section_id: Some(Some(section.id.clone())),
+                project_id: None,
                 cwd: None,
                 use_state_db_only: true,
                 search_term: Some("Persisted Worker B".to_string()),
@@ -318,6 +323,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
                 source_kinds: None,
                 archived: None,
                 section_id: None,
+                project_id: None,
                 cwd: None,
                 use_state_db_only: true,
                 search_term: None,
@@ -463,6 +469,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             source_kinds: None,
             archived: None,
             section_id: None,
+            project_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,
@@ -488,6 +495,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
             source_kinds: None,
             archived: None,
             section_id: None,
+            project_id: None,
             cwd: None,
             use_state_db_only: false,
             search_term: None,

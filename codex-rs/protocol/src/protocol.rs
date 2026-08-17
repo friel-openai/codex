@@ -153,6 +153,13 @@ pub struct TurnEnvironmentSelection {
     pub environment_id: String,
     pub cwd: PathUri,
     pub workspace_roots: Vec<PathUri>,
+    /// Runtime environment configuration is resolved by the environment owner.
+    ///
+    /// Rollout checkpoints retain the selected environment and roots but must not persist shell
+    /// environment policy values or transient pending and failure states.
+    #[serde(skip, default)]
+    #[schemars(skip)]
+    #[ts(skip)]
     pub config: EnvironmentConfigState,
 }
 
@@ -4445,6 +4452,24 @@ mod tests {
     use std::path::PathBuf;
     use tempfile::NamedTempFile;
     use tempfile::TempDir;
+
+    #[test]
+    fn turn_environment_selection_does_not_persist_runtime_config() -> Result<()> {
+        let cwd = test_path_buf("/workspace").abs();
+        let selection = TurnEnvironmentSelection {
+            environment_id: "remote".to_string(),
+            cwd: PathUri::from_abs_path(&cwd),
+            workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+            config: EnvironmentConfigState::Pending,
+        };
+
+        let value = serde_json::to_value(&selection)?;
+        assert_eq!(value.get("config"), None);
+
+        let decoded: TurnEnvironmentSelection = serde_json::from_value(value)?;
+        assert_eq!(decoded.config, EnvironmentConfigState::FromThread);
+        Ok(())
+    }
 
     #[test]
     fn review_decision_denied_round_trip() -> Result<()> {

@@ -29,6 +29,7 @@ fn stored_root(config: &Config) -> StoredThread {
         section: None,
         section_position: None,
         section_entered_at: None,
+        project_id: None,
         cwd: config.cwd.as_path().join("original-workspace"),
         cli_version: "test".to_string(),
         source: SessionSource::Cli,

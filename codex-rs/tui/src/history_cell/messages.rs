@@ -187,8 +187,8 @@ pub(crate) fn finish_user_message_lines(
         if left_padding > 0 {
             spans.push(Span::raw(" ".repeat(left_padding)));
             for hyperlink in &mut line.hyperlinks {
-                hyperlink.columns = hyperlink.columns.start + left_padding
-                    ..hyperlink.columns.end + left_padding;
+                hyperlink.columns =
+                    hyperlink.columns.start + left_padding..hyperlink.columns.end + left_padding;
             }
         }
         if line_width == 0 {

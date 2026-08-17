@@ -38,6 +38,7 @@ fn compacted() -> CompactedItem {
             phase: None,
             internal_chat_message_metadata_passthrough: None,
         })]),
+        mcp_resource_origins: None,
         window_number: Some(3),
         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
         previous_window_id: Some("019b3f6e-0000-7000-8000-000000000002".to_string()),
