@@ -1431,6 +1431,7 @@ fn compacted_without_window(
         message: message.to_string(),
         replacement_history: replacement_history
             .map(|items| items.into_iter().map(Into::into).collect()),
+        mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,
@@ -1458,6 +1459,7 @@ fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoin
                 }
                 .into(),
             ]),
+            mcp_resource_origins: None,
             window_number: Some(4),
             first_window_id: Some(window_id.to_string()),
             previous_window_id: None,

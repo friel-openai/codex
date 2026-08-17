@@ -2376,24 +2376,28 @@ fn user_message_alignment_padding_does_not_inherit_bubble_background() {
     let bubble_style = Style::default().bg(Color::Blue);
     let lines = finish_user_message_lines(
         vec![
-            Line::default().style(bubble_style),
-            Line::from(vec!["› ".dim(), "longer".into()]).style(bubble_style),
-            Line::from(vec!["  ".into(), "x".into()]).style(bubble_style),
-            Line::default().style(bubble_style),
+            Line::default().style(bubble_style).into(),
+            Line::from(vec!["› ".dim(), "longer".into()])
+                .style(bubble_style)
+                .into(),
+            Line::from(vec!["  ".into(), "x".into()])
+                .style(bubble_style)
+                .into(),
+            Line::default().style(bubble_style).into(),
         ],
         /*width*/ 40,
         /*available_width*/ 39,
         bubble_style,
     );
-    let first_alignment_width = lines[1].spans[0].width();
-    assert_eq!(first_alignment_width, lines[2].spans[0].width());
-    assert_eq!(lines[0].style, Style::default());
-    assert_eq!(lines[0].spans[0].style, Style::default());
-    assert_eq!(lines[1].spans[0].style, Style::default());
+    let first_alignment_width = lines[1].line.spans[0].width();
+    assert_eq!(first_alignment_width, lines[2].line.spans[0].width());
+    assert_eq!(lines[0].line.style, Style::default());
+    assert_eq!(lines[0].line.spans[0].style, Style::default());
+    assert_eq!(lines[1].line.spans[0].style, Style::default());
 
     let area = Rect::new(0, 0, 40, 4);
     let mut buffer = Buffer::empty(area);
-    Paragraph::new(Text::from(lines)).render(area, &mut buffer);
+    Paragraph::new(Text::from(visible_lines(lines))).render(area, &mut buffer);
     for x in 0..first_alignment_width as u16 {
         for y in 0..4 {
             assert_eq!(buffer[(x, y)].bg, Color::Reset);

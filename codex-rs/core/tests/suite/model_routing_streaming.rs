@@ -700,9 +700,9 @@ async fn queued_steer_follows_untagged_partial_message_into_reroute() -> Result<
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: INITIAL_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: INITIAL_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     wait_for_event(
         &test.codex,
@@ -712,9 +712,9 @@ async fn queued_steer_follows_untagged_partial_message_into_reroute() -> Result<
     let submission = test
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: STEER_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: STEER_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .map_err(|err| anyhow::anyhow!("steer input failed: {err:?}"))?;
     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));

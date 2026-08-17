@@ -103,7 +103,6 @@ pub(crate) struct McpServerConnectionIdentity {
     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
     oauth_refresh_mode: Option<McpOAuthRefreshMode>,
     oauth_credentials: Result<Option<StoredOAuthCredentialSnapshot>, String>,
-    pub(crate) oauth_store_was_contended: bool,
     resolved_environment: Result<Option<Arc<Environment>>, String>,
     local_stdio_fallback_cwd: Option<PathBuf>,
     referenced_environment_variables: Vec<(String, Option<OsString>)>,
@@ -211,12 +210,6 @@ impl McpServerConnectionIdentity {
         let referenced_environment_variables = referenced_environment_variables(config);
         let runtime_auth = runtime_auth_provider.and(auth).cloned();
         let runtime_auth_token = runtime_auth.as_ref().and_then(|auth| auth.get_token().ok());
-        let oauth_store_was_contended = oauth_credentials
-            .as_ref()
-            .ok()
-            .and_then(Option::as_ref)
-            .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
-
         Self {
             auth: config.auth.clone(),
             server_name: server_name.to_string(),
@@ -228,7 +221,6 @@ impl McpServerConnectionIdentity {
                 .then_some((store_mode, keyring_backend_kind)),
             oauth_refresh_mode: stored_oauth_url.is_some().then_some(oauth_refresh_mode),
             oauth_credentials,
-            oauth_store_was_contended,
             resolved_environment: resolved_environment.clone(),
             local_stdio_fallback_cwd,
             referenced_environment_variables,

@@ -8,8 +8,8 @@ use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_history::RolloutLine;
 use codex_login::CodexAuth;
-use codex_models_manager::bundled_models_response;
 use codex_models_manager::CustomModelConfig;
+use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -60,7 +60,6 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
 use test_case::test_case;
-use std::collections::HashMap;
 use wiremock::MockServer;
 
 fn read_only_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -> TurnInputRequest {
