@@ -986,6 +986,14 @@ fn missing_session_message(id_str: &str, picker_action: Option<&str>) -> String 
     }
 }
 
+fn format_error_chain(error: &color_eyre::Report) -> String {
+    error
+        .chain()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(": ")
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn run_ratatui_app(
     cli: Cli,
@@ -1955,6 +1963,19 @@ mod tests {
     use serial_test::serial;
     use tempfile::TempDir;
 
+    #[test]
+    fn format_error_chain_preserves_nested_side_fork_failure() {
+        let error = color_eyre::eyre::eyre!(
+            "missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021"
+        )
+        .wrap_err("thread/fork failed during TUI bootstrap")
+        .wrap_err("Failed to start standalone side conversation from parent");
+
+        assert_eq!(
+            format_error_chain(&error),
+            "Failed to start standalone side conversation from parent: thread/fork failed during TUI bootstrap: missing predecessor rollout 019da1a1-bed9-7a43-88a2-b49d43915021"
+        );
+    }
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
         ConfigBuilder::default()
             .codex_home(temp_dir.path().to_path_buf())
