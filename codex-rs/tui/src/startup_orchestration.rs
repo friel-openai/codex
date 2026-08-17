@@ -552,7 +552,7 @@ pub(super) async fn run_main_inner(
     .await
     .map_err(|err| {
         err.downcast::<std::io::Error>()
-            .unwrap_or_else(|err| std::io::Error::other(err.to_string()))
+            .unwrap_or_else(|err| std::io::Error::other(format_error_chain(&err)))
     });
 
     if let Some(otel) = otel
