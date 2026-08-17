@@ -1505,8 +1505,14 @@ impl ThreadManager {
             } else {
                 InitialHistory::Forked(copied_history)
             }
+        } else if let Some(frozen_segment) = prepared.frozen_segment.clone() {
+            full_history_from_frozen_segment(frozen_segment)
+        } else if config.ephemeral {
+            snapshot_response_history.clone()
         } else {
-            full_history_from_frozen_segment(prepared.frozen_segment.clone())
+            return Err(CodexErr::Fatal(
+                "durable prepared fork is missing its frozen source segment".to_string(),
+            ));
         };
         if prepared.copied_history.is_none()
             && !synthesized_suffix.is_empty()
@@ -2015,8 +2021,13 @@ impl ThreadManagerState {
                     },
                 ));
             }
-            let reference_history =
-                full_history_from_frozen_segment(prepared.frozen_segment.clone());
+            let reference_history = full_history_from_frozen_segment(
+                prepared.frozen_segment.clone().ok_or_else(|| {
+                    CodexErr::Fatal(
+                        "prepared FullHistory source is missing its frozen segment".to_string(),
+                    )
+                })?,
+            );
             let logical_history = materialize_recent_rollout_lines_from(
                 codex_home,
                 reference_history
@@ -2144,7 +2155,12 @@ impl ThreadManagerState {
                         ))
                     })?;
                     (
-                        prepared.frozen_segment.clone(),
+                        prepared.frozen_segment.clone().ok_or_else(|| {
+                            CodexErr::Fatal(
+                                "prepared paginated fork source is missing its frozen segment"
+                                    .to_string(),
+                            )
+                        })?,
                         prepared.response_history.as_ref().clone(),
                         FullHistorySourceReservation::Prepared {
                             _prepared: Box::new(prepared),

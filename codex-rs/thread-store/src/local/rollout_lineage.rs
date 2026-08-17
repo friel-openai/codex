@@ -651,7 +651,18 @@ impl LocalThreadStore {
         let active_path = codex_rollout::existing_rollout_path(active_rollout_path).await;
         let mut active_head = Some(active_head);
         let mut visited = HashSet::new();
+        let mut remaining_segments = codex_rollout::FRODEX_RECENT_ROLLOUT_SEGMENTS;
         loop {
+            if remaining_segments == 0 {
+                return Err(ThreadStoreError::InvalidRequest {
+                    message: format!(
+                        "the requested fork boundary is older than the recent {}-segment window; \
+                         page or migrate the history before forking at that boundary",
+                        codex_rollout::FRODEX_RECENT_ROLLOUT_SEGMENTS
+                    ),
+                });
+            }
+            remaining_segments -= 1;
             let Some(resolved_path) = codex_rollout::existing_rollout_path(path.as_path()).await
             else {
                 return Ok(None);

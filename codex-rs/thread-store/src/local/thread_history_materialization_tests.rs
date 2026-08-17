@@ -1847,6 +1847,76 @@ async fn paginated_fork_without_response_history_reuses_bounded_model_context() 
 }
 
 #[tokio::test]
+async fn segmented_paginated_explicit_fork_fails_closed_without_a_recent_checkpoint() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+
+    for index in 0..7 {
+        let turn_id = format!("turn-{index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id.as_str()),
+                    user_message(format!("message {index}").as_str()),
+                    turn_completed(turn_id.as_str()),
+                ],
+            })
+            .await
+            .expect("append segmented turn");
+        if index < 6 {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate without a checkpoint");
+        }
+    }
+    store
+        .freeze_thread_segment(
+            thread_id,
+            FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                "active checkpoint",
+            )),
+        )
+        .await
+        .expect("publish a certified active checkpoint");
+
+    let missing_checkpoint = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-3".to_string()),
+        })
+        .await
+        .expect_err("an explicit fork must not replay an uncheckpointed lineage");
+    assert!(
+        matches!(
+            missing_checkpoint,
+            ThreadStoreError::InvalidRequest { ref message }
+                if message.contains("migrate the history before forking at that boundary")
+        ),
+        "unexpected error: {missing_checkpoint:?}"
+    );
+
+    let ancient_boundary = store
+        .prepare_fork_without_response_history(PrepareForkParams {
+            thread_id,
+            boundary: ForkBoundary::ThroughTurn("turn-0".to_string()),
+        })
+        .await
+        .expect_err("an explicit fork must not scan beyond the recent segment window");
+    assert!(
+        matches!(
+            ancient_boundary,
+            ThreadStoreError::InvalidRequest { ref message }
+                if message.contains("migrate the history before forking at that boundary")
+        ),
+        "unexpected error: {ancient_boundary:?}"
+    );
+}
+
+#[tokio::test]
 async fn indexed_latest_fork_preserves_authoritative_context_and_projected_parent_turns() {
     for segment_count in [8, 32, 128] {
         let home = TempDir::new().expect("temp dir");

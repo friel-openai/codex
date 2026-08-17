@@ -291,7 +291,31 @@ async fn prepare_with_response_history(
         .await?
         {
             IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
-            IndexedForkAttempt::Fallback(_) => {}
+            IndexedForkAttempt::Fallback(reservation) => {
+                let active_head =
+                    super::rollout_lineage::read_rollout_head(source.path.as_path()).await?;
+                if active_head
+                    .leading_reference
+                    .as_ref()
+                    .is_some_and(|(_, reference)| {
+                        super::rollout_lineage::canonical_same_thread_reference(
+                            store.config.codex_home.as_path(),
+                            source.path.as_path(),
+                            thread_id,
+                            source.rollout_id,
+                            reference,
+                        )
+                    })
+                {
+                    return Err(ThreadStoreError::InvalidRequest {
+                        message: "the segmented rollout cannot reconstruct the requested fork \
+                                  boundary within the recent checkpoint window; migrate the \
+                                  history before forking at that boundary"
+                            .to_string(),
+                    });
+                }
+                indexed_fallback_reservation = Some(reservation);
+            }
         }
     }
     if matches!(boundary, ForkBoundary::Latest) {
@@ -880,7 +904,12 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     let prefix_rollout_id = prefix.segment.rollout_id();
     let prefix_rollout_path = prefix.segment.rollout_path.clone();
     let Some(model_context) = model_context::load_certified_prefix_for_fork(&prefix.lines)? else {
-        fallback!("boundary_segment_checkpoint_missing");
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "the rollout segment containing turn '{turn_id}' has no certified state \
+                 checkpoint; migrate the history before forking at that boundary"
+            ),
+        });
     };
     let model_context = Arc::new(model_context);
     let latest_model_context = Arc::new(active_scan.items);
