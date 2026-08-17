@@ -22,8 +22,8 @@ use super::migration_error;
 use super::publish::sync_parent_directory;
 use crate::ThreadStoreResult;
 
-const PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSION: u32 = 2;
-const LINEAGE_MIGRATION_JOURNAL_VERSION: u32 = 3;
+const PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS: &[u32] = &[2, 3];
+const LINEAGE_MIGRATION_JOURNAL_VERSION: u32 = 4;
 
 /// Durable publication boundary reached by a lineage migration transaction.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -197,7 +197,8 @@ impl LineageMigrationJournal {
                         && journal.selected == target.selected
                         && journal.predecessor_segment_id == target.predecessor_segment_id
                 });
-        let previous_selected_journal = self.version == PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSION
+        let previous_selected_journal = PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS
+            .contains(&self.version)
             && phase_rank(self.phase) >= phase_rank(LineageMigrationPhase::Selected);
         if !self.authenticated_inputs_match(plan) || (!previous_selected_journal && !targets_match)
         {
@@ -216,7 +217,7 @@ impl LineageMigrationJournal {
         if self.version == LINEAGE_MIGRATION_JOURNAL_VERSION {
             return Ok(false);
         }
-        if self.version != PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSION
+        if !PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS.contains(&self.version)
             || !self.authenticated_inputs_match(plan)
         {
             return Err(migration_error(
@@ -427,7 +428,7 @@ pub(super) async fn read_lineage_migration_journal(
     let journal = serde_json::from_slice::<LineageMigrationJournal>(bytes.as_slice())
         .map_err(migration_error)?;
     if journal.version != LINEAGE_MIGRATION_JOURNAL_VERSION
-        && journal.version != PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSION
+        && !PREVIOUS_LINEAGE_MIGRATION_JOURNAL_VERSIONS.contains(&journal.version)
     {
         return Err(migration_error(format!(
             "unsupported lineage migration journal version {}",

@@ -143,6 +143,18 @@ pub(super) async fn rebuild(
     rebuild_registered(store, thread_id).await
 }
 
+pub(super) async fn rebuild_waiting(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<bool> {
+    loop {
+        if let Some(_registration) = register(store, thread_id) {
+            return rebuild_registered(store, thread_id).await;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 struct ProjectionRebuildRegistration {
     active: Arc<StdMutex<HashSet<ThreadId>>>,
     thread_id: ThreadId,
@@ -194,13 +206,10 @@ async fn rebuild_registered(
         }
         let lineage = store.resolve_rollout_lineage(thread_id).await?;
         if lineage.root_rollout_id != selected.rollout_id
-            || lineage.segments.iter().any(|segment| {
-                segment.thread_id != thread_id
-                    || segment.rollout_id != selected.rollout_id
-                    || segment.uses_history_base
-                    || segment.uses_fork_boundary
-                    || !segment.filter_texts.is_empty()
-            })
+            || lineage
+                .segments
+                .iter()
+                .any(|segment| !segment.filter_texts.is_empty())
         {
             return Ok(false);
         }

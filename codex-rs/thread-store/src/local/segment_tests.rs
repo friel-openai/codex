@@ -4,6 +4,8 @@ use codex_protocol::ThreadId;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::ContentItem;
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutReferenceItem;
@@ -49,6 +51,7 @@ use crate::CreateThreadParams;
 use crate::ForkBoundary;
 use crate::FreezeRolloutSegmentParams;
 use crate::LiveThread;
+use crate::LoadThreadHistoryParams;
 use crate::PersistContext;
 use crate::PrepareForkParams;
 use crate::ResumeThreadParams;
@@ -511,7 +514,7 @@ async fn paginated_rotation_installs_the_exact_source_bytes() {
         .persist_thread(thread_id, PersistContext::Standard)
         .await
         .expect("persist paginated metadata");
-    append_message(&store, thread_id, "paginated prefix").await;
+    append_canonical_message(&store, thread_id, "paginated prefix").await;
     store.flush_thread(thread_id).await.expect("flush thread");
     let stable_path = store
         .live_rollout_path(thread_id)
@@ -527,12 +530,71 @@ async fn paginated_rotation_installs_the_exact_source_bytes() {
         .expect("rotate paginated segment");
 
     assert_eq!(frozen.history_mode, ThreadHistoryMode::Paginated);
+    let history_base = frozen
+        .history_base
+        .expect("paginated rotation must publish native history_base");
     assert_eq!(
-        tokio::fs::read(frozen.reference.rollout_path)
+        codex_rollout::rollout_id_from_path(frozen.reference.rollout_path.as_path()),
+        Some(history_base.thread_id)
+    );
+    assert!(
+        frozen.reference.rollout_path.starts_with(
+            home.path()
+                .join(codex_rollout::SESSIONS_SUBDIR)
+                .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        )
+    );
+    assert_eq!(
+        tokio::fs::read(frozen.reference.rollout_path.as_path())
             .await
             .expect("read immutable paginated segment"),
         source_bytes
     );
+    let active_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("read native continuation path");
+    assert_eq!(active_path, stable_path);
+    let active_meta = codex_rollout::read_session_meta_line(active_path.as_path())
+        .await
+        .expect("read native continuation metadata");
+    assert_eq!(active_meta.meta.id, thread_id);
+    assert_eq!(active_meta.meta.history_base, Some(history_base));
+    let active_items = RolloutRecorder::load_rollout_items(active_path.as_path())
+        .await
+        .expect("read native continuation")
+        .0;
+    assert!(
+        active_items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::RolloutReference(_)))
+    );
+
+    append_canonical_message(&store, thread_id, "paginated suffix").await;
+    store.flush_thread(thread_id).await.expect("flush suffix");
+    let logical_items = store
+        .load_history(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("materialize native segmented history")
+        .items;
+    assert!(
+        has_canonical_message(&logical_items, "paginated prefix"),
+        "logical items: {logical_items:#?}"
+    );
+    assert!(has_canonical_message(&logical_items, "paginated suffix"));
+
+    let sqlite_less_active = codex_rollout::find_thread_path_by_id_str(
+        home.path(),
+        thread_id.to_string().as_str(),
+        /*state_db_ctx*/ None,
+    )
+    .await
+    .expect("resolve active rollout without SQLite")
+    .expect("active rollout without SQLite");
+    assert_eq!(sqlite_less_active, active_path);
 }
 
 const SEGMENT_ROTATION_CRASH_HOME_ENV: &str = "FRODEX_SEGMENT_ROTATION_CRASH_HOME";
@@ -728,7 +790,16 @@ async fn segment_rotation_process_death_recovers_every_boundary() {
                 .iter()
                 .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
                 .count(),
-            1,
+            0,
+            "boundary {boundary}"
+        );
+        assert!(
+            codex_rollout::read_session_meta_line(stable_path.as_path())
+                .await
+                .expect("read recovered active metadata")
+                .meta
+                .history_base
+                .is_some(),
             "boundary {boundary}"
         );
         let projected = restarted
@@ -916,6 +987,10 @@ async fn concurrent_side_and_desktop_reads_rebuild_one_missing_projection() {
         .flush_thread(thread_id)
         .await
         .expect("flush projection-race history");
+    let active_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("read rotated projection-race rollout path");
     let rollout_id = store
         .projected_history_position(thread_id)
         .await
@@ -941,7 +1016,7 @@ async fn concurrent_side_and_desktop_reads_rebuild_one_missing_projection() {
     let mut sides = Vec::new();
     for _ in 0..8 {
         let read_store = store.clone();
-        let read_path = stable_path.clone();
+        let read_path = active_path.clone();
         reads.push(tokio::spawn(async move {
             let history = read_store
                 .read_thread_by_rollout_path(
@@ -999,7 +1074,7 @@ async fn concurrent_side_and_desktop_reads_rebuild_one_missing_projection() {
         .expect("rebuilt projection position");
     assert_eq!(
         projected.end_byte_offset,
-        tokio::fs::metadata(stable_path)
+        tokio::fs::metadata(active_path)
             .await
             .expect("read active rollout metadata")
             .len()
@@ -3461,7 +3536,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
     assert_eq!(parse_errors, 0);
     assert_eq!(
         lines.iter().map(|line| line.ordinal).collect::<Vec<_>>(),
-        vec![Some(1), Some(2)]
+        vec![Some(1)]
     );
 
     let pool = codex_state::open_thread_history_db(&sqlite)
@@ -3470,7 +3545,11 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
     let projection_state = sqlx::query_as::<_, (i64, i64)>(
         "SELECT next_rollout_byte_offset, next_rollout_ordinal FROM thread_history_projection_state WHERE thread_id = ?",
     )
-    .bind(thread_id.to_string())
+    .bind(
+        codex_rollout::rollout_id_from_path(stable_path.as_path())
+            .expect("active rollout id")
+            .to_string(),
+    )
     .fetch_one(&pool)
     .await
     .expect("read projection state");
@@ -3481,7 +3560,7 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()
             .len(),
     )
     .expect("replacement length");
-    assert_eq!(projection_state, (replacement_len, 3));
+    assert_eq!(projection_state, (replacement_len, 2));
 }
 
 #[tokio::test]
@@ -3635,22 +3714,47 @@ async fn assert_segmentless_source_freezes(history_mode: ThreadHistoryMode) {
         .expect("freeze segmentless source");
     assert_eq!(frozen.source_session_meta.meta.segment_id, None);
     assert_eq!(frozen.reference.segment_id, None);
-    assert_eq!(
-        frozen
-            .reference
-            .rollout_path
-            .parent()
-            .and_then(|path| path.file_name())
-            .and_then(|name| name.to_str()),
-        Some("initial")
-    );
+    if history_mode == ThreadHistoryMode::Paginated {
+        assert!(
+            frozen.reference.rollout_path.starts_with(
+                home.path()
+                    .join(codex_rollout::SESSIONS_SUBDIR)
+                    .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+            )
+        );
+        assert!(frozen.history_base.is_some());
+    } else {
+        assert_eq!(
+            frozen
+                .reference
+                .rollout_path
+                .parent()
+                .and_then(|path| path.file_name())
+                .and_then(|name| name.to_str()),
+            Some("initial")
+        );
+    }
     assert_eq!(
         tokio::fs::read(frozen.reference.rollout_path.as_path())
             .await
             .expect("read immutable segment"),
         source_bytes
     );
-    let replacement_meta = codex_rollout::read_session_meta_line(stable_path.as_path())
+    let replacement_path = if history_mode == ThreadHistoryMode::Paginated {
+        store
+            .read_thread(crate::ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: false,
+            })
+            .await
+            .expect("read paginated continuation")
+            .rollout_path
+            .expect("paginated continuation path")
+    } else {
+        stable_path
+    };
+    let replacement_meta = codex_rollout::read_session_meta_line(replacement_path.as_path())
         .await
         .expect("read replacement metadata");
     assert!(replacement_meta.meta.segment_id.is_some());
@@ -3666,6 +3770,231 @@ async fn state_backed_store(codex_home: &Path) -> LocalThreadStore {
     .await
     .expect("initialize state db");
     LocalThreadStore::new(config, Some(state_db))
+}
+
+#[tokio::test]
+#[ignore = "writes an interoperability fixture to FRODEX_HISTORY_BASE_COMPAT_HOME"]
+async fn exports_native_history_base_compatibility_fixture() {
+    let home = PathBuf::from(
+        std::env::var_os("FRODEX_HISTORY_BASE_COMPAT_HOME")
+            .expect("FRODEX_HISTORY_BASE_COMPAT_HOME must name an empty fixture directory"),
+    );
+    tokio::fs::create_dir_all(home.as_path())
+        .await
+        .expect("create compatibility fixture home");
+    let store = state_backed_store(home.as_path()).await;
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .expect("create compatibility thread");
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist compatibility thread");
+
+    let turns = [
+        ("frodex-segment-turn-0", "frodex-segment-item-0"),
+        ("frodex-segment-turn-1", "frodex-segment-item-1"),
+        ("frodex-segment-turn-2", "frodex-segment-item-2"),
+        ("frodex-active-turn", "frodex-active-item"),
+    ];
+    for (index, (turn_id, item_id)) in turns.iter().enumerate() {
+        append_turn(&store, thread_id, turn_id, item_id, turn_id).await;
+        store
+            .flush_thread(thread_id)
+            .await
+            .expect("flush compatibility segment");
+        if index + 1 < turns.len() {
+            store
+                .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
+                .await
+                .expect("rotate compatibility segment");
+        }
+    }
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("read compatibility rollout path");
+    store
+        .shutdown_thread(thread_id)
+        .await
+        .expect("close compatibility writer");
+
+    let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
+        .await
+        .expect("read compatibility metadata");
+    assert_eq!(session_meta.meta.id, thread_id);
+    assert!(session_meta.meta.history_base.is_some());
+    let manifest = serde_json::json!({
+        "thread_id": thread_id,
+        "rollout_path": rollout_path,
+        "turn_ids": turns.map(|(turn_id, _)| turn_id),
+    });
+    tokio::fs::write(
+        home.join("frodex-history-base-compatibility.json"),
+        serde_json::to_vec_pretty(&manifest).expect("serialize compatibility manifest"),
+    )
+    .await
+    .expect("write compatibility manifest");
+}
+
+#[tokio::test]
+#[ignore = "reads a fixture after the official alpha.20 compatibility consumer appends to it"]
+async fn imports_official_alpha20_append_to_native_history_base_fixture() {
+    let home = PathBuf::from(
+        std::env::var_os("FRODEX_HISTORY_BASE_COMPAT_HOME")
+            .expect("FRODEX_HISTORY_BASE_COMPAT_HOME must name the consumed fixture directory"),
+    );
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &tokio::fs::read(home.join("frodex-history-base-compatibility.json"))
+            .await
+            .expect("read compatibility manifest"),
+    )
+    .expect("parse compatibility manifest");
+    let thread_id = ThreadId::from_string(
+        manifest["thread_id"]
+            .as_str()
+            .expect("compatibility thread id"),
+    )
+    .expect("parse compatibility thread id");
+    let rollout_path = PathBuf::from(
+        manifest["rollout_path"]
+            .as_str()
+            .expect("compatibility rollout path"),
+    );
+    let mut expected_turn_ids = manifest["turn_ids"]
+        .as_array()
+        .expect("compatibility turn ids")
+        .iter()
+        .map(|turn_id| turn_id.as_str().expect("compatibility turn id"))
+        .collect::<Vec<_>>();
+    let inherited_turn_ids = expected_turn_ids.clone();
+    expected_turn_ids.push("official-alpha20-turn");
+    let store = state_backed_store(home.as_path()).await;
+
+    let history = store
+        .read_thread_by_rollout_path(
+            rollout_path,
+            /*include_archived*/ true,
+            /*include_history*/ true,
+        )
+        .await
+        .expect("Frodex reloads the upstream-mutated lineage")
+        .history
+        .expect("complete compatibility history");
+    for turn_id in &expected_turn_ids {
+        assert_eq!(
+            history
+                .items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                            if event.turn_id == *turn_id
+                    )
+                })
+                .count(),
+            1,
+            "turn {turn_id} must occur exactly once"
+        );
+    }
+    assert!(
+        store
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("rebuild upstream-mutated projection")
+    );
+    let turns = store
+        .list_turns(crate::ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 20,
+            sort_direction: crate::SortDirection::Asc,
+            items_view: crate::StoredTurnItemsView::NotLoaded,
+        })
+        .await
+        .expect("list upstream-mutated turns");
+    assert_eq!(
+        turns
+            .turns
+            .iter()
+            .map(|turn| turn.turn_id.as_str())
+            .collect::<Vec<_>>(),
+        expected_turn_ids
+    );
+    assert!(
+        store
+            .prepare_fork(PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            })
+            .await
+            .expect("prepare fork after upstream append")
+            .history_base
+            .is_some()
+    );
+
+    let child_thread_id = ThreadId::from_string(
+        manifest["upstream_child_thread_id"]
+            .as_str()
+            .expect("official alpha.20 child thread id"),
+    )
+    .expect("parse official alpha.20 child thread id");
+    let child_history = store
+        .read_thread(crate::ReadThreadParams {
+            thread_id: child_thread_id,
+            include_archived: false,
+            include_history: true,
+        })
+        .await
+        .expect("Frodex reads the official alpha.20 child")
+        .history
+        .expect("complete official alpha.20 child history");
+    for turn_id in &inherited_turn_ids {
+        assert_eq!(
+            child_history
+                .items
+                .iter()
+                .filter(|item| {
+                    matches!(
+                        item,
+                        RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                            if event.turn_id == *turn_id
+                    )
+                })
+                .count(),
+            1,
+            "parent turn {turn_id} must occur exactly once in the upstream child"
+        );
+    }
+    assert_eq!(
+        child_history
+            .items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                        if event.turn_id == "official-alpha20-child-turn"
+                )
+            })
+            .count(),
+        1
+    );
+    assert!(
+        store
+            .prepare_fork(PrepareForkParams {
+                thread_id: child_thread_id,
+                boundary: ForkBoundary::Latest,
+            })
+            .await
+            .expect("Frodex prepares a fork from the official alpha.20 child")
+            .history_base
+            .is_some()
+    );
 }
 
 async fn staged_rollout_file_count(stable_path: &Path) -> usize {
@@ -3814,6 +4143,27 @@ async fn append_message(store: &LocalThreadStore, thread_id: ThreadId, message: 
         .expect("append message");
 }
 
+async fn append_canonical_message(store: &LocalThreadStore, thread_id: ThreadId, message: &str) {
+    store
+        .append_items(AppendThreadItemsParams {
+            thread_id,
+            items: vec![RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "user".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: message.to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )],
+        })
+        .await
+        .expect("append canonical message");
+}
+
 fn user_message_item(message: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
         message: message.to_string(),
@@ -3886,6 +4236,20 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
             item,
             RolloutItem::EventMsg(EventMsg::UserMessage(event)) if event.message == message
         )
+    })
+}
+
+fn has_canonical_message(items: &[RolloutItem], message: &str) -> bool {
+    items.iter().any(|item| {
+        let RolloutItem::ResponseItem(response_item) = item else {
+            return false;
+        };
+        let ResponseItem::Message { content, .. } = &response_item.item else {
+            return false;
+        };
+        content
+            .iter()
+            .any(|content| matches!(content, ContentItem::InputText { text } if text == message))
     })
 }
 

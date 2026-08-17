@@ -49,6 +49,11 @@ pub(super) struct LegacyLineageSource {
     pub(super) initial_next_item_index: u64,
     /// Reference stored in this source. The referenced source precedes this source in the plan.
     pub(super) predecessor: Option<LegacyLineagePredecessor>,
+    /// Ordinal occupied by a leading reference in a Paginated source.
+    ///
+    /// Native `history_base` replaces this record, so Paginated replay uses the ordinal to
+    /// translate `subagent_history_start_ordinal` without changing the child-history boundary.
+    pub(super) reference_ordinal: Option<u64>,
 }
 
 /// The persisted edge from one physical source to its predecessor.
@@ -56,6 +61,13 @@ pub(super) struct LegacyLineageSource {
 pub(super) enum LegacyLineagePredecessor {
     RolloutReference(RolloutReferenceItem),
     HistoryBase(HistoryPosition),
+}
+
+pub(super) fn reference_is_history_base_compatible(reference: &RolloutReferenceItem) -> bool {
+    reference.nth_user_message.is_none()
+        && reference
+            .compacted_replacement_history_filter_texts
+            .is_none()
 }
 
 /// Complete authenticated source graph for one selected rollout.
@@ -163,6 +175,9 @@ async fn initial_legacy_replay_positions(
     codex_home: &Path,
     source: &LegacyLineageSource,
 ) -> ThreadStoreResult<(u64, u64)> {
+    if source.history_mode == ThreadHistoryMode::Paginated {
+        return Ok((1, 1));
+    }
     let Some(LegacyLineagePredecessor::RolloutReference(reference)) = &source.predecessor else {
         return Ok((1, 1));
     };
@@ -210,11 +225,6 @@ pub(super) fn validate_segment_migration(
         if !selected && source.thread_id != plan.selected_thread_id && source.segment_id.is_none() {
             return Err(migration_error(
                 "reference-backed legacy rollout migration requires an immutable authenticated cross-thread source",
-            ));
-        }
-        if source.history_mode != ThreadHistoryMode::Legacy {
-            return Err(migration_error(
-                "lineage migration may rewrite only Legacy physical sources",
             ));
         }
         match source.predecessor.as_ref() {
@@ -300,7 +310,7 @@ fn plan_targets(
     for (index, source) in sources.iter().enumerate() {
         let selected = index + 1 == sources.len();
         let mut segment_hasher = Sha256::new();
-        segment_hasher.update(b"frodex-paginated-segment-v2\0");
+        segment_hasher.update(b"frodex-paginated-segment-v3-history-base\0");
         segment_hasher.update(lineage_scope.as_slice());
         segment_hasher.update(b"\0");
         segment_hasher.update(source.sha256.as_bytes());
@@ -315,7 +325,7 @@ fn plan_targets(
         bytes[8] = (bytes[8] & 0x3f) | 0x80;
         let segment_id = SegmentId::from_bytes(bytes);
         let mut rollout_hasher = Sha256::new();
-        rollout_hasher.update(b"frodex-paginated-rollout-v2\0");
+        rollout_hasher.update(b"frodex-paginated-rollout-v3-history-base\0");
         rollout_hasher.update(lineage_scope.as_slice());
         rollout_hasher.update(b"\0");
         rollout_hasher.update(source.thread_id.to_string().as_bytes());
@@ -340,14 +350,22 @@ fn plan_targets(
             } else {
                 compressed
             },
+            !selected,
         )?;
         let path = if selected {
             selected_directory.join(filename)
         } else {
+            let (year, month, day) =
+                codex_rollout::rollout_date_parts(std::ffi::OsStr::new(filename.as_str()))
+                    .ok_or_else(|| {
+                        migration_error("lineage target has no canonical rollout date")
+                    })?;
             codex_home
-                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-                .join(source.thread_id.to_string())
-                .join(segment_id.to_string())
+                .join(codex_rollout::SESSIONS_SUBDIR)
+                .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+                .join(year)
+                .join(month)
+                .join(day)
                 .join(filename)
         };
         if path == source.path || sources.iter().any(|candidate| candidate.path == path) {
@@ -385,11 +403,16 @@ fn target_file_name(
     thread_id: ThreadId,
     rollout_id: RolloutId,
     compressed: bool,
+    physical_history: bool,
 ) -> ThreadStoreResult<String> {
-    let timestamp = DateTime::parse_from_rfc3339(timestamp)
-        .map_err(migration_error)?
-        .format("%Y-%m-%dT%H-%M-%S")
-        .to_string();
+    let timestamp = DateTime::parse_from_rfc3339(timestamp).map_err(migration_error)?;
+    let timestamp = if physical_history {
+        timestamp - chrono::Duration::seconds(1)
+    } else {
+        timestamp
+    }
+    .format("%Y-%m-%dT%H-%M-%S")
+    .to_string();
     let identity = if rollout_id == thread_id {
         thread_id.to_string()
     } else {
@@ -428,19 +451,14 @@ async fn plan_source(
                     .await
                     .map_err(migration_error)?;
             let predecessor = inspect_source(predecessor_path.as_path()).await?;
-            if predecessor.session_meta.meta.history_mode == ThreadHistoryMode::Paginated {
+            if !reference_is_history_base_compatible(&reference)
+                && predecessor.session_meta.meta.history_mode == ThreadHistoryMode::Paginated
+            {
                 let segment_id = predecessor.session_meta.meta.segment_id.ok_or_else(|| {
                     migration_error(
-                        "Paginated reference dependency is missing an immutable segment id",
+                        "filtered Paginated reference dependency is missing an immutable segment id",
                     )
                 })?;
-                validate_immutable_segment_path(
-                    codex_home,
-                    predecessor.path.as_path(),
-                    predecessor.session_meta.meta.id,
-                    segment_id,
-                )
-                .await?;
                 let end_ordinal_exclusive =
                     paginated_end_ordinal(predecessor.path.as_path()).await?;
                 reference_dependencies.push(LegacyReferenceDependency {
@@ -513,30 +531,6 @@ async fn plan_source(
     Ok(())
 }
 
-async fn validate_immutable_segment_path(
-    codex_home: &Path,
-    path: &Path,
-    thread_id: ThreadId,
-    segment_id: SegmentId,
-) -> ThreadStoreResult<()> {
-    let canonical_path = tokio::fs::canonicalize(path)
-        .await
-        .map_err(migration_error)?;
-    let expected_directory = codex_home
-        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-        .join(thread_id.to_string())
-        .join(segment_id.to_string());
-    let canonical_directory = tokio::fs::canonicalize(expected_directory.as_path())
-        .await
-        .map_err(migration_error)?;
-    if canonical_path.parent() != Some(canonical_directory.as_path()) {
-        return Err(migration_error(
-            "Paginated reference dependency is not an authenticated immutable segment",
-        ));
-    }
-    Ok(())
-}
-
 async fn paginated_end_ordinal(path: &Path) -> ThreadStoreResult<u64> {
     let mut reader = codex_rollout::open_rollout_line_reader(path)
         .await
@@ -583,6 +577,7 @@ struct InspectedSource {
     record_count: u64,
     sha256: String,
     predecessor: Option<LegacyLineagePredecessor>,
+    reference_ordinal: Option<u64>,
 }
 
 impl InspectedSource {
@@ -600,6 +595,7 @@ impl InspectedSource {
             initial_source_line_index: 1,
             initial_next_item_index: 1,
             predecessor: self.predecessor,
+            reference_ordinal: self.reference_ordinal,
         }
     }
 }
@@ -618,6 +614,7 @@ async fn inspect_source(path: &Path) -> ThreadStoreResult<InspectedSource> {
     let mut saw_session_meta = false;
     let mut saw_local_record = false;
     let mut leading_reference = None;
+    let mut reference_ordinal = None;
     let mut record_count = 0_u64;
     while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
         if raw.trim().is_empty() {
@@ -655,6 +652,7 @@ async fn inspect_source(path: &Path) -> ThreadStoreResult<InspectedSource> {
             RolloutItem::RolloutReference(reference)
                 if saw_session_meta && !saw_local_record && leading_reference.is_none() =>
             {
+                reference_ordinal = line.ordinal;
                 leading_reference = Some(reference);
             }
             RolloutItem::RolloutReference(_) => {
@@ -685,6 +683,7 @@ async fn inspect_source(path: &Path) -> ThreadStoreResult<InspectedSource> {
         record_count,
         sha256,
         predecessor,
+        reference_ordinal,
     })
 }
 

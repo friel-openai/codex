@@ -60,9 +60,9 @@ pub(super) struct RolloutLineageSegment {
 
 /// Ordered physical rollout ranges contributing to one logical history.
 ///
-/// `RolloutReference` is the canonical Frodex persistence format. `SessionMeta.history_base` is a
-/// compatibility input from upstream. Both are normalized here so pagination and model-context
-/// reconstruction have one lineage implementation.
+/// `SessionMeta.history_base` is the canonical paginated persistence format. A same-thread edge is
+/// a physical segment boundary; a cross-thread edge is a fork boundary. `RolloutReference`
+/// remains a compatibility input for Legacy and older Frodex rollouts.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct RolloutLineage {
     /// Physical rollout selected for the logical thread when this lineage was resolved.
@@ -77,6 +77,7 @@ pub(super) struct RolloutLineage {
 pub(super) struct PreparedForkLineage {
     pub(super) lineage: RolloutLineage,
     pub(super) model_context: Vec<RolloutItem>,
+    pub(super) full_history: Option<Vec<RolloutItem>>,
     pub(super) session_meta: SessionMetaLine,
     pub(super) source_projection_was_missing: bool,
 }
@@ -306,13 +307,15 @@ impl LocalThreadStore {
     /// The head pass authenticates the reference graph. The second pass keeps at most one physical
     /// segment in memory while validating the closed goal-supervisor compatibility invariant,
     /// calculating every byte boundary, and reconstructing model context. Histories that need
-    /// repair or cross a fork, filter, or `history_base` boundary return `None` and retain the
-    /// existing compatibility-repair implementation.
+    /// repair or cross a fork or filter boundary return `None` and retain the existing
+    /// compatibility-repair implementation. Same-thread `history_base` boundaries are exact
+    /// ordinal and byte positions, so native segmented Paginated history uses this path.
     pub(super) async fn try_prepare_same_thread_fork_lineage_reserved(
         &self,
         requested_thread_id: ThreadId,
         expected_rollout_id: Option<RolloutId>,
         reservation: &RolloutWriterReservation,
+        include_full_history: bool,
     ) -> ThreadStoreResult<Option<PreparedForkLineage>> {
         let source =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
@@ -349,7 +352,6 @@ impl LocalThreadStore {
         .await?;
         if segments.iter().any(|segment| {
             segment.thread_id != requested_thread_id
-                || segment.uses_history_base
                 || segment.uses_fork_boundary
                 || !segment.filter_texts.is_empty()
                 || !reservation.contains(segment.thread_id)
@@ -360,8 +362,13 @@ impl LocalThreadStore {
             root_rollout_id: source.rollout_id,
             segments,
         };
-        let Some((lineage, model_context, session_meta)) = self
-            .materialize_clean_fork_lineage(requested_thread_id, lineage, reservation)
+        let Some((lineage, model_context, full_history, session_meta)) = self
+            .materialize_clean_fork_lineage(
+                requested_thread_id,
+                lineage,
+                reservation,
+                include_full_history,
+            )
             .await?
         else {
             return Ok(None);
@@ -369,6 +376,7 @@ impl LocalThreadStore {
         Ok(Some(PreparedForkLineage {
             lineage,
             model_context,
+            full_history,
             session_meta,
             source_projection_was_missing,
         }))
@@ -379,10 +387,19 @@ impl LocalThreadStore {
         requested_thread_id: ThreadId,
         mut lineage: RolloutLineage,
         reservation: &RolloutWriterReservation,
-    ) -> ThreadStoreResult<Option<(RolloutLineage, Vec<RolloutItem>, SessionMetaLine)>> {
+        include_full_history: bool,
+    ) -> ThreadStoreResult<
+        Option<(
+            RolloutLineage,
+            Vec<RolloutItem>,
+            Option<Vec<RolloutItem>>,
+            SessionMetaLine,
+        )>,
+    > {
         let mut model_context_scan = ModelContextScan::default();
         let mut model_context_complete = false;
         let mut canonical_session_meta = None;
+        let mut full_history_segments = include_full_history.then(Vec::new);
 
         for segment in lineage.segments.iter_mut().rev() {
             debug_assert!(reservation.contains(segment.thread_id));
@@ -423,6 +440,32 @@ impl LocalThreadStore {
             })?;
             if repair.total() != 0 {
                 return Ok(None);
+            }
+
+            if let Some(full_history_segments) = full_history_segments.as_mut() {
+                let mut segment_items = Vec::new();
+                for line in &lines {
+                    let Some(ordinal) = line.ordinal else {
+                        continue;
+                    };
+                    if ordinal < segment.start_ordinal
+                        || segment
+                            .end_ordinal_exclusive
+                            .is_some_and(|end| ordinal >= end)
+                    {
+                        continue;
+                    }
+                    let mut item = line.item.clone();
+                    if matches!(
+                        item,
+                        RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
+                    ) || !segment.filter_rollout_item(&mut item)
+                    {
+                        continue;
+                    }
+                    segment_items.push(item);
+                }
+                full_history_segments.push(segment_items);
             }
 
             if canonical_session_meta.is_none() {
@@ -499,7 +542,14 @@ impl LocalThreadStore {
         if !matches!(model_context.first(), Some(RolloutItem::SessionMeta(_))) {
             model_context.insert(0, RolloutItem::SessionMeta(canonical_meta.clone()));
         }
-        Ok(Some((lineage, model_context, canonical_meta)))
+        let full_history = full_history_segments.map(|segments| {
+            let mut items = vec![RolloutItem::SessionMeta(canonical_meta.clone())];
+            for segment in segments.into_iter().rev() {
+                items.extend(segment);
+            }
+            items
+        });
+        Ok(Some((lineage, model_context, full_history, canonical_meta)))
     }
 
     async fn materialize_rollout_lineage_for_reference(
@@ -685,7 +735,6 @@ impl LocalThreadStore {
             if head.session_meta.meta.id != requested_thread_id
                 || head.session_meta.meta.history_mode != ThreadHistoryMode::Paginated
                 || head.session_meta.meta.forked_from_id.is_some()
-                || head.session_meta.meta.history_base.is_some()
                 || head
                     .session_meta
                     .meta
@@ -693,6 +742,26 @@ impl LocalThreadStore {
                     .is_some()
             {
                 return Ok(None);
+            }
+            if let Some(history_base) = head.session_meta.meta.history_base
+                && end.end_ordinal_exclusive <= history_base.end_ordinal_exclusive
+            {
+                let Some(predecessor_path) =
+                    resolve_rollout_path_by_id(self, history_base.thread_id).await?
+                else {
+                    return Ok(None);
+                };
+                let predecessor_meta =
+                    codex_rollout::read_session_meta_line(predecessor_path.as_path())
+                        .await
+                        .map_err(lineage_io_error)?;
+                if predecessor_meta.meta.id != requested_thread_id
+                    || predecessor_meta.meta.history_mode != ThreadHistoryMode::Paginated
+                {
+                    return Ok(None);
+                }
+                path = predecessor_path;
+                continue;
             }
             if let Some((reference_ordinal, reference)) = head.leading_reference.as_ref() {
                 let predecessor_end = reference_ordinal.checked_sub(1).ok_or_else(|| {
@@ -828,6 +897,24 @@ pub(super) fn canonical_same_thread_reference(
             .is_none()
 }
 
+pub(super) async fn has_same_thread_history_base(
+    store: &LocalThreadStore,
+    head: &RolloutHead,
+    thread_id: ThreadId,
+) -> ThreadStoreResult<bool> {
+    let Some(history_base) = head.session_meta.meta.history_base else {
+        return Ok(false);
+    };
+    let Some(predecessor_path) = resolve_rollout_path_by_id(store, history_base.thread_id).await?
+    else {
+        return Ok(false);
+    };
+    let predecessor_meta = codex_rollout::read_session_meta_line(predecessor_path.as_path())
+        .await
+        .map_err(lineage_io_error)?;
+    Ok(predecessor_meta.meta.id == thread_id)
+}
+
 async fn resolve_rollout_path_by_id(
     store: &LocalThreadStore,
     rollout_id: ThreadId,
@@ -851,6 +938,28 @@ async fn resolve_rollout_path_by_id(
     )
 }
 
+/// Reuses one filesystem index while following a native `history_base` chain.
+///
+/// Resolving every edge with an independent recursive filename scan makes startup projection
+/// quadratic in the number of physical segments.
+async fn resolve_indexed_rollout_path_by_id(
+    store: &LocalThreadStore,
+    rollout_id: ThreadId,
+    index: &mut Option<std::collections::HashMap<ThreadId, PathBuf>>,
+) -> ThreadStoreResult<Option<PathBuf>> {
+    if index.is_none() {
+        *index = Some(
+            codex_rollout::index_rollout_paths_by_rollout_id(store.config.codex_home.as_path())
+                .await
+                .map_err(lineage_io_error)?,
+        );
+    }
+    if let Some(path) = index.as_ref().and_then(|index| index.get(&rollout_id)) {
+        return Ok(Some(path.to_path_buf()));
+    }
+    resolve_rollout_path_by_id(store, rollout_id).await
+}
+
 impl RolloutLineage {
     pub(super) fn root_rollout_id(&self) -> RolloutId {
         self.root_rollout_id
@@ -860,17 +969,11 @@ impl RolloutLineage {
         self.segments.as_slice()
     }
 
-    /// Returns whether any segment depends on upstream `SessionMeta.history_base` ancestry.
-    pub(super) async fn requires_copied_history(&self) -> ThreadStoreResult<bool> {
-        for segment in &self.segments {
-            let meta = codex_rollout::read_session_meta_line(segment.rollout_path.as_path())
-                .await
-                .map_err(lineage_io_error)?;
-            if meta.meta.history_base.is_some() {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+    /// Returns whether inherited filtering prevents an exact `HistoryPosition` boundary.
+    pub(super) fn requires_copied_history(&self) -> bool {
+        self.segments
+            .iter()
+            .any(RolloutLineageSegment::filters_items)
     }
 
     pub(super) fn segment_index_for_ordinal(&self, ordinal: u64) -> Option<usize> {
@@ -1054,6 +1157,8 @@ async fn resolve_path_iteratively(
 ) -> ThreadStoreResult<Vec<RolloutLineageSegment>> {
     let mut pending_segments = Vec::new();
     let mut goal_supervisor_provenance = GoalSupervisorLineageProvenance::Untrusted;
+    let mut rollout_reference_index = None;
+    let mut prefetched_head = None;
 
     loop {
         let resolved_path = codex_rollout::existing_rollout_path(rollout_path.as_path())
@@ -1073,7 +1178,10 @@ async fn resolve_path_iteratively(
         }
         inserted_paths.push(resolved_path.clone());
 
-        let head = read_rollout_head(resolved_path.as_path()).await?;
+        let head = match prefetched_head.take() {
+            Some((prefetched_path, head)) if prefetched_path == resolved_path => head,
+            _ => read_rollout_head(resolved_path.as_path()).await?,
+        };
         if head.session_meta.meta.id != expected_thread_id {
             return Err(malformed_lineage(
                 expected_thread_id,
@@ -1150,21 +1258,22 @@ async fn resolve_path_iteratively(
         }
 
         if let Some(history_base) = head.session_meta.meta.history_base {
-            if graph_depth >= codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH {
+            let source_path = resolve_indexed_rollout_path_by_id(
+                store,
+                history_base.thread_id,
+                &mut rollout_reference_index,
+            )
+            .await?
+            .ok_or_else(|| malformed_lineage(history_base.thread_id, "missing source rollout"))?;
+            let source_head = read_rollout_head(source_path.as_path()).await?;
+            let fork_boundary = source_head.session_meta.meta.id != expected_thread_id;
+            if fork_boundary && graph_depth >= codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH {
                 let detail = format!(
                     "rollout reference graph exceeds maximum depth of {}",
                     codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH
                 );
                 return Err(malformed_lineage(expected_thread_id, &detail));
             }
-            let source_path = resolve_rollout_path_by_id(store, history_base.thread_id)
-                .await?
-                .ok_or_else(|| {
-                    malformed_lineage(history_base.thread_id, "missing source rollout")
-                })?;
-            let source_meta = codex_rollout::read_session_meta_line(source_path.as_path())
-                .await
-                .map_err(lineage_io_error)?;
             let next_filter_texts = inherited_filter_texts.clone();
             pending_segments.push(PendingLineageSegment {
                 thread_id: expected_thread_id,
@@ -1176,15 +1285,16 @@ async fn resolve_path_iteratively(
                 reference: None,
                 goal_supervisor_provenance: segment_goal_supervisor_provenance,
                 uses_history_base: true,
-                uses_fork_boundary: false,
+                uses_fork_boundary: fork_boundary,
             });
-            expected_thread_id = source_meta.meta.id;
+            expected_thread_id = source_head.session_meta.meta.id;
             expected_rollout_id = history_base.thread_id;
-            rollout_path = source_path;
+            rollout_path = source_path.clone();
+            prefetched_head = Some((source_path, source_head));
             end = Some(history_base);
             inherited_filter_texts = next_filter_texts;
             goal_supervisor_provenance = GoalSupervisorLineageProvenance::Untrusted;
-            graph_depth += 1;
+            graph_depth += usize::from(fork_boundary);
             continue;
         }
 
@@ -1374,11 +1484,13 @@ async fn trim_to_history_position(
     end: HistoryPosition,
     offset_mode: LineageOffsetMode,
 ) -> ThreadStoreResult<()> {
+    // This function validates the recorded byte boundary below, so asking `trim_to_ordinal` to
+    // resolve the same file first would read every native predecessor twice.
     trim_to_ordinal(
         segments,
         end.thread_id,
         end.end_ordinal_exclusive,
-        offset_mode,
+        LineageOffsetMode::Deferred,
     )
     .await?;
     let Some(segment) = segments.iter_mut().rev().find(|segment| {
@@ -1429,11 +1541,9 @@ async fn trim_to_history_position(
         return Ok(());
     }
     let ordinal_end_byte_offset =
-        byte_offset_for_ordinal(segment.rollout_path.as_path(), end.end_ordinal_exclusive)
-            .await?
-            .ok_or_else(|| {
-                malformed_lineage(end.thread_id, "plain rollout is missing its byte boundary")
-            })?;
+        byte_offset_for_ordinal_in_bytes(bytes.as_slice(), end.end_ordinal_exclusive)?.ok_or_else(
+            || malformed_lineage(end.thread_id, "plain rollout is missing its byte boundary"),
+        )?;
     if end.end_byte_offset != ordinal_end_byte_offset {
         let ordinal_end_byte_offset = usize::try_from(ordinal_end_byte_offset).map_err(|_| {
             malformed_lineage(

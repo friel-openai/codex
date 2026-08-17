@@ -15,6 +15,7 @@ use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
@@ -855,6 +856,7 @@ async fn freeze_thread_segment_reserved_with_publication(
         return Ok(FrozenRolloutSegmentResult {
             frozen: FrozenRolloutSegment {
                 reference,
+                history_base: None,
                 source_session_meta: source_meta,
                 history_mode,
                 next_rollout_ordinal,
@@ -865,29 +867,59 @@ async fn freeze_thread_segment_reserved_with_publication(
 
     if params.is_snapshot() {
         let segment_id = snapshot_segment_id(source_lines.as_slice())?;
-        let immutable_path = immutable_segment_path(
-            store.config.codex_home.as_path(),
-            thread_id,
-            Some(segment_id),
-            codex_rollout::plain_rollout_path(source_path.as_path()).as_path(),
-        )?;
+        let snapshot_rollout_id = if matches!(history_mode, ThreadHistoryMode::Paginated) {
+            ThreadId::new()
+        } else {
+            source_rollout_id
+        };
+        let immutable_path = if matches!(history_mode, ThreadHistoryMode::Paginated) {
+            native_history_segment_path(
+                store.config.codex_home.as_path(),
+                codex_rollout::plain_rollout_path(source_path.as_path()).as_path(),
+                Some(snapshot_rollout_id),
+            )?
+        } else {
+            immutable_segment_path(
+                store.config.codex_home.as_path(),
+                thread_id,
+                Some(segment_id),
+                codex_rollout::plain_rollout_path(source_path.as_path()).as_path(),
+            )?
+        };
         install_snapshot_segment(
             source_lines.as_slice(),
             immutable_path.as_path(),
-            Some(segment_id),
+            matches!(history_mode, ThreadHistoryMode::Legacy).then_some(segment_id),
         )
         .await?;
         return Ok(FrozenRolloutSegmentResult {
             frozen: FrozenRolloutSegment {
                 reference: RolloutReferenceItem {
-                    rollout_id: Some(source_rollout_id),
-                    rollout_path: immutable_path,
+                    rollout_id: Some(snapshot_rollout_id),
+                    rollout_path: immutable_path.clone(),
                     thread_id: Some(thread_id),
                     rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
                     segment_id: Some(segment_id),
                     max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                     nth_user_message: None,
                     compacted_replacement_history_filter_texts: None,
+                },
+                history_base: if matches!(history_mode, ThreadHistoryMode::Paginated) {
+                    Some(HistoryPosition {
+                        thread_id: snapshot_rollout_id,
+                        end_ordinal_exclusive: next_rollout_ordinal.ok_or_else(|| {
+                            ThreadStoreError::Internal {
+                                message: "paginated rollout snapshot has no terminal ordinal"
+                                    .to_string(),
+                            }
+                        })?,
+                        end_byte_offset: fs::metadata(immutable_path.as_path())
+                            .await
+                            .map_err(thread_store_io_error)?
+                            .len(),
+                    })
+                } else {
+                    None
                 },
                 source_session_meta: source_meta,
                 history_mode,
@@ -967,12 +999,22 @@ async fn freeze_thread_segment_reserved_with_publication(
     };
 
     let segment_id = source_meta.meta.segment_id;
-    let immutable_path = immutable_segment_path(
-        store.config.codex_home.as_path(),
-        thread_id,
-        segment_id,
-        source_path.as_path(),
-    )?;
+    let native_segment_rollout_id =
+        matches!(history_mode, ThreadHistoryMode::Paginated).then(ThreadId::new);
+    let immutable_path = if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        native_history_segment_path(
+            store.config.codex_home.as_path(),
+            source_path.as_path(),
+            native_segment_rollout_id,
+        )?
+    } else {
+        immutable_segment_path(
+            store.config.codex_home.as_path(),
+            thread_id,
+            segment_id,
+            source_path.as_path(),
+        )?
+    };
     if skipped_records {
         install_snapshot_segment(
             source_lines.as_slice(),
@@ -986,8 +1028,8 @@ async fn freeze_thread_segment_reserved_with_publication(
     crash_segment_rotation_at(thread_id, "immutable_sealed_before_reference");
 
     let reference = RolloutReferenceItem {
-        rollout_id: Some(source_rollout_id),
-        rollout_path: immutable_path,
+        rollout_id: native_segment_rollout_id.or(Some(source_rollout_id)),
+        rollout_path: immutable_path.clone(),
         thread_id: Some(thread_id),
         rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
         segment_id,
@@ -995,10 +1037,196 @@ async fn freeze_thread_segment_reserved_with_publication(
         nth_user_message: None,
         compacted_replacement_history_filter_texts: None,
     };
-    cleanup_stale_staged_rollouts(stable_path.as_path()).await?;
-    let staged_path = staged_rollout_path(stable_path.as_path());
     let config = rollout_config(store, &source_meta.meta);
     let initial_rollout_ordinal = next_rollout_ordinal.unwrap_or(0);
+    let native_history_base = if let Some(native_segment_rollout_id) = native_segment_rollout_id {
+        Some(HistoryPosition {
+            thread_id: native_segment_rollout_id,
+            end_ordinal_exclusive: initial_rollout_ordinal,
+            end_byte_offset: fs::metadata(immutable_path.as_path())
+                .await
+                .map_err(thread_store_io_error)?
+                .len(),
+        })
+    } else {
+        None
+    };
+    if matches!(history_mode, ThreadHistoryMode::Paginated) {
+        let history_base = native_history_base.ok_or_else(|| ThreadStoreError::Internal {
+            message: "paginated segment rotation did not derive history_base".to_string(),
+        })?;
+        let active_path = stable_path.clone();
+        cleanup_stale_staged_rollouts(active_path.as_path()).await?;
+        let staged_path = staged_rollout_path(active_path.as_path());
+        let staged_recorder = create_paginated_continuation_recorder(
+            &config,
+            &source_meta.meta,
+            staged_path.clone(),
+            history_base,
+            initial_rollout_ordinal,
+        )
+        .await
+        .map_err(|error| ThreadStoreError::Internal {
+            message: format!(
+                "failed to create paginated continuation {}: {error}",
+                staged_path.display()
+            ),
+        })?;
+        if let Err(err) = staged_recorder
+            .record_canonical_items(params.initial_items())
+            .await
+        {
+            let _ = staged_recorder.shutdown().await;
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to record paginated continuation {}: {err}",
+                    staged_path.display()
+                ),
+            });
+        }
+        crash_segment_rotation_at(thread_id, "reference_recorded_before_checkpoint");
+        if let Err(err) = staged_recorder.persist().await {
+            let _ = staged_recorder.shutdown().await;
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to materialize paginated continuation {}: {err}",
+                    staged_path.display()
+                ),
+            });
+        }
+        if let Err(err) = staged_recorder.flush().await {
+            let _ = staged_recorder.shutdown().await;
+            let _ = fs::remove_file(staged_path.as_path()).await;
+            return Err(ThreadStoreError::Internal {
+                message: format!(
+                    "failed to flush paginated continuation {}: {err}",
+                    staged_path.display()
+                ),
+            });
+        }
+        crash_segment_rotation_at(thread_id, "checkpoint_recorded_before_flush");
+        staged_recorder
+            .shutdown()
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to close paginated continuation {}: {error}",
+                    staged_path.display()
+                ),
+            })?;
+        crash_segment_rotation_at(thread_id, "staged_rollout_durable_before_publication");
+
+        fs::metadata(staged_path.as_path())
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!(
+                    "paginated continuation {} disappeared before publication: {error}",
+                    staged_path.display()
+                ),
+            })?;
+
+        if let Some((recorder, _rollout_id, _history_mode)) = live_entry.as_ref() {
+            {
+                let mut live_recorders = store.live_recorders.lock().await;
+                let entry = live_recorders
+                    .get_mut(&thread_id)
+                    .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+                entry.recovery = Some(LiveRecorderRecovery {
+                    config: config.clone(),
+                    rollout_path: active_path.clone(),
+                });
+            }
+            recorder
+                .shutdown()
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to close previous paginated rollout {}: {error}",
+                        source_path.display()
+                    ),
+                })?;
+        }
+
+        let publication = replace_stable_rollout(staged_path.clone(), active_path.clone())
+            .await
+            .map_err(|error| ThreadStoreError::Internal {
+                message: format!(
+                    "failed to publish paginated continuation {} from {}: {error}",
+                    active_path.display(),
+                    staged_path.display()
+                ),
+            })?;
+        #[cfg(test)]
+        let publication = if take_segment_durability_failure(thread_id) {
+            StableRolloutPublication::DurabilityUnknown {
+                error: ThreadStoreError::Internal {
+                    message: "injected segment durability failure".to_string(),
+                },
+            }
+        } else {
+            publication
+        };
+        if live_entry.is_some() {
+            let mut live_recorders = store.live_recorders.lock().await;
+            let entry = live_recorders
+                .get_mut(&thread_id)
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+            entry.history_mode = history_mode;
+            entry.persistence_mode = ThreadPersistenceMode::Durable;
+        }
+        if live_entry.is_some() {
+            #[cfg(test)]
+            let injected_reopen_failure = take_segment_reopen_failure(thread_id);
+            #[cfg(not(test))]
+            let injected_reopen_failure = false;
+            let reopen_result = if injected_reopen_failure {
+                Err(ThreadStoreError::Internal {
+                    message: "injected segment recorder reopen failure".to_string(),
+                })
+            } else {
+                super::live_writer::live_writer_parts(store, thread_id)
+                    .await
+                    .map(|_| ())
+            };
+            if let Err(error) = reopen_result {
+                warn!(%thread_id, %error, "native segment rotation committed; live writer will reopen on its next operation");
+            }
+        }
+        crash_segment_rotation_at(thread_id, "stable_rollout_published_before_projection");
+        let projection_result = async {
+            super::thread_history::reset_projection_for_replacement(
+                store,
+                source_rollout_id,
+                initial_rollout_ordinal,
+            )
+            .await?;
+            super::thread_history_materialization::materialize_to_sqlite(
+                store,
+                source_rollout_id,
+                active_path.as_path(),
+            )
+            .await
+        }
+        .await;
+        if let Err(err) = projection_result {
+            warn!(%thread_id, %err, "native segment rotation committed but paginated projection repair failed");
+        }
+        return Ok(FrozenRolloutSegmentResult {
+            frozen: FrozenRolloutSegment {
+                reference,
+                history_base: native_history_base,
+                source_session_meta: source_meta,
+                history_mode,
+                next_rollout_ordinal,
+            },
+            publication: FrozenSegmentPublication::ActiveRolloutReplaced(publication),
+        });
+    }
+
+    cleanup_stale_staged_rollouts(stable_path.as_path()).await?;
+    let staged_path = staged_rollout_path(stable_path.as_path());
     let staged_recorder = RolloutRecorder::new(
         &config,
         RolloutRecorderParams::CreateAtPath {
@@ -1184,6 +1412,7 @@ async fn freeze_thread_segment_reserved_with_publication(
     Ok(FrozenRolloutSegmentResult {
         frozen: FrozenRolloutSegment {
             reference,
+            history_base: None,
             source_session_meta: source_meta,
             history_mode,
             next_rollout_ordinal,
@@ -1260,7 +1489,7 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
     store: &LocalThreadStore,
     source_thread_id: ThreadId,
     prefix_thread_id: ThreadId,
-    prefix_rollout_id: RolloutId,
+    _prefix_rollout_id: RolloutId,
     prefix_rollout_path: &Path,
     end_ordinal_exclusive: u64,
     source_session_meta: SessionMetaLine,
@@ -1344,22 +1573,22 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
         .await?;
     }
     let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
-    let immutable_path = immutable_segment_path(
+    let snapshot_rollout_id = ThreadId::new();
+    let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
-        prefix_thread_id,
-        Some(segment_id),
         prefix_rollout_path,
+        Some(snapshot_rollout_id),
     )?;
     install_snapshot_segment(
         prefix_lines.as_slice(),
         immutable_path.as_path(),
-        Some(segment_id),
+        /*segment_id*/ None,
     )
     .await?;
     Ok(FrozenRolloutSegment {
         reference: RolloutReferenceItem {
-            rollout_id: Some(prefix_rollout_id),
-            rollout_path: immutable_path,
+            rollout_id: Some(snapshot_rollout_id),
+            rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
             segment_id: Some(segment_id),
@@ -1367,6 +1596,14 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
         },
+        history_base: Some(HistoryPosition {
+            thread_id: snapshot_rollout_id,
+            end_ordinal_exclusive,
+            end_byte_offset: fs::metadata(immutable_path.as_path())
+                .await
+                .map_err(thread_store_io_error)?
+                .len(),
+        }),
         source_session_meta,
         history_mode,
         next_rollout_ordinal: Some(end_ordinal_exclusive),
@@ -1382,7 +1619,7 @@ async fn freeze_paginated_prefix_reserved_inner(
     source_thread_id: ThreadId,
     source_rollout_path: &Path,
     prefix_thread_id: ThreadId,
-    prefix_rollout_id: RolloutId,
+    _prefix_rollout_id: RolloutId,
     prefix_rollout_path: &Path,
     end_ordinal_exclusive: u64,
     end_byte_offset: u64,
@@ -1494,22 +1731,22 @@ async fn freeze_paginated_prefix_reserved_inner(
         .await?;
     }
     let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
-    let immutable_path = immutable_segment_path(
+    let snapshot_rollout_id = ThreadId::new();
+    let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
-        prefix_thread_id,
-        Some(segment_id),
         prefix_rollout_path,
+        Some(snapshot_rollout_id),
     )?;
     install_snapshot_segment(
         prefix_lines.as_slice(),
         immutable_path.as_path(),
-        Some(segment_id),
+        /*segment_id*/ None,
     )
     .await?;
     Ok(FrozenRolloutSegment {
         reference: RolloutReferenceItem {
-            rollout_id: Some(prefix_rollout_id),
-            rollout_path: immutable_path,
+            rollout_id: Some(snapshot_rollout_id),
+            rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
             segment_id: Some(segment_id),
@@ -1517,6 +1754,14 @@ async fn freeze_paginated_prefix_reserved_inner(
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
         },
+        history_base: Some(HistoryPosition {
+            thread_id: snapshot_rollout_id,
+            end_ordinal_exclusive,
+            end_byte_offset: fs::metadata(immutable_path.as_path())
+                .await
+                .map_err(thread_store_io_error)?
+                .len(),
+        }),
         source_session_meta,
         history_mode,
         next_rollout_ordinal: Some(end_ordinal_exclusive),
@@ -1772,6 +2017,13 @@ fn is_immutable_segment_path(
     thread_id: ThreadId,
     segment_id: Option<SegmentId>,
 ) -> bool {
+    if path.starts_with(
+        codex_home
+            .join(codex_rollout::SESSIONS_SUBDIR)
+            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR),
+    ) {
+        return true;
+    }
     path.starts_with(
         codex_home
             .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
@@ -2004,6 +2256,76 @@ fn rollout_config(store: &LocalThreadStore, meta: &SessionMeta) -> RolloutConfig
             .unwrap_or_else(|| store.config.default_model_provider_id.clone()),
         generate_memories: meta.memory_mode.as_deref() != Some("disabled"),
     }
+}
+
+async fn create_paginated_continuation_recorder(
+    config: &RolloutConfig,
+    source_meta: &SessionMeta,
+    path: PathBuf,
+    history_base: HistoryPosition,
+    initial_rollout_ordinal: u64,
+) -> ThreadStoreResult<RolloutRecorder> {
+    let mut continuation_meta = source_meta.clone();
+    continuation_meta.segment_id = None;
+    continuation_meta.history_base = Some(history_base);
+    RolloutRecorder::new(
+        config,
+        RolloutRecorderParams::CreateAtPath {
+            path,
+            session_meta: Box::new(continuation_meta),
+            base_instructions: source_meta.base_instructions.clone().unwrap_or_default(),
+            dynamic_tools: source_meta.dynamic_tools.clone().unwrap_or_default(),
+            initial_rollout_ordinal,
+        },
+    )
+    .await
+    .map_err(thread_store_io_error)
+}
+
+/// Places native `history_base` predecessors below `sessions/` without exposing them as threads.
+///
+/// Upstream resolves a physical rollout ID recursively below `sessions/`, while thread listing
+/// only enters date directories. Keeping the canonical filename makes the predecessor readable by
+/// unmodified upstream Codex and keeps it out of the desktop thread list.
+fn native_history_segment_path(
+    codex_home: &Path,
+    source_path: &Path,
+    rollout_id: Option<RolloutId>,
+) -> ThreadStoreResult<PathBuf> {
+    let source_path = match rollout_id {
+        Some(rollout_id) => {
+            codex_rollout::history_rollout_path_with_rollout_id(source_path, rollout_id)
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "rollout {} does not have a canonical filename",
+                        source_path.display()
+                    ),
+                })?
+        }
+        None => source_path.to_path_buf(),
+    };
+    let file_name = source_path
+        .file_name()
+        .ok_or_else(|| ThreadStoreError::Internal {
+            message: format!(
+                "rollout {} does not have a file name",
+                source_path.display()
+            ),
+        })?;
+    let (year, month, day) =
+        codex_rollout::rollout_date_parts(file_name).ok_or_else(|| ThreadStoreError::Internal {
+            message: format!(
+                "rollout {} does not have a canonical dated filename",
+                source_path.display()
+            ),
+        })?;
+    Ok(codex_home
+        .join(codex_rollout::SESSIONS_SUBDIR)
+        .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        .join(year)
+        .join(month)
+        .join(day)
+        .join(file_name))
 }
 
 fn immutable_segment_path(

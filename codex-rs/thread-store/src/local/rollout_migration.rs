@@ -447,7 +447,12 @@ impl LocalThreadStore {
             && tokio::fs::try_exists(&journal_path)
                 .await
                 .map_err(migration_error)?;
-        if metadata.meta.history_mode == ThreadHistoryMode::Paginated {
+        let paginated_reference_lineage = metadata.meta.history_mode
+            == ThreadHistoryMode::Paginated
+            && rollout_contains_reference(path.as_path()).await?;
+        if metadata.meta.history_mode == ThreadHistoryMode::Paginated
+            && (pending_published_migration || !paginated_reference_lineage)
+        {
             let bytes_before = limiter.bytes_processed;
             let result = if pending_published_migration {
                 let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
@@ -594,8 +599,12 @@ impl LocalThreadStore {
         {
             return Ok(None);
         }
+        let locked_reference_lineage = locked_metadata.meta.history_mode
+            == ThreadHistoryMode::Paginated
+            && rollout_contains_reference(path.as_path()).await?;
         if locked_metadata.meta.id != thread_id
-            || locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
+            || (locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
+                && !locked_reference_lineage)
         {
             return Ok(Some(migration_outcome(
                 thread_id,
@@ -648,7 +657,7 @@ impl LocalThreadStore {
                     status: RolloutMigrationStatus::Migrated,
                     bytes_processed,
                     message: Some(
-                        "migrated authenticated segmented Legacy lineage without deleting sources"
+                        "migrated authenticated segmented lineage to native history_base without deleting sources"
                             .to_string(),
                     ),
                     manifest: None,
@@ -1251,7 +1260,9 @@ async fn legacy_lineage_migration_plan(
     if !has_lineage {
         return Ok(None);
     }
-    let prefix = if metadata.meta.history_base.is_some() {
+    let prefix = if metadata.meta.history_mode == ThreadHistoryMode::Paginated {
+        "segmented Paginated rollout migration requires an atomic native-history conversion"
+    } else if metadata.meta.history_base.is_some() {
         "segmented legacy rollout migration requires an atomic lineage conversion"
     } else {
         "reference-backed legacy rollout migration requires an atomic lineage conversion"
@@ -1262,6 +1273,24 @@ async fn legacy_lineage_migration_plan(
         .map_err(|error| {
             migration_error(format!("{prefix}; lineage authentication failed: {error}"))
         })
+}
+
+async fn rollout_contains_reference(path: &Path) -> ThreadStoreResult<bool> {
+    let mut reader = codex_rollout::open_rollout_line_reader(path)
+        .await
+        .map_err(migration_error)?;
+    while let Some(line) = reader.next_line().await.map_err(migration_error)? {
+        let Ok(value) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if matches!(
+            value.get("type").and_then(Value::as_str),
+            Some("rollout_reference" | "fork_reference")
+        ) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn lineage_plan_summary(plan: &LegacyLineageMigrationPlan) -> String {

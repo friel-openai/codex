@@ -1,4 +1,5 @@
 use crate::ARCHIVED_SESSIONS_SUBDIR;
+use crate::ROLLOUT_SEGMENTS_SUBDIR;
 use crate::RolloutItem;
 use crate::SESSIONS_SUBDIR;
 use crate::compression;
@@ -118,6 +119,38 @@ pub fn rollout_id_from_path(rollout_path: &Path) -> Option<RolloutId> {
 pub fn thread_id_from_path(rollout_path: &Path) -> Option<ThreadId> {
     let file_name = rollout_path.file_name()?.to_str()?;
     Some(RolloutFileName::parse(file_name)?.thread_id())
+}
+
+/// Returns a canonical sibling path with the same timestamp and stable thread ID.
+///
+/// `SessionMeta.history_base` addresses the physical rollout ID encoded after `_`, so snapshots
+/// of different prefixes need distinct canonical filenames even when they belong to one thread.
+pub fn rollout_path_with_rollout_id(rollout_path: &Path, rollout_id: RolloutId) -> Option<PathBuf> {
+    let file_name = rollout_path.file_name()?.to_str()?;
+    let file_name = RolloutFileName::parse(file_name)?;
+    let rendered = RolloutFileName::new(file_name.timestamp(), file_name.thread_id(), rollout_id)
+        .render()
+        .ok()?;
+    Some(rollout_path.with_file_name(rendered))
+}
+
+/// Returns a canonical physical-history path that sorts before its active rollout.
+///
+/// Upstream resolves `SessionMeta.history_base` by rollout ID, but its SQLite-less thread lookup
+/// chooses the newest filename owned by a thread. Physical predecessors therefore use the second
+/// immediately before the active filename so an unmodified upstream lookup still selects the
+/// active rollout.
+pub fn history_rollout_path_with_rollout_id(
+    rollout_path: &Path,
+    rollout_id: RolloutId,
+) -> Option<PathBuf> {
+    let file_name = rollout_path.file_name()?.to_str()?;
+    let file_name = RolloutFileName::parse(file_name)?;
+    let timestamp = file_name.timestamp().checked_sub(time::Duration::SECOND)?;
+    let rendered = RolloutFileName::new(timestamp, file_name.thread_id(), rollout_id)
+        .render()
+        .ok()?;
+    Some(rollout_path.with_file_name(rendered))
 }
 
 pub async fn extract_metadata_from_rollout(
@@ -570,6 +603,9 @@ async fn collect_rollout_paths(root: &Path) -> std::io::Result<Vec<PathBuf>> {
                 }
             };
             if file_type.is_dir() {
+                if entry.file_name() == ROLLOUT_SEGMENTS_SUBDIR {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }

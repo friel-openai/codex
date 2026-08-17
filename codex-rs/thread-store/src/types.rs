@@ -285,6 +285,8 @@ impl FreezeRolloutSegmentParams {
 pub struct FrozenRolloutSegment {
     /// Reference to the immutable source prefix.
     pub reference: RolloutReferenceItem,
+    /// Native upstream pointer to the same immutable prefix for paginated history.
+    pub history_base: Option<HistoryPosition>,
     /// Canonical metadata line copied from the source segment before it was frozen.
     pub source_session_meta: SessionMetaLine,
     /// Persisted history mode inherited by continuations and full-history forks.

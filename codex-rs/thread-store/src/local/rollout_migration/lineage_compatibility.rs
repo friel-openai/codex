@@ -43,12 +43,26 @@ pub(super) async fn validate_bounded_desktop_history(
         .iter()
         .map(|target| target.staged_path.clone())
         .collect::<Vec<_>>();
-    let canonical = canonical_turns_from_rollouts(staged_paths.as_slice()).await?;
-
     let selected = plan
         .sources
         .last()
         .ok_or_else(|| migration_error("lineage migration has no selected source"))?;
+    let inherited = if let Some(dependency) = plan.history_bases.first() {
+        codex_rollout::materialize_rollout_lines(codex_home, selected.path.as_path())
+            .await
+            .map_err(migration_error)?
+            .into_iter()
+            .filter(|line| {
+                line.ordinal
+                    .is_some_and(|ordinal| ordinal < dependency.position.end_ordinal_exclusive)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let canonical =
+        canonical_turns_from_rollouts(inherited.as_slice(), staged_paths.as_slice()).await?;
+
     let mut materializer =
         codex_rollout::BoundedRolloutMaterializer::new(codex_home, selected.path.as_path());
     let mut reference_limit = DEFAULT_ROLLOUT_REFERENCE_DEPTH;
@@ -59,7 +73,7 @@ pub(super) async fn validate_bounded_desktop_history(
             .map_err(migration_error)?;
         let bounded_turns = turns_from_items(
             bounded.lines.iter().map(|line| &line.item),
-            ThreadHistoryMode::Legacy,
+            selected.history_mode,
         );
         compare_turns(
             reference_limit,
@@ -92,9 +106,18 @@ struct CanonicalItem {
     item: ThreadItem,
 }
 
-async fn canonical_turns_from_rollouts(paths: &[PathBuf]) -> ThreadStoreResult<Vec<Turn>> {
+async fn canonical_turns_from_rollouts(
+    inherited: &[codex_rollout::RolloutLine],
+    paths: &[PathBuf],
+) -> ThreadStoreResult<Vec<Turn>> {
     let mut turns = HashMap::<String, CanonicalTurn>::new();
     let mut items = HashMap::<(String, String), CanonicalItem>::new();
+    for line in inherited {
+        let ordinal = line
+            .ordinal
+            .ok_or_else(|| migration_error("inherited Paginated line is missing its ordinal"))?;
+        apply_projected_line(&mut turns, &mut items, ordinal, line);
+    }
     for path in paths {
         let mut reader = codex_rollout::open_rollout_line_reader(path.as_path())
             .await
@@ -106,17 +129,7 @@ async fn canonical_turns_from_rollouts(paths: &[PathBuf]) -> ThreadStoreResult<V
             let ordinal = line
                 .ordinal
                 .ok_or_else(|| migration_error("staged rollout line is missing its ordinal"))?;
-            let changes = project_rollout_line(&line);
-            for turn_id in changes.removed_turn_ids {
-                turns.remove(turn_id.as_str());
-                items.retain(|(item_turn_id, _), _| item_turn_id != &turn_id);
-            }
-            for turn in changes.changed_turns {
-                apply_turn_change(&mut turns, ordinal, turn);
-            }
-            for item in changes.changed_items {
-                apply_item_change(&mut items, ordinal, item);
-            }
+            apply_projected_line(&mut turns, &mut items, ordinal, &line);
         }
     }
     let mut items_by_turn = HashMap::<String, Vec<CanonicalItem>>::new();
@@ -134,6 +147,25 @@ async fn canonical_turns_from_rollouts(paths: &[PathBuf]) -> ThreadStoreResult<V
             turn.turn
         })
         .collect())
+}
+
+fn apply_projected_line(
+    turns: &mut HashMap<String, CanonicalTurn>,
+    items: &mut HashMap<(String, String), CanonicalItem>,
+    ordinal: u64,
+    line: &codex_rollout::RolloutLine,
+) {
+    let changes = project_rollout_line(line);
+    for turn_id in changes.removed_turn_ids {
+        turns.remove(turn_id.as_str());
+        items.retain(|(item_turn_id, _), _| item_turn_id != &turn_id);
+    }
+    for turn in changes.changed_turns {
+        apply_turn_change(turns, ordinal, turn);
+    }
+    for item in changes.changed_items {
+        apply_item_change(items, ordinal, item);
+    }
 }
 
 fn ensure_bounded_compatibility_size(source_bytes: u64) -> ThreadStoreResult<()> {

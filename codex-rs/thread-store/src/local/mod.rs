@@ -452,7 +452,7 @@ impl LocalThreadStore {
     /// [`Self::schedule_history_projection_rebuild`] instead. This method waits for the complete
     /// lineage scan and exists for startup maintenance, explicit repair, and deterministic tests.
     pub async fn rebuild_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
-        projection_rebuild::rebuild(self, thread_id).await
+        projection_rebuild::rebuild_waiting(self, thread_id).await
     }
 
     /// Starts a single delayed projection rebuild without blocking the current request.

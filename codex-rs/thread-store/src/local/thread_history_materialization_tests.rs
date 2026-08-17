@@ -329,10 +329,10 @@ async fn legacy_projection_materializes_visible_messages_without_rollout_ordinal
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("first question")),
-            rollout_line(None, legacy_agent_message("first answer")),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first question")),
+            rollout_line(/*ordinal*/ None, legacy_agent_message("first answer")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -423,14 +423,14 @@ async fn legacy_projection_materializes_inter_agent_communication() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("first question")),
-            rollout_line(None, policy_rejected_item),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first question")),
+            rollout_line(/*ordinal*/ None, policy_rejected_item),
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::InterAgentCommunication(communication.clone()),
             ),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -487,7 +487,7 @@ async fn legacy_projection_preserves_item_ids_across_streaming_batches() {
             legacy_agent_message(&format!("answer {index}")),
             turn_completed(&turn_id),
         ] {
-            suffix.push_str(&rollout_line(None, item));
+            suffix.push_str(&rollout_line(/*ordinal*/ None, item));
             suffix.push('\n');
         }
     }
@@ -549,8 +549,14 @@ async fn legacy_projection_materializes_implicit_completed_turn_summary() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n",
-            rollout_line(None, legacy_user_message("implicit question")),
-            rollout_line(None, legacy_agent_message("implicit answer")),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_user_message("implicit question")
+            ),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_agent_message("implicit answer")
+            ),
         ),
     );
 
@@ -602,9 +608,12 @@ async fn legacy_projection_materializes_implicit_commentary_without_a_final_answ
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n",
-            rollout_line(None, legacy_user_message("implicit question")),
             rollout_line(
-                None,
+                /*ordinal*/ None,
+                legacy_user_message("implicit question")
+            ),
+            rollout_line(
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "implicit commentary".to_string(),
                     phase: Some(MessagePhase::Commentary),
@@ -671,17 +680,17 @@ async fn legacy_projection_does_not_report_commentary_as_a_final_answer() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n{}\n",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("question")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("question")),
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "progress update".to_string(),
                     phase: Some(MessagePhase::Commentary),
                     memory_citation: None,
                 })),
             ),
-            rollout_line(None, turn_completed("turn-1")),
+            rollout_line(/*ordinal*/ None, turn_completed("turn-1")),
         ),
     );
 
@@ -740,9 +749,9 @@ async fn legacy_projection_skips_repeated_segment_metadata() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}\n{}\n",
-            rollout_line(None, legacy_user_message("first segment")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("first segment")),
             segment_metadata,
-            rollout_line(None, legacy_user_message("next segment")),
+            rollout_line(/*ordinal*/ None, legacy_user_message("next segment")),
         ),
     );
 
@@ -804,8 +813,11 @@ async fn legacy_projection_waits_for_complete_rollout_lines() {
         rollout_path.as_path(),
         &format!(
             "{}\n{}",
-            rollout_line(None, turn_started("turn-1")),
-            rollout_line(None, legacy_user_message("partial message")),
+            rollout_line(/*ordinal*/ None, turn_started("turn-1")),
+            rollout_line(
+                /*ordinal*/ None,
+                legacy_user_message("partial message")
+            ),
         ),
     );
 
@@ -867,7 +879,7 @@ async fn legacy_projection_removes_rolled_back_turns_and_items_transactionally()
             legacy_agent_message(message),
             turn_completed(turn_id),
         ] {
-            suffix.push_str(&rollout_line(None, item));
+            suffix.push_str(&rollout_line(/*ordinal*/ None, item));
             suffix.push('\n');
         }
     }
@@ -882,7 +894,7 @@ async fn legacy_projection_removes_rolled_back_turns_and_items_transactionally()
         &format!(
             "{}\n",
             rollout_line(
-                None,
+                /*ordinal*/ None,
                 RolloutItem::EventMsg(EventMsg::ThreadRolledBack(ThreadRolledBackEvent {
                     num_turns: 1,
                 })),
@@ -2139,14 +2151,8 @@ async fn indexed_latest_fork_replays_uncompacted_model_context_once() {
         prepared.model_context.as_slice(),
         "uncompacted message 3"
     ));
-    assert_eq!(
-        prepared
-            .projected_response_turns
-            .as_ref()
-            .expect("reuse projected parent response instead of replaying twice")
-            .len(),
-        4
-    );
+    assert!(prepared.projected_response_turns.is_none());
+    assert!(prepared.copied_history.is_none());
 }
 
 #[tokio::test]
@@ -2484,6 +2490,7 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         .persist_thread(thread_id, PersistContext::Standard)
         .await
         .expect("persist paginated source metadata");
+    let mut predecessor_reference = None;
     for index in 0..3 {
         let turn_id = format!("turn-{index}");
         store
@@ -2507,10 +2514,18 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
             .await
             .expect("append projected source turn");
         if index < 2 {
-            store
+            let frozen = store
                 .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
                 .await
                 .expect("rotate projected source segment");
+            if predecessor_reference.is_none() {
+                predecessor_reference = Some((
+                    frozen.reference,
+                    frozen
+                        .next_rollout_ordinal
+                        .expect("sealed predecessor ordinal boundary"),
+                ));
+            }
         }
     }
     index_paginated_source_metadata(&store, thread_id).await;
@@ -2524,10 +2539,39 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse canonical source rollout");
-    match &mut lines[1].item {
-        RolloutItem::RolloutReference(reference) => reference.nth_user_message = Some(1),
-        _ => panic!("expected leading same-thread rollout reference"),
+    match &mut lines[0].item {
+        RolloutItem::SessionMeta(session_meta) => session_meta
+            .meta
+            .history_base
+            .take()
+            .expect("native same-thread history base"),
+        _ => panic!("expected leading session metadata"),
+    };
+    let (mut predecessor_reference, predecessor_end_ordinal) =
+        predecessor_reference.expect("sealed predecessor reference");
+    predecessor_reference.nth_user_message = Some(1);
+    lines[0].ordinal = Some(predecessor_end_ordinal);
+    for (offset, line) in lines[1..].iter_mut().enumerate() {
+        let offset = u64::try_from(offset).expect("compatibility ordinal offset");
+        line.ordinal = Some(
+            predecessor_end_ordinal
+                .checked_add(offset)
+                .and_then(|ordinal| ordinal.checked_add(2))
+                .expect("compatibility ordinal overflow"),
+        );
     }
+    lines.insert(
+        1,
+        RolloutLine {
+            timestamp: lines[0].timestamp.clone(),
+            ordinal: Some(
+                predecessor_end_ordinal
+                    .checked_add(1)
+                    .expect("compatibility reference ordinal overflow"),
+            ),
+            item: RolloutItem::RolloutReference(predecessor_reference),
+        },
+    );
     let encoded = lines
         .iter()
         .map(serde_json::to_string)
@@ -2537,19 +2581,12 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         + "\n";
     fs::write(active_path.as_path(), encoded.as_bytes())
         .expect("replace source rollout with inherited user cutoff");
-    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
-        home.path().abs(),
-    ))
-    .await
-    .expect("open projected thread history");
-    sqlx::query(
-        "UPDATE thread_history_projection_state SET next_rollout_byte_offset = ? WHERE thread_id = ?",
-    )
-    .bind(i64::try_from(encoded.len()).expect("source length"))
-    .bind(thread_id.to_string())
-    .execute(&pool)
-    .await
-    .expect("update source projection byte checkpoint");
+    assert!(
+        store
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("rebuild filtered compatibility projection")
+    );
 
     let prepared = store
         .prepare_fork(PrepareForkParams {
