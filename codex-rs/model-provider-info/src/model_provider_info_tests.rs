@@ -164,6 +164,10 @@ fn openai_client_version_header_preserves_prerelease_and_strips_build_metadata()
         openai_client_version_header("0.148.0-alpha.20"),
         "0.148.0-alpha.20"
     );
+    assert_eq!(
+        openai_client_version_header("not-a-version"),
+        "not-a-version"
+    );
 }
 
 #[test]
