@@ -19,6 +19,7 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadSettingsAppliedEvent;
 use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
 use codex_rollout::CertifiedSegmentStateCheckpoint;
@@ -338,7 +339,8 @@ async fn record_initial_history_ignores_security_risk_scores() {
             ]),
             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
         }))
-        .await;
+        .await
+        .expect("record resumed history");
 
     assert_eq!(
         raw_history_items(&session.state.lock().await.clone_history()),

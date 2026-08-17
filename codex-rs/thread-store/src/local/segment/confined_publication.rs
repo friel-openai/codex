@@ -25,12 +25,12 @@ use sha2::Sha256;
 
 static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 #[cfg(test)]
-pub(crate) static CRASH_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+pub(crate) static CRASH_TEST_LOCK: std::sync::LazyLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
 
 #[cfg(test)]
-pub(crate) async fn crash_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
-    CRASH_TEST_LOCK.lock().await
+pub(crate) async fn crash_test_guard() -> tokio::sync::OwnedMutexGuard<()> {
+    std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await
 }
 #[cfg(test)]
 static CRASH_BOUNDARIES: std::sync::LazyLock<
@@ -153,6 +153,7 @@ impl FileIdentity {
 }
 
 /// Reads one confined regular file and fingerprints the opened file descriptor.
+#[cfg(test)]
 pub(crate) async fn read_confined_file(
     codex_home: &Path,
     path: &Path,
@@ -225,6 +226,7 @@ pub(crate) async fn ensure_confined_directory_under_root(
 ///
 /// `replacement` is synchronized before rename. The installed descriptor and destination parent
 /// are synchronized before success is returned.
+#[cfg(test)]
 pub(crate) async fn replace_confined_file(
     codex_home: &Path,
     destination: &Path,
@@ -279,6 +281,7 @@ pub(crate) async fn replace_confined_file_under_root(
 ///
 /// An existing file is reused only when its bytes and metadata already match. Different existing
 /// bytes fail with `AlreadyExists`.
+#[cfg(test)]
 pub(crate) async fn install_confined_file(
     codex_home: &Path,
     destination: &Path,
@@ -415,7 +418,12 @@ mod platform {
                     std::process::id(),
                     thread_token()
                 ))
-                .expect("temporary rollout name has no NUL");
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "temporary rollout name contains NUL",
+                    )
+                })?;
                 match openat_file(
                     &self.parent,
                     &name,
@@ -773,6 +781,7 @@ fn ensure_confined_directory_sync_under_root(
 }
 
 #[cfg(unix)]
+#[cfg(test)]
 fn read_confined_file_sync(
     codex_home: &Path,
     path: &Path,
@@ -807,6 +816,7 @@ fn confined_entry_exists_sync_under_root(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(test)]
 fn replace_confined_file_sync(
     codex_home: &Path,
     destination: &Path,
@@ -934,6 +944,7 @@ fn ensure_confined_directory_sync(
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+#[cfg(test)]
 fn install_confined_file_sync(
     codex_home: &Path,
     destination: &Path,

@@ -230,9 +230,9 @@ async fn submit_prompt_text(
 ) -> Result<()> {
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     Ok(())
 }

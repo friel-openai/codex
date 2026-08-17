@@ -507,12 +507,10 @@ impl TurnContext {
             models_manager_config.model_auto_compact_token_limit = custom_model
                 .model_auto_compact_token_limit
                 .or(models_manager_config.model_auto_compact_token_limit);
-            routed.model_info = Arc::new(
-                codex_models_manager::model_info::with_config_overrides(
-                    (*routed.model_info).clone(),
-                    &models_manager_config,
-                ),
-            );
+            routed.model_info = Arc::new(codex_models_manager::model_info::with_config_overrides(
+                (*routed.model_info).clone(),
+                &models_manager_config,
+            ));
         }
         let has_authoritative_metadata = !routed.model_info.used_fallback_model_metadata;
 
@@ -546,10 +544,10 @@ impl TurnContext {
                 Arc::make_mut(&mut routed.model_info)
                     .service_tiers
                     .push(ModelServiceTier {
-                    id: service_tier.clone(),
-                    name: service_tier.clone(),
-                    description: "Configured by a custom model routing profile.".to_string(),
-                });
+                        id: service_tier.clone(),
+                        name: service_tier.clone(),
+                        description: "Configured by a custom model routing profile.".to_string(),
+                    });
             }
             Some(service_tier.clone())
         } else if fast_mode_enabled {

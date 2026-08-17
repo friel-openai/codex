@@ -329,11 +329,13 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&boundary_cwd),
         workspace_roots: vec![PathUri::from_abs_path(&boundary_cwd)],
+        config: EnvironmentConfigState::FromThread,
     };
     let latest_environment = TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&latest_cwd),
         workspace_roots: vec![PathUri::from_abs_path(&latest_cwd)],
+        config: EnvironmentConfigState::FromThread,
     };
     let boundary_context = vec![
         RolloutItem::ResponseItem(user_msg("boundary response").into()),
@@ -447,6 +449,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&restored_cwd),
         workspace_roots: vec![PathUri::from_abs_path(&restored_cwd)],
+        config: EnvironmentConfigState::FromThread,
     };
     let thread_id = ThreadId::new();
     let manager = ThreadManager::with_models_provider_and_home_for_tests(

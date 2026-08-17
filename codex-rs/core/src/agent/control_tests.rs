@@ -1018,6 +1018,7 @@ async fn persist_thread_environment_for_resume(
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&cwd),
         workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+        config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
     };
     let mut settings = thread
         .config_snapshot()

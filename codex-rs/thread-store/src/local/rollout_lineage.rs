@@ -562,6 +562,10 @@ struct PendingLineageSegment {
     reference: Option<PendingLineageReference>,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the iterative lineage traversal carries each bounded resolution constraint explicitly"
+)]
 async fn resolve_path(
     store: &LocalThreadStore,
     expected_thread_id: ThreadId,

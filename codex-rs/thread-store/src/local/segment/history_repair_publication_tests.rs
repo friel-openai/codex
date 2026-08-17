@@ -1011,7 +1011,7 @@ async fn publication_failure_is_old_before_commit_and_visible_unknown_after_comm
 
 #[tokio::test]
 async fn recovery_cleans_a_crash_left_stage_before_a_clean_runtime_return() {
-    let _crash_guard = CRASH_TEST_LOCK.lock().await;
+    let _crash_guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
     let home = TempDir::new().expect("temp home");
     let path = home.path().join("rollout.jsonl");
     let source = active_source(ThreadId::new(), "old");
@@ -1713,7 +1713,7 @@ async fn active_publication_binds_one_symlinked_codex_home_target() {
     .expect("install source backup");
     CODEX_HOME_RETARGETS
         .lock()
-        .expect("CODEX_HOME retarget mutex")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(linked_home.clone(), second.path().to_path_buf());
 
     let publication = publish_history_repair_replacement(

@@ -1071,12 +1071,12 @@ async fn select_thread_candidates(
                 continue;
             }
         }
-        selected.push(
-            candidates
-                .into_iter()
-                .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
-                .expect("duplicate group is nonempty"),
-        );
+        if let Some(candidate) = candidates
+            .into_iter()
+            .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
+        {
+            selected.push(candidate);
+        }
     }
     Ok(selected)
 }

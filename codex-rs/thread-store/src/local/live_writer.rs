@@ -224,15 +224,22 @@ pub(super) async fn resume_thread(
         };
     let rollout_id = match codex_rollout::rollout_id_from_path(rollout_path.as_path()) {
         Some(rollout_id) => rollout_id,
-        None => super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
-            rollout_path.as_path(),
-            params.thread_id,
-            noncanonical_session_meta
+        None => {
+            let authenticated_thread_id = noncanonical_session_meta
                 .as_ref()
-                .expect("noncanonical rollout metadata is loaded")
-                .meta
-                .id,
-        )?,
+                .map(|metadata| metadata.meta.id)
+                .ok_or_else(|| ThreadStoreError::Internal {
+                    message: format!(
+                        "noncanonical rollout metadata is missing for {}",
+                        rollout_path.display()
+                    ),
+                })?;
+            super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+                rollout_path.as_path(),
+                params.thread_id,
+                authenticated_thread_id,
+            )?
+        }
     };
     let segmented_legacy_projection_complete = if segmented_rollout {
         Some(if store.state_db().await.is_none() {

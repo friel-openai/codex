@@ -535,17 +535,17 @@ mod tests {
             .environments
             .single_local_environment()
             .expect("one local environment");
-        let environment_id = current_environment.environment_id.clone();
+        let mut selection = current_environment.selection.clone();
+        selection.cwd = PathUri::from_abs_path(&fixture.primary);
+        selection.workspace_roots = vec![PathUri::from_abs_path(&fixture.primary)];
+        let config_origin = current_environment.config_origin;
         let environment = Arc::clone(&current_environment.environment);
         let shell = current_environment.shell.clone();
-        let config = current_environment.config.clone();
         turn.environments.environments = vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
-            environment_id,
+            selection,
+            config_origin,
             environment,
-            PathUri::from_abs_path(&fixture.primary),
-            vec![PathUri::from_abs_path(&fixture.primary)],
             shell,
-            config,
         ))];
         let turn = Arc::new(turn);
         let step_context = StepContext::for_test(Arc::clone(&turn));

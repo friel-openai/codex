@@ -137,17 +137,17 @@ impl GoalSupervisorHistoryAccess {
                     "goal-supervisor publication is missing maintenance ownership for thread {thread_id}"
                 ),
             })?;
-        if !self
+        let Some(lifecycle) = self
             .lifecycle
             .iter()
-            .any(|lease| lease.thread_id() == thread_id)
-        {
+            .find(|lease| lease.thread_id() == thread_id)
+        else {
             return Err(ThreadStoreError::Internal {
                 message: format!(
                     "goal-supervisor publication is missing lifecycle ownership for thread {thread_id}"
                 ),
             });
-        }
+        };
         let reservation = self
             .reservation
             .as_ref()
@@ -157,11 +157,6 @@ impl GoalSupervisorHistoryAccess {
                     "goal-supervisor publication is missing writer ownership for thread {thread_id}"
                 ),
             })?;
-        let lifecycle = self
-            .lifecycle
-            .iter()
-            .find(|lease| lease.thread_id() == thread_id)
-            .expect("lifecycle ownership checked above");
         authorize_history_repair_writer(store, thread_id, maintenance, lifecycle, reservation).await
     }
 }
@@ -481,7 +476,7 @@ async fn discover_scope(
     let mut lineage_thread_ids = lineage
         .segments()
         .iter()
-        .map(|segment| segment.thread_id())
+        .map(super::rollout_lineage::RolloutLineageSegment::thread_id)
         .collect::<Vec<_>>();
     lineage_thread_ids.push(thread_id);
     lineage_thread_ids.sort_unstable_by_key(ThreadId::to_string);
@@ -507,9 +502,7 @@ async fn discover_scope(
             .await?,
         );
     }
-    if roots.is_empty() {
-        roots.push(root);
-    } else if !roots.iter().any(|candidate| candidate.path == root.path) {
+    if roots.is_empty() || !roots.iter().any(|candidate| candidate.path == root.path) {
         roots.push(root);
     }
     // Fork preparation has always reserved every stable thread identity in the consumed lineage,
@@ -633,6 +626,10 @@ async fn scan_reference(
         selected_candidate_ids: HashSet<String>,
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the iterative lineage scan carries each bounded traversal constraint explicitly"
+    )]
     async fn load_scan_frame(
         store: &LocalThreadStore,
         reference: RolloutReferenceItem,
@@ -1014,7 +1011,7 @@ fn canonical_home_key(store: &LocalThreadStore) -> ThreadStoreResult<PathBuf> {
 fn quarantined_thread(home: &Path, thread_id: ThreadId) -> bool {
     INDETERMINATE_HISTORY_REPAIRS
         .lock()
-        .expect("history repair quarantine mutex")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(home)
         .is_some_and(|threads| threads.contains(&thread_id))
 }
@@ -1022,7 +1019,7 @@ fn quarantined_thread(home: &Path, thread_id: ThreadId) -> bool {
 fn reject_quarantined_scope(home: &Path, thread_ids: &[ThreadId]) -> ThreadStoreResult<()> {
     let quarantined = INDETERMINATE_HISTORY_REPAIRS
         .lock()
-        .expect("history repair quarantine mutex");
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(thread_id) = quarantined
         .get(home)
         .and_then(|threads| thread_ids.iter().find(|id| threads.contains(id)))
@@ -1035,7 +1032,7 @@ fn reject_quarantined_scope(home: &Path, thread_ids: &[ThreadId]) -> ThreadStore
 fn quarantine_threads(home: &Path, thread_ids: impl IntoIterator<Item = ThreadId>) {
     INDETERMINATE_HISTORY_REPAIRS
         .lock()
-        .expect("history repair quarantine mutex")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .entry(home.to_path_buf())
         .or_default()
         .extend(thread_ids);
@@ -1326,6 +1323,10 @@ async fn repair_reference(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the iterative repair traversal carries each bounded lineage constraint explicitly"
+)]
 async fn load_frame(
     store: &LocalThreadStore,
     reference: RolloutReferenceItem,

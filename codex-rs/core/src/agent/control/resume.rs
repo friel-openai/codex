@@ -239,6 +239,7 @@ impl AgentControl {
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
+    #[cfg(test)]
     pub(crate) async fn resume_agent_from_rollout(
         &self,
         config: Config,
@@ -303,6 +304,7 @@ impl AgentControl {
             rollout_path: stored_thread.rollout_path,
         });
         let parent_thread_id = match ownership {
+            #[cfg(test)]
             ResumedThreadOwnership::Preserve => stored_thread.parent_thread_id,
             ResumedThreadOwnership::Transfer => session_source
                 .parent_thread_id()

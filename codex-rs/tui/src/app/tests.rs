@@ -5168,7 +5168,7 @@ async fn make_test_app_with_channels() -> (
             windows_sandbox: WindowsSandboxState::default(),
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
-        pending_thread_approval_labels: HashMap::new(),
+            pending_thread_approval_labels: HashMap::new(),
             agent_navigation: AgentNavigationState::default(),
             side_threads: HashMap::new(),
             abandoned_side_threads: HashSet::new(),

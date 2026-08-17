@@ -5,8 +5,8 @@ use tempfile::TempDir;
 
 use super::*;
 
-async fn reset_crash_injection() -> tokio::sync::MutexGuard<'static, ()> {
-    let guard = CRASH_TEST_LOCK.lock().await;
+async fn reset_crash_injection() -> tokio::sync::OwnedMutexGuard<()> {
+    let guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
     CRASH_BOUNDARIES
         .lock()
         .expect("confined crash boundary mutex")

@@ -63,6 +63,7 @@ fn startup_waiting_gate_is_only_for_fresh_or_exit_session_selection() {
         &SessionSelection::Side(crate::resume_picker::SessionTarget {
             path: Some(PathBuf::from("/tmp/side")),
             thread_id: ThreadId::new(),
+            history_mode: None,
         })
     ));
 }
@@ -82,6 +83,7 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
     let side = SessionSelection::Side(crate::resume_picker::SessionTarget {
         path: Some(PathBuf::from("/tmp/side")),
         thread_id: ThreadId::new(),
+        history_mode: None,
     });
     let no_images: Vec<PathBuf> = Vec::new();
     let initial_images = vec![PathBuf::from("/tmp/image.png")];
@@ -181,6 +183,7 @@ fn startup_waiting_gate_not_applied_for_resume_fork_or_side_session_selection() 
         crate::resume_picker::SessionTarget {
             path: Some(PathBuf::from("/tmp/side")),
             thread_id: ThreadId::new(),
+            history_mode: None,
         },
     ));
     assert!(App::should_handle_active_thread_events(

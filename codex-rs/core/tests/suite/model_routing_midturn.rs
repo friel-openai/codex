@@ -87,9 +87,9 @@ async fn build_routed_test(
 async fn submit_prompt(test: &TestCodex, text: &str) -> Result<()> {
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     Ok(())
 }
@@ -249,9 +249,9 @@ async fn steering_during_tool_wait_is_recorded_once_before_midturn_reroute() -> 
     let submission = test
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: STEER_PROMPT.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: STEER_PROMPT.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("steering should be accepted");
     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
@@ -357,9 +357,9 @@ async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -
     let submission = test
         .codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Mention {
-                name: MCP_SERVER.to_string(),
-                path: format!("mcp://{MCP_SERVER}"),
-            }]))
+            name: MCP_SERVER.to_string(),
+            path: format!("mcp://{MCP_SERVER}"),
+        }]))
         .await
         .expect("steering should be accepted");
     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));

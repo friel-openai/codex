@@ -116,6 +116,7 @@ async fn standalone_side_starts_real_fork_and_returns_blank_replay_inner(
     let target = SessionTarget {
         path: None,
         thread_id: parent_thread_id,
+        history_mode: None,
     };
     let side = App::start_standalone_side(
         &mut app_server,

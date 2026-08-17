@@ -303,7 +303,7 @@ impl ConfinedRepairAuthority {
         #[cfg(all(test, unix))]
         if let Some(target) = CODEX_HOME_RETARGETS
             .lock()
-            .expect("CODEX_HOME retarget mutex")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(codex_home)
         {
             use std::os::unix::fs::symlink;

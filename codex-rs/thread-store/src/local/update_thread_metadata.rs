@@ -1456,7 +1456,8 @@ mod tests {
                 include_archived: false,
             })
             .await
-            .expect("set workspace metadata");
+            .expect("set workspace metadata")
+            .expect("workspace metadata update should return the thread");
 
         assert_eq!(thread.cwd, worktree_cwd);
         assert_eq!(

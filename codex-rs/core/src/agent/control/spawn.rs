@@ -1,7 +1,5 @@
 use super::residency::is_resident_session_source;
 use super::*;
-use crate::agent::role::apply_role_to_config_for_multi_agent_v2;
-use crate::config::PermissionProfileSnapshot;
 use crate::context::ContextualUserFragment;
 use crate::context::CurrentTimeReminder;
 use crate::context::MultiAgentRoleInstructions;
@@ -186,6 +184,7 @@ impl AgentControl {
         .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn ensure_v2_agent_loaded(
         &self,
         config: Config,
@@ -551,7 +550,7 @@ impl AgentControl {
             }
             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
                 let parent_history =
-                    load_agent_model_context(&state, parent_thread_id, parent_history_mode)
+                    load_agent_model_context(state, parent_thread_id, parent_history_mode)
                         .await?
                         .ok_or_else(|| {
                             CodexErr::Fatal(format!(
