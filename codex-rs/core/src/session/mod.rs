@@ -672,6 +672,12 @@ async fn initial_rollout_ordinal(
     let InitialHistory::Forked(items) = history else {
         return Ok(0);
     };
+    if let Some(history_base) = items.iter().find_map(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.history_base,
+        _ => None,
+    }) {
+        return Ok(history_base.end_ordinal_exclusive);
+    }
     if !items
         .iter()
         .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
@@ -1737,9 +1743,14 @@ impl Session {
             }
             InitialHistory::Forked(mut rollout_items) => {
                 let turn_context = self.new_default_turn().await;
-                let has_rollout_reference = rollout_items
-                    .iter()
-                    .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
+                let has_inherited_history = rollout_items.iter().any(|item| {
+                    matches!(item, RolloutItem::RolloutReference(_))
+                        || matches!(
+                            item,
+                            RolloutItem::SessionMeta(meta)
+                                if meta.meta.history_base.is_some()
+                        )
+                });
                 Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
                 let mut logical_rollout_items =
                     match fork_startup_items.model_history_override.take() {
@@ -1822,7 +1833,7 @@ impl Session {
                 // Capture the inherited checkpoint before recording the child's startup tail.
                 // Otherwise the checkpoint replacement history and the physical suffix both
                 // contain the same assignment or context item, which duplicates it on resume.
-                let fork_checkpoint_items = if is_paginated_subagent && !has_rollout_reference {
+                let fork_checkpoint_items = if is_paginated_subagent && !has_inherited_history {
                     None
                 } else {
                     Some(self.current_segment_state_checkpoint().await.into_items())
@@ -1840,7 +1851,7 @@ impl Session {
                     .map(RolloutItem::ResponseItem)
                     .collect::<Vec<_>>();
 
-                if is_paginated_subagent && !has_rollout_reference {
+                if is_paginated_subagent && !has_inherited_history {
                     // The inherited model context is already the child's physical prefix. A
                     // checkpoint here would embed the same response items again as replacement
                     // history. The self-contained prefix remains replayable from its head; later

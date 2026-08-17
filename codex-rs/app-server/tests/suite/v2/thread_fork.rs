@@ -144,6 +144,41 @@ fn assert_reference_backed_fork_checkpoint(items: &[RolloutItem]) {
     );
 }
 
+fn assert_history_base_backed_fork_checkpoint(items: &[RolloutItem]) {
+    let Some(RolloutItem::SessionMeta(metadata)) = items.first() else {
+        panic!("history-base-backed fork must start with session metadata");
+    };
+    assert!(
+        metadata.meta.history_base.is_some(),
+        "Paginated fork must persist its inherited boundary in SessionMeta.history_base"
+    );
+    assert!(
+        items
+            .iter()
+            .all(|item| !matches!(item, RolloutItem::RolloutReference(_))),
+        "Paginated fork must not retain a compatibility RolloutReference"
+    );
+    let checkpoint_start = items
+        .iter()
+        .position(|item| matches!(item, RolloutItem::Compacted(_)))
+        .expect("history-base-backed fork must contain a compacted checkpoint");
+    assert_eq!(
+        checkpoint_start,
+        1,
+        "checkpoint must immediately follow session metadata; prefix: {:#?}",
+        &items[..checkpoint_start]
+    );
+    codex_rollout::validate_certified_segment_state_checkpoint(&items[checkpoint_start..])
+        .expect("fork-local records must form one certified state checkpoint");
+    assert!(
+        !items.iter().any(|item| matches!(
+            item,
+            RolloutItem::ResponseItem(_) | RolloutItem::EventMsg(EventMsg::ItemCompleted(_))
+        )),
+        "a completed fork must not copy canonical parent activity rows"
+    );
+}
+
 async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
     let list_id = mcp
         .send_thread_list_request(ThreadListParams {
@@ -598,27 +633,28 @@ async fn assert_thread_fork_at_named_boundary_keeps_only_terminal_prefix(
     let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
         .await?
         .0;
-    assert_reference_backed_fork_checkpoint(forked_physical_items.as_slice());
-    let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
-        unreachable!("physical fork layout checked above")
-    };
-    assert_eq!(
-        reference.nth_user_message,
-        (history_mode == ThreadHistoryMode::Legacy).then_some(2)
-    );
+    if history_mode == ThreadHistoryMode::Paginated {
+        assert_history_base_backed_fork_checkpoint(forked_physical_items.as_slice());
+    } else {
+        assert_reference_backed_fork_checkpoint(forked_physical_items.as_slice());
+        let RolloutItem::RolloutReference(reference) = &forked_physical_items[1] else {
+            unreachable!("physical fork layout checked above")
+        };
+        assert_eq!(reference.nth_user_message, Some(2));
+    }
     assert_eq!(forked_thread.preview, "first");
     let forked_logical_items =
         materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
     let forked_logical_json = serde_json::to_string(&forked_logical_items)?;
     assert!(forked_logical_json.contains(turn_ids[1].as_str()));
     assert!(!forked_logical_json.contains(turn_ids[2].as_str()));
+    let forked_history_base = read_session_meta_line(forked_path.as_path())
+        .await?
+        .meta
+        .history_base;
     assert_eq!(
-        read_session_meta_line(forked_path.as_path())
-            .await?
-            .meta
-            .history_base,
-        None,
-        "new forks persist canonical rollout references rather than history_base"
+        forked_history_base.is_some(),
+        history_mode == ThreadHistoryMode::Paginated
     );
 
     let started = loop {
@@ -1305,14 +1341,7 @@ async fn live_paginated_fork_preserves_model_history_and_token_usage() -> Result
     let child_rollout_items = RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
         .await?
         .0;
-    assert_eq!(
-        child_rollout_items
-            .iter()
-            .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
-            .count(),
-        1,
-        "live fork must persist exactly one immutable parent rollout reference"
-    );
+    assert_history_base_backed_fork_checkpoint(child_rollout_items.as_slice());
     assert!(
         !child_rollout_items.iter().any(|item| {
             matches!(
@@ -1570,14 +1599,11 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
     let meta = read_session_meta_line(forked_path.as_path()).await?;
-    assert_eq!(
-        meta.meta.history_base, None,
-        "new paginated forks persist a rollout reference, not history_base"
-    );
+    assert!(meta.meta.history_base.is_some());
     let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
         .await?
         .0;
-    assert_reference_backed_fork_checkpoint(forked_physical_items.as_slice());
+    assert_history_base_backed_fork_checkpoint(forked_physical_items.as_slice());
     assert!(
         !forked_physical_items.iter().any(|item| {
             matches!(item, RolloutItem::ResponseItem(_))
@@ -1631,19 +1657,12 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     assert!(excluded_turns_thread.turns.is_empty());
     let excluded_turns_path = excluded_turns_thread.path.expect("forked rollout path");
     let excluded_turns_meta = read_session_meta_line(excluded_turns_path.as_path()).await?;
-    assert_eq!(excluded_turns_meta.meta.history_base, None);
+    assert!(excluded_turns_meta.meta.history_base.is_some());
     let excluded_physical_items =
         RolloutRecorder::load_rollout_items(excluded_turns_path.as_path())
             .await?
             .0;
-    assert!(matches!(
-        excluded_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
+    assert_history_base_backed_fork_checkpoint(excluded_physical_items.as_slice());
 
     let ThreadForkResponse {
         thread: nested_thread,
@@ -1663,18 +1682,11 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     assert!(nested_thread.turns.is_empty());
     let nested_path = nested_thread.path.expect("nested fork rollout path");
     let nested_meta = read_session_meta_line(nested_path.as_path()).await?;
-    assert_eq!(nested_meta.meta.history_base, None);
+    assert!(nested_meta.meta.history_base.is_some());
     let nested_physical_items = RolloutRecorder::load_rollout_items(nested_path.as_path())
         .await?
         .0;
-    assert!(matches!(
-        nested_physical_items.as_slice(),
-        [
-            RolloutItem::SessionMeta(_),
-            RolloutItem::RolloutReference(_),
-            ..
-        ]
-    ));
+    assert_history_base_backed_fork_checkpoint(nested_physical_items.as_slice());
     Ok(())
 }
 
@@ -1846,6 +1858,9 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
 }
 
 const MAX_INDEXED_FORK_ROLLOUT_READER_OPENS: usize = 48;
+// A latest durable fork persists and reopens the child checkpoint; this budget remains independent
+// of the parent history_base lineage depth.
+const MAX_NATIVE_HISTORY_BASE_FORK_ROLLOUT_READER_OPENS: usize = 96;
 
 /// Describes whether complete model context is already available without old rollout files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1859,6 +1874,7 @@ enum IndexedForkSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum IndexedForkPresentation {
     Durable,
+    DurableWithoutTurnsAfterWarmup,
     Ephemeral,
 }
 
@@ -1938,7 +1954,7 @@ async fn compacted_paginated_fork_rollout_file_opens_are_bounded() -> Result<()>
 
 #[tokio::test]
 async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded() -> Result<()> {
-    for segment_count in [32, 128] {
+    for segment_count in [32, 128, 1_000] {
         for presentation in [
             IndexedForkPresentation::Durable,
             IndexedForkPresentation::Ephemeral,
@@ -1959,6 +1975,29 @@ async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded() -> Resul
                  {MAX_INDEXED_FORK_ROLLOUT_READER_OPENS} opens regardless of total lineage depth"
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_history_base_latest_fork_without_turns_opens_are_bounded() -> Result<()> {
+    for segment_count in [32, 128, 1_000] {
+        let file_open_count = paginated_fork_rollout_file_open_count_with_boundary(
+            segment_count,
+            IndexedForkSource::ColdCompacted,
+            IndexedForkPresentation::DurableWithoutTurnsAfterWarmup,
+            /*boundary_from_tip*/ None,
+            /*production_checkpoints*/ true,
+        )
+        .await?;
+        assert!(
+            file_open_count <= MAX_NATIVE_HISTORY_BASE_FORK_ROLLOUT_READER_OPENS,
+            "durable latest excludeTurns fork with {segment_count} native history_base segments \
+             opened {file_open_count} rollout files after startup indexing; latest fork \
+             preparation must require at most \
+             {MAX_NATIVE_HISTORY_BASE_FORK_ROLLOUT_READER_OPENS} opens regardless of lineage \
+             depth"
+        );
     }
     Ok(())
 }
@@ -2038,7 +2077,7 @@ async fn paginated_fork_rollout_file_open_count(
         segment_count,
         source,
         presentation,
-        None,
+        /*boundary_from_tip*/ None,
         /*production_checkpoints*/ false,
     )
     .await
@@ -2198,6 +2237,19 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             })
             .await?;
     }
+    if presentation == IndexedForkPresentation::DurableWithoutTurnsAfterWarmup {
+        let _: ThreadForkResponse = mcp
+            .request(|request_id| ClientRequest::ThreadFork {
+                request_id,
+                params: ThreadForkParams {
+                    thread_id: source_thread_id.to_string(),
+                    ephemeral: false,
+                    exclude_turns: true,
+                    ..Default::default()
+                },
+            })
+            .await?;
+    }
     let ThreadForkResponse {
         thread: forked_thread,
         ..
@@ -2207,7 +2259,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             params: ThreadForkParams {
                 thread_id: source_thread_id.to_string(),
                 ephemeral: presentation == IndexedForkPresentation::Ephemeral,
-                exclude_turns: presentation == IndexedForkPresentation::Ephemeral
+                exclude_turns: presentation != IndexedForkPresentation::Durable
                     || boundary_from_tip.is_some(),
                 last_turn_id: boundary_from_tip
                     .map(|from_tip| format!("turn-{}", segment_count.saturating_sub(from_tip))),
@@ -2216,8 +2268,11 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         })
         .await?;
     match presentation {
-        IndexedForkPresentation::Durable => {
-            if boundary_from_tip.is_some() {
+        IndexedForkPresentation::Durable
+        | IndexedForkPresentation::DurableWithoutTurnsAfterWarmup => {
+            if boundary_from_tip.is_some()
+                || presentation == IndexedForkPresentation::DurableWithoutTurnsAfterWarmup
+            {
                 assert!(forked_thread.turns.is_empty());
             } else {
                 assert_eq!(forked_thread.turns.len(), segment_count);
@@ -2231,23 +2286,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                 RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
                     .await?
                     .0;
-            assert!(
-                matches!(
-                    child_rollout_items.as_slice(),
-                    [
-                        RolloutItem::SessionMeta(_),
-                        RolloutItem::RolloutReference(_),
-                        ..
-                    ]
-                ),
-                "forked child must inherit history by reference rather than copying parent items"
-            );
-            assert!(
-                !child_rollout_items
-                    .iter()
-                    .any(|item| matches!(item, RolloutItem::EventMsg(EventMsg::ItemCompleted(_)))),
-                "forked child must not persist inherited parent item records"
-            );
+            assert_history_base_backed_fork_checkpoint(child_rollout_items.as_slice());
         }
         IndexedForkPresentation::Ephemeral => {
             assert!(forked_thread.ephemeral);
@@ -2261,7 +2300,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
     let events = mcp.json_log_events()?;
     let fork_start_index = events
         .iter()
-        .position(|event| {
+        .rposition(|event| {
             event["fields"]["event.name"] == "codex.history.fork.start"
                 && event["fields"]["source_thread.id"] == source_thread_id.to_string()
         })
@@ -2454,29 +2493,41 @@ async fn assert_thread_fork_freezes_active_paginated_turn_as_interrupted(
         .lines()
         .map(serde_json::from_str::<RolloutLine>)
         .collect::<Result<Vec<_>, _>>()?;
-    assert!(matches!(
-        child_rollout.first(),
-        Some(RolloutLine {
-            item: RolloutItem::SessionMeta(_),
-            ..
-        })
-    ));
+    let Some(RolloutLine {
+        item: RolloutItem::SessionMeta(metadata),
+        ..
+    }) = child_rollout.first()
+    else {
+        panic!("forked rollout must start with session metadata");
+    };
+    assert!(
+        metadata.meta.history_base.is_some(),
+        "Paginated fork must persist inherited history in SessionMeta.history_base"
+    );
     assert!(
         child_rollout
             .iter()
-            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .all(|line| !matches!(line.item, RolloutItem::RolloutReference(_))),
+        "Paginated fork must not retain a compatibility RolloutReference"
     );
-    assert!(child_rollout.iter().any(|line| matches!(
-        &line.item,
+    let materialized_child =
+        materialize_rollout_items(codex_home.path(), forked_path.as_path()).await?;
+    assert!(materialized_child.iter().any(|item| matches!(
+        item,
         RolloutItem::ResponseItem(response_item)
             if matches!(
                 &response_item.item,
-                codex_protocol::models::ResponseItem::Message { role, .. }
+                codex_protocol::models::ResponseItem::Message { role, content, .. }
                     if role == expected_marker_role
+                        && content.iter().any(|item| matches!(
+                            item,
+                            ContentItem::InputText { text }
+                                if text.contains("<turn_aborted>")
+                        ))
             )
     )));
-    assert!(child_rollout.iter().any(|line| matches!(
-        &line.item,
+    assert!(materialized_child.iter().any(|item| matches!(
+        item,
         RolloutItem::EventMsg(EventMsg::TurnAborted(aborted))
             if aborted.turn_id.as_deref() == Some("active-turn")
     )));
@@ -3113,6 +3164,7 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
                 model_providers: None,
                 source_kinds: None,
                 archived: Some(archived),
+                project_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,

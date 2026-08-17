@@ -255,8 +255,8 @@ async fn duplicate_physical_rollouts_union_direct_references_once() -> anyhow::R
     let second_target = thread_id(Uuid::from_u128(43))?;
     let active = active_rollout_path(home.path(), child_uuid);
     let archived = archived_rollout_path(home.path(), child_uuid);
-    write_rollout(active.clone(), child_id, None)?;
-    write_rollout(archived.clone(), child_id, None)?;
+    write_rollout(active.clone(), child_id, /*history_base*/ None)?;
+    write_rollout(archived.clone(), child_id, /*history_base*/ None)?;
     append_reference(&active, Some(first_target), Some(first_target))?;
     append_reference(&archived, Some(second_target), Some(second_target))?;
 
@@ -318,12 +318,12 @@ async fn leading_legacy_reference_falls_back_to_thread_id_and_ignores_self_count
     let target_id = thread_id(Uuid::from_u128(51))?;
     let child_id = thread_id(Uuid::from_u128(52))?;
     let child = active_rollout_path(home.path(), Uuid::from_u128(52));
-    write_rollout(child.clone(), child_id, None)?;
-    append_reference(&child, Some(target_id), None)?;
+    write_rollout(child.clone(), child_id, /*history_base*/ None)?;
+    append_reference(&child, Some(target_id), /*rollout_id*/ None)?;
     let self_child = active_rollout_path(home.path(), Uuid::from_u128(53));
     let self_id = thread_id(Uuid::from_u128(53))?;
-    write_rollout(self_child.clone(), self_id, None)?;
-    append_reference(&self_child, Some(self_id), None)?;
+    write_rollout(self_child.clone(), self_id, /*history_base*/ None)?;
+    append_reference(&self_child, Some(self_id), /*rollout_id*/ None)?;
 
     let index = RolloutReferenceIndex::scan(home.path()).await?;
     assert_eq!(index.reference_count(target_id), 1);

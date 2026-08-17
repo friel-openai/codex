@@ -103,7 +103,7 @@ pub(super) async fn prepare(
         store,
         params,
         ForkResponseHistory::Full,
-        None,
+        /*supplied_context*/ None,
         /*expected_rollout_id*/ None,
         ForkPersistence::ReferenceBacked,
     )
@@ -119,7 +119,7 @@ pub(super) async fn prepare_for_rollout(
         store,
         params,
         ForkResponseHistory::Full,
-        None,
+        /*supplied_context*/ None,
         Some(expected_rollout_id),
         ForkPersistence::ReferenceBacked,
     )
@@ -134,7 +134,7 @@ pub(super) async fn prepare_without_response_history(
         store,
         params,
         ForkResponseHistory::ModelContext,
-        None,
+        /*supplied_context*/ None,
         /*expected_rollout_id*/ None,
         ForkPersistence::ReferenceBacked,
     )
@@ -151,7 +151,7 @@ pub(super) async fn prepare_without_response_history_for_rollout(
         store,
         params,
         ForkResponseHistory::ModelContext,
-        None,
+        /*supplied_context*/ None,
         Some(expected_rollout_id),
         if ephemeral_context_only {
             ForkPersistence::EphemeralContext
@@ -306,6 +306,12 @@ async fn prepare_with_response_history(
                             reference,
                         )
                     })
+                    || super::rollout_lineage::has_same_thread_history_base(
+                        store,
+                        &active_head,
+                        thread_id,
+                    )
+                    .await?
                 {
                     return Err(ThreadStoreError::InvalidRequest {
                         message: "the segmented rollout cannot reconstruct the requested fork \
@@ -379,8 +385,8 @@ async fn prepare_with_response_history(
         trace_fork_stage("indexed_attempt_fell_back");
     }
     let mut prepared_same_thread_model_context = None;
+    let mut prepared_same_thread_full_history = None;
     let mut prepared_same_thread_session_meta = None;
-    let mut clean_same_thread_lineage = false;
     let fast_lineage = if let Some(reservation) = indexed_fallback_reservation {
         let writer_reservation =
             reservation
@@ -394,6 +400,7 @@ async fn prepare_with_response_history(
                 thread_id,
                 expected_rollout_id,
                 writer_reservation,
+                matches!(response_history, ForkResponseHistory::Full),
             )
             .await?;
         prepared.map(|prepared| (reservation, prepared))
@@ -407,8 +414,8 @@ async fn prepare_with_response_history(
                 history_access,
             } = *reservation;
             prepared_same_thread_model_context = Some(Arc::new(prepared.model_context));
+            prepared_same_thread_full_history = prepared.full_history.map(Arc::new);
             prepared_same_thread_session_meta = Some(prepared.session_meta);
-            clean_same_thread_lineage = true;
             trace_fork_stage("prepared_clean_same_thread_lineage");
             (
                 prepared.lineage,
@@ -638,11 +645,10 @@ async fn prepare_with_response_history(
     } else {
         Arc::new(model_context::load_for_fork(lineage.clone(), history_base).await?)
     };
-    // A cross-thread history base cannot be represented by a same-thread rollout reference.
-    // Keep the complete persistence prefix even when the caller requests bounded model context;
-    // `response_history` remains bounded below, while `copied_history` is the child rollout's
-    // authoritative persistence history.
-    let copied_history = if !clean_same_thread_lineage && lineage.requires_copied_history().await? {
+    // `HistoryPosition` cannot encode content filtering. Retain the complete persistence prefix
+    // only for compatibility lineages that apply filters; ordinary native history_base ancestry
+    // remains zero-copy across both same-thread rotations and cross-thread forks.
+    let copied_history = if lineage.requires_copied_history() {
         Some(Arc::new(
             model_context::load_full_for_fork(lineage.clone(), history_base).await?,
         ))
@@ -650,32 +656,38 @@ async fn prepare_with_response_history(
         None
     };
     trace_fork_stage("classified_copied_history");
-    let (response_history, projected_response_turns) =
-        match (response_history, copied_history.as_ref()) {
-            (ForkResponseHistory::Full, Some(copied_history)) => (Arc::clone(copied_history), None),
-            (ForkResponseHistory::Full, None) if indexed_root_latest => (
-                Arc::clone(&model_context),
-                Some(Arc::new(
-                    load_projected_response_turns(store, thread_id).await?,
-                )),
+    let (response_history, projected_response_turns) = match (
+        response_history,
+        copied_history.as_ref(),
+        prepared_same_thread_full_history,
+    ) {
+        (ForkResponseHistory::Full, Some(copied_history), _) => (Arc::clone(copied_history), None),
+        (ForkResponseHistory::Full, None, Some(prepared_full_history)) => {
+            (prepared_full_history, None)
+        }
+        (ForkResponseHistory::Full, None, None) if indexed_root_latest => (
+            Arc::clone(&model_context),
+            Some(Arc::new(
+                load_projected_response_turns(store, thread_id).await?,
+            )),
+        ),
+        (ForkResponseHistory::Full, None, None) => (
+            Arc::new(
+                if let Some(session_meta) = prepared_same_thread_session_meta {
+                    model_context::load_full_for_fork_with_session_meta(
+                        lineage,
+                        history_base,
+                        session_meta,
+                    )
+                    .await?
+                } else {
+                    model_context::load_full_for_fork(lineage, history_base).await?
+                },
             ),
-            (ForkResponseHistory::Full, None) => (
-                Arc::new(
-                    if let Some(session_meta) = prepared_same_thread_session_meta {
-                        model_context::load_full_for_fork_with_session_meta(
-                            lineage,
-                            history_base,
-                            session_meta,
-                        )
-                        .await?
-                    } else {
-                        model_context::load_full_for_fork(lineage, history_base).await?
-                    },
-                ),
-                None,
-            ),
-            (ForkResponseHistory::ModelContext, _) => (Arc::clone(&model_context), None),
-        };
+            None,
+        ),
+        (ForkResponseHistory::ModelContext, _, _) => (Arc::clone(&model_context), None),
+    };
     trace_fork_stage("loaded_response_history");
     let mut prepared = PreparedFork::new(
         thread_id,
@@ -816,10 +828,12 @@ async fn try_prepare_indexed_explicit_model_context_fork(
         (active_head, active_scan)
     };
     let active_session_meta = active_head.session_meta.clone();
+    let same_thread_history_base =
+        history_base_belongs_to_thread(store, &active_session_meta, thread_id).await?;
     if active_session_meta.meta.id != thread_id
         || active_session_meta.meta.history_mode != ThreadHistoryMode::Paginated
         || active_session_meta.meta.forked_from_id.is_some()
-        || active_session_meta.meta.history_base.is_some()
+        || !same_thread_history_base
         || active_session_meta
             .meta
             .subagent_history_start_ordinal
@@ -1031,6 +1045,40 @@ fn trace_fork_stage(stage: &'static str) {
     );
 }
 
+/// Confirms that an active native history boundary does not cross a logical thread.
+async fn history_base_belongs_to_thread(
+    store: &LocalThreadStore,
+    session_meta: &SessionMetaLine,
+    thread_id: codex_protocol::ThreadId,
+) -> ThreadStoreResult<bool> {
+    let Some(history_base) = session_meta.meta.history_base else {
+        return Ok(true);
+    };
+    let Some(path) = codex_rollout::find_rollout_path_by_rollout_id(
+        store.config.codex_home.as_path(),
+        history_base.thread_id,
+    )
+    .await
+    .map_err(|error| ThreadStoreError::Internal {
+        message: format!(
+            "failed to resolve history_base rollout {}: {error}",
+            history_base.thread_id
+        ),
+    })?
+    else {
+        return Ok(false);
+    };
+    let predecessor = codex_rollout::read_session_meta_line(path.as_path())
+        .await
+        .map_err(|error| ThreadStoreError::Internal {
+            message: format!(
+                "failed to read history_base rollout {}: {error}",
+                path.display()
+            ),
+        })?;
+    Ok(predecessor.meta.id == thread_id)
+}
+
 /// Resolves a source that can be safely referenced by a child rollout.
 ///
 /// Deferred live threads have no file until fork preparation explicitly persists them. Existing
@@ -1112,10 +1160,12 @@ async fn indexed_root_fallback_is_current(
     else {
         return Ok(false);
     };
+    let same_thread_history_base =
+        history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
         || session_meta.meta.forked_from_id.is_some()
-        || session_meta.meta.history_base.is_some()
+        || !same_thread_history_base
         || session_meta.meta.subagent_history_start_ordinal.is_some()
         || !store.has_history_projection(thread_id).await?
     {
@@ -1305,10 +1355,12 @@ async fn try_prepare_indexed_latest_fork(
     {
         fallback!("active_rollout_ordinal_mismatch");
     }
+    let same_thread_history_base =
+        history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
         || session_meta.meta.forked_from_id.is_some()
-        || session_meta.meta.history_base.is_some()
+        || !same_thread_history_base
         || session_meta.meta.subagent_history_start_ordinal.is_some()
     {
         fallback!("active_session_metadata_ineligible");
@@ -1517,10 +1569,12 @@ async fn try_prepare_certified_latest_model_context_fork(
     let Ok(session_meta) = codex_rollout::read_session_meta_line(path.as_path()).await else {
         fallback!("session_metadata_unreadable");
     };
+    let same_thread_history_base =
+        history_base_belongs_to_thread(store, &session_meta, thread_id).await?;
     if session_meta.meta.id != thread_id
         || session_meta.meta.history_mode != ThreadHistoryMode::Paginated
         || session_meta.meta.forked_from_id.is_some()
-        || session_meta.meta.history_base.is_some()
+        || !same_thread_history_base
         || session_meta.meta.subagent_history_start_ordinal.is_some()
     {
         fallback!("session_metadata_ineligible");

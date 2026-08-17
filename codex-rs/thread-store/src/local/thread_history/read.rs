@@ -213,7 +213,7 @@ pub(in crate::local) async fn list_items(
 ///
 /// Immutable predecessors were validated when their SQLite rows were projected. Revalidating
 /// every predecessor during an indexed page would make the request depend on thread length.
-async fn indexed_same_thread_lineage(
+pub(in crate::local) async fn indexed_same_thread_lineage(
     store: &LocalThreadStore,
     thread_id: ThreadId,
 ) -> ThreadStoreResult<Option<RolloutLineage>> {
@@ -277,9 +277,9 @@ async fn indexed_same_thread_lineage_from_resolved(
     };
     if session_meta.id != thread_id
         || session_meta.history_mode != ThreadHistoryMode::Paginated
-        || session_meta.forked_from_id.is_some()
-        || session_meta.history_base.is_some()
-        || session_meta.subagent_history_start_ordinal.is_some()
+        || (session_meta.forked_from_id.is_some() && session_meta.history_base.is_none())
+        || (session_meta.subagent_history_start_ordinal.is_some()
+            && session_meta.history_base.is_none())
     {
         return Ok(None);
     }
@@ -304,7 +304,8 @@ async fn indexed_same_thread_lineage_from_resolved(
 
 /// Checks the newest projected root turn without resolving the selected rollout a second time.
 ///
-/// Referenced or forked histories return `None` so callers retain the complete lineage check.
+/// Forked histories return `None` so callers retain the complete lineage check. A complete
+/// same-thread native `history_base` projection is already one logical ordinal range.
 pub(in crate::local) async fn has_nonempty_newest_root_turn_for_resolved(
     store: &LocalThreadStore,
     thread_id: ThreadId,

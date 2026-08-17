@@ -83,7 +83,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 filter_texts: Vec::new(),
                 goal_supervisor_provenance: Default::default(),
                 uses_history_base: true,
-                uses_fork_boundary: false,
+                uses_fork_boundary: true,
             },
             RolloutLineageSegment {
                 thread_id: child,
@@ -96,7 +96,7 @@ async fn resolves_nested_lineage_with_empty_intermediate_segments() {
                 filter_texts: Vec::new(),
                 goal_supervisor_provenance: Default::default(),
                 uses_history_base: true,
-                uses_fork_boundary: false,
+                uses_fork_boundary: true,
             },
         ]
     );
@@ -303,7 +303,7 @@ async fn resolves_lineage_at_explicit_history_position() {
                 filter_texts: Vec::new(),
                 goal_supervisor_provenance: Default::default(),
                 uses_history_base: true,
-                uses_fork_boundary: false,
+                uses_fork_boundary: true,
             },
         ]
     );
@@ -550,7 +550,7 @@ async fn history_base_cutoff_survives_parent_rotation() {
             ),
             expected_segment_with_provenance(
                 child, child_path, /*start_ordinal*/ 5, /*end*/ None,
-                /*uses_history_base*/ true, /*uses_fork_boundary*/ false,
+                /*uses_history_base*/ true, /*uses_fork_boundary*/ true,
             ),
         ]
     );

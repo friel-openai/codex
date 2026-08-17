@@ -44,6 +44,7 @@ use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_rollout::RolloutRecorder;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use sha2::Digest;
@@ -225,6 +226,25 @@ fn write_paginated_segment(
         .expect("write Paginated segment record");
     }
     next_ordinal
+}
+
+fn set_paginated_subagent_history_start(path: &Path, boundary: u64) {
+    let text = fs::read_to_string(path).expect("read Paginated rollout");
+    let mut lines = text.lines();
+    let mut first: RolloutLine = serde_json::from_str(lines.next().expect("session metadata line"))
+        .expect("parse session metadata line");
+    let RolloutItem::SessionMeta(metadata) = &mut first.item else {
+        panic!("first rollout item must be session metadata");
+    };
+    metadata.meta.source = SessionSource::SubAgent(SubAgentSource::Other("test".to_string()));
+    metadata.meta.subagent_history_start_ordinal = Some(boundary);
+    let mut output = serde_json::to_string(&first).expect("serialize session metadata");
+    output.push('\n');
+    for line in lines {
+        output.push_str(line);
+        output.push('\n');
+    }
+    fs::write(path, output).expect("rewrite Paginated session metadata");
 }
 
 fn segment_reference(path: PathBuf, thread_id: ThreadId, segment_id: SegmentId) -> RolloutItem {
@@ -1289,15 +1309,20 @@ async fn lineage_migration_stages_one_contiguous_paginated_ordinal_space() {
             records.push(line);
         }
         assert_eq!(target.end_ordinal_exclusive, next_ordinal);
-        assert!(matches!(records[0].item, RolloutItem::SessionMeta(_)));
-        if index > 0 {
-            let RolloutItem::RolloutReference(reference) = &records[1].item else {
-                panic!("successor target must start with a reference");
-            };
-            assert_eq!(reference.rollout_path, staged[index - 1].final_path);
-            assert_eq!(reference.rollout_id, Some(staged[index - 1].rollout_id));
-            assert_eq!(reference.segment_id, staged[index - 1].segment_id);
-        }
+        let RolloutItem::SessionMeta(metadata) = &records[0].item else {
+            panic!("target must start with SessionMeta");
+        };
+        let expected_history_base = index.checked_sub(1).map(|predecessor| HistoryPosition {
+            thread_id: staged[predecessor].rollout_id,
+            end_ordinal_exclusive: staged[predecessor].end_ordinal_exclusive,
+            end_byte_offset: staged[predecessor].byte_count,
+        });
+        assert_eq!(metadata.meta.history_base, expected_history_base);
+        assert!(
+            records
+                .iter()
+                .all(|line| !matches!(line.item, RolloutItem::RolloutReference(_)))
+        );
     }
 
     let repeated = stage_legacy_lineage(
@@ -1328,6 +1353,364 @@ async fn lineage_migration_stages_one_contiguous_paginated_ordinal_space() {
             ))
             .collect::<Vec<_>>()
     );
+}
+
+#[tokio::test]
+async fn migration_rewrites_segmented_paginated_references_as_native_history_base() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let predecessor_segment_id = SegmentId::new();
+    let active_segment_id = SegmentId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor_path = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(predecessor_segment_id.to_string())
+        .join(filename.as_str());
+    let predecessor_end = write_paginated_segment(
+        predecessor_path.as_path(),
+        home.path(),
+        thread_id,
+        predecessor_segment_id,
+        /*start_ordinal*/ 0,
+        vec![user_message("native migration predecessor")],
+    );
+    let active_path = home.path().join("sessions/2025/01/03").join(filename);
+    write_paginated_segment(
+        active_path.as_path(),
+        home.path(),
+        thread_id,
+        active_segment_id,
+        predecessor_end,
+        vec![
+            segment_reference(predecessor_path.clone(), thread_id, predecessor_segment_id),
+            user_message("native migration active"),
+        ],
+    );
+    let source_bytes = [
+        fs::read(predecessor_path.as_path()).expect("read predecessor source"),
+        fs::read(active_path.as_path()).expect("read active source"),
+    ];
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..RolloutMigrationOptions::default()
+        })
+        .await
+        .expect("dry-run native migration");
+    assert_eq!(dry_run.outcomes.len(), 1);
+    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Eligible);
+    let manifest = dry_run.outcomes[0]
+        .manifest
+        .as_ref()
+        .expect("native migration manifest");
+    assert_eq!(manifest.sources.len(), 2);
+    assert_eq!(manifest.targets.len(), 2);
+    assert!(manifest.reference_dependencies.is_empty());
+    assert_eq!(manifest.targets[0].history_base, None);
+    assert_eq!(
+        manifest.targets[1].history_base,
+        Some(HistoryPosition {
+            thread_id: manifest.targets[0].rollout_id,
+            end_ordinal_exclusive: manifest.targets[0].end_ordinal_exclusive,
+            end_byte_offset: manifest.targets[0].byte_count,
+        })
+    );
+
+    let applied = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("apply native migration");
+    assert_eq!(applied.outcomes.len(), 1);
+    assert_eq!(
+        applied.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        applied.outcomes[0].message
+    );
+    let selected_path = applied.outcomes[0].rollout_path.clone();
+    let selected_text = fs::read_to_string(selected_path.as_path()).expect("read selected target");
+    assert!(!selected_text.contains("rollout_reference"));
+    let selected_meta = codex_rollout::read_session_meta_line(selected_path.as_path())
+        .await
+        .expect("read selected metadata");
+    assert_eq!(selected_meta.meta.id, thread_id);
+    assert_eq!(
+        selected_meta.meta.history_mode,
+        ThreadHistoryMode::Paginated
+    );
+    let history_base = selected_meta
+        .meta
+        .history_base
+        .expect("native history base");
+    let native_predecessor =
+        codex_rollout::find_rollout_path_by_rollout_id(home.path(), history_base.thread_id)
+            .await
+            .expect("resolve native predecessor")
+            .expect("native predecessor exists");
+    assert!(
+        native_predecessor.starts_with(
+            home.path()
+                .join(codex_rollout::SESSIONS_SUBDIR)
+                .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        ),
+        "{}",
+        native_predecessor.display()
+    );
+    assert_eq!(
+        history_base.end_byte_offset,
+        fs::metadata(native_predecessor.as_path())
+            .expect("native predecessor metadata")
+            .len()
+    );
+    assert!(
+        !fs::read_to_string(native_predecessor.as_path())
+            .expect("read native predecessor")
+            .contains("rollout_reference")
+    );
+
+    let materialized =
+        codex_rollout::materialize_rollout_lines(home.path(), selected_path.as_path())
+            .await
+            .expect("materialize native migration");
+    let json = serde_json::to_string(&materialized).expect("serialize native migration");
+    assert_eq!(json.matches("native migration predecessor").count(), 1);
+    assert_eq!(json.matches("native migration active").count(), 1);
+    let mut materialized_ordinals = materialized
+        .iter()
+        .filter_map(|line| line.ordinal)
+        .collect::<Vec<_>>();
+    materialized_ordinals.sort_unstable();
+    assert_eq!(materialized_ordinals, vec![1, 2, 3]);
+    assert_eq!(history_base.end_ordinal_exclusive, 2);
+
+    let repeated = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("repeat native migration");
+    assert_eq!(repeated.outcomes.len(), 1);
+    assert_eq!(
+        repeated.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(repeated.outcomes[0].rollout_path, selected_path);
+    assert_eq!(
+        [
+            fs::read(predecessor_path).expect("reread predecessor source"),
+            fs::read(active_path).expect("reread active source"),
+        ],
+        source_bytes
+    );
+}
+
+#[tokio::test]
+async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let rollout_ids = [ThreadId::new(), ThreadId::new()];
+    let segment_ids = [SegmentId::new(), SegmentId::new(), SegmentId::new()];
+    let active_filename = format!("rollout-2025-01-03T12-00-02-{thread_id}.jsonl");
+    let history_root = home
+        .path()
+        .join(codex_rollout::SESSIONS_SUBDIR)
+        .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        .join("2025/01/03");
+    let oldest_path = history_root.join(format!(
+        "rollout-2025-01-03T12-00-00-{thread_id}_{}.jsonl",
+        rollout_ids[0]
+    ));
+    let oldest_end = write_paginated_segment(
+        oldest_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[0],
+        0,
+        vec![user_message("mixed native oldest")],
+    );
+    let oldest_position = HistoryPosition {
+        thread_id: rollout_ids[0],
+        end_ordinal_exclusive: oldest_end,
+        end_byte_offset: fs::metadata(oldest_path.as_path())
+            .expect("oldest metadata")
+            .len(),
+    };
+
+    let middle_path = history_root.join(format!(
+        "rollout-2025-01-03T12-00-01-{thread_id}_{}.jsonl",
+        rollout_ids[1]
+    ));
+    let middle_end = write_paginated_segment(
+        middle_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[1],
+        oldest_end,
+        vec![user_message("mixed native middle")],
+    );
+    set_history_base(middle_path.as_path(), oldest_position);
+
+    let active_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(active_filename);
+    write_paginated_segment(
+        active_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[2],
+        middle_end,
+        vec![
+            RolloutItem::RolloutReference(RolloutReferenceItem {
+                rollout_id: Some(rollout_ids[1]),
+                rollout_path: middle_path.clone(),
+                thread_id: Some(thread_id),
+                rollout_timestamp: None,
+                segment_id: Some(segment_ids[1]),
+                max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+                nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
+            }),
+            user_message("mixed compatibility active"),
+        ],
+    );
+    let source_bytes = [
+        fs::read(oldest_path.as_path()).expect("read oldest source"),
+        fs::read(middle_path.as_path()).expect("read middle source"),
+        fs::read(active_path.as_path()).expect("read active source"),
+    ];
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..RolloutMigrationOptions::default()
+        })
+        .await
+        .expect("dry-run mixed migration");
+    let manifest = dry_run.outcomes[0]
+        .manifest
+        .as_ref()
+        .expect("mixed migration manifest");
+    assert_eq!(manifest.sources.len(), 2);
+    assert_eq!(manifest.targets.len(), 2);
+    assert_eq!(manifest.targets[0].history_base, Some(oldest_position));
+    for index in 1..manifest.targets.len() {
+        assert_eq!(
+            manifest.targets[index].history_base,
+            Some(HistoryPosition {
+                thread_id: manifest.targets[index - 1].rollout_id,
+                end_ordinal_exclusive: manifest.targets[index - 1].end_ordinal_exclusive,
+                end_byte_offset: manifest.targets[index - 1].byte_count,
+            })
+        );
+    }
+
+    let applied = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("apply mixed migration");
+    assert_eq!(applied.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let selected_path = applied.outcomes[0].rollout_path.as_path();
+    assert!(
+        !fs::read_to_string(selected_path)
+            .expect("read mixed selected target")
+            .contains("rollout_reference")
+    );
+    let materialized = codex_rollout::materialize_rollout_lines(home.path(), selected_path)
+        .await
+        .expect("materialize mixed native lineage");
+    let json = serde_json::to_string(&materialized).expect("serialize mixed lineage");
+    for message in [
+        "mixed native oldest",
+        "mixed native middle",
+        "mixed compatibility active",
+    ] {
+        assert_eq!(json.matches(message).count(), 1, "{message}");
+    }
+    assert_eq!(
+        [
+            fs::read(oldest_path).expect("reread oldest source"),
+            fs::read(middle_path).expect("reread middle source"),
+            fs::read(active_path).expect("reread active source"),
+        ],
+        source_bytes
+    );
+}
+
+#[tokio::test]
+async fn native_history_base_migration_translates_subagent_history_boundary() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let segment_ids = [SegmentId::new(), SegmentId::new()];
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_ids[0].to_string())
+        .join(filename.as_str());
+    let predecessor_end = write_paginated_segment(
+        predecessor.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[0],
+        0,
+        vec![user_message("inherited parent context")],
+    );
+    let active = home.path().join("sessions/2025/01/03").join(filename);
+    write_paginated_segment(
+        active.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[1],
+        predecessor_end,
+        vec![
+            segment_reference(predecessor, thread_id, segment_ids[0]),
+            user_message("subagent-owned context"),
+        ],
+    );
+    set_paginated_subagent_history_start(active.as_path(), predecessor_end + 2);
+    let store = indexed_store(home.path()).await;
+
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate bounded Paginated subagent");
+    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let selected = report.outcomes[0].rollout_path.as_path();
+    let metadata = codex_rollout::read_session_meta_line(selected)
+        .await
+        .expect("read migrated subagent metadata");
+    assert_eq!(
+        metadata.meta.subagent_history_start_ordinal,
+        Some(predecessor_end + 1)
+    );
+    assert!(
+        !fs::read_to_string(selected)
+            .expect("read migrated subagent")
+            .contains("rollout_reference")
+    );
+    let materialized = codex_rollout::materialize_rollout_lines(home.path(), selected)
+        .await
+        .expect("materialize migrated subagent");
+    let json = serde_json::to_string(&materialized).expect("serialize subagent history");
+    assert_eq!(json.matches("inherited parent context").count(), 1);
+    assert!(json.contains("subagent-owned context"));
 }
 
 #[tokio::test]
@@ -1751,7 +2134,7 @@ async fn migration_applies_same_thread_segmented_legacy_lineage_atomically_and_i
         .manifest
         .as_ref()
         .expect("dry-run lineage manifest");
-    assert_eq!(manifest.version, 1);
+    assert_eq!(manifest.version, 2);
     assert_eq!(manifest.selected_thread_id, thread_id);
     assert_eq!(manifest.sources.len(), 3);
     assert!(manifest.history_base_dependencies.is_empty());
@@ -1779,7 +2162,7 @@ async fn migration_applies_same_thread_segmented_legacy_lineage_atomically_and_i
     );
     let report_json = serde_json::to_value(&dry_run).expect("serialize dry-run report");
     let manifest_json = &report_json["outcomes"][0]["manifest"];
-    assert_eq!(manifest_json["version"], 1);
+    assert_eq!(manifest_json["version"], 2);
     assert_eq!(manifest_json["input_kind"], "segmented_lineage");
     assert_eq!(manifest_json["selected_thread_id"], thread_id.to_string());
     assert_eq!(manifest_json["sources"].as_array().map(Vec::len), Some(3));
@@ -2297,6 +2680,127 @@ async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
 }
 
 #[tokio::test]
+async fn native_history_base_migration_recovers_from_every_durable_phase() {
+    for phase in [
+        LineageMigrationPhase::Planned,
+        LineageMigrationPhase::TargetsDurable,
+        LineageMigrationPhase::ProjectionDurable,
+        LineageMigrationPhase::Selected,
+        LineageMigrationPhase::Verified,
+        LineageMigrationPhase::Complete,
+    ] {
+        let home = TempDir::new().expect("create Codex home");
+        let thread_id = ThreadId::new();
+        let segment_ids = [SegmentId::new(), SegmentId::new()];
+        let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+        let immutable = home
+            .path()
+            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            .join(thread_id.to_string())
+            .join(segment_ids[0].to_string())
+            .join(filename.as_str());
+        let predecessor_end = write_paginated_segment(
+            immutable.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[0],
+            /*start_ordinal*/ 0,
+            vec![user_message("native recovery predecessor")],
+        );
+        let active = home.path().join("sessions/2025/01/03").join(filename);
+        write_paginated_segment(
+            active.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[1],
+            predecessor_end,
+            vec![
+                segment_reference(immutable.clone(), thread_id, segment_ids[0]),
+                user_message("native recovery active"),
+            ],
+        );
+        let source_bytes = [
+            fs::read(immutable.as_path()).expect("read immutable source"),
+            fs::read(active.as_path()).expect("read active source"),
+        ];
+        let store = indexed_store(home.path()).await;
+        let plan = plan_legacy_lineage(home.path(), active.as_path())
+            .await
+            .expect("plan native migration");
+        let journal_path = migration_journal_path(home.path(), thread_id);
+        let mut limiter =
+            RolloutMigrationRateLimiter::new(Some(1024)).expect("create migration limiter");
+        let error = store
+            .migrate_legacy_lineage_until_phase_for_test(
+                active.as_path(),
+                journal_path.as_path(),
+                plan,
+                &mut limiter,
+                phase,
+            )
+            .await
+            .expect_err("injected native migration phase stop");
+        assert!(
+            error
+                .to_string()
+                .contains("injected lineage migration stop")
+        );
+        assert!(journal_path.exists());
+        drop(store);
+
+        let restarted = indexed_store(home.path()).await;
+        let recovered = restarted
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..apply_options()
+            })
+            .await
+            .expect("recover native migration");
+        assert_eq!(recovered.outcomes.len(), 1, "phase {phase:?}");
+        assert_eq!(
+            recovered.outcomes[0].status,
+            RolloutMigrationStatus::Migrated,
+            "phase {phase:?}: {:?}",
+            recovered.outcomes[0].message
+        );
+        assert!(!journal_path.exists());
+        let selected_path = recovered.outcomes[0].rollout_path.as_path();
+        let selected_text = fs::read_to_string(selected_path).expect("read recovered target");
+        assert!(!selected_text.contains("rollout_reference"));
+        let selected_meta = codex_rollout::read_session_meta_line(selected_path)
+            .await
+            .expect("read recovered metadata");
+        let history_base = selected_meta
+            .meta
+            .history_base
+            .expect("recovered history base");
+        let predecessor =
+            codex_rollout::find_rollout_path_by_rollout_id(home.path(), history_base.thread_id)
+                .await
+                .expect("resolve recovered predecessor")
+                .expect("recovered predecessor exists");
+        assert!(
+            !fs::read_to_string(predecessor)
+                .expect("read recovered predecessor")
+                .contains("rollout_reference")
+        );
+        let materialized = codex_rollout::materialize_rollout_lines(home.path(), selected_path)
+            .await
+            .expect("materialize recovered native lineage");
+        let json = serde_json::to_string(&materialized).expect("serialize recovered history");
+        assert_eq!(json.matches("native recovery predecessor").count(), 1);
+        assert_eq!(json.matches("native recovery active").count(), 1);
+        assert_eq!(
+            [
+                fs::read(immutable.as_path()).expect("reread immutable source"),
+                fs::read(active.as_path()).expect("reread active source"),
+            ],
+            source_bytes
+        );
+    }
+}
+
+#[tokio::test]
 async fn migration_restarts_previous_target_identity_before_selection() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -2478,6 +2982,17 @@ async fn migration_lineage_process_crash_child() {
 
 #[tokio::test]
 async fn migration_process_death_recovers_every_durable_phase() {
+    assert_migration_process_death_recovers_every_durable_phase(ThreadHistoryMode::Legacy).await;
+}
+
+#[tokio::test]
+async fn native_history_base_migration_process_death_recovers_every_durable_phase() {
+    assert_migration_process_death_recovers_every_durable_phase(ThreadHistoryMode::Paginated).await;
+}
+
+async fn assert_migration_process_death_recovers_every_durable_phase(
+    history_mode: ThreadHistoryMode,
+) {
     for phase in [
         LineageMigrationPhase::Planned,
         LineageMigrationPhase::TargetsDurable,
@@ -2496,24 +3011,48 @@ async fn migration_process_death_recovers_every_durable_phase() {
             .join(thread_id.to_string())
             .join(segment_ids[0].to_string())
             .join(filename.as_str());
-        write_legacy_segment(
-            immutable.as_path(),
-            home.path(),
-            thread_id,
-            segment_ids[0],
-            vec![user_message("process crash immutable marker")],
-        );
+        let predecessor_end = if history_mode == ThreadHistoryMode::Paginated {
+            write_paginated_segment(
+                immutable.as_path(),
+                home.path(),
+                thread_id,
+                segment_ids[0],
+                /*start_ordinal*/ 0,
+                vec![user_message("process crash immutable marker")],
+            )
+        } else {
+            write_legacy_segment(
+                immutable.as_path(),
+                home.path(),
+                thread_id,
+                segment_ids[0],
+                vec![user_message("process crash immutable marker")],
+            );
+            0
+        };
         let active = home.path().join("sessions/2025/01/03").join(filename);
-        write_legacy_segment(
-            active.as_path(),
-            home.path(),
-            thread_id,
-            segment_ids[1],
-            vec![
-                segment_reference(immutable.clone(), thread_id, segment_ids[0]),
-                user_message("process crash active marker"),
-            ],
-        );
+        let active_items = vec![
+            segment_reference(immutable.clone(), thread_id, segment_ids[0]),
+            user_message("process crash active marker"),
+        ];
+        if history_mode == ThreadHistoryMode::Paginated {
+            write_paginated_segment(
+                active.as_path(),
+                home.path(),
+                thread_id,
+                segment_ids[1],
+                predecessor_end,
+                active_items,
+            );
+        } else {
+            write_legacy_segment(
+                active.as_path(),
+                home.path(),
+                thread_id,
+                segment_ids[1],
+                active_items,
+            );
+        }
         let source_bytes = [
             fs::read(immutable.as_path()).expect("read immutable source"),
             fs::read(active.as_path()).expect("read active source"),
@@ -2569,6 +3108,19 @@ async fn migration_process_death_recovers_every_durable_phase() {
         let json = serde_json::to_string(&materialized).expect("serialize recovered lineage");
         assert!(json.contains("process crash immutable marker"));
         assert!(json.contains("process crash active marker"));
+        if history_mode == ThreadHistoryMode::Paginated {
+            let selected_text = fs::read_to_string(selected.rollout_path.as_path())
+                .expect("read recovered selected rollout");
+            assert!(!selected_text.contains("rollout_reference"));
+            assert!(
+                codex_rollout::read_session_meta_line(selected.rollout_path.as_path())
+                    .await
+                    .expect("read recovered selected metadata")
+                    .meta
+                    .history_base
+                    .is_some()
+            );
+        }
         assert_eq!(
             [
                 fs::read(immutable.as_path()).expect("reread immutable source"),
@@ -2581,6 +3133,15 @@ async fn migration_process_death_recovers_every_durable_phase() {
 
 #[tokio::test]
 async fn migration_preserves_archived_compressed_segmented_lineage_and_sources() {
+    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Legacy).await;
+}
+
+#[tokio::test]
+async fn native_history_base_migration_preserves_archived_compressed_lineage_and_sources() {
+    assert_migration_preserves_archived_compressed_lineage(ThreadHistoryMode::Paginated).await;
+}
+
+async fn assert_migration_preserves_archived_compressed_lineage(history_mode: ThreadHistoryMode) {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let segment_ids = [SegmentId::new(), SegmentId::new()];
@@ -2591,24 +3152,48 @@ async fn migration_preserves_archived_compressed_segmented_lineage_and_sources()
         .join(thread_id.to_string())
         .join(segment_ids[0].to_string())
         .join(filename.as_str());
-    write_legacy_segment(
-        immutable_plain.as_path(),
-        home.path(),
-        thread_id,
-        segment_ids[0],
-        vec![user_message("compressed predecessor")],
-    );
+    let predecessor_end = if history_mode == ThreadHistoryMode::Paginated {
+        write_paginated_segment(
+            immutable_plain.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[0],
+            0,
+            vec![user_message("compressed predecessor")],
+        )
+    } else {
+        write_legacy_segment(
+            immutable_plain.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[0],
+            vec![user_message("compressed predecessor")],
+        );
+        0
+    };
     let active_plain = home.path().join("sessions/2025/01/03").join(filename);
-    write_legacy_segment(
-        active_plain.as_path(),
-        home.path(),
-        thread_id,
-        segment_ids[1],
-        vec![
-            segment_reference(immutable_plain.clone(), thread_id, segment_ids[0]),
-            user_message("archived active"),
-        ],
-    );
+    let active_items = vec![
+        segment_reference(immutable_plain.clone(), thread_id, segment_ids[0]),
+        user_message("archived active"),
+    ];
+    if history_mode == ThreadHistoryMode::Paginated {
+        write_paginated_segment(
+            active_plain.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[1],
+            predecessor_end,
+            active_items,
+        );
+    } else {
+        write_legacy_segment(
+            active_plain.as_path(),
+            home.path(),
+            thread_id,
+            segment_ids[1],
+            active_items,
+        );
+    }
     let immutable = compress_rollout(immutable_plain.as_path());
     let archived_plain = move_to_archived(home.path(), active_plain);
     let archived = compress_rollout(archived_plain.as_path());
@@ -2642,6 +3227,21 @@ async fn migration_preserves_archived_compressed_segmented_lineage_and_sources()
         ],
         source_bytes
     );
+    if history_mode == ThreadHistoryMode::Paginated {
+        let selected_meta = codex_rollout::read_session_meta_line(selected_path.as_path())
+            .await
+            .expect("read archived native metadata");
+        assert!(selected_meta.meta.history_base.is_some());
+        let selected_items = RolloutRecorder::load_rollout_items(selected_path.as_path())
+            .await
+            .expect("read archived native target")
+            .0;
+        assert!(
+            selected_items
+                .iter()
+                .all(|item| !matches!(item, RolloutItem::RolloutReference(_)))
+        );
+    }
     let materialized =
         codex_rollout::materialize_rollout_lines(home.path(), selected_path.as_path())
             .await
@@ -3219,6 +3819,7 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
     );
     assert_eq!(manifest.dependency_bytes, parent_bytes.len() as u64);
     assert_eq!(manifest.targets[0].start_ordinal, parent_end);
+    assert_eq!(manifest.targets[0].history_base, None);
     assert!(!manifest.targets[0].path.exists());
 
     let report = store
@@ -3315,7 +3916,26 @@ async fn migration_retains_compressed_paginated_immutable_reference() {
     let child_target_text =
         fs::read_to_string(report.outcomes[0].rollout_path.as_path()).expect("read child target");
     assert!(!child_target_text.contains("compressed Paginated parent marker"));
-    assert!(child_target_text.contains(".jsonl.zst"));
+    assert!(!child_target_text.contains("rollout_reference"));
+    let child_meta =
+        codex_rollout::read_session_meta_line(report.outcomes[0].rollout_path.as_path())
+            .await
+            .expect("read migrated child metadata");
+    let history_base = child_meta
+        .meta
+        .history_base
+        .expect("compressed history base");
+    let migrated_parent =
+        codex_rollout::find_rollout_path_by_rollout_id(home.path(), history_base.thread_id)
+            .await
+            .expect("resolve compressed native predecessor")
+            .expect("compressed native predecessor exists");
+    assert_eq!(
+        migrated_parent
+            .extension()
+            .and_then(|extension| extension.to_str()),
+        Some("zst")
+    );
     let materialized = codex_rollout::materialize_rollout_lines(
         home.path(),
         report.outcomes[0].rollout_path.as_path(),

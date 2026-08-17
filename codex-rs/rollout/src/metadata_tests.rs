@@ -48,6 +48,51 @@ fn canonical_path_parsing_distinguishes_stable_and_physical_ids() {
     );
 }
 
+#[test]
+fn physical_history_filename_sorts_before_active_rollout() {
+    let thread_id =
+        ThreadId::from_string("019ff1a2-b3c4-7d5e-8f60-112233445566").expect("thread id");
+    let rollout_id =
+        ThreadId::from_string("019ff1a2-b3c4-7d5e-8f60-667788990011").expect("rollout id");
+    let active = PathBuf::from(format!("rollout-2026-08-11T18-42-07-{thread_id}.jsonl"));
+    let history = history_rollout_path_with_rollout_id(active.as_path(), rollout_id)
+        .expect("physical history path");
+    let expected = format!("rollout-2026-08-11T18-42-06-{thread_id}_{rollout_id}.jsonl");
+
+    assert_eq!(
+        history.file_name().and_then(|name| name.to_str()),
+        Some(expected.as_str())
+    );
+    assert_eq!(thread_id_from_path(history.as_path()), Some(thread_id));
+    assert_eq!(rollout_id_from_path(history.as_path()), Some(rollout_id));
+}
+
+#[tokio::test]
+async fn session_backfill_excludes_native_history_segments() {
+    let home = tempdir().expect("tempdir");
+    let sessions = home.path().join(SESSIONS_SUBDIR);
+    let thread_id = ThreadId::new();
+    let rollout_id = ThreadId::new();
+    let active = sessions.join(format!(
+        "2026/08/11/rollout-2026-08-11T18-42-07-{thread_id}.jsonl"
+    ));
+    let history = sessions.join(ROLLOUT_SEGMENTS_SUBDIR).join(format!(
+        "2026/08/11/rollout-2026-08-11T18-42-06-{thread_id}_{rollout_id}.jsonl"
+    ));
+    std::fs::create_dir_all(active.parent().expect("active parent")).expect("create active parent");
+    std::fs::create_dir_all(history.parent().expect("history parent"))
+        .expect("create history parent");
+    std::fs::write(active.as_path(), b"active\n").expect("write active rollout");
+    std::fs::write(history.as_path(), b"history\n").expect("write history rollout");
+
+    assert_eq!(
+        collect_rollout_paths(sessions.as_path())
+            .await
+            .expect("collect session rollouts"),
+        vec![active]
+    );
+}
+
 #[tokio::test]
 async fn extract_metadata_from_rollout_uses_session_meta() {
     let dir = tempdir().expect("tempdir");

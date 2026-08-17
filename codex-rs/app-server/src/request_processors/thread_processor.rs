@@ -3601,7 +3601,7 @@ impl ThreadRequestProcessor {
                         self.thread_watch_manager
                             .loaded_status_for_thread(&thread_uuid.to_string())
                             .await,
-                        /*has_live_running_thread*/ true,
+                        /*has_live_in_progress_turn*/ true,
                     );
                     response = ThreadTurnsListResponse {
                         data: page.data,
@@ -3696,6 +3696,36 @@ impl ThreadRequestProcessor {
             .map(|value| value as usize)
             .unwrap_or(THREAD_SEARCH_OCCURRENCES_DEFAULT_LIMIT)
             .clamp(1, THREAD_SEARCH_OCCURRENCES_MAX_LIMIT);
+        let displayed_unprojected_history = self
+            .unprojected_paginated_history_threads
+            .lock()
+            .await
+            .contains(&thread_id);
+        if let Some(store) = self
+            .thread_store
+            .as_any()
+            .downcast_ref::<codex_thread_store::LocalThreadStore>()
+            && (displayed_unprojected_history
+                || !store
+                    .has_history_projection(thread_id)
+                    .await
+                    .map_err(|err| {
+                        internal_error(format!(
+                            "failed to inspect thread history projection: {err}"
+                        ))
+                    })?)
+        {
+            // Full-history search requires the SQLite projection. Keep thread open, list, and
+            // fork bounded; pay the one-time lineage scan only for this explicit search request.
+            store
+                .rebuild_history_projection(thread_id)
+                .await
+                .map_err(|err| {
+                    internal_error(format!(
+                        "failed to rebuild thread history projection: {err}"
+                    ))
+                })?;
+        }
         let page = self
             .thread_store
             .search_thread_occurrences(StoreSearchThreadOccurrencesParams {
@@ -3749,15 +3779,16 @@ impl ThreadRequestProcessor {
             SortDirection::Asc => StoreSortDirection::Asc,
             SortDirection::Desc => StoreSortDirection::Desc,
         };
-        let use_unprojected_history = self
-            .unprojected_paginated_history_threads
-            .lock()
-            .await
-            .contains(&thread_id)
-            || match cursor.as_deref() {
-                Some(cursor) => parse_thread_turns_cursor(cursor).is_ok(),
-                None => !self.has_paginated_history_projection(thread_id).await?,
-            };
+        let use_unprojected_history = match cursor.as_deref() {
+            Some(cursor) => parse_thread_turns_cursor(cursor).is_ok(),
+            None => {
+                self.unprojected_paginated_history_threads
+                    .lock()
+                    .await
+                    .contains(&thread_id)
+                    || !self.has_paginated_history_projection(thread_id).await?
+            }
+        };
         if use_unprojected_history
             && let Some(response) = self
                 .unprojected_paginated_thread_turns_list_response(
@@ -4195,7 +4226,7 @@ impl ThreadRequestProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread_id.to_string())
                 .await,
-            /*has_live_running_thread*/ false,
+            /*has_live_in_progress_turn*/ false,
         );
         self.legacy_displayed_turn_items
             .lock()
@@ -4642,6 +4673,9 @@ impl ThreadRequestProcessor {
                 };
                 match &line.item {
                     RolloutItem::SessionMeta(_) => {
+                        if session_meta.meta.history_base.is_some() {
+                            return Ok(None);
+                        }
                         reversed_items.reverse();
                         let mut items = vec![RolloutItem::SessionMeta(session_meta)];
                         items.extend(reversed_items);
@@ -4659,13 +4693,14 @@ impl ThreadRequestProcessor {
                 reversed_items.push(line.item);
 
                 if started_turns >= page_size {
-                    let has_older_reference = match scanner.scan_next::<RolloutLine>()? {
-                        Some(ScanOutcome::Parsed(line)) => {
-                            !matches!(line.item, RolloutItem::SessionMeta(_))
-                        }
-                        Some(ScanOutcome::Rejected(_)) => return Ok(None),
-                        None => false,
-                    };
+                    let has_older_reference = session_meta.meta.history_base.is_some()
+                        || match scanner.scan_next::<RolloutLine>()? {
+                            Some(ScanOutcome::Parsed(line)) => {
+                                !matches!(line.item, RolloutItem::SessionMeta(_))
+                            }
+                            Some(ScanOutcome::Rejected(_)) => return Ok(None),
+                            None => false,
+                        };
                     reversed_items.reverse();
                     let mut items = Vec::with_capacity(reversed_items.len() + 1);
                     items.push(RolloutItem::SessionMeta(session_meta));
@@ -4731,7 +4766,7 @@ impl ThreadRequestProcessor {
                 .legacy_page_depth_hints
                 .lock()
                 .await
-                .lookup(generation, None, page_size)
+                .lookup(generation, /*turn_id*/ None, page_size)
                 .unwrap_or(DEFAULT_ROLLOUT_REFERENCE_DEPTH),
             _ => DEFAULT_ROLLOUT_REFERENCE_DEPTH,
         }
@@ -7761,7 +7796,9 @@ fn thread_store_list_error(err: ThreadStoreError) -> JSONRPCErrorError {
 
 fn thread_store_resume_read_error(err: ThreadStoreError) -> JSONRPCErrorError {
     match err {
-        ThreadStoreError::InvalidRequest { message } => invalid_request(message),
+        ThreadStoreError::InvalidRequest { message } | ThreadStoreError::Conflict { message } => {
+            invalid_request(message)
+        }
         ThreadStoreError::Unsupported { operation } => {
             unsupported_thread_store_operation(operation)
         }
@@ -8113,44 +8150,6 @@ fn preview_from_response_item(item: &codex_rollout::ResponseItemEnvelope) -> Opt
     }
 }
 
-fn requested_permissions_trust_project(overrides: &ConfigOverrides, cwd: &Path) -> bool {
-    if matches!(
-        overrides.sandbox_mode,
-        Some(
-            codex_protocol::config_types::SandboxMode::WorkspaceWrite
-                | codex_protocol::config_types::SandboxMode::DangerFullAccess
-        )
-    ) {
-        return true;
-    }
-
-    if matches!(
-        overrides.default_permissions.as_deref(),
-        Some(
-            BUILT_IN_PERMISSION_PROFILE_WORKSPACE | BUILT_IN_PERMISSION_PROFILE_DANGER_FULL_ACCESS
-        )
-    ) {
-        return true;
-    }
-
-    overrides
-        .permission_profile
-        .as_ref()
-        .is_some_and(|profile| permission_profile_trusts_project(profile, cwd))
-}
-
-fn permission_profile_trusts_project(
-    profile: &codex_protocol::models::PermissionProfile,
-    cwd: &Path,
-) -> bool {
-    match profile {
-        codex_protocol::models::PermissionProfile::Disabled
-        | codex_protocol::models::PermissionProfile::External { .. } => true,
-        codex_protocol::models::PermissionProfile::Managed { .. } => profile
-            .file_system_sandbox_policy()
-            .can_write_path_with_cwd(cwd, cwd),
-    }
-}
 fn build_thread_from_snapshot(
     thread_id: ThreadId,
     session_id: String,

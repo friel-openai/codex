@@ -232,6 +232,11 @@ struct ForkHistory {
 
 /// Builds the canonical physical history used by a reference-backed full-history fork.
 pub(crate) fn full_history_from_frozen_segment(frozen: FrozenRolloutSegment) -> InitialHistory {
+    if let Some(history_base) = frozen.history_base {
+        let mut source_session_meta = frozen.source_session_meta;
+        source_session_meta.meta.history_base = Some(history_base);
+        return InitialHistory::Forked(vec![RolloutItem::SessionMeta(source_session_meta)]);
+    }
     InitialHistory::Forked(vec![
         RolloutItem::SessionMeta(frozen.source_session_meta),
         RolloutItem::RolloutReference(frozen.reference),

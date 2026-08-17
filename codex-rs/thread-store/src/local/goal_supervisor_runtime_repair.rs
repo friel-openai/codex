@@ -351,7 +351,19 @@ async fn repair_before_access(
             reservation: Some(reservation),
             certified_active_snapshot: None,
         };
-        let locked_scope = discover_scope(store, thread_id, rollout_path, access).await?;
+        let locked_rollout_path = if codex_rollout::existing_rollout_path(rollout_path)
+            .await
+            .is_some()
+        {
+            rollout_path.to_path_buf()
+        } else {
+            super::thread_rollout_resolver::resolve_current_including_archived(store, thread_id)
+                .await?
+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?
+                .path
+        };
+        let locked_scope =
+            discover_scope(store, thread_id, locked_rollout_path.as_path(), access).await?;
         let discovered_lock_ids = locked_scope.lock_thread_ids();
         if discovered_lock_ids != lock_ids {
             drop(access_token);
@@ -588,7 +600,7 @@ async fn scan_root_for_access(
         store,
         thread_id,
         rollout_path,
-        None,
+        /*end_byte_offset*/ None,
         /*include_references*/ !matches!(access, RepairAccess::ActiveOnly),
         reference_policy,
     )
@@ -724,7 +736,7 @@ async fn scan_root(
                         lines.as_slice(),
                         reference,
                         reference_policy,
-                        None,
+                        /*inherited_selection*/ None,
                     )
                     .await?,
                 )
@@ -1085,7 +1097,7 @@ async fn repair_root_locked(
                     selection_parent_lines.as_slice(),
                     reference,
                     root.reference_policy,
-                    None,
+                    /*inherited_selection*/ None,
                 )
                 .await?,
                 access,
@@ -1391,7 +1403,8 @@ async fn repair_reference(
             let old_segment_id = completed.reference.segment_id.ok_or_else(|| {
                 repair_error("mutable reference fallback is missing its segment identity")
             })?;
-            let identity_cleared = replacement_with_segment_id(&completed, None)?;
+            let identity_cleared =
+                replacement_with_segment_id(&completed, /*segment_id*/ None)?;
             let segment_id = history_repair_segment_id(identity_cleared.as_slice());
             let replacement = replacement_with_segment_id(&completed, Some(segment_id))?;
             install_existing_identity_history_repair_backup(
@@ -1439,7 +1452,8 @@ async fn repair_reference(
             }
         } else {
             let writer = access.writer_token(store, completed.thread_id).await?;
-            let identity_cleared = replacement_with_segment_id(&completed, None)?;
+            let identity_cleared =
+                replacement_with_segment_id(&completed, /*segment_id*/ None)?;
             let segment_id = history_repair_segment_id(identity_cleared.as_slice());
             let replacement = replacement_with_segment_id(&completed, Some(segment_id))?;
             let installed_path = install_history_repair_segment(

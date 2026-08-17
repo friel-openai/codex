@@ -21,7 +21,7 @@ use super::lineage_stage::measure_legacy_lineage;
 use super::single_manifest::measure_single_rollout;
 use crate::ThreadStoreResult;
 
-const LINEAGE_MANIFEST_VERSION: u32 = 1;
+const LINEAGE_MANIFEST_VERSION: u32 = 2;
 
 /// Exact dry-run description of one authenticated migration.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -121,6 +121,8 @@ pub struct RolloutMigrationLineageTarget {
     pub rollout_id: RolloutId,
     pub segment_id: Option<SegmentId>,
     pub path: PathBuf,
+    /// Exact predecessor boundary written into the target `SessionMeta`.
+    pub history_base: Option<HistoryPosition>,
     pub start_ordinal: u64,
     pub end_ordinal_exclusive: u64,
     pub byte_count: u64,
@@ -232,6 +234,7 @@ pub(super) async fn build_lineage_manifest(
                 .extension()
                 .is_some_and(|extension| extension == "zst"),
             path: target.final_path,
+            history_base: target.history_base,
             start_ordinal: target.start_ordinal,
             end_ordinal_exclusive: target.end_ordinal_exclusive,
             byte_count: target.byte_count,
@@ -303,6 +306,7 @@ pub(super) async fn build_single_manifest(
         rollout_id: measured.rollout_id,
         segment_id: measured.segment_id,
         path: path.to_path_buf(),
+        history_base: None,
         start_ordinal: 0,
         end_ordinal_exclusive: measured.target_end_ordinal_exclusive,
         byte_count: measured.target_byte_count,
