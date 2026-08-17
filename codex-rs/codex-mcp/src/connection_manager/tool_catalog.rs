@@ -206,8 +206,8 @@ impl McpConnectionSet {
             if !view.connection.startup_complete() {
                 let required = self.required_servers.binary_search(server_name).is_ok();
                 let has_cached_tools = view.connection.has_cached_tools();
-                let must_wait_for_startup =
-                    (required && (!view.startup_is_dormant() || !has_cached_tools))
+                let must_wait_for_startup = (required
+                    && (!view.startup_is_dormant() || !has_cached_tools))
                     || self.is_selected_plugin_mcp_server(server_name)
                     || required_servers
                         .iter()

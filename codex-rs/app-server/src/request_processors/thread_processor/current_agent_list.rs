@@ -183,7 +183,7 @@ impl ThreadRequestProcessor {
                     sort_key,
                     sort_direction,
                     entry,
-                    false,
+                    /*inclusive*/ false,
                 )
             })
             .transpose()?;
@@ -196,7 +196,7 @@ impl ThreadRequestProcessor {
                     sort_key,
                     opposite_sort_direction(sort_direction),
                     entry,
-                    true,
+                    /*inclusive*/ true,
                 )
             })
             .transpose()?;
@@ -405,6 +405,7 @@ fn minimal_current_agent_thread(
             ephemeral: true,
             section: None,
             section_entered_at: None,
+            project_id: None,
             history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
             model_provider: config.model_provider_id.clone(),
             created_at: 0,

@@ -31,7 +31,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::router::ToolRouter;
 
-const PINNED_UPSTREAM: &str = "4b07886d593546a4aee64a09aab219dd6660497f";
+const PINNED_UPSTREAM: &str = "9dd3d6a13ef146cdcb60376f94a85d41918d16e3";
 const V1_NAMESPACE: &str = "multi_agent_v1";
 const V2_NAMESPACE: &str = "collaboration";
 const V1_TOOLS: &[&str] = &[
@@ -158,7 +158,9 @@ impl Scenario {
             }
         }
         match self {
-            Self::V1Deferred => turn.model_info.supports_search_tool = true,
+            Self::V1Deferred => {
+                Arc::make_mut(&mut turn.model_info).supports_search_tool = true;
+            }
             Self::V1DepthLimit => {
                 turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                     parent_thread_id: ThreadId::new(),
@@ -182,7 +184,7 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                turn.model_info.tool_mode = Some(ToolMode::CodeModeOnly);
+                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
             }
             Self::V2CodeModeOnlyDirectModel => {
                 config.multi_agent_v2.non_code_mode_only = true;
@@ -190,7 +192,7 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                turn.model_info.tool_mode = Some(ToolMode::CodeModeOnly);
+                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
             }
             Self::V2CustomNamespace => {
                 config.multi_agent_v2.tool_namespace = Some("agents".to_string());
@@ -227,7 +229,7 @@ impl Scenario {
                     agent_role: matches!(self, Self::V2GoalHelperUnsupported)
                         .then(|| "goal_supervisor".to_string()),
                 });
-                turn.model_info.multi_agent_version =
+                Arc::make_mut(&mut turn.model_info).multi_agent_version =
                     Some(if matches!(self, Self::V2SubagentSupported) {
                         MultiAgentVersion::V2
                     } else {
@@ -415,7 +417,7 @@ async fn collaboration_manifest() -> Value {
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tools/fixtures/collaboration_contract_4b07886d.json")
+        .join("src/tools/fixtures/collaboration_contract_9dd3d6a1.json")
 }
 
 #[tokio::test]
@@ -451,7 +453,7 @@ async fn frodex_namespaces_do_not_change_the_pinned_collaboration_contract() {
 async fn custom_model_aliases_do_not_change_the_pinned_collaboration_contract() {
     let expected = scenario_manifest_with(Scenario::V2Root, |turn| {
         let manager = StaticModelsManager::new(
-            None,
+            /*auth_manager*/ None,
             bundled_models_response().expect("bundled model catalog"),
         );
         turn.available_models = manager
@@ -487,7 +489,9 @@ async fn custom_model_aliases_do_not_change_the_pinned_collaboration_contract() 
                 },
             ),
         ]);
-        let manager = StaticModelsManager::new_with_custom_models(None, catalog, aliases);
+        let manager = StaticModelsManager::new_with_custom_models(
+            /*auth_manager*/ None, catalog, aliases,
+        );
         turn.available_models = manager
             .try_list_upstream_models()
             .expect("static model catalog is unlocked");
@@ -503,22 +507,22 @@ fn canonical_handler_sources_without_internal_adapters_match_pinned_upstream() {
         (
             "send_message.rs",
             include_str!("handlers/multi_agents_v2/send_message.rs"),
-            include_str!("fixtures/collaboration_source_4b07886d/send_message.rs"),
+            include_str!("fixtures/collaboration_source_9dd3d6a1/send_message.rs"),
         ),
         (
             "followup_task.rs",
             include_str!("handlers/multi_agents_v2/followup_task.rs"),
-            include_str!("fixtures/collaboration_source_4b07886d/followup_task.rs"),
+            include_str!("fixtures/collaboration_source_9dd3d6a1/followup_task.rs"),
         ),
         (
             "wait.rs",
             include_str!("handlers/multi_agents_v2/wait.rs"),
-            include_str!("fixtures/collaboration_source_4b07886d/wait.rs"),
+            include_str!("fixtures/collaboration_source_9dd3d6a1/wait.rs"),
         ),
         (
             "interrupt_agent.rs",
             include_str!("handlers/multi_agents_v2/interrupt_agent.rs"),
-            include_str!("fixtures/collaboration_source_4b07886d/interrupt_agent.rs"),
+            include_str!("fixtures/collaboration_source_9dd3d6a1/interrupt_agent.rs"),
         ),
     ] {
         assert_eq!(actual, expected, "{name} differs from pinned upstream");
