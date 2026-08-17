@@ -306,6 +306,8 @@ struct ThreadCompatibility {
     updated_at: i64,
     recency_at: Option<i64>,
     status: ThreadStatus,
+    #[serde(default)]
+    agent_status: Option<CollabAgentStatus>,
     path: Option<PathBuf>,
     cwd: AbsolutePathBuf,
     cli_version: String,
@@ -342,6 +344,7 @@ impl<'de> Deserialize<'de> for Thread {
             updated_at: thread.updated_at,
             recency_at: thread.recency_at,
             status: thread.status,
+            agent_status: thread.agent_status,
             path: thread.path,
             cwd: thread.cwd,
             cli_version: thread.cli_version,

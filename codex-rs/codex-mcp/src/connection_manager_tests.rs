@@ -117,7 +117,6 @@ impl McpConnectionSet {
         Self {
             servers: HashMap::new(),
             disabled_servers: Vec::new(),
-            protocol_mode: crate::McpProtocolMode::Legacy,
             required_servers: Vec::new(),
             optional_startup_deadline: OnceLock::new(),
             tool_catalog_revision: Arc::new(RwLock::new(0)),
@@ -5311,7 +5310,7 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() -> 
         create_test_tool("docs", "search"),
         create_test_tool("docs", "write"),
     ];
-    let mut previous =
+    let previous =
         manager_with_reusable_ready_server(&config, &runtime_context, tools.clone()).await;
     let managed_client = create_test_managed_client(tools).await;
     let (pending_client, startup_started, release_startup) =
@@ -5321,15 +5320,12 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() -> 
         async move { pending_client.client().await }
     });
     startup_started.await?;
-    let connection = Arc::get_mut(
-        &mut previous
-            .servers
-            .get_mut("docs")
-            .expect("test server should exist")
-            .connection,
-    )
-    .expect("test server should have one connection owner");
-    connection.client = pending_client;
+    previous
+        .servers
+        .get("docs")
+        .expect("test server should exist")
+        .connection
+        .replace_connection_for_test(pending_client);
     config.enabled_tools = Some(vec!["search".to_string()]);
     config.startup_timeout_sec = Some(DEFAULT_STARTUP_TIMEOUT);
 
@@ -5357,7 +5353,7 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
     let runtime_context = reusable_server_runtime_context();
     let mut config = reusable_server_config("http://127.0.0.1:1");
     let tools = vec![create_test_tool("docs", "search")];
-    let mut previous =
+    let previous =
         manager_with_reusable_ready_server(&config, &runtime_context, tools.clone()).await;
     let managed_client = create_test_managed_client(tools).await;
     let (pending_client, startup_started, release_startup) =
@@ -5368,15 +5364,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
         async move { pending_client.client().await }
     });
     startup_started.await?;
-    let connection = Arc::get_mut(
-        &mut previous
-            .servers
-            .get_mut("docs")
-            .expect("test server should exist")
-            .connection,
-    )
-    .expect("test server should have one connection owner");
-    connection.client = pending_client;
+    previous
+        .servers
+        .get("docs")
+        .expect("test server should exist")
+        .connection
+        .replace_connection_for_test(pending_client);
 
     let reused =
         reconcile_reusable_server(&previous, config.clone(), runtime_context.clone()).await;

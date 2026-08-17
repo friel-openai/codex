@@ -14,6 +14,7 @@ const ACTIVE_ADOPTION_IDLE_RECHECK: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ResumedThreadOwnership {
+    #[cfg(test)]
     Preserve,
     Transfer,
 }
@@ -35,6 +36,10 @@ struct OriginalRoot {
 
 impl AgentControl {
     /// Transfer a root into this agent tree without copying or interrupting its history.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "adoption keeps persisted identity, communication context, and turn ancestry explicit"
+    )]
     pub(crate) async fn adopt_agent_with_communication(
         &self,
         config: Config,
@@ -385,6 +390,7 @@ impl AgentControl {
                     | RolloutItem::Compacted(_)
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
+                    | RolloutItem::SecurityRiskScore(_)
                     | RolloutItem::EventMsg(_) => None,
                 })
                 .unwrap_or(SessionSource::Cli);
@@ -595,7 +601,7 @@ impl AgentControl {
             .map_err(|err| {
                 CodexErr::Fatal(format!("failed to persist root thread metadata: {err}"))
             })?;
-        self.register_session_root(thread_id, None);
+        self.register_session_root(thread_id, /*current_parent_thread_id*/ None);
         state.notify_thread_created(thread_id);
         Ok(resumed.thread_id)
     }
@@ -751,6 +757,7 @@ pub(super) async fn persisted_thread_workspace_roots(
                 | RolloutItem::InterAgentCommunicationMetadata { .. }
                 | RolloutItem::Compacted(_)
                 | RolloutItem::WorldState(_)
+                | RolloutItem::SecurityRiskScore(_)
                 | RolloutItem::EventMsg(_) => None,
             }),
     )

@@ -681,10 +681,10 @@ impl TurnContext {
                 Arc::make_mut(&mut model_info)
                     .service_tiers
                     .push(ModelServiceTier {
-                    id: service_tier.clone(),
-                    name: service_tier.clone(),
-                    description: "Configured by a custom model routing profile.".to_string(),
-                });
+                        id: service_tier.clone(),
+                        name: service_tier.clone(),
+                        description: "Configured by a custom model routing profile.".to_string(),
+                    });
             }
             Some(service_tier.clone())
         } else if fast_mode_enabled {
@@ -1068,7 +1068,7 @@ impl Session {
             options,
             TurnMultiAgentRuntime::ResolveAndStore,
             self.git_enrichment_policy,
-            true,
+            /*resolve_model_routing*/ true,
         )
         .await
     }
@@ -1084,7 +1084,7 @@ impl Session {
             NewTurnContextOptions::default(),
             TurnMultiAgentRuntime::Preview,
             GitEnrichmentPolicy::Skip,
-            true,
+            /*resolve_model_routing*/ true,
         )
         .await
     }
@@ -1318,7 +1318,7 @@ impl Session {
                 },
                 TurnMultiAgentRuntime::ResolveAndStore,
                 self.git_enrichment_policy,
-                false,
+                /*resolve_model_routing*/ false,
             )
             .await;
         let mut refreshed = Arc::try_unwrap(refreshed)

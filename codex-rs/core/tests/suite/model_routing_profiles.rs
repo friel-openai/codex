@@ -230,9 +230,9 @@ async fn submit_prompt_text(
 ) -> Result<()> {
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: text.to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: text.to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await?;
     Ok(())
 }
@@ -387,9 +387,19 @@ async fn continuation_failure_reroutes_after_recorded_tool_output() -> Result<()
         ],
     )
     .await;
-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
+    let mut primary = catalog_model(
+        PRIMARY,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     primary.experimental_supported_tools = vec![TOOL_NAME.to_string()];
-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
+    let mut fallback = catalog_model(
+        FALLBACK,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     fallback.experimental_supported_tools = vec![TOOL_NAME.to_string()];
     let test = test_codex()
         .with_config(move |config| {
@@ -938,7 +948,7 @@ async fn smaller_fallback_compacts_before_its_first_sampling_request() -> Result
         vec![
             sse_response(sse(vec![
                 ev_assistant_message("message-primary-history", "history before reroute"),
-                ev_completed_with_tokens("response-primary-history", 20_000),
+                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
             ])),
             sse_response(sse(vec![overload_failure])),
             sse_response(sse(vec![
@@ -949,17 +959,27 @@ async fn smaller_fallback_compacts_before_its_first_sampling_request() -> Result
                         "encrypted_content": "test-routed-compaction-summary"
                     }
                 }),
-                ev_completed_with_tokens("response-fallback-compact", 10),
+                ev_completed_with_tokens("response-fallback-compact", /*total_tokens*/ 10),
             ])),
             sse_response(sse_completed("response-fallback-final")),
         ],
     )
     .await;
-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
+    let mut primary = catalog_model(
+        PRIMARY,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     primary.context_window = Some(100_000);
     primary.auto_compact_token_limit = Some(90_000);
     primary.comp_hash = None;
-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
+    let mut fallback = catalog_model(
+        FALLBACK,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     fallback.context_window = Some(10_000);
     fallback.auto_compact_token_limit = Some(9_000);
     fallback.comp_hash = None;
@@ -1048,7 +1068,7 @@ async fn typed_compaction_failure_falls_through_without_terminating_the_turn() -
         vec![
             sse_response(sse(vec![
                 ev_assistant_message("message-primary-history", "history before reroute"),
-                ev_completed_with_tokens("response-primary-history", 20_000),
+                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
             ])),
             sse_response(sse(vec![overload_failure()])),
             sse_response(sse(vec![
@@ -1059,13 +1079,28 @@ async fn typed_compaction_failure_falls_through_without_terminating_the_turn() -
         ],
     )
     .await;
-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
+    let mut primary = catalog_model(
+        PRIMARY,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     primary.context_window = Some(100_000);
     primary.auto_compact_token_limit = Some(90_000);
-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
+    let mut fallback = catalog_model(
+        FALLBACK,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     fallback.context_window = Some(10_000);
     fallback.auto_compact_token_limit = Some(9_000);
-    let mut second_fallback = catalog_model(SECOND_FALLBACK, &[ReasoningEffort::Medium], &[], None);
+    let mut second_fallback = catalog_model(
+        SECOND_FALLBACK,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     second_fallback.context_window = Some(100_000);
     second_fallback.auto_compact_token_limit = Some(90_000);
     let test = test_codex()
@@ -1159,17 +1194,27 @@ async fn token_budget_reroute_runs_post_compact_hook_once_after_route_commit() -
         vec![
             sse_response(sse(vec![
                 ev_assistant_message("message-primary-history", "history before reroute"),
-                ev_completed_with_tokens("response-primary-history", 20_000),
+                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
             ])),
             sse_response(sse(vec![overload_failure])),
             sse_response(sse_completed("response-fallback-final")),
         ],
     )
     .await;
-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
+    let mut primary = catalog_model(
+        PRIMARY,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     primary.context_window = Some(100_000);
     primary.auto_compact_token_limit = Some(90_000);
-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
+    let mut fallback = catalog_model(
+        FALLBACK,
+        &[ReasoningEffort::Medium],
+        &[],
+        /*default_service_tier*/ None,
+    );
     fallback.context_window = Some(10_000);
     fallback.auto_compact_token_limit = Some(9_000);
     let test = test_codex()
@@ -1285,8 +1330,18 @@ async fn catalog_rejects_primary_tuple_and_selects_supported_fallback() -> Resul
             ]);
             config.model_catalog = Some(ModelsResponse {
                 models: vec![
-                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
-                    catalog_model(FALLBACK, &[ReasoningEffort::High], &[], None),
+                    catalog_model(
+                        PRIMARY,
+                        &[ReasoningEffort::Medium],
+                        &[],
+                        /*default_service_tier*/ None,
+                    ),
+                    catalog_model(
+                        FALLBACK,
+                        &[ReasoningEffort::High],
+                        &[],
+                        /*default_service_tier*/ None,
+                    ),
                 ],
             });
         })
@@ -1332,8 +1387,18 @@ async fn all_locally_rejected_candidates_send_lowest_exact_tuple() -> Result<()>
             ]);
             config.model_catalog = Some(ModelsResponse {
                 models: vec![
-                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
-                    catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None),
+                    catalog_model(
+                        PRIMARY,
+                        &[ReasoningEffort::Medium],
+                        &[],
+                        /*default_service_tier*/ None,
+                    ),
+                    catalog_model(
+                        FALLBACK,
+                        &[ReasoningEffort::Medium],
+                        &[],
+                        /*default_service_tier*/ None,
+                    ),
                 ],
             });
         })
@@ -1379,7 +1444,7 @@ async fn omitted_service_tier_uses_catalog_default_when_fast_mode_is_enabled() -
             });
             config
                 .features
-                .set_enabled(Feature::FastMode, true)
+                .set_enabled(Feature::FastMode, /*enabled*/ true)
                 .expect("enable fast mode");
         })
         .build(&server)
@@ -1425,7 +1490,7 @@ async fn omitted_service_tier_stays_omitted_when_fast_mode_is_disabled() -> Resu
             });
             config
                 .features
-                .set_enabled(Feature::FastMode, false)
+                .set_enabled(Feature::FastMode, /*enabled*/ false)
                 .expect("disable fast mode");
         })
         .build(&server)

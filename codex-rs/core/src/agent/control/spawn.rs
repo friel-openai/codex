@@ -878,7 +878,7 @@ impl AgentControl {
             }
             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
                 let parent_history =
-                    load_agent_model_context(&state, parent_thread_id, parent_history_mode)
+                    load_agent_model_context(state, parent_thread_id, parent_history_mode)
                         .await?
                         .ok_or_else(|| {
                             CodexErr::Fatal(format!(

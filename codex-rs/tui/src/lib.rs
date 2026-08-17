@@ -130,10 +130,10 @@ mod exec_cell;
 mod exec_command;
 mod external_agent_config_migration;
 mod external_editor;
-mod ghostty_fork;
 mod file_search;
 mod frames;
 mod get_git_diff;
+mod ghostty_fork;
 mod git_action_directives;
 mod goal_display;
 mod goal_files;
@@ -2773,14 +2773,10 @@ mod tests {
         });
 
         assert!(!allow_interactive_session_cwd_prompt(
-            /*uses_remote_workspace*/ false,
-            /*cli_cwd_is_set*/ false,
-            &side,
+            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &side,
         ));
         assert!(allow_interactive_session_cwd_prompt(
-            /*uses_remote_workspace*/ false,
-            /*cli_cwd_is_set*/ false,
-            &fork,
+            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &fork,
         ));
     }
 

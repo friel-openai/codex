@@ -1037,9 +1037,9 @@ async fn routed_profile_rebases_websocket_after_partial_commentary() {
 
     test.codex
         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
-                text: "stream the routing test commentary".to_string(),
-                text_elements: Vec::new(),
-            }]))
+            text: "stream the routing test commentary".to_string(),
+            text_elements: Vec::new(),
+        }]))
         .await
         .expect("submit routed websocket commentary turn");
     let mut events = Vec::new();

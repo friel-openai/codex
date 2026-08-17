@@ -17,7 +17,6 @@ use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
 use crate::session::multi_agents::ResolvedMultiAgentV2UsageHints;
-use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
@@ -911,7 +910,6 @@ impl AgentControl {
             agent_path,
             agent_nickname,
             agent_role,
-            ephemeral: config.ephemeral,
             last_task_message: None,
             ..Default::default()
         })
@@ -1005,24 +1003,6 @@ impl AgentControl {
     }
 
     #[cfg(test)]
-    pub(crate) fn register_current_only_agent_for_test(
-        &self,
-        agent_id: ThreadId,
-        parent_thread_id: ThreadId,
-        depth: i32,
-    ) {
-        self.state
-            .reserve_spawn_slot(/*max_threads*/ None)
-            .expect("current-only test identity should reserve a slot")
-            .commit(AgentMetadata {
-                agent_id: Some(agent_id),
-                parent_thread_id: Some(parent_thread_id),
-                depth: Some(depth),
-                ephemeral: false,
-                ..Default::default()
-            });
-    }
-
     async fn open_thread_spawn_children(
         &self,
         parent_thread_id: ThreadId,

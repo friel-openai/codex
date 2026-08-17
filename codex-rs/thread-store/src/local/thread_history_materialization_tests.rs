@@ -2363,6 +2363,177 @@ async fn indexed_latest_fork_rebuilds_history_when_projection_disappears_before_
 }
 
 #[tokio::test]
+async fn ephemeral_latest_side_uses_certified_active_context_without_freezing_source() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist paginated source metadata");
+
+    let mut immutable_predecessors = Vec::new();
+    for index in 0..8 {
+        let turn_id = format!("turn-{index}");
+        let message = format!("bounded side message {index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id.as_str()),
+                    user_message(message.as_str()),
+                    completed_item(
+                        thread_id,
+                        turn_id.as_str(),
+                        TurnItem::UserMessage(UserMessageItem {
+                            id: format!("item-{index}"),
+                            client_id: None,
+                            content: Vec::new(),
+                        }),
+                    ),
+                    turn_completed(turn_id.as_str()),
+                ],
+            })
+            .await
+            .expect("append source turn");
+        immutable_predecessors.push(
+            store
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                        format!("checkpoint {index}").as_str(),
+                    )),
+                )
+                .await
+                .expect("rotate source segment")
+                .reference
+                .rollout_path,
+        );
+    }
+    index_paginated_source_metadata(&store, thread_id).await;
+    let projected = store
+        .projected_history_position(thread_id)
+        .await
+        .expect("read projected position")
+        .expect("projected position");
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open projected thread history");
+    for statement in [
+        "DELETE FROM thread_items WHERE thread_id = ?",
+        "DELETE FROM thread_turns WHERE thread_id = ?",
+        "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(projected.thread_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("remove projected source history");
+    }
+    for predecessor in immutable_predecessors
+        .iter()
+        .take(immutable_predecessors.len().saturating_sub(1))
+    {
+        fs::remove_file(predecessor).expect("remove obsolete immutable predecessor");
+    }
+
+    let prepared = store
+        .prepare_fork_without_response_history_for_rollout(
+            PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            },
+            projected.thread_id,
+            /*ephemeral_context_only*/ true,
+        )
+        .await
+        .expect("prepare bounded side without projection or old predecessors");
+
+    assert!(prepared.projected_response_turns.is_none());
+    assert!(prepared.model_context.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(compacted) if compacted.message == "checkpoint 7"
+        )
+    }));
+    assert!(
+        prepared.frozen_segment.is_none(),
+        "an ephemeral side must not snapshot or copy the source rollout"
+    );
+}
+
+fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+    let window_id = uuid::Uuid::now_v7();
+    let cwd: AbsolutePathBuf =
+        serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd");
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: message.to_string(),
+            replacement_history: Some(vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "bounded checkpoint history".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            ]),
+            mcp_resource_origins: None,
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        Some(SegmentPreviousTurnSettings {
+            model: "test-model".to_string(),
+            comp_hash: None,
+            realtime_active: None,
+        }),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: cwd.clone(),
+                environments: Some(TurnEnvironmentSelections::new(cwd, Vec::new())),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid certified checkpoint")
+}
+
+#[tokio::test]
 async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
