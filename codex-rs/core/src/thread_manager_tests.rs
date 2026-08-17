@@ -400,7 +400,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
     let prepared = PreparedFork::new(
         source_thread_id,
         /*history_base*/ None,
-        frozen_segment,
+        Some(frozen_segment),
         Arc::new(boundary_context.clone()),
         Arc::new(latest_context),
         Arc::new(boundary_context),
