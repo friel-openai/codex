@@ -786,7 +786,7 @@ fn read_confined_file_sync(
     codex_home: &Path,
     path: &Path,
 ) -> io::Result<(Vec<u8>, ConfinedFileSnapshot)> {
-    read_confined_file_sync_under_root(codex_home, path, None)
+    read_confined_file_sync_under_root(codex_home, path, /*expected_root*/ None)
 }
 
 #[cfg(unix)]
@@ -823,7 +823,13 @@ fn replace_confined_file_sync(
     expected: &ConfinedFileSnapshot,
     replacement: &[u8],
 ) -> io::Result<ConfinedMutationOutcome> {
-    replace_confined_file_sync_under_root(codex_home, destination, expected, replacement, None)
+    replace_confined_file_sync_under_root(
+        codex_home,
+        destination,
+        expected,
+        replacement,
+        /*expected_root*/ None,
+    )
 }
 
 #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
@@ -915,6 +921,7 @@ fn replace_confined_file_sync_under_root(
 
 #[cfg(all(
     unix,
+    test,
     not(any(target_os = "linux", target_os = "android", target_os = "macos"))
 ))]
 fn replace_confined_file_sync(
@@ -958,7 +965,7 @@ fn install_confined_file_sync(
         bytes,
         permissions,
         modified,
-        None,
+        /*expected_root*/ None,
     )
 }
 
