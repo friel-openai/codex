@@ -136,12 +136,15 @@ pub(super) fn repair_legacy_goal_supervisor_lines(
 
 /// Repairs exact legacy damage when this rollout or same-thread rotation ancestry proves that the
 /// affected Frodex build wrote the lineage.
-#[cfg(test)]
 pub(super) fn repair_legacy_goal_supervisor_lines_with_provenance(
     lines: &mut [RolloutLine],
     inherited_provenance: GoalSupervisorLineageProvenance,
 ) -> ThreadStoreResult<GoalSupervisorRepairCount> {
-    repair_selected_legacy_goal_supervisor_lines_with_provenance(lines, inherited_provenance, None)
+    repair_selected_legacy_goal_supervisor_lines_with_provenance(
+        lines,
+        inherited_provenance,
+        /*selected_message_ids*/ None,
+    )
 }
 
 /// Repairs only candidates whose message IDs occur in `selected_message_ids`.
@@ -249,11 +252,14 @@ pub(super) fn reject_malformed_goal_supervisor_supplied_history(
             item,
         })
         .collect::<Vec<_>>();
-    validate_candidates(lines.as_slice(), /*affected_ancestry*/ false, None).map_err(|_| {
-        ThreadStoreError::InvalidRequest {
-            message: "supplied history contains an untrusted goal-supervisor encrypted envelope"
-                .to_string(),
-        }
+    validate_candidates(
+        lines.as_slice(),
+        /*affected_ancestry*/ false,
+        /*selected_message_ids*/ None,
+    )
+    .map_err(|_| ThreadStoreError::InvalidRequest {
+        message: "supplied history contains an untrusted goal-supervisor encrypted envelope"
+            .to_string(),
     })
 }
 
@@ -371,7 +377,7 @@ pub(super) fn repair_legacy_goal_supervisor_jsonl_lines_with_provenance(
     repair_selected_legacy_goal_supervisor_jsonl_lines_with_provenance(
         source,
         inherited_provenance,
-        None,
+        /*selected_message_ids*/ None,
     )
 }
 
@@ -458,7 +464,10 @@ fn validate_candidates(
                     || (!affected_ancestry
                         && classification == CandidateClassification::ExactLegacyDamage)
                 {
-                    return Err(ambiguous_candidate_error(line.ordinal, None));
+                    return Err(ambiguous_candidate_error(
+                        line.ordinal,
+                        /*compacted_index*/ None,
+                    ));
                 }
             }
             RolloutItem::Compacted(compacted) => {
