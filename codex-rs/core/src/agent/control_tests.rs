@@ -1040,6 +1040,7 @@ async fn persist_thread_environment_for_resume(
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&cwd),
         workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+        config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
     };
     let mut settings = thread.thread_settings_snapshot().await;
     settings.environments = Some(TurnEnvironmentSelections::new(
@@ -2737,6 +2738,7 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
             /*thread_source*/ None,
             /*parent_trace*/ None,
             codex_protocol::mcp::ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
         )
         .await
         .expect("thread/fork should copy the complete history-base lineage");

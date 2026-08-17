@@ -793,9 +793,9 @@ mod tests {
     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
     use codex_app_server_protocol::InitializeCapabilities;
     use codex_app_server_protocol::SessionSource as ApiSessionSource;
-    use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadForkParams;
     use codex_app_server_protocol::ThreadForkResponse;
+    use codex_app_server_protocol::ThreadQueueChangedNotification;
     use codex_app_server_protocol::ThreadStartParams;
     use codex_app_server_protocol::ThreadStartResponse;
     use codex_app_server_protocol::Turn;

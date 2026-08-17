@@ -182,7 +182,7 @@ use futures::prelude::*;
 use rmcp::model::RequestId;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -455,9 +455,9 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::DeprecationNoticeEvent;
+use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
-use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::ModelRerouteEvent;
 use codex_protocol::protocol::ModelRerouteReason;
@@ -1973,14 +1973,15 @@ impl Session {
                 shared_model_response_items.is_some(),
             )
             .await;
-        let mut state = self.state.lock().await;
-        let previous_turn_settings = Self::install_rollout_reconstruction_in_state(
-            &mut state,
-            reconstruction,
-            shared_model_response_items,
-            shared_model_state,
-        );
-        drop(state);
+        let previous_turn_settings = {
+            let mut state = self.state.lock().await;
+            Self::install_rollout_reconstruction_in_state(
+                &mut state,
+                reconstruction,
+                shared_model_response_items,
+                shared_model_state,
+            )
+        };
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
             AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -2125,7 +2126,9 @@ impl Session {
             return;
         }
 
-        let _checkpoint_admission = self.checkpoint_admission_lock.lock().await;
+        let _checkpoint_admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
         if self.persistence_restart_required() {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
@@ -2152,7 +2155,10 @@ impl Session {
         );
         let recomputed_token_count =
             Self::recompute_token_usage_state_in_state(&mut state, turn_context.as_ref());
-        let checkpoint = Self::segment_state_checkpoint_from_state(&state);
+        let checkpoint = Self::segment_state_checkpoint_from_state(
+            &state,
+            self.services.turn_environments.selections(),
+        );
         // Cancellation after this point cannot prove whether the detached publication owner
         // committed, so only a classified outcome may clear the restart requirement.
         let outcome = live_thread
@@ -2262,6 +2268,7 @@ impl Session {
     )]
     fn segment_state_checkpoint_from_state(
         state: &SessionState,
+        environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CertifiedSegmentStateCheckpoint {
         let (info, rate_limits) = state.token_info_and_rate_limits();
         let window_ids = state.auto_compact_window_ids();
@@ -2269,6 +2276,7 @@ impl Session {
             CompactedItem {
                 message: String::new(),
                 replacement_history: Some(state.clone_history().annotated_items().to_vec()),
+                mcp_resource_origins: None,
                 window_number: Some(state.auto_compact_window_number()),
                 first_window_id: Some(window_ids.first_window_id.to_string()),
                 previous_window_id: window_ids.previous_window_id.map(|id| id.to_string()),
@@ -2290,7 +2298,7 @@ impl Session {
             ThreadSettingsAppliedEvent {
                 thread_settings: state
                     .session_configuration
-                    .thread_settings_snapshot(&self.services.turn_environments.selections()),
+                    .thread_settings_snapshot(&environment_selections),
             },
             TokenCountEvent { info, rate_limits },
         )
@@ -2299,7 +2307,10 @@ impl Session {
 
     async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
         let state = self.state.lock().await;
-        Self::segment_state_checkpoint_from_state(&state)
+        Self::segment_state_checkpoint_from_state(
+            &state,
+            self.services.turn_environments.selections(),
+        )
     }
 
     async fn previous_turn_settings(&self) -> Option<PreviousTurnSettings> {
@@ -2465,7 +2476,7 @@ impl Session {
 
     pub(crate) async fn effective_session_config(&self) -> Config {
         let state = self.state.lock().await;
-        Self::build_effective_session_config(&state.session_configuration)
+        self.build_effective_session_config(&state.session_configuration)
     }
 
     pub(crate) async fn session_source(&self) -> SessionSource {
@@ -4459,8 +4470,10 @@ impl Session {
     pub(crate) async fn lock_checkpoint_admission(
         &self,
         operation: &str,
-    ) -> anyhow::Result<MutexGuard<'_, ()>> {
-        let admission = self.checkpoint_admission_lock.lock().await;
+    ) -> anyhow::Result<OwnedMutexGuard<()>> {
+        let admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
         if self.persistence_restart_required() {
             anyhow::bail!(
                 "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
@@ -5123,6 +5136,7 @@ impl Session {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
         let token_count = {
             let mut state = self.state.lock().await;

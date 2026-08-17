@@ -1419,6 +1419,7 @@ impl Session {
                     }
                     RolloutItem::EventMsg(event) => mcp_runtime.observe_event(event),
                     RolloutItem::SessionMeta(_)
+                    | RolloutItem::RolloutReference(_)
                     | RolloutItem::ResponseItem(_)
                     | RolloutItem::InterAgentCommunication(_)
                     | RolloutItem::InterAgentCommunicationMetadata { .. }
