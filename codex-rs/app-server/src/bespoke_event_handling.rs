@@ -4199,7 +4199,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_encrypted_inter_agent_raw_response_does_not_render_ciphertext() -> Result<()> {
+    async fn test_encrypted_inter_agent_raw_response_is_not_projected_as_visible_message()
+    -> Result<()> {
         let (tx, mut rx) = mpsc::channel(CHANNEL_CAPACITY);
         let outgoing = Arc::new(OutgoingMessageSender::new(
             tx,
@@ -4220,18 +4221,13 @@ mod tests {
         );
         let item = communication.to_model_input_item();
 
-        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item, &outgoing).await;
+        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item.clone(), &outgoing)
+            .await;
 
         let msg = recv_broadcast_notification(&mut rx).await?;
         match msg {
-            ServerNotification::ItemCompleted(notification) => {
-                let ThreadItem::AgentMessage { text, .. } = notification.item else {
-                    bail!("unexpected item");
-                };
-                assert_eq!(
-                    text,
-                    "Agent message: [encrypted message] from /root/goal_supervisor"
-                );
+            ServerNotification::RawResponseItemCompleted(notification) => {
+                assert_eq!(notification.item, item);
             }
             other => bail!("unexpected message: {other:?}"),
         }

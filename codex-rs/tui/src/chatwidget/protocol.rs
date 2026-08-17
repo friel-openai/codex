@@ -14,8 +14,11 @@ impl ChatWidget {
 
     pub(super) fn on_inter_agent_communication(&mut self, communication: InterAgentCommunication) {
         let sender = communication.author.to_string();
-        let content =
-            codex_app_server_protocol::visible_inter_agent_message_content(&communication);
+        let Some(content) =
+            codex_app_server_protocol::visible_inter_agent_message_content(&communication)
+        else {
+            return;
+        };
         let message = display_inter_agent_message_content(&content);
         let hint = (!sender.is_empty()).then(|| format!("from {sender}"));
         self.add_to_history(history_cell::new_info_event(
