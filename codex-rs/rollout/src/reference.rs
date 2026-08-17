@@ -17,6 +17,7 @@ use codex_history::RolloutLine;
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -410,6 +411,18 @@ pub async fn resolve_rollout_reference_path(
         [] => {}
     }
 
+    // Older fork references recorded an absolute rollout path but no relocation timestamp. The
+    // filename still identifies the physical rollout. Resolve that rollout inside the current
+    // CODEX_HOME, then require the referenced SessionMeta identity before accepting it.
+    if let Some(rollout_id) = identity
+        .rollout_id()
+        .or_else(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
+        && let Some(path) = crate::find_rollout_path_by_rollout_id(codex_home, rollout_id).await?
+        && let Some(path) = validated_candidate(codex_home, path.as_path(), identity).await?
+    {
+        return Ok(path);
+    }
+
     if let ReferenceIdentity::Segment {
         thread_id,
         segment_id: _,
@@ -630,6 +643,8 @@ async fn materialize_rollout_lines_from_with_cache(
     has_older_reference: &mut bool,
     cache: Option<&mut ImmutableRolloutCache>,
 ) -> io::Result<Vec<RolloutLine>> {
+    let lines =
+        materialize_history_base_prefix(codex_home, lines, policy, has_older_reference).await?;
     let root_thread_id = canonical_session_meta(&lines)?.meta.id;
     let mut state = ExpansionState {
         active_segments: HashSet::new(),
@@ -654,6 +669,119 @@ async fn materialize_rollout_lines_from_with_cache(
         )
         .await?,
     );
+    Ok(materialized)
+}
+
+/// Prepends native `SessionMeta.history_base` predecessors before expanding compatibility
+/// `RolloutReference` records.
+///
+/// `HistoryPosition` addresses a byte- and ordinal-bounded physical rollout. Keeping this pass in
+/// the existing materializer gives complete, recent, and explicitly bounded callers identical
+/// semantics without a second lineage reader.
+async fn materialize_history_base_prefix(
+    codex_home: &Path,
+    root_lines: Vec<RolloutLine>,
+    policy: MaterializationPolicy,
+    has_older_reference: &mut bool,
+) -> io::Result<Vec<RolloutLine>> {
+    let root_meta = canonical_session_meta(&root_lines)?.clone();
+    if root_meta.meta.history_mode != ThreadHistoryMode::Paginated {
+        return Ok(root_lines);
+    }
+    let mut history_base = root_meta.meta.history_base;
+    if history_base.is_none() {
+        return Ok(root_lines);
+    }
+
+    let ordinary_limit = match policy {
+        MaterializationPolicy::Complete => None,
+        MaterializationPolicy::RecentSegments => Some(FRODEX_RECENT_ROLLOUT_REFERENCES),
+        MaterializationPolicy::OrdinaryReferenceLimit(limit) => Some(limit),
+    };
+    let root_thread_id = root_meta.meta.id;
+    let mut graph_depth = 0_usize;
+    let mut active_rollouts = HashSet::new();
+    let mut predecessor_segments = Vec::new();
+
+    while let Some(position) = history_base {
+        if ordinary_limit.is_some_and(|limit| predecessor_segments.len() >= limit) {
+            *has_older_reference = true;
+            break;
+        }
+        if !active_rollouts.insert(position.thread_id) {
+            return Err(io::Error::other(format!(
+                "history_base cycle detected at rollout {}",
+                position.thread_id
+            )));
+        }
+        let path = crate::find_rollout_path_by_rollout_id(codex_home, position.thread_id)
+            .await?
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("history_base rollout {} was not found", position.thread_id),
+                )
+            })?;
+        let path = crate::materialize_rollout_for_reference(path.as_path()).await?;
+        let bytes = tokio::fs::read(path.as_path()).await?;
+        let end = usize::try_from(position.end_byte_offset)
+            .map_err(|_| io::Error::other("history_base byte offset exceeds addressable memory"))?;
+        let prefix = bytes.get(..end).ok_or_else(|| {
+            io::Error::other(format!(
+                "history_base byte offset exceeds rollout {}",
+                path.display()
+            ))
+        })?;
+        if !prefix.ends_with(b"\n") {
+            return Err(io::Error::other(format!(
+                "history_base byte offset is not a record boundary in {}",
+                path.display()
+            )));
+        }
+        let mut lines = Vec::new();
+        for encoded in prefix
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+        {
+            let value = serde_json::from_slice(encoded)?;
+            lines.push(crate::decode_rollout_line(value)?);
+        }
+        let predecessor_meta = canonical_session_meta(&lines)?.clone();
+        let fork_boundary = predecessor_meta.meta.id != root_thread_id;
+        if fork_boundary {
+            if graph_depth >= MAX_ROLLOUT_REFERENCE_DEPTH {
+                return Err(io::Error::other(format!(
+                    "history_base graph exceeds maximum depth of {MAX_ROLLOUT_REFERENCE_DEPTH}"
+                )));
+            }
+            graph_depth += 1;
+        }
+        let actual_end = lines
+            .last()
+            .and_then(|line| line.ordinal)
+            .and_then(|ordinal| ordinal.checked_add(1));
+        if actual_end != Some(position.end_ordinal_exclusive) {
+            return Err(io::Error::other(format!(
+                "history_base ordinal boundary does not match rollout {}",
+                path.display()
+            )));
+        }
+        history_base = predecessor_meta.meta.history_base;
+        predecessor_segments.push(lines);
+    }
+
+    let mut materialized = Vec::with_capacity(
+        root_lines.len()
+            + predecessor_segments
+                .iter()
+                .map(|lines| lines.len().saturating_sub(1))
+                .sum::<usize>(),
+    );
+    materialized.push(root_lines[0].clone());
+    for lines in predecessor_segments.into_iter().rev() {
+        materialized.extend(lines.into_iter().skip(1));
+    }
+    materialized.extend(root_lines.into_iter().skip(1));
     Ok(materialized)
 }
 
@@ -832,7 +960,8 @@ fn is_fork_boundary_reference(
 }
 
 fn reference_identity(reference: &RolloutReferenceItem) -> io::Result<ReferenceIdentity> {
-    let thread_id = reference.thread_id.ok_or_else(|| {
+    let inferred_thread_id = crate::thread_id_from_path(reference.rollout_path.as_path());
+    let thread_id = reference.thread_id.or(inferred_thread_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -849,7 +978,13 @@ fn reference_identity(reference: &RolloutReferenceItem) -> io::Result<ReferenceI
         },
         None => ReferenceIdentity::LegacyInitial {
             thread_id,
-            rollout_id: reference.rollout_id,
+            rollout_id: reference.rollout_id.or_else(|| {
+                reference
+                    .thread_id
+                    .is_none()
+                    .then(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
+                    .flatten()
+            }),
         },
     })
 }
@@ -1163,6 +1298,11 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
                 active_turn_start = Some(index);
             }
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
+                event_user_positions.push(active_turn_start.unwrap_or(index));
+            }
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                if matches!(event.item, TurnItem::UserMessage(_)) =>
+            {
                 event_user_positions.push(active_turn_start.unwrap_or(index));
             }
             RolloutItem::ResponseItem(item) if item.is_user_message() => {

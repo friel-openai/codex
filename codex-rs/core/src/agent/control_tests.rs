@@ -1302,7 +1302,7 @@ async fn list_agents_pages_are_byte_bounded_and_complete() {
             } else {
                 AgentStatus::Errored("error".repeat(4096))
             },
-            true,
+            /*visible_when_cold*/ true,
         );
         harness
             .control
@@ -2511,6 +2511,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
         .control
         .shutdown_live_agent(child_thread_id)
         .await
+        .expect("child shutdown before resume should submit");
+    let resumed_thread_id = harness
+        .control
+        .resume_agent_from_rollout(harness.config.clone(), child_thread_id, SessionSource::Exec)
+        .await
+        .expect("self-contained copied-prefix child should resume");
+    let resumed_thread = harness
+        .manager
+        .get_thread(resumed_thread_id)
+        .await
+        .expect("resumed copied-prefix child should be registered");
+    assert!(
+        history_contains_text(
+            resumed_thread.session.clone_history().await.raw_items(),
+            "paginated parent context",
+        ),
+        "resumed copied-prefix child should reconstruct inherited model context"
+    );
+
+    let _ = harness
+        .control
+        .shutdown_live_agent(child_thread_id)
+        .await
         .expect("child shutdown should submit");
     let _ = parent_thread
         .submit(Op::Shutdown {})
@@ -2707,6 +2730,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
     reference_params.parent_thread_id = Some(lineage_thread_id);
     reference_params.initial_rollout_ordinal = lineage_prepared
         .frozen_segment
+        .as_ref()
+        .expect("durable fork freezes its source")
         .next_rollout_ordinal
         .unwrap_or_default();
     store
@@ -2721,7 +2746,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
         .append_items(AppendThreadItemsParams {
             thread_id: reference_thread_id,
             items: vec![RolloutItem::RolloutReference(
-                lineage_prepared.frozen_segment.reference.clone(),
+                lineage_prepared
+                    .frozen_segment
+                    .as_ref()
+                    .expect("durable fork freezes its source")
+                    .reference
+                    .clone(),
             )],
         })
         .await
