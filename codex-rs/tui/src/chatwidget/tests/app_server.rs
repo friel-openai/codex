@@ -646,6 +646,53 @@ async fn live_app_server_inter_agent_message_renders_agent_message_cell() {
 }
 
 #[tokio::test]
+async fn live_encrypted_inter_agent_message_does_not_render_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new_encrypted(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "ciphertext".to_string(),
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_model_input_item(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn live_child_completion_envelope_does_not_render_history() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
+    let communication = InterAgentCommunication::new(
+        AgentPath::try_from("/root/worker").expect("valid agent path"),
+        AgentPath::root(),
+        Vec::new(),
+        "Message Type: FINAL_ANSWER\nTask name: /root\nSender: /root/worker\nPayload:\nanalysis complete"
+            .to_string(),
+        /*trigger_turn*/ false,
+    );
+
+    chat.handle_server_notification(
+        ServerNotification::RawResponseItemCompleted(RawResponseItemCompletedNotification {
+            thread_id: "thread-1".to_string(),
+            turn_id: "turn-1".to_string(),
+            item: communication.to_model_input_item(),
+        }),
+        /*replay_kind*/ None,
+    );
+
+    assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
 async fn replayed_inter_agent_message_renders_agent_message_cell() {
     let (mut chat, mut rx, _ops) = make_chatwidget_manual(/*model_override*/ None).await;
     let communication = InterAgentCommunication::new(
