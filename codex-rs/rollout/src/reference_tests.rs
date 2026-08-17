@@ -179,6 +179,7 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
             approvals_reviewer: None,
             sandbox_policy: SandboxPolicy::new_read_only_policy(),
             permission_profile: None,
+            active_permission_profile: None,
             network: None,
             file_system_sandbox_policy: None,
             model: "test-model".to_string(),
@@ -203,6 +204,7 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
         item: RolloutItem::Compacted(CompactedItem {
             message: message.to_string(),
             replacement_history: Some(Vec::new()),
+            mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: None,
             previous_window_id: None,
@@ -217,6 +219,7 @@ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
     let compacted = CompactedItem {
         message: message.to_string(),
         replacement_history: Some(Vec::new()),
+        mcp_resource_origins: None,
         window_number: Some(1),
         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
         previous_window_id: None,

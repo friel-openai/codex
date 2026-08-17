@@ -1011,7 +1011,7 @@ async fn publication_failure_is_old_before_commit_and_visible_unknown_after_comm
 
 #[tokio::test]
 async fn recovery_cleans_a_crash_left_stage_before_a_clean_runtime_return() {
-    let _crash_guard = CRASH_TEST_LOCK.lock().await;
+    let _crash_guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
     let home = TempDir::new().expect("temp home");
     let path = home.path().join("rollout.jsonl");
     let source = active_source(ThreadId::new(), "old");
@@ -1047,7 +1047,7 @@ async fn recovery_cleans_a_crash_left_stage_before_a_clean_runtime_return() {
 #[tokio::test]
 async fn runtime_recovery_token_borrows_every_required_lock() {
     let home = TempDir::new().expect("temp home");
-    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
     let path = home.path().join("rollout.jsonl");
     let source = active_source(ThreadId::new(), "clean");
     let thread_id = thread_id_from_source(source.as_slice());
@@ -1076,10 +1076,10 @@ async fn runtime_recovery_token_borrows_every_required_lock() {
 #[tokio::test]
 async fn runtime_recovery_accepts_clean_segmentless_rollout() {
     let home = TempDir::new().expect("temp home");
-    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
     let path = home.path().join("rollout.jsonl");
     let thread_id = ThreadId::new();
-    let source = source_with_segment(thread_id, None, b"");
+    let source = source_with_segment(thread_id, /*segment_id*/ None, b"");
     tokio::fs::write(path.as_path(), source.as_slice())
         .await
         .expect("write clean segmentless source");
@@ -1507,7 +1507,7 @@ async fn segmentless_source_fails_closed_without_touching_history_cache_or_creat
     let home = TempDir::new().expect("temp home");
     let path = home.path().join("rollout.jsonl");
     let thread_id = ThreadId::new();
-    let source = source_with_segment(thread_id, None, b"poison\n");
+    let source = source_with_segment(thread_id, /*segment_id*/ None, b"poison\n");
     let replacement = replace_ascii(source.clone(), b"poison", b"repair");
     tokio::fs::write(path.as_path(), source.as_slice())
         .await
@@ -1713,7 +1713,7 @@ async fn active_publication_binds_one_symlinked_codex_home_target() {
     .expect("install source backup");
     CODEX_HOME_RETARGETS
         .lock()
-        .expect("CODEX_HOME retarget mutex")
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(linked_home.clone(), second.path().to_path_buf());
 
     let publication = publish_history_repair_replacement(

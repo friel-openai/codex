@@ -1734,6 +1734,7 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
     let compacted = RolloutItem::Compacted(CompactedItem {
         message: String::new(),
         replacement_history: None,
+        mcp_resource_origins: None,
         window_number: None,
         first_window_id: None,
         previous_window_id: None,

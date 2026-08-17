@@ -48,9 +48,9 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
 use codex_protocol::openai_models::ReasoningEffort;
-use core_test_support::stdio_server_bin;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
+use core_test_support::stdio_server_bin;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -1180,6 +1180,7 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
                 model_providers: None,
                 source_kinds: None,
                 archived: Some(archived),
+                project_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,
