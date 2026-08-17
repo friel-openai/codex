@@ -1519,6 +1519,100 @@ async fn migration_rewrites_segmented_paginated_references_as_native_history_bas
 }
 
 #[tokio::test]
+async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_bound() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let mut predecessor = None;
+    let mut next_ordinal = 0;
+    let mut source_paths = Vec::new();
+    for index in 0..4 {
+        let segment_id = SegmentId::new();
+        let path = if index == 3 {
+            home.path().join("sessions/2025/01/03").join(&filename)
+        } else {
+            home.path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segment_id.to_string())
+                .join(&filename)
+        };
+        let turn_id = format!("turn-{index}");
+        let mut items = Vec::new();
+        if let Some((predecessor_path, predecessor_segment_id)) = predecessor.take() {
+            items.push(segment_reference(
+                predecessor_path,
+                thread_id,
+                predecessor_segment_id,
+            ));
+        }
+        items.extend([
+            turn_started(turn_id.as_str()),
+            completed_user_message(
+                thread_id,
+                turn_id.as_str(),
+                format!("user-{index}").as_str(),
+                format!("question-{index}").as_str(),
+            ),
+            turn_complete(turn_id.as_str()),
+        ]);
+        next_ordinal = write_paginated_segment(
+            path.as_path(),
+            home.path(),
+            thread_id,
+            segment_id,
+            next_ordinal,
+            items,
+        );
+        predecessor = Some((path.clone(), segment_id));
+        source_paths.push(path);
+    }
+    let store = indexed_store(home.path()).await;
+
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..RolloutMigrationOptions::default()
+        })
+        .await
+        .expect("dry-run deep Paginated lineage migration");
+    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Eligible);
+    assert_eq!(
+        dry_run.outcomes[0]
+            .manifest
+            .as_ref()
+            .expect("migration manifest")
+            .targets
+            .len(),
+        4
+    );
+
+    let applied = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("apply deep Paginated lineage migration");
+    assert_eq!(applied.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    let selected_path = applied.outcomes[0].rollout_path.as_path();
+    let materialized = codex_rollout::materialize_rollout_lines(home.path(), selected_path)
+        .await
+        .expect("materialize deep native lineage");
+    let materialized = serde_json::to_string(&materialized).expect("serialize native lineage");
+    for index in 0..4 {
+        assert_eq!(
+            materialized
+                .matches(format!("question-{index}").as_str())
+                .count(),
+            1
+        );
+    }
+    assert!(!materialized.contains("rollout_reference"));
+    assert_eq!(source_paths.len(), 4);
+}
+
+#[tokio::test]
 async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();

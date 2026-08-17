@@ -74,6 +74,16 @@ impl LocalThreadStore {
         &self,
         plan: &LegacyLineageMigrationPlan,
     ) -> ThreadStoreResult<()> {
+        // Paginated sources already persist stable turn and item identities. The bounded-view
+        // comparison below protects Legacy synthetic IDs, which can depend on how many
+        // predecessor segments a reader materializes. Applying that comparison to a Paginated
+        // reference chain would reject a lossless migration whenever an ordinary bounded view
+        // intentionally omits older item bodies.
+        if plan.sources.iter().all(|source| {
+            source.history_mode == codex_protocol::protocol::ThreadHistoryMode::Paginated
+        }) {
+            return Ok(());
+        }
         super::lineage_compatibility::validate_bounded_desktop_history(
             self.config.codex_home.as_path(),
             plan,
