@@ -2295,6 +2295,7 @@ impl FromStr for RateLimitReachedType {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct RateLimitWindow {
     /// Percentage (0-100) of the window that has been consumed.
+    #[serde(deserialize_with = "deserialize_rate_limit_used_percent")]
     pub used_percent: f64,
     /// Rolling window duration, in minutes.
     #[ts(type = "number | null")]
@@ -2302,6 +2303,18 @@ pub struct RateLimitWindow {
     /// Unix timestamp (seconds since epoch) when the window resets.
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
+}
+
+fn deserialize_rate_limit_used_percent<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Tagged event buffering represents arbitrary-precision numbers as Serde's private map,
+    // including valid spellings such as 12.50 and 1.25e1. Number accepts both representations;
+    // decoding directly as f64 rejects the map even after the outer rollout became a Value.
+    serde_json::Number::deserialize(deserializer)?
+        .as_f64()
+        .ok_or_else(|| D::Error::custom("rate-limit used_percent must be a finite f64"))
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
