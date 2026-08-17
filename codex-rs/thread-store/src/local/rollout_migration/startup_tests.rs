@@ -4,9 +4,11 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
@@ -23,6 +25,11 @@ use super::super::publish::migration_journal_path;
 use super::super::publish::write_migration_journal;
 use super::super::thread_history;
 use super::LocalThreadStore;
+use crate::ListThreadsParams;
+use crate::ReadThreadParams;
+use crate::SortDirection;
+use crate::ThreadSortKey;
+use crate::ThreadStore;
 use crate::local::test_support::test_config;
 
 const TIMESTAMP: &str = "2025-01-03T12:00:00Z";
@@ -87,6 +94,26 @@ fn set_history_base(path: &Path, history_base: HistoryPosition) {
     }
     updated.push('\n');
     fs::write(path, updated).expect("write history base");
+}
+
+fn prepend_rollout_reference(path: &Path, reference: RolloutReferenceItem) {
+    let original = fs::read_to_string(path).expect("read Paginated rollout");
+    let mut original_lines = original.lines();
+    let session_meta = original_lines.next().expect("session metadata");
+    let reference = serde_json::to_string(&RolloutLine {
+        timestamp: TIMESTAMP.to_string(),
+        ordinal: Some(1),
+        item: RolloutItem::RolloutReference(reference),
+    })
+    .expect("serialize rollout reference");
+    let mut rewritten = format!("{session_meta}\n{reference}\n");
+    for line in original_lines {
+        let mut line: RolloutLine = serde_json::from_str(line).expect("parse local record");
+        line.ordinal = line.ordinal.map(|ordinal| ordinal + 1);
+        rewritten.push_str(&serde_json::to_string(&line).expect("serialize local record"));
+        rewritten.push('\n');
+    }
+    fs::write(path, rewritten).expect("write leading rollout reference");
 }
 
 fn move_to_timestamp(
@@ -213,6 +240,94 @@ async fn checks_rollouts_within_the_cursor_lookback() {
             .history_mode,
         ThreadHistoryMode::Paginated
     );
+}
+
+#[tokio::test]
+async fn legacy_cursor_does_not_suppress_automatic_native_migration() {
+    let home = TempDir::new().expect("create Codex home");
+    let legacy_thread_id = ThreadId::new();
+    let legacy_path = move_to_timestamp(
+        home.path(),
+        write_rollout(home.path(), legacy_thread_id, ThreadHistoryMode::Legacy),
+        "2025/01/02",
+        "2025-01-02T12-00-00",
+    );
+    let newer_path = move_to_timestamp(
+        home.path(),
+        write_rollout(home.path(), ThreadId::new(), ThreadHistoryMode::Paginated),
+        "2025/01/04",
+        "2025-01-04T12-00-00",
+    );
+    let store = indexed_store(home.path()).await;
+    let old_cursor = super::thread_creation_cursor(&newer_path).expect("newer rollout cursor");
+    store
+        .state_db()
+        .await
+        .expect("state db")
+        .advance_rollout_migration_state(super::LEGACY_TO_PAGINATED_MIGRATION_ID, Some(&old_cursor))
+        .await
+        .expect("seed completed legacy migration cursor");
+
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if codex_rollout::read_session_meta_line(&legacy_path)
+                .await
+                .is_ok_and(|line| line.meta.history_mode == ThreadHistoryMode::Paginated)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("automatic migration ignores the completed legacy-only cursor");
+}
+
+#[tokio::test]
+async fn filtered_paginated_reference_is_terminal_compatible_startup_state() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
+    prepend_rollout_reference(
+        &path,
+        RolloutReferenceItem {
+            rollout_id: Some(ThreadId::new()),
+            rollout_path: home.path().join("filtered-parent.jsonl"),
+            thread_id: Some(ThreadId::new()),
+            rollout_timestamp: None,
+            segment_id: Some(SegmentId::new()),
+            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: Some(1),
+            compacted_replacement_history_filter_texts: Some(Vec::new()),
+        },
+    );
+
+    let store = indexed_store(home.path()).await;
+    assert!(matches!(
+        super::inspect_rollout_path(&store, &path)
+            .await
+            .expect("inspect filtered reference"),
+        super::StartupInspection::Compatible
+    ));
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !super::automatic_migration_idle(&store).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("filtered reference inspection becomes idle");
+    assert!(super::processed_thread_ids(&store).await.is_empty());
+    let terminal = store
+        .state_db()
+        .await
+        .expect("state db")
+        .list_rollout_migration_skipped_rollouts(super::NATIVE_HISTORY_BASE_MIGRATION_ID)
+        .await
+        .expect("read native migration fingerprints");
+    assert_eq!(terminal.len(), 1);
+    assert_eq!(terminal[0].skip_reason, super::NATIVE_OR_COMPATIBLE_REASON);
 }
 
 #[tokio::test]
@@ -382,5 +497,217 @@ async fn rechecks_changed_empty_rollouts() {
             .await
             .expect("read skipped rollouts")
             .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn specific_thread_load_runs_next_while_list_remains_nonblocking() {
+    let home = TempDir::new().expect("create Codex home");
+    let oldest_thread_id = ThreadId::new();
+    write_rollout(home.path(), oldest_thread_id, ThreadHistoryMode::Legacy);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let middle_thread_id = ThreadId::new();
+    write_rollout(home.path(), middle_thread_id, ThreadHistoryMode::Legacy);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let newest_thread_id = ThreadId::new();
+    write_rollout(home.path(), newest_thread_id, ThreadHistoryMode::Legacy);
+    let store = indexed_store(home.path()).await;
+    let newest_guard = store.live_writer_locks.lock(newest_thread_id).await;
+
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if super::processed_thread_ids(&store).await == vec![newest_thread_id] {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("newest background migration starts first");
+
+    let listed = tokio::time::timeout(
+        Duration::from_millis(100),
+        ThreadStore::list_threads(
+            &store,
+            ListThreadsParams {
+                page_size: 10,
+                cursor: None,
+                sort_key: ThreadSortKey::UpdatedAt,
+                sort_direction: SortDirection::Desc,
+                allowed_sources: Vec::new(),
+                model_providers: None,
+                cwd_filters: None,
+                section: None,
+                project_id: None,
+                archived: false,
+                search_term: None,
+                relation_filter: None,
+                use_state_db_only: true,
+            },
+        ),
+    )
+    .await
+    .expect("thread list must not wait for migration")
+    .expect("list threads");
+    assert_eq!(listed.items.len(), 3);
+
+    let load_store = store.clone();
+    let mut load = tokio::spawn(async move {
+        ThreadStore::read_thread(
+            &load_store,
+            ReadThreadParams {
+                thread_id: oldest_thread_id,
+                include_archived: false,
+                include_history: true,
+            },
+        )
+        .await
+    });
+    let joined_load_store = store.clone();
+    let mut joined_load = tokio::spawn(async move {
+        ThreadStore::read_thread(
+            &joined_load_store,
+            ReadThreadParams {
+                thread_id: oldest_thread_id,
+                include_archived: false,
+                include_history: true,
+            },
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut load)
+            .await
+            .is_err(),
+        "specific thread load must wait for its migration"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut joined_load)
+            .await
+            .is_err(),
+        "concurrent loads must join the same migration"
+    );
+
+    drop(newest_guard);
+    load.await
+        .expect("join thread load")
+        .expect("load requested thread after migration");
+    joined_load
+        .await
+        .expect("join second thread load")
+        .expect("load requested thread from shared migration");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if super::processed_thread_ids(&store).await.len() == 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background migration completes");
+
+    assert_eq!(
+        super::processed_thread_ids(&store).await,
+        vec![newest_thread_id, oldest_thread_id, middle_thread_id]
+    );
+}
+
+#[tokio::test]
+async fn maintenance_conflict_defers_background_work_until_a_thread_load_requests_it() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let rollout_path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Legacy);
+    let store = indexed_store(home.path()).await;
+    let maintenance_guard = codex_rollout::try_acquire_rollout_maintenance_lock(home.path())
+        .expect("acquire rollout maintenance lock")
+        .expect("maintenance lock is available");
+
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !super::automatic_migration_idle(&store).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("background conflict becomes deferred");
+    assert_eq!(super::processed_thread_ids(&store).await, vec![thread_id]);
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&rollout_path)
+            .await
+            .expect("read deferred rollout")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Legacy
+    );
+
+    let load_store = store.clone();
+    let mut load = tokio::spawn(async move {
+        ThreadStore::read_thread(
+            &load_store,
+            ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            },
+        )
+        .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut load)
+            .await
+            .is_err(),
+        "requested thread waits while maintenance remains active"
+    );
+    drop(maintenance_guard);
+    load.await
+        .expect("join requested thread load")
+        .expect("load thread after deferred migration");
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&rollout_path)
+            .await
+            .expect("read migrated rollout")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Paginated
+    );
+}
+
+#[tokio::test]
+async fn thread_load_reports_automatic_migration_failure() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let missing_thread_id = ThreadId::new();
+    let rollout_path = write_rollout(home.path(), thread_id, ThreadHistoryMode::Paginated);
+    prepend_rollout_reference(
+        &rollout_path,
+        RolloutReferenceItem {
+            rollout_id: Some(missing_thread_id),
+            rollout_path: home.path().join("missing-parent.jsonl"),
+            thread_id: Some(missing_thread_id),
+            rollout_timestamp: None,
+            segment_id: Some(SegmentId::new()),
+            max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        },
+    );
+    let store = indexed_store(home.path()).await;
+    store.start_automatic_rollout_migration();
+
+    let error = ThreadStore::read_thread(
+        &store,
+        ReadThreadParams {
+            thread_id,
+            include_archived: false,
+            include_history: true,
+        },
+    )
+    .await
+    .expect_err("thread load must report an incomplete automatic migration");
+    assert!(
+        error.to_string().contains("missing-parent.jsonl"),
+        "unexpected migration error: {error}"
     );
 }

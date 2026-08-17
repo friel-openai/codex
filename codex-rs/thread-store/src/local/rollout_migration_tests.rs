@@ -3,6 +3,7 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -1604,6 +1605,286 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
     }
     assert!(!materialized.contains("rollout_reference"));
     assert_eq!(source_paths.len(), 4);
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("inspect migrated lineage projection"),
+        "migration must publish the complete logical projection before returning"
+    );
+
+    let first_page = store
+        .list_turns(ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: None,
+            page_size: 2,
+            sort_direction: SortDirection::Desc,
+            items_view: StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("read first migrated lineage page");
+    assert_eq!(first_page.turns.len(), 2);
+    let second_page = store
+        .list_turns(ListTurnsParams {
+            thread_id,
+            include_archived: false,
+            cursor: first_page.next_cursor.clone(),
+            page_size: 2,
+            sort_direction: SortDirection::Desc,
+            items_view: StoredTurnItemsView::Summary,
+        })
+        .await
+        .expect("read second migrated lineage page");
+    assert_eq!(second_page.turns.len(), 2);
+    assert!(second_page.next_cursor.is_none());
+    let turn_ids = first_page
+        .turns
+        .iter()
+        .chain(&second_page.turns)
+        .map(|turn| turn.turn_id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(turn_ids, vec!["turn-3", "turn-2", "turn-1", "turn-0"]);
+}
+
+#[tokio::test]
+async fn automatic_migration_rewrites_paginated_reference_lineage() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let mut predecessor = None;
+    let mut next_ordinal = 0;
+    for index in 0..3 {
+        let segment_id = SegmentId::new();
+        let path = if index == 2 {
+            home.path().join("sessions/2025/01/03").join(&filename)
+        } else {
+            home.path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segment_id.to_string())
+                .join(&filename)
+        };
+        let turn_id = format!("automatic-turn-{index}");
+        let mut items = Vec::new();
+        if let Some((predecessor_path, predecessor_segment_id)) = predecessor.take() {
+            items.push(segment_reference(
+                predecessor_path,
+                thread_id,
+                predecessor_segment_id,
+            ));
+        }
+        items.extend([
+            turn_started(turn_id.as_str()),
+            completed_user_message(
+                thread_id,
+                turn_id.as_str(),
+                format!("automatic-user-{index}").as_str(),
+                format!("automatic-question-{index}").as_str(),
+            ),
+            turn_complete(turn_id.as_str()),
+        ]);
+        next_ordinal = write_paginated_segment(
+            path.as_path(),
+            home.path(),
+            thread_id,
+            segment_id,
+            next_ordinal,
+            items,
+        );
+        predecessor = Some((path.clone(), segment_id));
+    }
+    let store = indexed_store(home.path()).await;
+
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if super::startup::processed_thread_ids(&store)
+                .await
+                .contains(&thread_id)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("automatic discovery selects the Paginated reference lineage");
+    store
+        .await_automatic_rollout_migration(thread_id)
+        .await
+        .expect("wait for automatic Paginated reference migration");
+    let selected_path = store
+        .state_db()
+        .await
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read migrated metadata")
+        .expect("migrated thread metadata")
+        .rollout_path;
+    assert!(
+        !fs::read_to_string(&selected_path)
+            .expect("read selected rollout")
+            .contains("rollout_reference"),
+        "automatic migration must replace RolloutReference with history_base"
+    );
+
+    let materialized = codex_rollout::materialize_rollout_lines(home.path(), &selected_path)
+        .await
+        .expect("materialize automatically migrated lineage");
+    let materialized = serde_json::to_string(&materialized).expect("serialize lineage");
+    for index in 0..3 {
+        assert_eq!(
+            materialized
+                .matches(format!("automatic-question-{index}").as_str())
+                .count(),
+            1
+        );
+    }
+
+    let restarted = indexed_store(home.path()).await;
+    restarted.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if super::startup::automatic_migration_idle(&restarted).await {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restarted automatic migration becomes idle");
+    assert!(
+        super::startup::processed_thread_ids(&restarted)
+            .await
+            .is_empty(),
+        "retained source rollouts must not be selected again after restart"
+    );
+}
+
+#[tokio::test]
+async fn automatic_migration_rewrites_reference_behind_native_history_base() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let oldest_rollout_id = ThreadId::new();
+    let middle_rollout_id = ThreadId::new();
+    let segment_ids = [SegmentId::new(), SegmentId::new(), SegmentId::new()];
+    let history_root = home
+        .path()
+        .join(codex_rollout::SESSIONS_SUBDIR)
+        .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        .join("2025/01/03");
+    let oldest_path = history_root.join(format!(
+        "rollout-2025-01-03T12-00-00-{thread_id}_{oldest_rollout_id}.jsonl"
+    ));
+    let oldest_end = write_paginated_segment(
+        oldest_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[0],
+        /*start_ordinal*/ 0,
+        vec![user_message("hybrid oldest")],
+    );
+    let middle_path = history_root.join(format!(
+        "rollout-2025-01-03T12-00-01-{thread_id}_{middle_rollout_id}.jsonl"
+    ));
+    let middle_end = write_paginated_segment(
+        middle_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[1],
+        oldest_end,
+        vec![
+            RolloutItem::RolloutReference(RolloutReferenceItem {
+                rollout_id: Some(oldest_rollout_id),
+                rollout_path: oldest_path.clone(),
+                thread_id: Some(thread_id),
+                rollout_timestamp: None,
+                segment_id: Some(segment_ids[0]),
+                max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+                nth_user_message: None,
+                compacted_replacement_history_filter_texts: None,
+            }),
+            user_message("hybrid middle"),
+        ],
+    );
+    let active_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-02-{thread_id}.jsonl"));
+    write_paginated_segment(
+        active_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[2],
+        middle_end,
+        vec![user_message("hybrid active")],
+    );
+    set_history_base(
+        active_path.as_path(),
+        HistoryPosition {
+            thread_id: middle_rollout_id,
+            end_ordinal_exclusive: middle_end,
+            end_byte_offset: fs::metadata(middle_path.as_path())
+                .expect("middle metadata")
+                .len(),
+        },
+    );
+    let sources = [
+        fs::read(oldest_path.as_path()).expect("read oldest source"),
+        fs::read(middle_path.as_path()).expect("read middle source"),
+        fs::read(active_path.as_path()).expect("read active source"),
+    ];
+    let store = indexed_store(home.path()).await;
+
+    store.start_automatic_rollout_migration();
+    store
+        .await_automatic_rollout_migration(thread_id)
+        .await
+        .expect("migrate hybrid native/reference lineage");
+
+    let selected_path = store
+        .state_db()
+        .await
+        .expect("state db")
+        .get_thread(thread_id)
+        .await
+        .expect("read migrated metadata")
+        .expect("migrated thread metadata")
+        .rollout_path;
+    let materialized = codex_rollout::materialize_rollout_lines(home.path(), &selected_path)
+        .await
+        .expect("materialize migrated hybrid lineage");
+    let materialized = serde_json::to_string(&materialized).expect("serialize hybrid lineage");
+    for message in ["hybrid oldest", "hybrid middle", "hybrid active"] {
+        assert_eq!(materialized.matches(message).count(), 1, "{message}");
+    }
+    assert!(!materialized.contains("rollout_reference"));
+    assert_eq!(
+        [
+            fs::read(oldest_path).expect("reread oldest source"),
+            fs::read(middle_path).expect("reread middle source"),
+            fs::read(active_path).expect("reread active source"),
+        ],
+        sources,
+        "automatic migration retains every source rollout"
+    );
+
+    let restarted = indexed_store(home.path()).await;
+    restarted.start_automatic_rollout_migration();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !super::startup::automatic_migration_idle(&restarted).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restarted hybrid migration becomes idle");
+    assert!(
+        super::startup::processed_thread_ids(&restarted)
+            .await
+            .is_empty()
+    );
 }
 
 #[tokio::test]
@@ -1627,7 +1908,7 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
         home.path(),
         thread_id,
         segment_ids[0],
-        0,
+        /*start_ordinal*/ 0,
         vec![user_message("mixed native oldest")],
     );
     let oldest_position = HistoryPosition {
@@ -1760,7 +2041,7 @@ async fn native_history_base_migration_translates_subagent_history_boundary() {
         home.path(),
         thread_id,
         segment_ids[0],
-        0,
+        /*start_ordinal*/ 0,
         vec![user_message("inherited parent context")],
     );
     let active = home.path().join("sessions/2025/01/03").join(filename);
@@ -3252,7 +3533,7 @@ async fn assert_migration_preserves_archived_compressed_lineage(history_mode: Th
             home.path(),
             thread_id,
             segment_ids[0],
-            0,
+            /*start_ordinal*/ 0,
             vec![user_message("compressed predecessor")],
         )
     } else {

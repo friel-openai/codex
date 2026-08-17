@@ -2,6 +2,8 @@ use anyhow::Result;
 use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ThreadHistoryMode;
+use codex_app_server_protocol::ThreadListParams;
+use codex_app_server_protocol::ThreadListResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -128,5 +130,103 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
     assert!(user_messages.contains(&"resumed user message".to_string()));
     assert!(resumed_request.body_contains_text("legacy assistant message"));
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_migration_keeps_list_nonblocking_and_gates_resume() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("resp-automatic-migration"),
+            responses::ev_assistant_message("msg-automatic-migration", "legacy response"),
+            responses::ev_completed("resp-automatic-migration"),
+        ]),
+    )
+    .await;
+    let codex_home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+
+    let mut primary = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let start_id = primary
+        .send_thread_start_request_with_auto_env(ThreadStartParams {
+            history_mode: Some(ThreadHistoryMode::Legacy),
+            ..Default::default()
+        })
+        .await?;
+    let ThreadStartResponse { thread, .. } =
+        timeout(DEFAULT_READ_TIMEOUT, primary.read_response(start_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        primary.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![UserInput::Text {
+                text: "legacy request".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
+
+    let maintenance_guard = codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?
+        .expect("hold rollout maintenance while app-server starts");
+    let mut secondary = TestAppServer::builder()
+        .with_codex_home(codex_home.path())
+        .build_initialized()
+        .await?;
+    let list_id = secondary
+        .send_thread_list_request(ThreadListParams {
+            cursor: None,
+            limit: Some(10),
+            sort_key: None,
+            sort_direction: None,
+            model_providers: None,
+            source_kinds: None,
+            archived: None,
+            project_id: None,
+            cwd: None,
+            use_state_db_only: true,
+            search_term: None,
+            parent_thread_id: None,
+            ancestor_thread_id: None,
+            section_id: None,
+        })
+        .await?;
+    let listed: ThreadListResponse = timeout(
+        std::time::Duration::from_millis(250),
+        secondary.read_response(list_id),
+    )
+    .await??;
+    assert_eq!(listed.data.len(), 1);
+
+    let resume_id = secondary
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: thread.id.clone(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let mut resumed = Box::pin(secondary.read_response::<ThreadResumeResponse>(resume_id));
+    assert!(
+        timeout(std::time::Duration::from_millis(100), &mut resumed)
+            .await
+            .is_err(),
+        "thread/resume must wait for the requested thread migration"
+    );
+    drop(maintenance_guard);
+    let ThreadResumeResponse {
+        thread: resumed_thread,
+        ..
+    } = timeout(DEFAULT_READ_TIMEOUT, &mut resumed).await??;
+    assert_eq!(resumed_thread.history_mode, ThreadHistoryMode::Paginated);
+    drop(resumed);
+
+    timeout(DEFAULT_READ_TIMEOUT, secondary.shutdown_gracefully()).await??;
     Ok(())
 }

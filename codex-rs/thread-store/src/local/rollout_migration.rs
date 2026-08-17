@@ -61,6 +61,7 @@ mod telemetry;
 
 use canonicalizer::LegacyRolloutCanonicalizer;
 use lineage::LegacyLineageMigrationPlan;
+use lineage::contains_convertible_rollout_reference;
 use lineage::plan_legacy_lineage;
 pub use lineage_manifest::RolloutMigrationAdditionalFreeSpace;
 pub use lineage_manifest::RolloutMigrationHistoryBaseDependency;
@@ -88,6 +89,7 @@ use publish::sync_parent_directory;
 use publish::write_migration_journal;
 use rollback_plan::RollbackPlan;
 use rollback_plan::RollbackPlanner;
+pub(crate) use startup::StartupMigrationCoordinator;
 use telemetry::RolloutMigrationTelemetry;
 use telemetry::RolloutMigrationTrigger;
 
@@ -247,6 +249,40 @@ impl LocalThreadStore {
     /// when it does.
     pub async fn migrate_rollouts_on_startup(&self) -> ThreadStoreResult<()> {
         startup::migrate_rollouts_on_startup(self).await
+    }
+
+    /// Starts automatic rollout migration without delaying store construction.
+    pub fn start_automatic_rollout_migration(&self) {
+        startup::start_automatic_rollout_migration(self.clone());
+    }
+
+    pub(super) async fn await_automatic_rollout_migration(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        startup::await_thread_migration(self, thread_id).await
+    }
+
+    async fn migrate_rollout_path_on_startup(
+        &self,
+        path: PathBuf,
+        max_mib_per_second: Option<u64>,
+    ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
+        let options = RolloutMigrationOptions {
+            mode: RolloutMigrationMode::Apply,
+            thread_ids: Vec::new(),
+            max_mib_per_second,
+        };
+        let _maintenance_guard =
+            codex_rollout::try_acquire_rollout_maintenance_lock(&self.config.codex_home)
+                .map_err(migration_error)?
+                .ok_or_else(|| ThreadStoreError::Conflict {
+                    message: "rollout compression or another migration is already running"
+                        .to_string(),
+                })?;
+        let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
+        self.migrate_rollout_path(path, &options, &mut limiter)
+            .await
     }
 
     /// Inspect or migrate eligible legacy rollout files beneath active and archived sessions.
@@ -449,12 +485,16 @@ impl LocalThreadStore {
                 .map_err(migration_error)?;
         let paginated_reference_lineage = metadata.meta.history_mode
             == ThreadHistoryMode::Paginated
-            && rollout_contains_reference(path.as_path()).await?;
+            && contains_convertible_rollout_reference(
+                self.config.codex_home.as_path(),
+                path.as_path(),
+            )
+            .await?;
         if metadata.meta.history_mode == ThreadHistoryMode::Paginated
             && (pending_published_migration || !paginated_reference_lineage)
         {
             let bytes_before = limiter.bytes_processed;
-            let result = if pending_published_migration {
+            let mut result = if pending_published_migration {
                 let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
                 let lineage_journal = tokio::fs::metadata(&journal_path)
                     .await
@@ -487,6 +527,11 @@ impl LocalThreadStore {
             } else {
                 Ok(RolloutMigrationStatus::AlreadyPaginated)
             };
+            if matches!(result, Ok(RolloutMigrationStatus::Migrated))
+                && let Err(error) = self.ensure_complete_migrated_projection(thread_id).await
+            {
+                result = Err(error);
+            }
             let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
             return Ok(Some(migration_outcome(
                 thread_id,
@@ -601,7 +646,11 @@ impl LocalThreadStore {
         }
         let locked_reference_lineage = locked_metadata.meta.history_mode
             == ThreadHistoryMode::Paginated
-            && rollout_contains_reference(path.as_path()).await?;
+            && contains_convertible_rollout_reference(
+                self.config.codex_home.as_path(),
+                path.as_path(),
+            )
+            .await?;
         if locked_metadata.meta.id != thread_id
             || (locked_metadata.meta.history_mode != ThreadHistoryMode::Legacy
                 && !locked_reference_lineage)
@@ -648,6 +697,15 @@ impl LocalThreadStore {
                     ))),
                 },
                 result => result,
+            };
+            drop(_writer_guard);
+            drop(_live_writer_guard);
+            let result = match result {
+                Ok(selected_path) => self
+                    .ensure_complete_migrated_projection(thread_id)
+                    .await
+                    .map(|()| selected_path),
+                Err(error) => Err(error),
             };
             let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
             return Ok(Some(match result {
@@ -1231,6 +1289,23 @@ impl LocalThreadStore {
         }
         Ok(())
     }
+
+    async fn ensure_complete_migrated_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        if self.has_history_projection(thread_id).await? {
+            return Ok(());
+        }
+        if self.rebuild_history_projection(thread_id).await?
+            && self.has_history_projection(thread_id).await?
+        {
+            return Ok(());
+        }
+        Err(migration_error(
+            "rollout migration could not publish its complete SQLite projection",
+        ))
+    }
 }
 
 async fn legacy_lineage_migration_plan(
@@ -1241,21 +1316,7 @@ async fn legacy_lineage_migration_plan(
     let mut has_lineage = metadata.meta.history_base.is_some();
 
     if !has_lineage {
-        let mut reader = codex_rollout::open_rollout_line_reader(rollout_path)
-            .await
-            .map_err(migration_error)?;
-        while let Some(line) = reader.next_line().await.map_err(migration_error)? {
-            let Ok(value) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            if matches!(
-                value.get("type").and_then(Value::as_str),
-                Some("rollout_reference" | "fork_reference")
-            ) {
-                has_lineage = true;
-                break;
-            }
-        }
+        has_lineage = rollout_contains_reference(rollout_path).await?;
     }
     if !has_lineage {
         return Ok(None);

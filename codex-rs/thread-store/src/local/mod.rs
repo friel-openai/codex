@@ -12,8 +12,8 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod pending_thread_metadata;
-mod projects;
 mod projection_rebuild;
+mod projects;
 mod read_thread;
 mod revert_thread;
 mod rollout_migration;
@@ -163,6 +163,8 @@ pub struct LocalThreadStore {
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
     projection_rebuilds: Arc<StdMutex<HashSet<ThreadId>>>,
     projection_rebuild_schedules: Arc<StdMutex<projection_rebuild::ScheduledProjectionRebuilds>>,
+    /// Coordinates background rollout conversion with thread-specific reads.
+    rollout_migration_coordinator: Arc<rollout_migration::StartupMigrationCoordinator>,
 }
 
 struct LiveRecorderEntry {
@@ -328,6 +330,9 @@ impl LocalThreadStore {
             thread_history_db: Arc::new(OnceCell::new()),
             projection_rebuilds: Arc::new(StdMutex::new(HashSet::new())),
             projection_rebuild_schedules: Arc::new(StdMutex::new(HashMap::new())),
+            rollout_migration_coordinator: Arc::new(
+                rollout_migration::StartupMigrationCoordinator::default(),
+            ),
         }
     }
 
@@ -608,6 +613,8 @@ impl LocalThreadStore {
         &self,
         params: PrepareForkParams,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history(self, params).await
     }
 
@@ -619,6 +626,8 @@ impl LocalThreadStore {
         expected_rollout_id: codex_protocol::RolloutId,
         ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_for_rollout(
             self,
             params,
@@ -635,6 +644,8 @@ impl LocalThreadStore {
         model_context: Arc<Vec<ResponseItemEnvelope>>,
         expected_position: HistoryPosition,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_with_model_context(self, params, model_context, expected_position)
             .await
     }
@@ -647,6 +658,8 @@ impl LocalThreadStore {
         expected_position: HistoryPosition,
         expected_rollout_id: codex_protocol::RolloutId,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_with_model_context_for_rollout(
             self,
             params,
@@ -664,6 +677,8 @@ impl LocalThreadStore {
         model_context: Arc<Vec<ResponseItemEnvelope>>,
         expected_position: HistoryPosition,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_with_model_context(
             self,
             params,
@@ -683,6 +698,8 @@ impl LocalThreadStore {
         expected_rollout_id: codex_protocol::RolloutId,
         ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
             self,
             params,
@@ -723,6 +740,8 @@ impl LocalThreadStore {
         params: PrepareForkParams,
         expected_rollout_id: codex_protocol::RolloutId,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_for_rollout(self, params, expected_rollout_id).await
     }
 
@@ -888,6 +907,8 @@ impl LocalThreadStore {
 
     /// Lists projection-backed turns without enabling app-server routing yet.
     pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_turns(self, params).await
     }
 
@@ -896,6 +917,8 @@ impl LocalThreadStore {
         &self,
         params: ListTurnsParams,
     ) -> ThreadStoreResult<Option<TurnPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_segmented_legacy_turns(self, params).await
     }
 
@@ -904,6 +927,8 @@ impl LocalThreadStore {
         &self,
         params: ListTurnsParams,
     ) -> ThreadStoreResult<Option<TurnPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_existing_segmented_legacy_turns(self, params).await
     }
 
@@ -917,6 +942,8 @@ impl LocalThreadStore {
 
     /// Lists projection-backed items without enabling app-server routing yet.
     pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_items(self, params).await
     }
 
@@ -925,6 +952,8 @@ impl LocalThreadStore {
         &self,
         params: ListItemsParams,
     ) -> ThreadStoreResult<Option<ItemPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_segmented_legacy_items(self, params).await
     }
 
@@ -974,7 +1003,11 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async move { live_writer::resume_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            live_writer::resume_thread(self, params).await
+        })
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
@@ -1013,26 +1046,46 @@ impl ThreadStore for LocalThreadStore {
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
-        Box::pin(LocalThreadStore::load_history(self, params))
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            LocalThreadStore::load_history(self, params).await
+        })
     }
 
     fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredModelContext> {
-        Box::pin(async move { model_context::load_latest_model_context(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            model_context::load_latest_model_context(self, params).await
+        })
     }
 
     fn prepare_fork(&self, params: PrepareForkParams) -> ThreadStoreFuture<'_, PreparedFork> {
-        Box::pin(async move { paginated_fork::prepare(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            paginated_fork::prepare(self, params).await
+        })
     }
 
     fn revert_thread(&self, params: RevertThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async move { revert_thread::revert(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            revert_thread::revert(self, params).await
+        })
     }
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(async move { read_thread::read_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            read_thread::read_thread(self, params).await
+        })
     }
 
     fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
@@ -1188,6 +1241,8 @@ impl ThreadStore for LocalThreadStore {
 
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
             archive_thread::archive_threads(
                 self,
                 ArchiveThreadsParams {
@@ -1208,7 +1263,11 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(async move { unarchive_thread::unarchive_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            unarchive_thread::unarchive_thread(self, params).await
+        })
     }
 
     fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
