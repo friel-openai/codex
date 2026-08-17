@@ -167,6 +167,86 @@ async fn leading_rollout_reference_counts_physical_target() -> anyhow::Result<()
 }
 
 #[tokio::test]
+async fn detached_segment_reference_does_not_pin_mutable_source_rollout() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let source_id = thread_id(Uuid::from_u128(34))?;
+    let child_id = thread_id(Uuid::from_u128(35))?;
+    let child_path = active_rollout_path(home.path(), Uuid::from_u128(35));
+    write_rollout(child_path.clone(), child_id, /*history_base*/ None)?;
+    let segment_id = codex_protocol::SegmentId::new();
+    let immutable_path = home
+        .path()
+        .join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(source_id.to_string())
+        .join(segment_id.to_string())
+        .join("rollout.jsonl");
+    let reference = RolloutLine {
+        timestamp: "2025-01-03T12:00:00Z".to_string(),
+        ordinal: Some(1),
+        item: RolloutItem::RolloutReference(RolloutReferenceItem {
+            rollout_path: immutable_path,
+            thread_id: Some(source_id),
+            rollout_id: Some(source_id),
+            rollout_timestamp: None,
+            segment_id: Some(segment_id),
+            max_depth: 2,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        }),
+    };
+    let mut file = fs::OpenOptions::new().append(true).open(child_path)?;
+    use std::io::Write;
+    writeln!(file, "{}", serde_json::to_string(&reference)?)?;
+
+    let index = RolloutReferenceIndex::scan(home.path()).await?;
+    assert_eq!(index.reference_count(source_id), 0);
+    assert_eq!(index.direct_references(child_id), None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn malformed_detached_segment_path_still_pins_mutable_source_rollout() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let source_id = thread_id(Uuid::from_u128(36))?;
+    let child_id = thread_id(Uuid::from_u128(37))?;
+    let child_path = active_rollout_path(home.path(), Uuid::from_u128(37));
+    write_rollout(child_path.clone(), child_id, /*history_base*/ None)?;
+    let segment_id = codex_protocol::SegmentId::new();
+    let malformed_path = home
+        .path()
+        .join(crate::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(source_id.to_string())
+        .join(segment_id.to_string())
+        .join("..")
+        .join("rollout.jsonl");
+    let reference = RolloutLine {
+        timestamp: "2025-01-03T12:00:00Z".to_string(),
+        ordinal: Some(1),
+        item: RolloutItem::RolloutReference(RolloutReferenceItem {
+            rollout_path: malformed_path,
+            thread_id: Some(source_id),
+            rollout_id: Some(source_id),
+            rollout_timestamp: None,
+            segment_id: Some(segment_id),
+            max_depth: 2,
+            nth_user_message: None,
+            compacted_replacement_history_filter_texts: None,
+        }),
+    };
+    let mut file = fs::OpenOptions::new().append(true).open(child_path)?;
+    use std::io::Write;
+    writeln!(file, "{}", serde_json::to_string(&reference)?)?;
+
+    let index = RolloutReferenceIndex::scan(home.path()).await?;
+    assert_eq!(index.reference_count(source_id), 1);
+    assert_eq!(
+        index.direct_references(child_id),
+        Some(&std::collections::HashSet::from([source_id]))
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn duplicate_physical_rollouts_union_direct_references_once() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let child_uuid = Uuid::from_u128(41);

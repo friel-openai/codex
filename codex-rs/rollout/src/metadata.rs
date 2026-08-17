@@ -124,43 +124,159 @@ pub async fn extract_metadata_from_rollout(
     rollout_path: &Path,
     default_provider: &str,
 ) -> anyhow::Result<ExtractionOutcome> {
-    let (items, _thread_id, parse_errors) =
-        RolloutRecorder::load_rollout_items(rollout_path).await?;
-    if items.is_empty() {
+    let fallback_builder = match builder_from_items(&[], rollout_path) {
+        Some(builder) => builder,
+        None => {
+            let session_meta = find_first_session_meta(rollout_path)
+                .await?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "rollout missing metadata builder: {}",
+                        rollout_path.display()
+                    )
+                })?;
+            builder_from_session_meta(&session_meta, rollout_path).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "rollout has invalid session metadata: {}",
+                    rollout_path.display()
+                )
+            })?
+        }
+    };
+    let first_pass = stream_rollout_metadata(
+        rollout_path,
+        default_provider,
+        fallback_builder.clone(),
+        /*detect_late_session_meta*/ true,
+    )
+    .await?;
+    let mut outcome = if let Some(session_meta) = first_pass.late_session_meta {
+        let builder =
+            builder_from_session_meta(&session_meta, rollout_path).unwrap_or(fallback_builder);
+        stream_rollout_metadata(
+            rollout_path,
+            default_provider,
+            builder,
+            /*detect_late_session_meta*/ false,
+        )
+        .await?
+    } else {
+        first_pass
+    };
+    if let Some(updated_at) = file_modified_time_utc(rollout_path).await {
+        outcome.metadata.updated_at = updated_at;
+        outcome.metadata.recency_at = updated_at;
+    }
+    Ok(ExtractionOutcome {
+        metadata: outcome.metadata,
+        memory_mode: outcome.memory_mode,
+        parse_errors: outcome.parse_errors,
+    })
+}
+
+async fn find_first_session_meta(rollout_path: &Path) -> anyhow::Result<Option<SessionMetaLine>> {
+    let mut reader = compression::open_rollout_line_reader(rollout_path).await?;
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Ok(Some(line)) = RolloutRecorder::parse_rollout_line_value(value) else {
+            continue;
+        };
+        if let RolloutItem::SessionMeta(session_meta) = line.item {
+            return Ok(Some(session_meta));
+        }
+    }
+    Ok(None)
+}
+
+struct StreamedMetadata {
+    metadata: codex_state::ThreadMetadata,
+    memory_mode: Option<String>,
+    parse_errors: usize,
+    late_session_meta: Option<SessionMetaLine>,
+}
+
+async fn stream_rollout_metadata(
+    rollout_path: &Path,
+    default_provider: &str,
+    builder: ThreadMetadataBuilder,
+    detect_late_session_meta: bool,
+) -> anyhow::Result<StreamedMetadata> {
+    let mut metadata = builder.build(default_provider);
+    let mut memory_mode = None;
+    let mut parse_errors = 0usize;
+    let mut valid_items = 0usize;
+    let mut first_session_meta_seen = false;
+    let mut late_session_meta = None;
+    let mut reader = compression::open_rollout_line_reader(rollout_path).await?;
+    while let Some(line) = reader.next_line().await? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let value = match serde_json::from_str::<serde_json::Value>(&line) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!("failed to parse line as JSON: {line:?}, error: {error}");
+                parse_errors = parse_errors.saturating_add(1);
+                continue;
+            }
+        };
+        if !first_session_meta_seen {
+            crate::recorder::reject_unknown_thread_history_mode(&value)?;
+        }
+        let is_rollout_reference = matches!(
+            value.get("type").and_then(serde_json::Value::as_str),
+            Some("rollout_reference" | "fork_reference")
+        );
+        let item = match RolloutRecorder::parse_rollout_line_value(value) {
+            Ok(Some(line)) => line.item,
+            Ok(None) => continue,
+            Err(_) if is_rollout_reference => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "invalid rollout reference record",
+                )
+                .into());
+            }
+            Err(error) => {
+                tracing::trace!(%error, "failed to parse rollout line during metadata extraction");
+                parse_errors = parse_errors.saturating_add(1);
+                continue;
+            }
+        };
+        if let RolloutItem::SessionMeta(session_meta) = &item {
+            if !first_session_meta_seen {
+                first_session_meta_seen = true;
+                if detect_late_session_meta && valid_items != 0 {
+                    late_session_meta = Some(session_meta.clone());
+                } else if detect_late_session_meta
+                    && let Some(builder) = builder_from_session_meta(session_meta, rollout_path)
+                {
+                    metadata = builder.build(default_provider);
+                }
+            }
+            if let Some(mode) = session_meta.meta.memory_mode.as_ref() {
+                memory_mode = Some(mode.clone());
+            }
+        }
+        apply_rollout_item(&mut metadata, &item, default_provider);
+        valid_items = valid_items.saturating_add(1);
+    }
+    if valid_items == 0 {
         return Err(anyhow::anyhow!(
             "empty session file: {}",
             rollout_path.display()
         ));
     }
-    let builder = builder_from_items(items.as_slice(), rollout_path).ok_or_else(|| {
-        anyhow::anyhow!(
-            "rollout missing metadata builder: {}",
-            rollout_path.display()
-        )
-    })?;
-    let mut metadata = builder.build(default_provider);
-    for item in &items {
-        apply_rollout_item(&mut metadata, item, default_provider);
-    }
-    if let Some(updated_at) = file_modified_time_utc(rollout_path).await {
-        metadata.updated_at = updated_at;
-        metadata.recency_at = updated_at;
-    }
-    Ok(ExtractionOutcome {
+    Ok(StreamedMetadata {
         metadata,
-        memory_mode: items.iter().rev().find_map(|item| match item {
-            RolloutItem::SessionMeta(meta_line) => meta_line.meta.memory_mode.clone(),
-            RolloutItem::RolloutReference(_)
-            | RolloutItem::ResponseItem(_)
-            | RolloutItem::InterAgentCommunication(_)
-            | RolloutItem::InterAgentCommunicationMetadata { .. }
-            | RolloutItem::Compacted(_)
-            | RolloutItem::TurnContext(_)
-            | RolloutItem::WorldState(_)
-            | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::EventMsg(_) => None,
-        }),
+        memory_mode,
         parse_errors,
+        late_session_meta,
     })
 }
 

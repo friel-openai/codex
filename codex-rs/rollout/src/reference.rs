@@ -17,6 +17,7 @@ use codex_history::RolloutLine;
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
@@ -408,6 +409,18 @@ pub async fn resolve_rollout_reference_path(
             ));
         }
         [] => {}
+    }
+
+    // Older fork references recorded an absolute rollout path but no relocation timestamp. The
+    // filename still identifies the physical rollout. Resolve that rollout inside the current
+    // CODEX_HOME, then require the referenced SessionMeta identity before accepting it.
+    if let Some(rollout_id) = identity
+        .rollout_id()
+        .or_else(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
+        && let Some(path) = crate::find_rollout_path_by_rollout_id(codex_home, rollout_id).await?
+        && let Some(path) = validated_candidate(codex_home, path.as_path(), identity).await?
+    {
+        return Ok(path);
     }
 
     if let ReferenceIdentity::Segment {
@@ -832,7 +845,8 @@ fn is_fork_boundary_reference(
 }
 
 fn reference_identity(reference: &RolloutReferenceItem) -> io::Result<ReferenceIdentity> {
-    let thread_id = reference.thread_id.ok_or_else(|| {
+    let inferred_thread_id = crate::thread_id_from_path(reference.rollout_path.as_path());
+    let thread_id = reference.thread_id.or(inferred_thread_id).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             format!(
@@ -849,7 +863,13 @@ fn reference_identity(reference: &RolloutReferenceItem) -> io::Result<ReferenceI
         },
         None => ReferenceIdentity::LegacyInitial {
             thread_id,
-            rollout_id: reference.rollout_id,
+            rollout_id: reference.rollout_id.or_else(|| {
+                reference
+                    .thread_id
+                    .is_none()
+                    .then(|| crate::rollout_id_from_path(reference.rollout_path.as_path()))
+                    .flatten()
+            }),
         },
     })
 }
@@ -1163,6 +1183,11 @@ fn truncate_before_nth_user_message(lines: &mut Vec<RolloutLine>, nth_user_messa
                 active_turn_start = Some(index);
             }
             RolloutItem::EventMsg(EventMsg::UserMessage(_)) => {
+                event_user_positions.push(active_turn_start.unwrap_or(index));
+            }
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(event))
+                if matches!(event.item, TurnItem::UserMessage(_)) =>
+            {
                 event_user_positions.push(active_turn_start.unwrap_or(index));
             }
             RolloutItem::ResponseItem(item) if item.is_user_message() => {

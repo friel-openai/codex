@@ -222,6 +222,130 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
     assert_eq!(outcome.memory_mode.as_deref(), Some("polluted"));
 }
 
+#[tokio::test]
+async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
+    let dir = tempdir().expect("tempdir");
+    let uuid = Uuid::new_v4();
+    let id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = dir
+        .path()
+        .join(format!("rollout-2026-01-27T12-34-56-{uuid}.jsonl"));
+    let session_meta = SessionMetaLine {
+        meta: SessionMeta {
+            session_id: id.into(),
+            id,
+            timestamp: "2026-01-27T12:34:56Z".to_string(),
+            cwd: dir.path().to_path_buf(),
+            originator: "cli".to_string(),
+            cli_version: "0.0.0".to_string(),
+            model_provider: Some("openai".to_string()),
+            history_mode: ThreadHistoryMode::Paginated,
+            ..SessionMeta::default()
+        },
+        git: None,
+    };
+    let mut file = File::create(&path).expect("create rollout");
+    let mut ordinal = 0_u64;
+    for item in std::iter::once(RolloutItem::SessionMeta(session_meta)).chain((0..32).map(|_| {
+        RolloutItem::Compacted(CompactedItem {
+            message: "x".repeat(256 * 1024),
+            replacement_history: None,
+            window_number: None,
+            first_window_id: None,
+            previous_window_id: None,
+            window_id: None,
+            segment_state_checkpoint: None,
+        })
+    })) {
+        let line = RolloutLine {
+            timestamp: "2026-01-27T12:34:56Z".to_string(),
+            ordinal: Some(ordinal),
+            item,
+        };
+        ordinal += 1;
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&line).expect("serialize rollout line")
+        )
+        .expect("write rollout line");
+    }
+    file.flush().expect("flush rollout");
+    let compressed = path.with_extension("jsonl.zst");
+    let mut source = File::open(&path).expect("open rollout");
+    let mut target = File::create(&compressed).expect("create compressed rollout");
+    zstd::stream::copy_encode(&mut source, &mut target, 3).expect("compress rollout");
+    target.flush().expect("flush compressed rollout");
+
+    for rollout_path in [&path, &compressed] {
+        let outcome = extract_metadata_from_rollout(rollout_path, "openai")
+            .await
+            .expect("extract streamed metadata");
+        assert_eq!(outcome.metadata.id, id);
+        assert_eq!(outcome.metadata.history_mode, ThreadHistoryMode::Paginated);
+        assert_eq!(outcome.metadata.model_provider, "openai");
+        assert_eq!(outcome.metadata.rollout_path, *rollout_path);
+        assert_eq!(outcome.parse_errors, 0);
+    }
+}
+
+#[tokio::test]
+async fn extract_metadata_replays_items_before_a_late_session_meta() {
+    let dir = tempdir().expect("tempdir");
+    let filename_uuid = Uuid::new_v4();
+    let session_uuid = Uuid::new_v4();
+    let id = ThreadId::from_string(&session_uuid.to_string()).expect("thread id");
+    let path = dir
+        .path()
+        .join(format!("rollout-2026-01-27T12-34-56-{filename_uuid}.jsonl"));
+    let lines = [
+        RolloutLine {
+            timestamp: "2026-01-27T12:34:55Z".to_string(),
+            ordinal: Some(0),
+            item: RolloutItem::Compacted(CompactedItem {
+                message: "prefix".to_string(),
+                replacement_history: None,
+                window_number: None,
+                first_window_id: None,
+                previous_window_id: None,
+                window_id: None,
+                segment_state_checkpoint: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: "2026-01-27T12:34:56Z".to_string(),
+            ordinal: Some(1),
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    session_id: id.into(),
+                    id,
+                    timestamp: "2026-01-27T12:34:56Z".to_string(),
+                    cwd: dir.path().to_path_buf(),
+                    originator: "cli".to_string(),
+                    cli_version: "0.0.0".to_string(),
+                    model_provider: Some("openai".to_string()),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+        },
+    ];
+    let mut file = File::create(&path).expect("create rollout");
+    for line in lines {
+        writeln!(
+            file,
+            "{}",
+            serde_json::to_string(&line).expect("serialize rollout line")
+        )
+        .expect("write rollout line");
+    }
+
+    let outcome = extract_metadata_from_rollout(&path, "openai")
+        .await
+        .expect("extract metadata");
+    assert_eq!(outcome.metadata.id, id);
+}
+
 #[test]
 fn builder_from_items_falls_back_to_filename() {
     let dir = tempdir().expect("tempdir");
