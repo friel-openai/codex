@@ -10,10 +10,11 @@ mod list_threads;
 mod live_writer;
 mod model_context;
 mod move_thread_to_section;
+mod ordinal_recovery;
 mod paginated_fork;
 mod pending_thread_metadata;
-mod projects;
 mod projection_rebuild;
+mod projects;
 mod read_thread;
 mod revert_thread;
 mod rollout_migration;
@@ -97,7 +98,6 @@ use crate::RevertThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
 use crate::SegmentCheckpointPersistenceOutcome;
-use crate::SortDirection;
 use crate::StoredModelContext;
 use crate::StoredProject;
 use crate::StoredProjectsPage;
@@ -105,7 +105,6 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
-use crate::StoredTurnItemsView;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
@@ -166,6 +165,10 @@ pub struct LocalThreadStore {
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
     projection_rebuilds: Arc<StdMutex<HashSet<ThreadId>>>,
     projection_rebuild_schedules: Arc<StdMutex<projection_rebuild::ScheduledProjectionRebuilds>>,
+    /// Bounds complete-lineage projection repair to one disk- and memory-intensive scan.
+    projection_rebuild_gate: Arc<Mutex<()>>,
+    /// Coordinates first-request rollout conversion with thread-specific reads.
+    rollout_migration_coordinator: Arc<rollout_migration::StartupMigrationCoordinator>,
 }
 
 struct LiveRecorderEntry {
@@ -267,6 +270,17 @@ impl LiveWriterLocks {
             .await
     }
 
+    async fn try_lock(&self, thread_id: ThreadId) -> ThreadStoreResult<OwnedMutexGuard<()>> {
+        self.coordination(thread_id)
+            .await
+            .writer
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| ThreadStoreError::Conflict {
+                message: format!("thread {thread_id} has an active rollout operation"),
+            })
+    }
+
     async fn reserve_lifecycle(&self, thread_id: ThreadId) -> OwnedRwLockReadGuard<()> {
         self.coordination(thread_id)
             .await
@@ -331,6 +345,10 @@ impl LocalThreadStore {
             thread_history_db: Arc::new(OnceCell::new()),
             projection_rebuilds: Arc::new(StdMutex::new(HashSet::new())),
             projection_rebuild_schedules: Arc::new(StdMutex::new(HashMap::new())),
+            projection_rebuild_gate: Arc::new(Mutex::new(())),
+            rollout_migration_coordinator: Arc::new(
+                rollout_migration::StartupMigrationCoordinator::default(),
+            ),
         }
     }
 
@@ -346,14 +364,14 @@ impl LocalThreadStore {
         else {
             return Ok(false);
         };
-        if let Some(has_projection) = thread_history::has_nonempty_newest_root_turn_for_resolved(
+        if thread_history::has_complete_root_projection_for_resolved(
             self,
             thread_id,
             resolved.clone(),
         )
         .await?
         {
-            return Ok(has_projection);
+            return Ok(true);
         }
         let physical_history_mode = match resolved.authenticated_session_meta.as_ref() {
             Some(session_meta) => session_meta.history_mode,
@@ -395,30 +413,15 @@ impl LocalThreadStore {
         {
             return Ok(false);
         }
-        let newest_turn = thread_history::list_turns(
-            self,
-            ListTurnsParams {
-                thread_id,
-                include_archived: true,
-                cursor: None,
-                page_size: 1,
-                sort_direction: SortDirection::Desc,
-                items_view: StoredTurnItemsView::Summary,
-            },
-        )
-        .await?;
-
-        Ok(newest_turn
-            .turns
-            .first()
-            .is_none_or(|turn| !turn.items.is_empty()))
+        // A completed or interrupted turn can legitimately have no visible items. The
+        // checkpoint, not the newest turn's presentation, certifies projection completeness.
+        Ok(true)
     }
 
     /// Returns whether the already-validated Paginated rollout has a complete projection at the
     /// supplied durable byte boundary.
     pub(super) async fn has_complete_history_projection_at(
         &self,
-        thread_id: ThreadId,
         rollout_id: RolloutId,
         end_byte_offset: u64,
     ) -> ThreadStoreResult<bool> {
@@ -426,27 +429,8 @@ impl LocalThreadStore {
         else {
             return Ok(false);
         };
-        if !projection_state.lineage_complete
-            || projection_state.next_byte_offset != end_byte_offset
-        {
-            return Ok(false);
-        }
-        let newest_turn = thread_history::list_turns(
-            self,
-            ListTurnsParams {
-                thread_id,
-                include_archived: true,
-                cursor: None,
-                page_size: 1,
-                sort_direction: SortDirection::Desc,
-                items_view: StoredTurnItemsView::Summary,
-            },
-        )
-        .await?;
-        Ok(newest_turn
-            .turns
-            .first()
-            .is_none_or(|turn| !turn.items.is_empty()))
+        Ok(projection_state.lineage_complete
+            && projection_state.next_byte_offset == end_byte_offset)
     }
 
     /// Rebuilds one complete same-thread Paginated projection and publishes it atomically.
@@ -539,10 +523,11 @@ impl LocalThreadStore {
         // Rotation stabilizes the active rollout's bounded reference window. History-base
         // ancestors are repaired by operations that replay them; traversing the complete lineage
         // here makes repeated rotations rescan every older immutable segment.
-        let history_access = goal_supervisor_runtime_repair::repair_recent_history_before_access(
+        let history_access = goal_supervisor_runtime_repair::repair_selected_history_before_access(
             self,
             thread_id,
             source.path.as_path(),
+            goal_supervisor_runtime_repair::RepairAccess::Recent,
         )
         .await?;
         match history_access.writer_reservation() {
@@ -577,10 +562,11 @@ impl LocalThreadStore {
                 ),
             });
         }
-        let history_access = goal_supervisor_runtime_repair::repair_recent_history_before_access(
+        let history_access = goal_supervisor_runtime_repair::repair_selected_history_before_access(
             self,
             thread_id,
             source.path.as_path(),
+            goal_supervisor_runtime_repair::RepairAccess::Recent,
         )
         .await?;
         match history_access.writer_reservation() {
@@ -611,6 +597,8 @@ impl LocalThreadStore {
         &self,
         params: PrepareForkParams,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history(self, params).await
     }
 
@@ -622,6 +610,8 @@ impl LocalThreadStore {
         expected_rollout_id: codex_protocol::RolloutId,
         ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_for_rollout(
             self,
             params,
@@ -638,6 +628,8 @@ impl LocalThreadStore {
         model_context: Arc<Vec<ResponseItemEnvelope>>,
         expected_position: HistoryPosition,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_with_model_context(self, params, model_context, expected_position)
             .await
     }
@@ -650,6 +642,8 @@ impl LocalThreadStore {
         expected_position: HistoryPosition,
         expected_rollout_id: codex_protocol::RolloutId,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_with_model_context_for_rollout(
             self,
             params,
@@ -667,6 +661,8 @@ impl LocalThreadStore {
         model_context: Arc<Vec<ResponseItemEnvelope>>,
         expected_position: HistoryPosition,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_with_model_context(
             self,
             params,
@@ -686,6 +682,8 @@ impl LocalThreadStore {
         expected_rollout_id: codex_protocol::RolloutId,
         ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
             self,
             params,
@@ -726,6 +724,8 @@ impl LocalThreadStore {
         params: PrepareForkParams,
         expected_rollout_id: codex_protocol::RolloutId,
     ) -> ThreadStoreResult<PreparedFork> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         paginated_fork::prepare_for_rollout(self, params, expected_rollout_id).await
     }
 
@@ -790,6 +790,46 @@ impl LocalThreadStore {
         let mut cross_process_guards = Vec::with_capacity(thread_ids.len());
         for &thread_id in &thread_ids {
             if self.live_recorders.lock().await.contains_key(&thread_id) {
+                continue;
+            }
+            cross_process_guards
+                .push((thread_id, self.writer_lock_coordinator.acquire(thread_id)?));
+        }
+        Ok(RolloutWriterReservation {
+            store_identity: Arc::as_ptr(&self.live_writer_locks) as usize,
+            thread_ids,
+            _in_process_guards: in_process_guards,
+            cross_process_guards,
+        })
+    }
+
+    /// Reserve newly discovered ancestors without waiting while another thread is already locked.
+    async fn try_reserve_rollout_writers(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<RolloutWriterReservation> {
+        let mut thread_ids = thread_ids.to_vec();
+        thread_ids.sort_unstable_by_key(ThreadId::to_string);
+        thread_ids.dedup();
+        let mut in_process_guards = Vec::with_capacity(thread_ids.len());
+        for &thread_id in &thread_ids {
+            in_process_guards.push((thread_id, self.live_writer_locks.try_lock(thread_id).await?));
+        }
+        let mut cross_process_guards = Vec::with_capacity(thread_ids.len());
+        for &thread_id in &thread_ids {
+            let recorder = self
+                .live_recorders
+                .lock()
+                .await
+                .get(&thread_id)
+                .map(|entry| entry.recorder.clone());
+            if let Some(recorder) = recorder {
+                recorder
+                    .flush()
+                    .await
+                    .map_err(|error| ThreadStoreError::Internal {
+                        message: format!("failed to flush reserved rollout: {error}"),
+                    })?;
                 continue;
             }
             cross_process_guards
@@ -891,6 +931,8 @@ impl LocalThreadStore {
 
     /// Lists projection-backed turns without enabling app-server routing yet.
     pub async fn list_turns(&self, params: ListTurnsParams) -> ThreadStoreResult<TurnPage> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_turns(self, params).await
     }
 
@@ -899,6 +941,8 @@ impl LocalThreadStore {
         &self,
         params: ListTurnsParams,
     ) -> ThreadStoreResult<Option<TurnPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_segmented_legacy_turns(self, params).await
     }
 
@@ -907,6 +951,8 @@ impl LocalThreadStore {
         &self,
         params: ListTurnsParams,
     ) -> ThreadStoreResult<Option<TurnPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_existing_segmented_legacy_turns(self, params).await
     }
 
@@ -920,6 +966,8 @@ impl LocalThreadStore {
 
     /// Lists projection-backed items without enabling app-server routing yet.
     pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_items(self, params).await
     }
 
@@ -936,6 +984,8 @@ impl LocalThreadStore {
         &self,
         params: ListItemsParams,
     ) -> ThreadStoreResult<Option<ItemPage>> {
+        self.await_automatic_rollout_migration(params.thread_id)
+            .await?;
         thread_history::list_segmented_legacy_items(self, params).await
     }
 
@@ -985,7 +1035,11 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn resume_thread(&self, params: ResumeThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async move { live_writer::resume_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            live_writer::resume_thread(self, params).await
+        })
     }
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
@@ -1024,26 +1078,46 @@ impl ThreadStore for LocalThreadStore {
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredThreadHistory> {
-        Box::pin(LocalThreadStore::load_history(self, params))
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            LocalThreadStore::load_history(self, params).await
+        })
     }
 
     fn load_latest_model_context(
         &self,
         params: LoadThreadHistoryParams,
     ) -> ThreadStoreFuture<'_, StoredModelContext> {
-        Box::pin(async move { model_context::load_latest_model_context(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            model_context::load_latest_model_context(self, params).await
+        })
     }
 
     fn prepare_fork(&self, params: PrepareForkParams) -> ThreadStoreFuture<'_, PreparedFork> {
-        Box::pin(async move { paginated_fork::prepare(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            paginated_fork::prepare(self, params).await
+        })
     }
 
     fn revert_thread(&self, params: RevertThreadParams) -> ThreadStoreFuture<'_, ()> {
-        Box::pin(async move { revert_thread::revert(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            revert_thread::revert(self, params).await
+        })
     }
 
     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(async move { read_thread::read_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            read_thread::read_thread(self, params).await
+        })
     }
 
     fn read_threads(&self, params: ReadThreadsParams) -> ThreadStoreFuture<'_, Vec<StoredThread>> {
@@ -1203,6 +1277,8 @@ impl ThreadStore for LocalThreadStore {
 
     fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
             archive_thread::archive_threads(
                 self,
                 ArchiveThreadsParams {
@@ -1223,7 +1299,11 @@ impl ThreadStore for LocalThreadStore {
     }
 
     fn unarchive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
-        Box::pin(async move { unarchive_thread::unarchive_thread(self, params).await })
+        Box::pin(async move {
+            self.await_automatic_rollout_migration(params.thread_id)
+                .await?;
+            unarchive_thread::unarchive_thread(self, params).await
+        })
     }
 
     fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreFuture<'_, ()> {
