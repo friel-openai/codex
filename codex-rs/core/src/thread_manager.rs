@@ -297,7 +297,7 @@ pub(crate) enum FullHistorySourceReservation {
         _reservation: ThreadLifecycleReservation,
     },
     /// A paginated source prepared under one selected-rollout reservation.
-    Prepared { _prepared: PreparedFork },
+    Prepared { _prepared: Box<PreparedFork> },
 }
 
 /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
@@ -1801,7 +1801,8 @@ impl ThreadManagerState {
                 .await
                 .map_err(|err| thread_store_metadata_update_error(thread_id, err));
         }
-        self.thread_store
+        let updated = self
+            .thread_store
             .update_thread_metadata(UpdateThreadMetadataParams {
                 thread_id,
                 patch,
@@ -1813,7 +1814,19 @@ impl ThreadManagerState {
                     CodexErr::ThreadNotFound(thread_id)
                 }
                 err => thread_store_metadata_update_error(thread_id, err),
-            })
+            })?;
+        match updated {
+            Some(thread) => Ok(thread),
+            None => self
+                .thread_store
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived,
+                    include_history: false,
+                })
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err)),
+        }
     }
 
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
@@ -1998,7 +2011,7 @@ impl ThreadManagerState {
                     InitialHistory::Forked(logical_history.clone()),
                     logical_history,
                     FullHistorySourceReservation::Prepared {
-                        _prepared: prepared,
+                        _prepared: Box::new(prepared),
                     },
                 ));
             }
@@ -2025,7 +2038,7 @@ impl ThreadManagerState {
                 reference_history,
                 logical_history,
                 FullHistorySourceReservation::Prepared {
-                    _prepared: prepared,
+                    _prepared: Box::new(prepared),
                 },
             ));
         }
@@ -2054,6 +2067,10 @@ impl ThreadManagerState {
         ))
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "snapshot selection keeps source identity, history mode, cutoff, and validation expectations explicit"
+    )]
     async fn reference_backed_snapshot_history(
         &self,
         source_thread_id: ThreadId,
@@ -2130,7 +2147,7 @@ impl ThreadManagerState {
                         prepared.frozen_segment.clone(),
                         prepared.response_history.as_ref().clone(),
                         FullHistorySourceReservation::Prepared {
-                            _prepared: prepared,
+                            _prepared: Box::new(prepared),
                         },
                     )
                 }

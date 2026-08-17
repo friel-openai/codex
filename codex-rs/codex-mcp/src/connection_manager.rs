@@ -109,7 +109,6 @@ impl McpServerView {
 /// A published view over a set of running MCP server connections.
 pub(crate) struct McpConnectionSet {
     servers: HashMap<String, McpServerView>,
-    protocol_mode: crate::McpProtocolMode,
     required_servers: Vec<String>,
     optional_startup_deadline: OnceLock<tokio::time::Instant>,
     tool_catalog_revision: Arc<RwLock<u64>>,
@@ -637,7 +636,6 @@ impl McpConnectionSet {
         }
         let manager = Self {
             servers,
-            protocol_mode,
             required_servers,
             optional_startup_deadline: OnceLock::new(),
             tool_catalog_revision: Arc::new(RwLock::new(0)),
@@ -711,7 +709,6 @@ impl McpConnectionSet {
         ));
         Self {
             servers: HashMap::new(),
-            protocol_mode: crate::McpProtocolMode::Legacy,
             required_servers: Vec::new(),
             optional_startup_deadline: OnceLock::new(),
             tool_catalog_revision: Arc::new(RwLock::new(0)),

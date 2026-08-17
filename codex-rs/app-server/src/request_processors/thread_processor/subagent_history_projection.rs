@@ -145,6 +145,7 @@ async fn scan_segment(
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::WorldState(_) => {}
         }
     }

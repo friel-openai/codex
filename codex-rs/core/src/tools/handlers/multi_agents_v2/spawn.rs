@@ -11,8 +11,8 @@ use crate::tools::handlers::multi_agents_spec::create_adopt_agent_tool;
 use crate::tools::handlers::multi_agents_spec::create_spawn_agent_tool_v2;
 use crate::tools::handlers::multi_agents_v2::message_tool::message_content;
 use codex_protocol::AgentPath;
-use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::MultiAgentVersion;
 use codex_tools::ToolSpec;
 
 #[derive(Default)]

@@ -7,7 +7,7 @@ use crate::session_prefix::format_subagent_notification_message;
 enum AgentDeliveryInput {
     UserInput(Vec<UserInput>),
     InterAgentCommunication {
-        communication: InterAgentCommunication,
+        communication: Box<InterAgentCommunication>,
         context: AgentCommunicationContext,
     },
 }
@@ -44,6 +44,10 @@ impl AgentControl {
     }
 
     /// Deliver a context-bearing communication to an addressable agent, reloading it if needed.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "delivery keeps the target, communication context, admission mode, and turn ancestry explicit"
+    )]
     pub(crate) async fn deliver_inter_agent_communication_to_agent(
         &self,
         config: Config,
@@ -58,7 +62,7 @@ impl AgentControl {
             config,
             agent_id,
             AgentDeliveryInput::InterAgentCommunication {
-                communication,
+                communication: Box::new(communication),
                 context,
             },
             delivery,
@@ -104,7 +108,8 @@ impl AgentControl {
                 Box::pin(self.ensure_agent_loaded_locked(&state, config.clone(), agent_id)).await?;
             if input.starts_turn() {
                 let thread = state.get_thread(agent_id).await?;
-                self.ensure_execution_capacity_for_turn_start(&thread).await?;
+                self.ensure_execution_capacity_for_turn_start(&thread)
+                    .await?;
             }
             if multi_agent_version != MultiAgentVersion::V2 {
                 self.maybe_start_completion_watcher_for_loaded_agent(&state, agent_id)
@@ -131,7 +136,7 @@ impl AgentControl {
                     self.send_inter_agent_communication_after_capacity_check(
                         agent_id,
                         &state,
-                        communication.clone(),
+                        communication.as_ref().clone(),
                         context.clone(),
                         parent_turn_id.clone(),
                         root_turn_id.clone(),

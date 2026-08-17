@@ -6,10 +6,10 @@ use super::turn_processor::can_accept_direct_input;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
+use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
-use codex_app_server_protocol::SessionSource;
 use codex_app_server_protocol::ThreadSection;
 use codex_app_server_protocol::ThreadSectionAppearance;
 use codex_app_server_protocol::ThreadSectionMoveParams;
@@ -1931,7 +1931,7 @@ impl ThreadRequestProcessor {
                         "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                     );
                 }
-                return Err(thread_store_archive_error("archive", err));
+                return Err(thread_store_mutation_error("archive", err));
             }
         };
         let mut current_agent_ids_to_evict = already_archived_thread_ids;
@@ -6118,8 +6118,11 @@ impl ThreadRequestProcessor {
                 };
             let prepared =
                 if let Some(local_store) = local_store {
-                    let expected_rollout_id = expected_rollout_id
-                        .expect("local paginated source has a canonical rollout ID");
+                    let Some(expected_rollout_id) = expected_rollout_id else {
+                        return Err(internal_error(
+                            "local paginated source has no canonical rollout ID".to_string(),
+                        ));
+                    };
                     match (model_context, include_turns) {
                         (Some((model_context, expected_position)), true) => {
                             local_store
