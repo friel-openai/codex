@@ -11,7 +11,7 @@ use codex_protocol::items::TurnItem as CoreTurnItem;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_rollout::RolloutItem;
-use codex_rollout::RolloutLine;
+use codex_rollout::RolloutRecorder;
 
 const UNFILTERED_SEGMENT_COUNT: usize = 5;
 
@@ -111,12 +111,16 @@ async fn scan_segment(
         if line.trim().is_empty() {
             continue;
         }
-        let line = serde_json::from_str::<RolloutLine>(&line).map_err(|error| {
-            invalid_data(format!(
-                "failed to decode rollout {}: {error}",
-                rollout_path.display()
-            ))
-        })?;
+        let Some(line) =
+            RolloutRecorder::parse_rollout_line_bytes(line.as_bytes()).map_err(|error| {
+                invalid_data(format!(
+                    "failed to decode rollout {}: {error}",
+                    rollout_path.display()
+                ))
+            })?
+        else {
+            continue;
+        };
         match line.item {
             RolloutItem::SessionMeta(session_meta) => {
                 if saw_session_meta || session_meta.meta.id != expected_thread_id {
