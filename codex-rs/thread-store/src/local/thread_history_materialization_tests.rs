@@ -13,6 +13,11 @@ use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::TurnStatus;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::AgentMessageContent;
 use codex_protocol::items::AgentMessageItem;
 use codex_protocol::items::TurnItem;
@@ -20,27 +25,36 @@ use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::MessagePhase;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::InterAgentCommunication;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RateLimitSnapshot;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
 use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
+use codex_rollout::CompactedItem;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::RolloutRecorderParams;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::test_support::PathExt;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
@@ -1240,6 +1254,85 @@ WHERE thread_id = ?
 }
 
 #[tokio::test]
+async fn paginated_projection_streams_across_multiple_byte_batches() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist session metadata");
+
+    let payload = "x".repeat(20 * 1024);
+    let mut items = Vec::with_capacity(302);
+    items.push(turn_started("large-turn"));
+    for index in 0..300 {
+        items.push(completed_item(
+            thread_id,
+            "large-turn",
+            TurnItem::AgentMessage(AgentMessageItem {
+                id: format!("large-agent-{index:03}"),
+                content: vec![AgentMessageContent::Text {
+                    text: format!("{index:03}:{payload}"),
+                }],
+                phase: Some(MessagePhase::Commentary),
+                memory_citation: None,
+            }),
+        ));
+    }
+    items.push(turn_completed("large-turn"));
+    store
+        .append_items(AppendThreadItemsParams { thread_id, items })
+        .await
+        .expect("append multi-batch paginated history");
+
+    let rollout_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("large rollout path");
+    let rollout_len = fs::metadata(rollout_path)
+        .expect("large rollout metadata")
+        .len();
+    assert!(
+        rollout_len > 4 * 1024 * 1024,
+        "fixture must cross the projection byte-batch boundary"
+    );
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open thread history db");
+    let projected_items = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM thread_items WHERE thread_id = ? AND turn_id = 'large-turn'",
+    )
+    .bind(thread_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("count multi-batch projected items");
+    assert_eq!(projected_items, 300);
+    let item_ids = sqlx::query_scalar::<_, String>(
+        "SELECT item_id FROM thread_items WHERE thread_id = ? AND turn_id = 'large-turn' ORDER BY rollout_ordinal",
+    )
+    .bind(thread_id.to_string())
+    .fetch_all(&pool)
+    .await
+    .expect("read multi-batch projected item ids");
+    assert_eq!(
+        item_ids.first().map(String::as_str),
+        Some("large-agent-000")
+    );
+    assert_eq!(item_ids.last().map(String::as_str), Some("large-agent-299"));
+    assert_eq!(
+        projection_state(&pool, thread_id).await,
+        (
+            i64::try_from(rollout_len).expect("rollout length fits SQLite"),
+            303,
+        )
+    );
+}
+
+#[tokio::test]
 async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
@@ -1865,7 +1958,15 @@ async fn indexed_latest_fork_preserves_authoritative_context_and_projected_paren
             assert_eq!(turn.items.len(), 1);
             assert_eq!(turn.items[0].item_id, format!("item-{index}"));
         }
-        assert_eq!(prepared.frozen_segment.reference.thread_id, Some(thread_id));
+        assert_eq!(
+            prepared
+                .frozen_segment
+                .as_ref()
+                .expect("durable fork freezes its source")
+                .reference
+                .thread_id,
+            Some(thread_id)
+        );
 
         let side = store
             .prepare_fork_without_response_history_with_model_context(
@@ -2130,6 +2231,176 @@ async fn indexed_latest_fork_rebuilds_history_when_projection_disappears_before_
         prepared.response_history.as_slice(),
         "projected message 2"
     ));
+}
+
+#[tokio::test]
+async fn ephemeral_latest_side_uses_certified_active_context_without_freezing_source() {
+    let home = TempDir::new().expect("temp dir");
+    let store = projection_store(home.path()).await;
+    let thread_id = ThreadId::default();
+    create_paginated_thread(&store, thread_id).await;
+    store
+        .persist_thread(thread_id, PersistContext::Standard)
+        .await
+        .expect("persist paginated source metadata");
+
+    let mut immutable_predecessors = Vec::new();
+    for index in 0..8 {
+        let turn_id = format!("turn-{index}");
+        let message = format!("bounded side message {index}");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![
+                    turn_started(turn_id.as_str()),
+                    user_message(message.as_str()),
+                    completed_item(
+                        thread_id,
+                        turn_id.as_str(),
+                        TurnItem::UserMessage(UserMessageItem {
+                            id: format!("item-{index}"),
+                            client_id: None,
+                            content: Vec::new(),
+                        }),
+                    ),
+                    turn_completed(turn_id.as_str()),
+                ],
+            })
+            .await
+            .expect("append source turn");
+        immutable_predecessors.push(
+            store
+                .freeze_thread_segment(
+                    thread_id,
+                    FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
+                        format!("checkpoint {index}").as_str(),
+                    )),
+                )
+                .await
+                .expect("rotate source segment")
+                .reference
+                .rollout_path,
+        );
+    }
+    index_paginated_source_metadata(&store, thread_id).await;
+    let projected = store
+        .projected_history_position(thread_id)
+        .await
+        .expect("read projected position")
+        .expect("projected position");
+    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
+        home.path().abs(),
+    ))
+    .await
+    .expect("open projected thread history");
+    for statement in [
+        "DELETE FROM thread_items WHERE thread_id = ?",
+        "DELETE FROM thread_turns WHERE thread_id = ?",
+        "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
+    ] {
+        sqlx::query(statement)
+            .bind(projected.thread_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("remove projected source history");
+    }
+    for predecessor in immutable_predecessors
+        .iter()
+        .take(immutable_predecessors.len().saturating_sub(1))
+    {
+        fs::remove_file(predecessor).expect("remove obsolete immutable predecessor");
+    }
+
+    let prepared = store
+        .prepare_fork_without_response_history_for_rollout(
+            PrepareForkParams {
+                thread_id,
+                boundary: ForkBoundary::Latest,
+            },
+            projected.thread_id,
+            /*ephemeral_context_only*/ true,
+        )
+        .await
+        .expect("prepare bounded side without projection or old predecessors");
+
+    assert!(prepared.projected_response_turns.is_none());
+    assert!(prepared.model_context.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(compacted) if compacted.message == "checkpoint 7"
+        )
+    }));
+    assert!(
+        prepared.frozen_segment.is_none(),
+        "an ephemeral side must not snapshot or copy the source rollout"
+    );
+}
+
+fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+    let window_id = uuid::Uuid::now_v7();
+    let cwd: AbsolutePathBuf =
+        serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd");
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: message.to_string(),
+            replacement_history: Some(vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "bounded checkpoint history".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            ]),
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        Some(SegmentPreviousTurnSettings {
+            model: "test-model".to_string(),
+            comp_hash: None,
+            realtime_active: None,
+        }),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: cwd.clone(),
+                environments: Some(TurnEnvironmentSelections::new(cwd, Vec::new())),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid certified checkpoint")
 }
 
 #[tokio::test]
@@ -2742,7 +3013,13 @@ async fn prepared_fork_reserves_source_until_child_reference_is_durable() {
     ));
     let frozen_items = super::super::read_thread::load_history_items(
         home.path(),
-        prepared.frozen_segment.reference.rollout_path.as_path(),
+        prepared
+            .frozen_segment
+            .as_ref()
+            .expect("durable prepared fork freezes its source")
+            .reference
+            .rollout_path
+            .as_path(),
     )
     .await
     .expect("materialize the exact prepared reference");
@@ -3368,7 +3645,7 @@ SELECT
 }
 
 #[tokio::test]
-async fn synchronized_catch_up_does_not_replay_old_rows() {
+async fn out_of_band_projection_update_requires_canonical_rebuild() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -3400,7 +3677,16 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
         .await
         .expect("catch up synchronized rollout");
 
-    assert_eq!(projection_state(&pool, thread_id).await, before);
+    assert_eq!(
+        projection_state(&pool, thread_id).await,
+        (-1 - before.0, before.1)
+    );
+    assert!(
+        !store
+            .has_history_projection(thread_id)
+            .await
+            .expect("reject externally modified projection")
+    );
     let status =
         sqlx::query_scalar::<_, String>("SELECT status FROM thread_turns WHERE thread_id = ?")
             .bind(thread_id.to_string())
@@ -3408,6 +3694,20 @@ async fn synchronized_catch_up_does_not_replay_old_rows() {
             .await
             .expect("read projected turn");
     assert_eq!(status, "sentinel");
+    assert!(
+        store
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("rebuild externally modified projection")
+    );
+    assert_eq!(projection_state(&pool, thread_id).await, before);
+    let status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM thread_turns WHERE thread_id = ?")
+            .bind(thread_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("read rebuilt turn");
+    assert_eq!(status, "inProgress");
 }
 
 #[tokio::test]

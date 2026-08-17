@@ -360,8 +360,11 @@ pub struct PreparedFork {
     pub source_thread_id: ThreadId,
     /// Compatibility position selected while normalizing the paginated lineage.
     pub history_base: Option<HistoryPosition>,
-    /// Canonical immutable rollout prefix inherited by the child.
-    pub frozen_segment: FrozenRolloutSegment,
+    /// Canonical immutable rollout prefix inherited by a durable child.
+    ///
+    /// Context-only ephemeral forks do not persist a child rollout, so they retain the bounded
+    /// model context instead of freezing the source rollout.
+    pub frozen_segment: Option<FrozenRolloutSegment>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
     /// Latest source context used for settings that follow the source thread rather than the
@@ -400,7 +403,7 @@ impl PreparedFork {
     pub fn new(
         source_thread_id: ThreadId,
         history_base: Option<HistoryPosition>,
-        frozen_segment: FrozenRolloutSegment,
+        frozen_segment: Option<FrozenRolloutSegment>,
         model_context: Arc<Vec<RolloutItem>>,
         latest_model_context: Arc<Vec<RolloutItem>>,
         response_history: Arc<Vec<RolloutItem>>,

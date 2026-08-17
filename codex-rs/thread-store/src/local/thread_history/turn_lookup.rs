@@ -34,6 +34,54 @@ pub(in crate::local) async fn find_visible_turn(
     find_turn(pool, lineage.segments().iter().rev(), turn_id).await
 }
 
+/// Finds a turn in a complete root projection without resolving its physical segment lineage.
+///
+/// Callers must first prove that `rollout_id` names a clean same-thread projection. The newest row
+/// wins so a repaired projection cannot expose a superseded duplicate turn identifier.
+pub(in crate::local) async fn find_projected_turn(
+    pool: &sqlx::SqlitePool,
+    rollout_id: ThreadId,
+    turn_id: &str,
+) -> ThreadStoreResult<TurnRow> {
+    sqlx::query(
+        r#"
+SELECT
+    rollout_ordinal,
+    rollout_byte_offset,
+    rollout_end_ordinal,
+    rollout_end_byte_offset,
+    status,
+    first_user_item_id,
+    final_agent_item_id
+FROM thread_turns
+WHERE thread_id = ?
+  AND turn_id = ?
+ORDER BY rollout_ordinal DESC
+LIMIT 1
+        "#,
+    )
+    .bind(rollout_id.to_string())
+    .bind(turn_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|err| ThreadStoreError::Internal {
+        message: format!("failed to resolve projected turn: {err}"),
+    })?
+    .map(|row| TurnRow {
+        rollout_id,
+        rollout_ordinal: row.get("rollout_ordinal"),
+        rollout_byte_offset: row.get("rollout_byte_offset"),
+        rollout_end_ordinal: row.get("rollout_end_ordinal"),
+        rollout_end_byte_offset: row.get("rollout_end_byte_offset"),
+        status: row.get("status"),
+        first_user_item_id: row.get("first_user_item_id"),
+        final_agent_item_id: row.get("final_agent_item_id"),
+    })
+    .ok_or_else(|| ThreadStoreError::InvalidRequest {
+        message: format!("turn not found: {turn_id}"),
+    })
+}
+
 async fn find_turn<'a>(
     pool: &sqlx::SqlitePool,
     segments: impl Iterator<Item = &'a RolloutLineageSegment>,
