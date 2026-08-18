@@ -212,6 +212,7 @@ pub(crate) async fn execute_user_shell_command(
         // inherit a managed proxy from the surrounding session or turn.
         network: None,
         network_environment_id: None,
+        environment_proxy_lease: None,
         // TODO(zhao-oai): Now that we have ExecExpiration::Cancellation, we
         // should use that instead of an "arbitrarily large" timeout here.
         expiration: USER_SHELL_TIMEOUT_MS.into(),

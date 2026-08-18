@@ -2267,6 +2267,7 @@ dependencies = [
  "codex-utils-home-dir",
  "codex-windows-sandbox",
  "dotenvy",
+ "libc",
  "pretty_assertions",
  "tempfile",
  "tokio",
