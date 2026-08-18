@@ -9,7 +9,6 @@
 //! byte-for-byte. Filesystem publishing and SQLite projection intentionally live outside this
 //! module.
 
-use chrono::DateTime;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::items::ReasoningItem;
@@ -31,6 +30,7 @@ use tokio::io::AsyncWriteExt;
 
 use super::legacy_event;
 use super::migration_error;
+use super::parse_rollout_timestamp;
 use crate::ThreadStoreResult;
 
 #[derive(Clone)]
@@ -552,9 +552,7 @@ impl LegacyRolloutCanonicalizer {
     where
         W: AsyncWrite + Unpin,
     {
-        let completed_at_ms = DateTime::parse_from_rfc3339(timestamp)
-            .map_err(migration_error)?
-            .timestamp_millis();
+        let completed_at_ms = parse_rollout_timestamp(timestamp)?.timestamp_millis();
         self.write_item(
             writer,
             timestamp,

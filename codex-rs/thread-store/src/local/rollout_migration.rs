@@ -13,6 +13,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::DateTime;
+use chrono::NaiveDateTime;
+use chrono::Utc;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
@@ -1246,9 +1248,8 @@ impl LocalThreadStore {
             let ordinal = line
                 .ordinal
                 .ok_or_else(|| migration_error("staged rollout line is missing its ordinal"))?;
-            let fallback_created_at_ms = DateTime::parse_from_rfc3339(&line.timestamp)
-                .map_err(migration_error)?
-                .timestamp_millis();
+            let fallback_created_at_ms =
+                parse_rollout_timestamp(&line.timestamp)?.timestamp_millis();
             batch.push(RolloutProjectionStep::Line(ProjectedRolloutLine {
                 ordinal,
                 start_byte_offset: offset,
@@ -1515,6 +1516,16 @@ fn migration_error(error: impl std::fmt::Display) -> ThreadStoreError {
     ThreadStoreError::Internal {
         message: format!("rollout migration failed: {error}"),
     }
+}
+
+fn parse_rollout_timestamp(timestamp: &str) -> ThreadStoreResult<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .map(|timestamp| timestamp.with_timezone(&Utc))
+        .or_else(|_| {
+            NaiveDateTime::parse_from_str(timestamp, "%Y-%m-%dT%H-%M-%S")
+                .map(|timestamp| timestamp.and_utc())
+        })
+        .map_err(migration_error)
 }
 
 #[cfg(test)]
