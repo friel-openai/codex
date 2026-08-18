@@ -66,6 +66,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
 use codex_core_plugins::PluginCommandAttribution;
 use codex_core_plugins::PluginMetricsSidecar;
 use codex_core_plugins::strip_output_env;
+use codex_network_proxy::EnvironmentProxyLease;
 use codex_network_proxy::NetworkPolicyDecider;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::config_types::ShellEnvironmentPolicy;
@@ -485,6 +486,7 @@ impl UnifiedExecProcessManager {
         let UnifiedExecAttempt {
             process,
             metrics_sidecar,
+            environment_proxy_lease,
         } = attempt;
         let process = Arc::new(process);
         let network_denial_monitor = deferred_network_approval.as_ref().map(|deferred| {
@@ -550,6 +552,7 @@ impl UnifiedExecProcessManager {
                 deferred_network_approval.clone(),
                 network_denial_monitor,
                 metrics_sidecar,
+                environment_proxy_lease,
                 Arc::clone(&transcript),
                 Arc::clone(&initial_exec_command_active),
             )
@@ -1010,6 +1013,7 @@ impl UnifiedExecProcessManager {
         network_approval: Option<DeferredNetworkApproval>,
         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
         metrics_sidecar: Option<PluginMetricsSidecar>,
+        environment_proxy_lease: Option<EnvironmentProxyLease>,
         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
         initial_exec_command_active: Arc<AtomicBool>,
     ) {
@@ -1054,6 +1058,7 @@ impl UnifiedExecProcessManager {
             started_at,
             network_denial_monitor,
             plugin_metrics_sidecar,
+            environment_proxy_lease,
         );
     }
 
