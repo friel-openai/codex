@@ -1803,6 +1803,7 @@ async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_h
         }),
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
     };
     let mut next_config = (*session.get_config().await).clone();
     {
@@ -1853,6 +1854,7 @@ async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tupl
         }),
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
     };
     let mut next_config = (*session.get_config().await).clone();
     {
@@ -1908,6 +1910,7 @@ async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_r
         routing_profile: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
     };
     let effort = codex_protocol::openai_models::ReasoningEffort::High;
     let service_tier = "test-tier".to_string();
