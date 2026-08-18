@@ -7,6 +7,7 @@
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::Context;
 use std::task::Poll;
 
@@ -387,7 +388,8 @@ where
             replay.next_ordinal,
             source.initial_next_item_index,
             source.initial_source_line_index,
-        ),
+        )
+        .with_synthetic_item_id_remap(Arc::new(plan.synthetic_item_id_remap.clone())),
     };
     canonicalizer.reset_output_position();
     let start_ordinal = canonicalizer.next_ordinal();

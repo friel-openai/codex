@@ -79,7 +79,7 @@ impl LocalThreadStore {
 
     pub(super) async fn validate_legacy_lineage_desktop_compatibility(
         &self,
-        plan: &LegacyLineageMigrationPlan,
+        plan: &mut LegacyLineageMigrationPlan,
     ) -> ThreadStoreResult<()> {
         // Paginated sources already persist stable turn and item identities. The bounded-view
         // comparison below protects Legacy synthetic IDs, which can depend on how many
@@ -193,12 +193,12 @@ impl LocalThreadStore {
         &self,
         selected_source_path: &Path,
         journal_path: &Path,
-        plan: LegacyLineageMigrationPlan,
+        mut plan: LegacyLineageMigrationPlan,
         limiter: &mut RolloutMigrationRateLimiter,
         stop_after: Option<LineageMigrationPhase>,
     ) -> ThreadStoreResult<PathBuf> {
         self.validate_legacy_lineage_plan(&plan).await?;
-        self.validate_legacy_lineage_desktop_compatibility(&plan)
+        self.validate_legacy_lineage_desktop_compatibility(&mut plan)
             .await?;
         let stage_root = journal_path.with_extension("staging");
         let mut journal = if tokio::fs::try_exists(journal_path)

@@ -24,7 +24,9 @@ use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 use tokio::io::AsyncWrite;
 use tokio::io::AsyncWriteExt;
 
@@ -52,6 +54,7 @@ pub(super) struct LegacyCanonicalizerCheckpoint {
     active_turn: Option<ActiveTurn>,
     known_turn_ids: HashSet<String>,
     reasoning: Option<ReasoningItem>,
+    synthetic_item_id_remap: Arc<HashMap<String, String>>,
 }
 
 impl LegacyCanonicalizerCheckpoint {
@@ -83,6 +86,7 @@ pub(super) struct LegacyRolloutCanonicalizer {
     active_turn: Option<ActiveTurn>,
     known_turn_ids: HashSet<String>,
     reasoning: Option<ReasoningItem>,
+    synthetic_item_id_remap: Arc<HashMap<String, String>>,
 }
 
 impl LegacyRolloutCanonicalizer {
@@ -109,6 +113,7 @@ impl LegacyRolloutCanonicalizer {
             active_turn: None,
             known_turn_ids: HashSet::new(),
             reasoning: None,
+            synthetic_item_id_remap: Arc::new(HashMap::new()),
         }
     }
 
@@ -126,6 +131,7 @@ impl LegacyRolloutCanonicalizer {
             active_turn: checkpoint.active_turn,
             known_turn_ids: checkpoint.known_turn_ids,
             reasoning: checkpoint.reasoning,
+            synthetic_item_id_remap: checkpoint.synthetic_item_id_remap,
         }
     }
 
@@ -137,7 +143,17 @@ impl LegacyRolloutCanonicalizer {
             active_turn: self.active_turn,
             known_turn_ids: self.known_turn_ids,
             reasoning: self.reasoning,
+            synthetic_item_id_remap: self.synthetic_item_id_remap,
         }
+    }
+
+    /// Applies deterministic IDs to synthesized Legacy items during migration.
+    pub(super) fn with_synthetic_item_id_remap(
+        mut self,
+        synthetic_item_id_remap: Arc<HashMap<String, String>>,
+    ) -> Self {
+        self.synthetic_item_id_remap = synthetic_item_id_remap;
+        self
     }
 
     pub(super) fn next_ordinal(&self) -> u64 {
@@ -639,6 +655,10 @@ impl LegacyRolloutCanonicalizer {
             .next_item_index
             .checked_add(1)
             .ok_or_else(|| migration_error("legacy rollout item id overflow"))?;
-        Ok(item_id)
+        Ok(self
+            .synthetic_item_id_remap
+            .get(item_id.as_str())
+            .cloned()
+            .unwrap_or(item_id))
     }
 }

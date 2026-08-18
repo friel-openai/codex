@@ -558,10 +558,10 @@ impl LocalThreadStore {
                     )));
                 }
             };
-            if let Some(plan) = lineage_plan {
+            if let Some(mut plan) = lineage_plan {
                 return Ok(Some(match self.validate_legacy_lineage_plan(&plan).await {
                     Ok(()) => match self
-                        .validate_legacy_lineage_desktop_compatibility(&plan)
+                        .validate_legacy_lineage_desktop_compatibility(&mut plan)
                         .await
                     {
                         Ok(()) => match build_lineage_manifest(&plan).await {

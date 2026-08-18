@@ -83,6 +83,7 @@ use crate::ItemSortKey;
 use crate::ListItemsParams;
 use crate::ListTurnsParams;
 use crate::LoadThreadHistoryParams;
+use crate::ReadThreadParams;
 use crate::SortDirection;
 use crate::StoredTurnItemsView;
 use crate::ThreadStore;
@@ -91,6 +92,7 @@ use crate::TurnPage;
 use crate::local::test_support::test_config;
 
 const TIMESTAMP: &str = "2025-01-03T12:00:00Z";
+const CONTEXT_DEPENDENT_TURN_ID: &str = "01a007a5-e024-7230-bf4e-922358abba37";
 
 #[test]
 fn lineage_target_filename_accepts_legacy_filename_timestamp() {
@@ -2887,8 +2889,18 @@ async fn migration_preserves_a_turn_split_across_same_thread_segments() {
     assert_eq!(item_turn_ids, vec!["split-turn", "split-turn"]);
 }
 
-#[tokio::test]
-async fn segmented_migration_refuses_context_dependent_legacy_item_ids_without_mutation() {
+struct ContextDependentLegacyFixture {
+    home: TempDir,
+    thread_id: ThreadId,
+    source_paths: Vec<PathBuf>,
+    source_bytes: Vec<Vec<u8>>,
+    selected_path: PathBuf,
+    initial_items: Vec<(String, String, Vec<u8>)>,
+    initial_turn_ids: HashSet<String>,
+    total_item_count: usize,
+}
+
+async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let segment_ids = [
@@ -2900,6 +2912,13 @@ async fn segmented_migration_refuses_context_dependent_legacy_item_ids_without_m
     let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
     let mut predecessor = None;
     let mut source_paths = Vec::new();
+    let turn_ids = [
+        "older-turn",
+        "bounded-prefix-turn",
+        CONTEXT_DEPENDENT_TURN_ID,
+        "active-turn",
+    ];
+    let item_counts = [397_usize, 160, 1, 1];
     for (index, segment_id) in segment_ids.into_iter().enumerate() {
         let path = if index + 1 == segment_ids.len() {
             home.path().join("sessions/2025/01/03").join(&filename)
@@ -2918,9 +2937,13 @@ async fn segmented_migration_refuses_context_dependent_legacy_item_ids_without_m
                 predecessor_segment_id,
             ));
         }
-        items.push(started(format!("turn-{index}").as_str()));
-        items.push(user_message(format!("question-{index}").as_str()));
-        items.push(completed(format!("turn-{index}").as_str()));
+        items.push(started(turn_ids[index]));
+        for item_index in 0..item_counts[index] {
+            items.push(user_message(
+                format!("question-{index}-{item_index}").as_str(),
+            ));
+        }
+        items.push(completed(turn_ids[index]));
         write_legacy_segment(path.as_path(), home.path(), thread_id, segment_id, items);
         predecessor = Some((path.clone(), segment_id));
         source_paths.push(path);
@@ -2930,46 +2953,213 @@ async fn segmented_migration_refuses_context_dependent_legacy_item_ids_without_m
         .map(|path| fs::read(path).expect("read Legacy source"))
         .collect::<Vec<_>>();
     let selected_path = source_paths.last().expect("selected path").clone();
-    let store = indexed_store(home.path()).await;
+    let initial_bounded = codex_rollout::materialize_bounded_rollout_lines(
+        home.path(),
+        selected_path.as_path(),
+        codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+    )
+    .await
+    .expect("materialize initial Legacy Desktop history");
+    let initial_turns = build_turns_from_rollout_items(
+        initial_bounded
+            .lines
+            .iter()
+            .map(|line| line.item.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
+    let initial_reported_turn = initial_turns
+        .iter()
+        .find(|turn| turn.id == CONTEXT_DEPENDENT_TURN_ID)
+        .expect("initial Desktop history contains reported turn");
+    assert_eq!(
+        initial_reported_turn
+            .items
+            .iter()
+            .map(codex_app_server_protocol::ThreadItem::id)
+            .collect::<Vec<_>>(),
+        vec!["item-161"]
+    );
+    let complete_legacy =
+        codex_rollout::materialize_rollout_lines(home.path(), selected_path.as_path())
+            .await
+            .expect("materialize complete Legacy history");
+    let complete_legacy_turns = build_turns_from_rollout_items(
+        complete_legacy
+            .iter()
+            .map(|line| line.item.clone())
+            .collect::<Vec<_>>()
+            .as_slice(),
+    );
+    let complete_reported_turn = complete_legacy_turns
+        .iter()
+        .find(|turn| turn.id == CONTEXT_DEPENDENT_TURN_ID)
+        .expect("complete Legacy history contains reported turn");
+    assert_eq!(
+        complete_reported_turn
+            .items
+            .iter()
+            .map(codex_app_server_protocol::ThreadItem::id)
+            .collect::<Vec<_>>(),
+        vec!["item-558"]
+    );
+    let initial_items = initial_turns
+        .iter()
+        .flat_map(|turn| {
+            turn.items.iter().map(|item| {
+                (
+                    turn.id.clone(),
+                    item.id().to_string(),
+                    serde_json::to_vec(item).expect("serialize initial Legacy item"),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    let initial_turn_ids = initial_turns
+        .iter()
+        .map(|turn| turn.id.clone())
+        .collect::<HashSet<_>>();
+
+    ContextDependentLegacyFixture {
+        home,
+        thread_id,
+        source_paths,
+        source_bytes,
+        selected_path,
+        initial_items,
+        initial_turn_ids,
+        total_item_count: item_counts.into_iter().sum(),
+    }
+}
+
+async fn assert_context_dependent_migration_projection(
+    store: &LocalThreadStore,
+    fixture: &ContextDependentLegacyFixture,
+) {
+    let mut cursor = None;
+    let mut all_migrated_items = Vec::new();
+    loop {
+        let page = store
+            .list_items(ListItemsParams {
+                thread_id: fixture.thread_id,
+                turn_id: None,
+                include_archived: false,
+                cursor,
+                page_size: 100,
+                sort_direction: SortDirection::Asc,
+                sort_key: ItemSortKey::CreatedAtOrdinal,
+                after_updated_at_ordinal: None,
+            })
+            .await
+            .expect("list every migrated Paginated item");
+        all_migrated_items.extend(
+            page.items
+                .into_iter()
+                .map(|item| (item.turn_id, item.item_id, item.item_json)),
+        );
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    let migrated_items = all_migrated_items
+        .iter()
+        .filter(|(turn_id, _, _)| fixture.initial_turn_ids.contains(turn_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(migrated_items, fixture.initial_items);
+    assert_eq!(all_migrated_items.len(), fixture.total_item_count);
+    assert_eq!(
+        all_migrated_items
+            .iter()
+            .map(|(_, item_id, _)| item_id)
+            .collect::<HashSet<_>>()
+            .len(),
+        all_migrated_items.len(),
+        "the newly pageable older item must not reuse an initially visible item ID"
+    );
+}
+
+fn assert_legacy_sources_unchanged(fixture: &ContextDependentLegacyFixture) {
+    assert_eq!(
+        fixture
+            .source_paths
+            .iter()
+            .map(|path| fs::read(path).expect("reread Legacy source"))
+            .collect::<Vec<_>>(),
+        fixture.source_bytes
+    );
+}
+
+#[tokio::test]
+async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_history() {
+    let fixture = context_dependent_legacy_fixture().await;
+    let store = indexed_store(fixture.home.path()).await;
 
     let dry_run = store
         .migrate_rollouts(RolloutMigrationOptions::default())
         .await
-        .expect("dry-run incompatible segmented migration");
+        .expect("dry-run segmented migration with bounded Legacy IDs");
     assert_eq!(dry_run.outcomes.len(), 1);
-    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Failed);
-    assert!(
-        dry_run.outcomes[0].message.as_deref().is_some_and(
-            |message| message.contains("bounded Legacy Desktop history is not canonical")
-        ),
-        "{:?}",
-        dry_run.outcomes[0].message
-    );
+    assert_eq!(dry_run.outcomes[0].status, RolloutMigrationStatus::Eligible);
 
     let apply = store
         .migrate_rollouts(apply_options())
         .await
-        .expect("apply incompatible segmented migration");
+        .expect("migrate segmented history with bounded Legacy IDs");
     assert_eq!(apply.outcomes.len(), 1);
-    assert_eq!(apply.outcomes[0].status, RolloutMigrationStatus::Failed);
-    assert_eq!(
-        source_paths
-            .iter()
-            .map(|path| fs::read(path).expect("reread Legacy source"))
-            .collect::<Vec<_>>(),
-        source_bytes
-    );
+    assert_eq!(apply.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_legacy_sources_unchanged(&fixture);
     let selected = store
         .state_db
         .as_ref()
         .expect("state db")
-        .get_thread(thread_id)
+        .get_thread(fixture.thread_id)
         .await
         .expect("read selected thread")
         .expect("selected thread");
-    assert_eq!(selected.rollout_path, selected_path);
-    assert_eq!(selected.history_mode, ThreadHistoryMode::Legacy);
-    assert_no_migration_artifacts(home.path(), selected_path.as_path(), thread_id).await;
+    assert_ne!(selected.rollout_path, fixture.selected_path);
+    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
+    let migrated_meta = codex_rollout::read_session_meta_line(selected.rollout_path.as_path())
+        .await
+        .expect("read migrated selected SessionMeta");
+    assert!(migrated_meta.meta.history_base.is_some());
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+}
+
+#[tokio::test]
+async fn automatic_migration_reads_context_dependent_legacy_ids_after_paginated_conversion() {
+    let fixture = context_dependent_legacy_fixture().await;
+    let store = indexed_store(fixture.home.path()).await;
+    store.start_automatic_rollout_migration();
+
+    ThreadStore::read_thread(
+        &store,
+        ReadThreadParams {
+            thread_id: fixture.thread_id,
+            include_archived: false,
+            include_history: true,
+        },
+    )
+    .await
+    .expect("automatic migration must convert context-dependent Legacy IDs");
+
+    let selected = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(fixture.thread_id)
+        .await
+        .expect("read automatically migrated thread")
+        .expect("automatically migrated thread");
+    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
+    assert_ne!(selected.rollout_path, fixture.selected_path);
+    let migrated_meta = codex_rollout::read_session_meta_line(selected.rollout_path.as_path())
+        .await
+        .expect("read automatically migrated SessionMeta");
+    assert!(migrated_meta.meta.history_base.is_some());
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+    assert_legacy_sources_unchanged(&fixture);
 }
 
 #[tokio::test]

@@ -5,6 +5,7 @@
 //! thread's prefix. This module authenticates that graph and records its sources before the
 //! migration transaction writes any target file.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
@@ -82,6 +83,8 @@ pub(super) struct LegacyLineageMigrationPlan {
     pub(super) reference_dependencies: Vec<LegacyReferenceDependency>,
     /// Deterministic unpublished targets in the same oldest-to-newest order as `sources`.
     pub(super) targets: Vec<LegacyLineageTarget>,
+    /// Synthetic IDs reassigned so the initial bounded Legacy response remains unchanged.
+    pub(super) synthetic_item_id_remap: HashMap<String, String>,
 }
 
 /// One already-Paginated source whose authenticated prefix remains external to the migration.
@@ -168,6 +171,7 @@ pub(super) async fn plan_legacy_lineage(
         history_bases,
         reference_dependencies,
         targets,
+        synthetic_item_id_remap: HashMap::new(),
     })
 }
 
