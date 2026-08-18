@@ -477,6 +477,7 @@ async fn custom_model_aliases_do_not_change_the_pinned_collaboration_contract() 
                     routing_profile: None,
                     model_context_window: None,
                     model_auto_compact_token_limit: None,
+                    trust_candidate_constraints: false,
                 },
             ),
             (
@@ -486,6 +487,7 @@ async fn custom_model_aliases_do_not_change_the_pinned_collaboration_contract() 
                     routing_profile: None,
                     model_context_window: None,
                     model_auto_compact_token_limit: None,
+                    trust_candidate_constraints: false,
                 },
             ),
         ]);
