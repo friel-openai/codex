@@ -67,6 +67,7 @@ use super::decompressed_staged_rollout_path;
 use super::lineage::LegacyLineagePredecessor;
 use super::lineage::hash_file;
 use super::lineage::plan_legacy_lineage;
+use super::lineage::target_file_name;
 use super::lineage_journal::LineageMigrationJournal;
 use super::lineage_journal::LineageMigrationPhase;
 use super::lineage_journal::read_lineage_migration_journal;
@@ -90,6 +91,23 @@ use crate::TurnPage;
 use crate::local::test_support::test_config;
 
 const TIMESTAMP: &str = "2025-01-03T12:00:00Z";
+
+#[test]
+fn lineage_target_filename_accepts_legacy_filename_timestamp() {
+    let thread_id = ThreadId::new();
+
+    assert_eq!(
+        target_file_name(
+            "2025-01-03T13-42-00",
+            thread_id,
+            thread_id,
+            /*compressed*/ false,
+            /*physical_history*/ false,
+        )
+        .expect("legacy filename timestamp should parse"),
+        format!("rollout-2025-01-03T13-42-00-{thread_id}.jsonl")
+    );
+}
 
 fn write_rollout(
     home: &Path,

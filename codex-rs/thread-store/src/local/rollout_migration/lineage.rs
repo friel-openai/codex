@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use chrono::DateTime;
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
@@ -25,6 +24,7 @@ use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 
 use super::migration_error;
+use super::parse_rollout_timestamp;
 use crate::ThreadStoreResult;
 
 /// One authenticated physical source in oldest-to-newest migration order.
@@ -508,14 +508,14 @@ fn plan_targets(
     Ok(targets)
 }
 
-fn target_file_name(
+pub(super) fn target_file_name(
     timestamp: &str,
     thread_id: ThreadId,
     rollout_id: RolloutId,
     compressed: bool,
     physical_history: bool,
 ) -> ThreadStoreResult<String> {
-    let timestamp = DateTime::parse_from_rfc3339(timestamp).map_err(migration_error)?;
+    let timestamp = parse_rollout_timestamp(timestamp)?;
     let timestamp = if physical_history {
         timestamp - chrono::Duration::seconds(1)
     } else {
