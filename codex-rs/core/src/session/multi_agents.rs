@@ -3,7 +3,6 @@ use crate::context::MultiAgentRoleInstructions;
 use crate::session::turn_context::TurnContext;
 use codex_protocol::config_types::MultiAgentMode;
 use codex_protocol::openai_models::MultiAgentRoleMessages;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
@@ -174,20 +173,14 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
         .as_deref()
         .or_else(|| catalog_mode.and_then(|mode| mode.hint_text.as_deref()));
 
-    // A configured or catalog hint, including an empty string, defines a custom policy instead
-    // of an effort-derived built-in policy.
+    // Custom hints, including empty strings, override Frodex's effort-independent proactive
+    // default. Catalog mode templates supply wording without restricting the reasoning effort.
     let multi_agent_mode = match mode_hint_text {
         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
-        None => match turn_context.effective_reasoning_effort() {
-            Some(ReasoningEffort::Ultra) => catalog_mode
-                .and_then(|messages| messages.proactive.clone())
-                .map(MultiAgentMode::Custom)
-                .unwrap_or(MultiAgentMode::Proactive),
-            _ => catalog_mode
-                .and_then(|messages| messages.explicit.clone())
-                .map(MultiAgentMode::Custom)
-                .unwrap_or(MultiAgentMode::ExplicitRequestOnly),
-        },
+        None => catalog_mode
+            .and_then(|messages| messages.proactive.clone())
+            .map(MultiAgentMode::Custom)
+            .unwrap_or(MultiAgentMode::Proactive),
     };
 
     match &turn_context.session_source {

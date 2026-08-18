@@ -11614,6 +11614,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
         |config| {
             if enable_multi_agent_v2 {
                 let _ = config.features.enable(Feature::MultiAgentV2);
+            } else {
+                config
+                    .features
+                    .disable(Feature::MultiAgentV2)
+                    .expect("test config should disable V2");
             }
             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
@@ -14249,16 +14254,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
 async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
     let codex_home = tempfile::tempdir().expect("create temp dir");
     let mut config = build_test_config(codex_home.path()).await;
-    for feature in [
-        Feature::AgentPromptInjection,
-        Feature::Goals,
-        Feature::GoalSupervisor,
-    ] {
-        config
-            .features
-            .enable(feature)
-            .expect("test config should enable goal supervisor prompt injection");
-    }
+    config
+        .features
+        .enable(Feature::Goals)
+        .expect("test config should enable goals");
 
     let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
         .await
