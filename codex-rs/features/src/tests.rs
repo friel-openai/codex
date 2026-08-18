@@ -398,17 +398,14 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
 }
 
 #[test]
-fn goal_supervisor_is_experimental_and_disabled_by_default() {
+fn goal_supervisor_is_stable_and_enabled_by_default() {
     assert_eq!(
         feature_for_key("goal_supervisor"),
         Some(Feature::GoalSupervisor)
     );
-    assert!(matches!(
-        Feature::GoalSupervisor.stage(),
-        Stage::Experimental { .. }
-    ));
-    assert!(!Feature::GoalSupervisor.default_enabled());
-    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
+    assert_eq!(Feature::GoalSupervisor.stage(), Stage::Stable);
+    assert!(Feature::GoalSupervisor.default_enabled());
+    assert!(Features::with_defaults().enabled(Feature::GoalSupervisor));
 }
 
 fn apps_require_feature_flag_and_chatgpt_auth() {

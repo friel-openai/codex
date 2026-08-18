@@ -1407,12 +1407,8 @@ pub const FEATURES: &[FeatureSpec] = &[
     FeatureSpec {
         id: Feature::GoalSupervisor,
         key: "goal_supervisor",
-        stage: Stage::Experimental {
-            name: "Goal supervisor",
-            menu_description: "Use an internal supervisor helper for active goal continuation.",
-            announcement: "",
-        },
-        default_enabled: false,
+        stage: Stage::Stable,
+        default_enabled: true,
     },
     FeatureSpec {
         id: Feature::TokenBudget,
