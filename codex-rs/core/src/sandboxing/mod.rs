@@ -15,6 +15,7 @@ use crate::exec::execute_exec_request;
 use crate::spawn::CODEX_SANDBOX_ENV_VAR;
 use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_file_system::FileSystemSandboxContext;
+use codex_network_proxy::EnvironmentProxyLease;
 use codex_network_proxy::ManagedNetworkSandboxContext;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
@@ -54,6 +55,8 @@ pub struct ExecRequest {
     pub(crate) exec_server_env_config: Option<ExecServerEnvConfig>,
     pub network: Option<NetworkProxy>,
     pub network_environment_id: Option<String>,
+    /// Keeps environment-specific proxy listeners alive for this execution.
+    pub(crate) environment_proxy_lease: Option<EnvironmentProxyLease>,
     pub expiration: ExecExpiration,
     pub capture_policy: ExecCapturePolicy,
     pub sandbox: SandboxType,
@@ -96,6 +99,7 @@ impl ExecRequest {
             exec_server_env_config: None,
             network,
             network_environment_id,
+            environment_proxy_lease: None,
             expiration,
             capture_policy,
             sandbox,
@@ -184,6 +188,7 @@ impl ExecRequest {
             exec_server_env_config: None,
             network,
             network_environment_id,
+            environment_proxy_lease: None,
             expiration,
             capture_policy,
             sandbox,
