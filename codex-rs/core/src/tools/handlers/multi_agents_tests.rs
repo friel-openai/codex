@@ -956,7 +956,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
 }
 
 #[tokio::test]
-async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+async fn multi_agent_v2_ownership_transfer_can_be_explicitly_disabled() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
     let root = manager
@@ -966,6 +966,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
     session.services.agent_control = manager.agent_control();
     session.thread_id = root.thread_id;
     let mut config = (*turn.config).clone();
+    config.multi_agent_v2.enable_thread_adoption = false;
     config
         .features
         .enable(Feature::MultiAgentV2)
@@ -987,7 +988,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
         ))
         .await
     else {
-        panic!("existing-thread adoption must be disabled by default");
+        panic!("existing-thread adoption must respect the explicit opt-out");
     };
     let Err(promote_error) = PromoteAgentHandler
         .handle(invocation(
@@ -998,7 +999,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
         ))
         .await
     else {
-        panic!("subagent promotion must be disabled by default");
+        panic!("subagent promotion must respect the explicit opt-out");
     };
 
     let expected = FunctionCallError::RespondToModel(
@@ -4544,12 +4545,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
         .expect("closed children should load");
     assert_eq!(closed_children, Vec::<ThreadId>::new());
 
+    // The live root is listed separately; this assertion concerns only the unloaded worker.
     let output = ListAgentsHandlerV2
         .handle(invocation(
             session.clone(),
             turn.clone(),
             "list_agents",
-            function_payload(json!({})),
+            function_payload(json!({"path_prefix": "worker"})),
         ))
         .await
         .expect("list_agents should succeed");
