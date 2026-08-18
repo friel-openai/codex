@@ -23,7 +23,6 @@ use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 
-use super::MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES;
 use super::lineage::LegacyLineageMigrationPlan;
 use super::lineage_stage::stage_legacy_lineage;
 use super::migration_error;
@@ -33,40 +32,13 @@ pub(super) async fn validate_bounded_desktop_history(
     codex_home: &Path,
     plan: &mut LegacyLineageMigrationPlan,
 ) -> ThreadStoreResult<()> {
-    let source_bytes = plan.sources.iter().try_fold(0_u64, |total, source| {
-        total
-            .checked_add(source.byte_count)
-            .ok_or_else(|| migration_error("lineage migration source byte count overflowed"))
-    })?;
-    ensure_bounded_compatibility_size(source_bytes)?;
-    let stage = tempfile::tempdir().map_err(migration_error)?;
-    let staged = stage_legacy_lineage(plan, stage.path()).await?;
     let selected = plan
         .sources
         .last()
         .ok_or_else(|| migration_error("lineage migration has no selected source"))?;
-    let inherited = if let Some(dependency) = plan.history_bases.first() {
-        codex_rollout::materialize_rollout_lines(codex_home, selected.path.as_path())
-            .await
-            .map_err(migration_error)?
-            .into_iter()
-            .filter(|line| {
-                line.ordinal
-                    .is_some_and(|ordinal| ordinal < dependency.position.end_ordinal_exclusive)
-            })
-            .collect::<Vec<_>>()
-    } else {
-        Vec::new()
-    };
-    let mut canonical = canonical_turns_from_rollouts(
-        inherited.as_slice(),
-        staged_paths(staged.as_slice()).as_slice(),
-    )
-    .await?;
-
     let mut materializer =
         codex_rollout::BoundedRolloutMaterializer::new(codex_home, selected.path.as_path());
-    let mut reference_limit = DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+    let reference_limit = DEFAULT_ROLLOUT_REFERENCE_DEPTH;
     let initial = materializer
         .materialize(reference_limit)
         .await
@@ -75,58 +47,46 @@ pub(super) async fn validate_bounded_desktop_history(
         initial.lines.iter().map(|line| &line.item),
         selected.history_mode,
     );
+    let retained_turn_ids = initial_turns
+        .iter()
+        .map(|turn| turn.id.clone())
+        .collect::<HashSet<_>>();
+    let retained_item_ids = initial_turns
+        .iter()
+        .flat_map(|turn| turn.items.iter().map(|item| item.id().to_string()))
+        .collect::<HashSet<_>>();
+
+    let stage = tempfile::tempdir().map_err(migration_error)?;
+    let staged = stage_legacy_lineage(plan, stage.path()).await?;
+    let mut canonical = canonical_turns_from_rollouts(
+        staged_paths(staged.as_slice()).as_slice(),
+        &retained_turn_ids,
+        &retained_item_ids,
+    )
+    .await?;
     plan.synthetic_item_id_remap = derive_initial_synthetic_item_id_remap(
         reference_limit,
         initial_turns.as_slice(),
-        canonical.as_slice(),
+        canonical.turns.as_slice(),
+        &canonical.retained_item_ids,
+        canonical.max_synthetic_item_index,
     )?;
     if !plan.synthetic_item_id_remap.is_empty() {
         let staged = stage_legacy_lineage(plan, stage.path()).await?;
         canonical = canonical_turns_from_rollouts(
-            inherited.as_slice(),
             staged_paths(staged.as_slice()).as_slice(),
+            &retained_turn_ids,
+            &retained_item_ids,
         )
         .await?;
     }
     compare_turns(
         reference_limit,
         initial_turns.as_slice(),
-        canonical.as_slice(),
+        canonical.turns.as_slice(),
         /*compare_item_ids*/ true,
     )?;
-    if !initial.has_older_reference {
-        return Ok(());
-    }
-
-    loop {
-        if reference_limit >= codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH {
-            return Err(migration_error(format!(
-                "bounded Legacy Desktop history exceeds {} references",
-                codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH
-            )));
-        }
-        reference_limit = reference_limit
-            .checked_mul(2)
-            .unwrap_or(codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH)
-            .min(codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH);
-        let bounded = materializer
-            .materialize(reference_limit)
-            .await
-            .map_err(migration_error)?;
-        let bounded_turns = turns_from_items(
-            bounded.lines.iter().map(|line| &line.item),
-            selected.history_mode,
-        );
-        compare_turns(
-            reference_limit,
-            bounded_turns.as_slice(),
-            canonical.as_slice(),
-            /*compare_item_ids*/ false,
-        )?;
-        if !bounded.has_older_reference {
-            return Ok(());
-        }
-    }
+    Ok(())
 }
 
 fn staged_paths(staged: &[super::lineage_stage::StagedLineageTarget]) -> Vec<PathBuf> {
@@ -146,18 +106,113 @@ struct CanonicalItem {
     item: ThreadItem,
 }
 
-async fn canonical_turns_from_rollouts(
-    inherited: &[codex_rollout::RolloutLine],
-    paths: &[PathBuf],
-) -> ThreadStoreResult<Vec<Turn>> {
-    let mut turns = HashMap::<String, CanonicalTurn>::new();
-    let mut items = HashMap::<(String, String), CanonicalItem>::new();
-    for line in inherited {
-        let ordinal = line
-            .ordinal
-            .ok_or_else(|| migration_error("inherited Paginated line is missing its ordinal"))?;
-        apply_projected_line(&mut turns, &mut items, ordinal, line);
+/// Canonical state needed to preserve the existing bounded Desktop response.
+///
+/// The staged lineage can be arbitrarily large. This projection retains only turns already
+/// visible in the bounded Legacy response, the subset of generated IDs that could collide with
+/// those turns, and the largest generated ID needed to allocate collision-free replacements.
+struct CanonicalProjection {
+    /// Canonical versions of turns visible before migration.
+    turns: Vec<Turn>,
+    /// Canonical item IDs that are also used by the bounded Legacy response.
+    retained_item_ids: HashSet<String>,
+    /// Largest numeric suffix observed across every staged `item-N` ID.
+    max_synthetic_item_index: u64,
+}
+
+/// Incremental projection restricted to the bounded Desktop response.
+struct CanonicalProjectionBuilder<'a> {
+    turns: HashMap<String, CanonicalTurn>,
+    items: HashMap<(String, String), CanonicalItem>,
+    retained_item_owners: HashMap<String, HashSet<String>>,
+    max_synthetic_item_index: u64,
+    retained_turn_ids: &'a HashSet<String>,
+    retained_item_ids: &'a HashSet<String>,
+}
+
+impl<'a> CanonicalProjectionBuilder<'a> {
+    fn new(retained_turn_ids: &'a HashSet<String>, retained_item_ids: &'a HashSet<String>) -> Self {
+        Self {
+            turns: HashMap::new(),
+            items: HashMap::new(),
+            retained_item_owners: HashMap::new(),
+            max_synthetic_item_index: 0,
+            retained_turn_ids,
+            retained_item_ids,
+        }
     }
+
+    fn apply(&mut self, ordinal: u64, line: &codex_rollout::RolloutLine) {
+        let changes = project_rollout_line(line);
+        for turn_id in changes.removed_turn_ids {
+            for owners in self.retained_item_owners.values_mut() {
+                owners.remove(turn_id.as_str());
+            }
+            if self.retained_turn_ids.contains(turn_id.as_str()) {
+                self.turns.remove(turn_id.as_str());
+                self.items
+                    .retain(|(item_turn_id, _), _| item_turn_id != &turn_id);
+            }
+        }
+        for turn in changes.changed_turns {
+            if self.retained_turn_ids.contains(turn.turn_id.as_str()) {
+                apply_turn_change(&mut self.turns, ordinal, turn);
+            }
+        }
+        for item in changes.changed_items {
+            let item_id = item.item.id().to_string();
+            if self.retained_item_ids.contains(item_id.as_str()) {
+                self.retained_item_owners
+                    .entry(item_id.clone())
+                    .or_default()
+                    .insert(item.turn_id.clone());
+            }
+            if let Some(index) = item_id
+                .strip_prefix("item-")
+                .and_then(|index| index.parse::<u64>().ok())
+            {
+                self.max_synthetic_item_index = self.max_synthetic_item_index.max(index);
+            }
+            if self.retained_turn_ids.contains(item.turn_id.as_str()) {
+                apply_item_change(&mut self.items, ordinal, item);
+            }
+        }
+    }
+
+    fn finish(self) -> CanonicalProjection {
+        let mut items_by_turn = HashMap::<String, Vec<CanonicalItem>>::new();
+        for ((turn_id, _), item) in self.items {
+            items_by_turn.entry(turn_id).or_default().push(item);
+        }
+        let mut turns = self.turns.into_values().collect::<Vec<_>>();
+        turns.sort_by_key(|turn| turn.ordinal);
+        let turns = turns
+            .into_iter()
+            .map(|mut turn| {
+                let mut turn_items = items_by_turn.remove(&turn.turn.id).unwrap_or_default();
+                turn_items.sort_by_key(|item| item.ordinal);
+                turn.turn.items = turn_items.into_iter().map(|item| item.item).collect();
+                turn.turn
+            })
+            .collect();
+        CanonicalProjection {
+            turns,
+            retained_item_ids: self
+                .retained_item_owners
+                .into_iter()
+                .filter_map(|(item_id, owners)| (!owners.is_empty()).then_some(item_id))
+                .collect(),
+            max_synthetic_item_index: self.max_synthetic_item_index,
+        }
+    }
+}
+
+async fn canonical_turns_from_rollouts(
+    paths: &[PathBuf],
+    retained_turn_ids: &HashSet<String>,
+    retained_item_ids: &HashSet<String>,
+) -> ThreadStoreResult<CanonicalProjection> {
+    let mut projection = CanonicalProjectionBuilder::new(retained_turn_ids, retained_item_ids);
     for path in paths {
         let mut reader = codex_rollout::open_rollout_line_reader(path.as_path())
             .await
@@ -169,52 +224,10 @@ async fn canonical_turns_from_rollouts(
             let ordinal = line
                 .ordinal
                 .ok_or_else(|| migration_error("staged rollout line is missing its ordinal"))?;
-            apply_projected_line(&mut turns, &mut items, ordinal, &line);
+            projection.apply(ordinal, &line);
         }
     }
-    let mut items_by_turn = HashMap::<String, Vec<CanonicalItem>>::new();
-    for ((turn_id, _), item) in items {
-        items_by_turn.entry(turn_id).or_default().push(item);
-    }
-    let mut turns = turns.into_values().collect::<Vec<_>>();
-    turns.sort_by_key(|turn| turn.ordinal);
-    Ok(turns
-        .into_iter()
-        .map(|mut turn| {
-            let mut turn_items = items_by_turn.remove(&turn.turn.id).unwrap_or_default();
-            turn_items.sort_by_key(|item| item.ordinal);
-            turn.turn.items = turn_items.into_iter().map(|item| item.item).collect();
-            turn.turn
-        })
-        .collect())
-}
-
-fn apply_projected_line(
-    turns: &mut HashMap<String, CanonicalTurn>,
-    items: &mut HashMap<(String, String), CanonicalItem>,
-    ordinal: u64,
-    line: &codex_rollout::RolloutLine,
-) {
-    let changes = project_rollout_line(line);
-    for turn_id in changes.removed_turn_ids {
-        turns.remove(turn_id.as_str());
-        items.retain(|(item_turn_id, _), _| item_turn_id != &turn_id);
-    }
-    for turn in changes.changed_turns {
-        apply_turn_change(turns, ordinal, turn);
-    }
-    for item in changes.changed_items {
-        apply_item_change(items, ordinal, item);
-    }
-}
-
-fn ensure_bounded_compatibility_size(source_bytes: u64) -> ThreadStoreResult<()> {
-    if source_bytes <= MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES {
-        return Ok(());
-    }
-    Err(migration_error(format!(
-        "bounded Legacy Desktop compatibility proof requires {source_bytes} source bytes, which exceeds the fixed {MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES}-byte memory-safety limit; source files were not changed"
-    )))
+    Ok(projection.finish())
 }
 
 fn apply_turn_change(
@@ -286,6 +299,8 @@ fn derive_initial_synthetic_item_id_remap(
     reference_limit: usize,
     bounded: &[Turn],
     canonical: &[Turn],
+    canonical_retained_item_ids: &HashSet<String>,
+    canonical_max_synthetic_item_index: u64,
 ) -> ThreadStoreResult<HashMap<String, String>> {
     let canonical_by_id = canonical
         .iter()
@@ -349,18 +364,12 @@ fn derive_initial_synthetic_item_id_remap(
         return Err(no_migrated_turn_error(reference_limit, bounded, canonical));
     }
 
-    let canonical_ids = canonical
-        .iter()
-        .flat_map(|turn| turn.items.iter().map(|item| item.id().to_string()))
-        .collect::<Vec<_>>();
-    let mut occupied = canonical_ids.iter().cloned().collect::<HashSet<_>>();
-    occupied.extend(desired_owners.keys().cloned());
-    let mut next_item_index = canonical_ids
-        .iter()
-        .chain(desired_owners.keys())
+    let mut next_item_index = desired_owners
+        .keys()
         .filter_map(|id| id.strip_prefix("item-")?.parse::<u64>().ok())
         .max()
         .unwrap_or(0)
+        .max(canonical_max_synthetic_item_index)
         .checked_add(1)
         .ok_or_else(|| migration_error("Legacy synthetic item ID overflowed"))?;
     let mut remap = visible_ids
@@ -368,22 +377,15 @@ fn derive_initial_synthetic_item_id_remap(
         .filter(|(canonical_id, desired_id)| canonical_id != desired_id)
         .map(|(canonical_id, desired_id)| (canonical_id.clone(), desired_id.clone()))
         .collect::<HashMap<_, _>>();
-    for canonical_id in canonical_ids {
-        if visible_ids.contains_key(canonical_id.as_str())
-            || !desired_owners.contains_key(canonical_id.as_str())
-        {
+    for (desired_id, canonical_owner) in &desired_owners {
+        if desired_id == canonical_owner || !canonical_retained_item_ids.contains(desired_id) {
             continue;
         }
-        let replacement = loop {
-            let candidate = format!("item-{next_item_index}");
-            next_item_index = next_item_index
-                .checked_add(1)
-                .ok_or_else(|| migration_error("Legacy synthetic item ID overflowed"))?;
-            if occupied.insert(candidate.clone()) {
-                break candidate;
-            }
-        };
-        remap.insert(canonical_id, replacement);
+        let replacement = format!("item-{next_item_index}");
+        next_item_index = next_item_index
+            .checked_add(1)
+            .ok_or_else(|| migration_error("Legacy synthetic item ID overflowed"))?;
+        remap.insert(desired_id.clone(), replacement);
     }
     Ok(remap)
 }
@@ -511,18 +513,4 @@ fn incompatible(reference_limit: usize, turn_id: &str, reason: &str) -> crate::T
     migration_error(format!(
         "bounded Legacy Desktop history is not canonical at reference depth {reference_limit}: turn {turn_id} {reason}; source files were not changed"
     ))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES;
-    use super::ensure_bounded_compatibility_size;
-
-    #[test]
-    fn bounded_compatibility_size_limit_is_inclusive_and_fail_closed() {
-        assert!(ensure_bounded_compatibility_size(MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES).is_ok());
-        let error = ensure_bounded_compatibility_size(MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES + 1)
-            .expect_err("oversized compatibility proof must fail closed");
-        assert!(error.to_string().contains("source files were not changed"));
-    }
 }

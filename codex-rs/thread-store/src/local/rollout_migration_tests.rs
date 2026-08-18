@@ -3163,6 +3163,118 @@ async fn automatic_migration_reads_context_dependent_legacy_ids_after_paginated_
 }
 
 #[tokio::test]
+async fn automatic_migration_streams_large_reference_lineage_with_malformed_tail() {
+    const PREVIOUS_TOTAL_SOURCE_BYTE_LIMIT: u64 = 128 * 1024 * 1024;
+    const PADDING_LINE_BYTES: usize = 1024 * 1024;
+
+    let fixture = context_dependent_legacy_fixture().await;
+    let source_bytes = fixture
+        .source_paths
+        .iter()
+        .map(|path| fs::metadata(path).expect("read source metadata").len())
+        .sum::<u64>();
+    let padding_bytes = PREVIOUS_TOTAL_SOURCE_BYTE_LIMIT
+        .saturating_add(1)
+        .saturating_sub(source_bytes);
+    let mut oldest = fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture.source_paths[0])
+        .expect("open oldest Legacy source");
+    let mut padding_line = vec![b' '; PADDING_LINE_BYTES];
+    *padding_line.last_mut().expect("padding line") = b'\n';
+    let mut written = 0_u64;
+    while written < padding_bytes {
+        let remaining = usize::try_from(padding_bytes.saturating_sub(written))
+            .unwrap_or(usize::MAX)
+            .min(PADDING_LINE_BYTES);
+        if remaining == 1 {
+            oldest.write_all(b"\n").expect("write final padding byte");
+        } else {
+            oldest
+                .write_all(&padding_line[..remaining - 1])
+                .expect("write Legacy source padding");
+            oldest
+                .write_all(b"\n")
+                .expect("terminate Legacy source padding");
+        }
+        written = written.saturating_add(remaining as u64);
+    }
+    drop(oldest);
+
+    let mut selected = fs::OpenOptions::new()
+        .append(true)
+        .open(&fixture.selected_path)
+        .expect("open selected Legacy source");
+    serde_json::to_writer(
+        &mut selected,
+        &RolloutLine {
+            timestamp: "2026-08-06T13:54:48.638Z".to_string(),
+            ordinal: None,
+            item: started("truncated-turn"),
+        },
+    )
+    .expect("append started turn before malformed tail");
+    selected
+        .write_all(b"\n")
+        .expect("terminate started turn before malformed tail");
+    writeln!(
+        selected,
+        r#"{{"timestamp":"2026-08-06T13:54:48.639Z","type":"response_item","payload":{{"type":"message","content":"interrupted"#
+    )
+    .expect("append malformed final Legacy record");
+    drop(selected);
+
+    let total_source_bytes = fixture
+        .source_paths
+        .iter()
+        .map(|path| fs::metadata(path).expect("reread source metadata").len())
+        .sum::<u64>();
+    assert!(total_source_bytes > PREVIOUS_TOTAL_SOURCE_BYTE_LIMIT);
+    let source_hashes = futures::future::try_join_all(
+        fixture
+            .source_paths
+            .iter()
+            .map(|path| hash_file(path.as_path())),
+    )
+    .await
+    .expect("hash large Legacy sources");
+
+    let store = indexed_store(fixture.home.path()).await;
+    store.start_automatic_rollout_migration();
+    ThreadStore::read_thread(
+        &store,
+        ReadThreadParams {
+            thread_id: fixture.thread_id,
+            include_archived: false,
+            include_history: true,
+        },
+    )
+    .await
+    .expect("automatic migration must stream the oversized Legacy lineage");
+
+    let selected = store
+        .state_db
+        .as_ref()
+        .expect("state db")
+        .get_thread(fixture.thread_id)
+        .await
+        .expect("read migrated thread")
+        .expect("migrated thread");
+    assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
+    assert_ne!(selected.rollout_path, fixture.selected_path);
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+    let hashes_after = futures::future::try_join_all(
+        fixture
+            .source_paths
+            .iter()
+            .map(|path| hash_file(path.as_path())),
+    )
+    .await
+    .expect("rehash large Legacy sources");
+    assert_eq!(hashes_after, source_hashes);
+}
+
+#[tokio::test]
 async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
     for phase in [
         LineageMigrationPhase::Planned,

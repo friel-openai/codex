@@ -305,7 +305,9 @@ async fn indexed_same_thread_lineage_from_resolved(
 /// Checks the newest projected root turn without resolving the selected rollout a second time.
 ///
 /// Forked histories return `None` so callers retain the complete lineage check. A complete
-/// same-thread native `history_base` projection is already one logical ordinal range.
+/// same-thread native `history_base` projection is already one logical ordinal range. An empty
+/// in-progress turn is valid: a process can durably write `TurnStarted` before its first item, and
+/// migration deliberately skips a malformed or partial item record at the end of a Legacy file.
 pub(in crate::local) async fn has_nonempty_newest_root_turn_for_resolved(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -329,9 +331,9 @@ pub(in crate::local) async fn has_nonempty_newest_root_turn_for_resolved(
         &lineage,
     )
     .await?;
-    Ok(Some(
-        page.turns.first().is_none_or(|turn| !turn.items.is_empty()),
-    ))
+    Ok(Some(page.turns.first().is_none_or(|turn| {
+        !turn.items.is_empty() || turn.status == StoredTurnStatus::InProgress
+    })))
 }
 
 /// Read an existing segmented legacy projection without exposing indexed cursors.

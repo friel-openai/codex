@@ -150,17 +150,18 @@ pub(super) async fn plan_legacy_lineage(
         &mut reference_dependencies,
     )
     .await?;
-    let source_bytes = sources.iter().try_fold(0_u64, |total, source| {
-        total
-            .checked_add(source.byte_count)
-            .ok_or_else(|| migration_error("lineage migration source byte count overflowed"))
-    })?;
-    if source_bytes <= super::MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES {
-        for source in &mut sources {
+    // Same-thread sources carry one reducer checkpoint through staging. Only the first source and
+    // sources after a fork, filtered reference, or Paginated boundary start a new reducer and need
+    // their materialized predecessor position. Computing it for every same-thread source would
+    // recursively replay the same predecessors and make planning quadratic.
+    for index in 0..sources.len() {
+        let starts_reducer =
+            index == 0 || !ordinary_same_thread_successor(&sources[index - 1], &sources[index]);
+        if starts_reducer {
             let (initial_source_line_index, initial_next_item_index) =
-                initial_legacy_replay_positions(codex_home, source).await?;
-            source.initial_source_line_index = initial_source_line_index;
-            source.initial_next_item_index = initial_next_item_index;
+                initial_legacy_replay_positions(codex_home, &sources[index]).await?;
+            sources[index].initial_source_line_index = initial_source_line_index;
+            sources[index].initial_next_item_index = initial_next_item_index;
         }
     }
     let targets = plan_targets(codex_home, selected_path.as_path(), &sources)?;
@@ -173,6 +174,22 @@ pub(super) async fn plan_legacy_lineage(
         targets,
         synthetic_item_id_remap: HashMap::new(),
     })
+}
+
+fn ordinary_same_thread_successor(
+    source: &LegacyLineageSource,
+    successor: &LegacyLineageSource,
+) -> bool {
+    if source.thread_id != successor.thread_id {
+        return false;
+    }
+    matches!(
+        successor.predecessor.as_ref(),
+        Some(LegacyLineagePredecessor::RolloutReference(reference))
+            if reference.thread_id == Some(source.thread_id)
+                && reference.nth_user_message.is_none()
+                && reference.compacted_replacement_history_filter_texts.is_none()
+    )
 }
 
 /// Reports whether a selected Paginated lineage still contains a `RolloutReference` that native

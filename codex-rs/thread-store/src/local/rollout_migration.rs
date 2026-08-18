@@ -97,9 +97,6 @@ use telemetry::RolloutMigrationTrigger;
 
 const PROJECTION_BATCH_BYTES: u64 = 256 * 1024;
 pub(super) const MAX_ROLLOUT_LINE_BYTES: usize = 16 * 1024 * 1024;
-// `ThreadHistoryBuilder` retains the visible Legacy turns while proving that Paginated projection
-// preserves them. Refuse larger proofs until the Legacy reducer can spill its state to disk.
-pub(super) const MAX_BOUNDED_DESKTOP_COMPATIBILITY_BYTES: u64 = 128 * 1024 * 1024;
 
 enum CanonicalizationAttempt {
     Complete {
