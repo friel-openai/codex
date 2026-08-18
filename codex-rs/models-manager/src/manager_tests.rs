@@ -783,6 +783,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
             routing_profile: None,
             model_context_window: Some(123_456),
             model_auto_compact_token_limit: Some(100_000),
+            trust_candidate_constraints: false,
         },
     );
     let mut remote = remote_model("gpt-real", "Real", /*priority*/ 0);
@@ -830,6 +831,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                 routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
+                trust_candidate_constraints: false,
             },
         ),
         (
@@ -839,6 +841,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                 routing_profile: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
+                trust_candidate_constraints: false,
             },
         ),
     ]);
@@ -876,6 +879,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
             routing_profile: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]));
     assert_eq!(
@@ -905,6 +909,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
             routing_profile: None,
             model_context_window: Some(64_000),
             model_auto_compact_token_limit: None,
+            trust_candidate_constraints: false,
         },
     )]);
 
@@ -952,6 +957,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
         routing_profile: None,
         model_context_window: None,
         model_auto_compact_token_limit: None,
+        trust_candidate_constraints: false,
     };
     let manager = Arc::new(StaticModelsManager::new_with_custom_models(
         /*auth_manager*/ None,
