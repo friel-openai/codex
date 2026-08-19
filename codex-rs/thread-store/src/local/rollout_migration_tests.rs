@@ -87,7 +87,6 @@ use crate::ReadThreadParams;
 use crate::SortDirection;
 use crate::StoredTurnItemsView;
 use crate::ThreadStore;
-use crate::ThreadStoreError;
 use crate::TurnPage;
 use crate::local::test_support::test_config;
 
@@ -3036,6 +3035,34 @@ struct ContextDependentLegacyFixture {
 }
 
 async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
+    context_dependent_legacy_fixture_with_counts(
+        [397, 160, 1, 1],
+        /*expected_bounded_item_id*/ "item-161",
+        /*expected_complete_item_id*/ "item-558",
+    )
+    .await
+}
+
+async fn context_dependent_legacy_fixture_with_counts(
+    item_counts: [usize; 4],
+    expected_bounded_item_id: &str,
+    expected_complete_item_id: &str,
+) -> ContextDependentLegacyFixture {
+    context_dependent_legacy_fixture_with_shape(
+        item_counts,
+        expected_bounded_item_id,
+        expected_complete_item_id,
+        /*split_reported_turn*/ false,
+    )
+    .await
+}
+
+async fn context_dependent_legacy_fixture_with_shape(
+    item_counts: [usize; 4],
+    expected_bounded_item_id: &str,
+    expected_complete_item_id: &str,
+    split_reported_turn: bool,
+) -> ContextDependentLegacyFixture {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let segment_ids = [
@@ -3053,7 +3080,6 @@ async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
         CONTEXT_DEPENDENT_TURN_ID,
         "active-turn",
     ];
-    let item_counts = [397_usize, 160, 1, 1];
     for (index, segment_id) in segment_ids.into_iter().enumerate() {
         let path = if index + 1 == segment_ids.len() {
             home.path().join("sessions/2025/01/03").join(&filename)
@@ -3072,13 +3098,19 @@ async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
                 predecessor_segment_id,
             ));
         }
-        items.push(started(turn_ids[index]));
+        let turn_id = turn_ids[index];
+        if !split_reported_turn || index != 2 {
+            items.push(started(turn_id));
+        }
         for item_index in 0..item_counts[index] {
             items.push(user_message(
                 format!("question-{index}-{item_index}").as_str(),
             ));
         }
-        items.push(completed(turn_ids[index]));
+        items.push(completed(turn_id));
+        if split_reported_turn && index == 1 {
+            items.push(started(CONTEXT_DEPENDENT_TURN_ID));
+        }
         write_legacy_segment(path.as_path(), home.path(), thread_id, segment_id, items);
         predecessor = Some((path.clone(), segment_id));
         source_paths.push(path);
@@ -3113,7 +3145,7 @@ async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
             .iter()
             .map(codex_app_server_protocol::ThreadItem::id)
             .collect::<Vec<_>>(),
-        vec!["item-161"]
+        vec![expected_bounded_item_id]
     );
     let complete_legacy =
         codex_rollout::materialize_rollout_lines(home.path(), selected_path.as_path())
@@ -3136,7 +3168,7 @@ async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
             .iter()
             .map(codex_app_server_protocol::ThreadItem::id)
             .collect::<Vec<_>>(),
-        vec!["item-558"]
+        vec![expected_complete_item_id]
     );
     let initial_items = initial_turns
         .iter()
@@ -3260,6 +3292,52 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
         .expect("read migrated selected SessionMeta");
     assert!(migrated_meta.meta.history_base.is_some());
     assert_context_dependent_migration_projection(&store, &fixture).await;
+}
+
+#[tokio::test]
+async fn segmented_migration_preserves_low_suffix_legacy_item_ids() {
+    let fixture = context_dependent_legacy_fixture_with_counts(
+        [416, 3, 1, 417],
+        /*expected_bounded_item_id*/ "item-4",
+        /*expected_complete_item_id*/ "item-420",
+    )
+    .await;
+    let store = indexed_store(fixture.home.path()).await;
+
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate low-suffix Legacy history");
+    assert_eq!(apply.outcomes.len(), 1);
+    assert_eq!(
+        apply.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        apply.outcomes[0].message
+    );
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+    assert_legacy_sources_unchanged(&fixture);
+}
+
+#[tokio::test]
+async fn segmented_migration_preserves_low_suffix_for_turn_split_across_segments() {
+    let fixture = context_dependent_legacy_fixture_with_shape(
+        [416, 3, 1, 1],
+        /*expected_bounded_item_id*/ "item-4",
+        /*expected_complete_item_id*/ "item-420",
+        /*split_reported_turn*/ true,
+    )
+    .await;
+    let store = indexed_store(fixture.home.path()).await;
+
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate split low-suffix Legacy history");
+    assert_eq!(apply.outcomes.len(), 1);
+    assert_eq!(apply.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+    assert_legacy_sources_unchanged(&fixture);
 }
 
 #[tokio::test]
@@ -6470,7 +6548,7 @@ async fn migration_skips_threads_with_an_active_writer() {
 }
 
 #[tokio::test]
-async fn migration_apply_conflicts_with_rollout_maintenance() {
+async fn migration_apply_waits_for_rollout_maintenance() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let path = write_rollout(
@@ -6480,18 +6558,41 @@ async fn migration_apply_conflicts_with_rollout_maintenance() {
         vec![user_message("maintenance question")],
     );
     let original = fs::read(&path).expect("read legacy rollout");
-    let _maintenance_guard = codex_rollout::try_acquire_rollout_maintenance_lock(home.path())
+    let maintenance_guard = codex_rollout::try_acquire_rollout_maintenance_lock(home.path())
         .expect("acquire rollout maintenance lock")
         .expect("claim rollout maintenance lock");
-    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let store = indexed_store(home.path()).await;
+    let migration_store = store.clone();
+    let mut migration =
+        tokio::spawn(async move { migration_store.migrate_rollouts(apply_options()).await });
 
-    let error = store
-        .migrate_rollouts(apply_options())
-        .await
-        .expect_err("reject concurrent rollout maintenance");
-
-    assert!(matches!(error, ThreadStoreError::Conflict { .. }));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut migration)
+            .await
+            .is_err(),
+        "explicit migration waits for the current maintenance owner"
+    );
     assert_eq!(fs::read(&path).expect("read untouched rollout"), original);
+
+    drop(maintenance_guard);
+    let report = migration
+        .await
+        .expect("join waiting migration")
+        .expect("migrate after maintenance completes");
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        report.outcomes[0].message
+    );
+    assert_eq!(
+        codex_rollout::read_session_meta_line(&report.outcomes[0].rollout_path)
+            .await
+            .expect("read migrated rollout metadata")
+            .meta
+            .history_mode,
+        ThreadHistoryMode::Paginated
+    );
 }
 
 #[tokio::test]

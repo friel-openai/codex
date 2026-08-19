@@ -28,6 +28,7 @@ use super::segment::history_repair_publication::HistoryRepairLifecycleLease;
 use super::segment::history_repair_publication::HistoryRepairMaintenanceLease;
 use super::segment::history_repair_publication::HistoryRepairPublication;
 use super::segment::history_repair_publication::HistoryRepairWriterToken;
+use super::segment::history_repair_publication::acquire_history_repair_maintenance;
 use super::segment::history_repair_publication::authorize_history_repair_writer;
 use super::segment::history_repair_publication::clear_history_repair_segment_id;
 use super::segment::history_repair_publication::history_repair_segment_id;
@@ -38,7 +39,6 @@ use super::segment::history_repair_publication::publish_history_repair_replaceme
 use super::segment::history_repair_publication::recover_history_repair_publication;
 use super::segment::history_repair_publication::replace_history_repair_segment_id;
 use super::segment::history_repair_publication::reserve_history_repair_lifecycle;
-use super::segment::history_repair_publication::reserve_history_repair_maintenance;
 use super::segment::history_repair_publication::validate_legacy_initial_repair_path;
 use super::writer_lock::WriterLockGuard;
 use crate::ThreadStoreError;
@@ -465,22 +465,7 @@ fn indeterminate_repair_error(thread_id: ThreadId) -> ThreadStoreError {
 async fn acquire_maintenance(
     store: &LocalThreadStore,
 ) -> ThreadStoreResult<HistoryRepairMaintenanceLease> {
-    let started = tokio::time::Instant::now();
-    let mut delay = std::time::Duration::from_millis(25);
-    loop {
-        if let Some(guard) = reserve_history_repair_maintenance(store).await? {
-            return Ok(guard);
-        }
-        if started.elapsed() >= std::time::Duration::from_secs(10) {
-            return Err(ThreadStoreError::Conflict {
-                message: "rollout compression or another migration is already running".to_string(),
-            });
-        }
-        tokio::time::sleep(delay).await;
-        delay = delay
-            .saturating_mul(2)
-            .min(std::time::Duration::from_millis(500));
-    }
+    acquire_history_repair_maintenance(store).await
 }
 
 async fn discover_scope(

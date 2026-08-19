@@ -113,6 +113,7 @@ pub(crate) struct HistoryRepairMaintenanceLease {
     _guard: codex_rollout::RolloutMaintenanceGuard,
 }
 
+#[cfg(test)]
 pub(crate) async fn reserve_history_repair_maintenance(
     store: &LocalThreadStore,
 ) -> ThreadStoreResult<Option<HistoryRepairMaintenanceLease>> {
@@ -130,6 +131,26 @@ pub(crate) async fn reserve_history_repair_maintenance(
         canonical_home,
         _guard: guard,
     }))
+}
+
+pub(crate) async fn acquire_history_repair_maintenance(
+    store: &LocalThreadStore,
+) -> ThreadStoreResult<HistoryRepairMaintenanceLease> {
+    let canonical_home = fs::canonicalize(store.config.codex_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let root_identity = confined_root_identity(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let guard = codex_rollout::acquire_rollout_maintenance_lock(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    Ok(HistoryRepairMaintenanceLease {
+        store_identity: store_identity(store),
+        root_identity,
+        canonical_home,
+        _guard: guard,
+    })
 }
 
 pub(crate) async fn reserve_history_repair_lifecycle(

@@ -378,7 +378,12 @@ fn derive_initial_synthetic_item_id_remap(
         .map(|(canonical_id, desired_id)| (canonical_id.clone(), desired_id.clone()))
         .collect::<HashMap<_, _>>();
     for (desired_id, canonical_owner) in &desired_owners {
-        if desired_id == canonical_owner || !canonical_retained_item_ids.contains(desired_id) {
+        // An existing entry already moves the canonical owner away from this ID. Replacing that
+        // entry would lose the bounded response's requested mapping when both IDs are visible.
+        if desired_id == canonical_owner
+            || remap.contains_key(desired_id)
+            || !canonical_retained_item_ids.contains(desired_id)
+        {
             continue;
         }
         let replacement = format!("item-{next_item_index}");

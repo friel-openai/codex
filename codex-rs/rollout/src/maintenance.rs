@@ -39,3 +39,23 @@ pub fn try_acquire_rollout_maintenance_lock(
         Err(std::fs::TryLockError::Error(error)) => Err(error),
     }
 }
+
+/// Wait for exclusive ownership of operations that replace local rollout files.
+///
+/// The operating system releases the file lock if its owning process exits. Callers that require
+/// maintenance to finish can cancel this future instead of translating ordinary contention into
+/// an unrecoverable user-visible error.
+pub async fn acquire_rollout_maintenance_lock(
+    codex_home: &Path,
+) -> io::Result<RolloutMaintenanceGuard> {
+    let mut delay = std::time::Duration::from_millis(25);
+    loop {
+        if let Some(guard) = try_acquire_rollout_maintenance_lock(codex_home)? {
+            return Ok(guard);
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay
+            .saturating_mul(2)
+            .min(std::time::Duration::from_millis(500));
+    }
+}

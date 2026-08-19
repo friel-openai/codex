@@ -465,6 +465,41 @@ async fn clean_fernet_history_creates_no_repair_artifacts() {
     assert!(!home.path().join("rollout-history-repair-backups").exists());
 }
 
+#[tokio::test(start_paused = true)]
+async fn clean_history_waits_for_rollout_maintenance_beyond_ten_seconds() {
+    let home = TempDir::new().expect("temp home");
+    let thread_id = ThreadId::from_u128(/*value*/ 0x70031);
+    let source = supervisor_rollout(
+        thread_id,
+        Some(SegmentId::new()),
+        "gAAAAABqfQkApRY563QcNHss2A4AKN3hJ027UTP8TRjRMwBjGzwdQ1xZ-6mLXPG8wa8TVLFB3ggULSAKlfpl7C4YbWdR4_R28-k0urBPtKk2Amtf8DdoShe_vVF4ffJ0XoIvR1ryVWmP",
+    );
+    let path = write_rollout(home.path(), thread_id, source.as_slice());
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let maintenance = codex_rollout::try_acquire_rollout_maintenance_lock(home.path())
+        .expect("open rollout-maintenance lock")
+        .expect("acquire rollout-maintenance lock");
+    let repair_store = store.clone();
+    let repair = tokio::spawn(async move {
+        repair_compatibility_history_before_access(&repair_store, thread_id, path.as_path()).await
+    });
+
+    tokio::task::yield_now().await;
+    tokio::time::advance(std::time::Duration::from_secs(11)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !repair.is_finished(),
+        "a healthy maintenance owner must not become a terminal thread-read error"
+    );
+
+    drop(maintenance);
+    tokio::time::advance(std::time::Duration::from_millis(500)).await;
+    repair
+        .await
+        .expect("join waiting history access")
+        .expect("read history after maintenance completes");
+}
+
 #[tokio::test]
 async fn indeterminate_publication_stays_quarantined_until_store_restart() {
     let home = TempDir::new().expect("temp home");

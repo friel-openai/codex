@@ -334,12 +334,9 @@ impl LocalThreadStore {
         let _maintenance_guard = match options.mode {
             RolloutMigrationMode::DryRun => None,
             RolloutMigrationMode::Apply => Some(
-                codex_rollout::try_acquire_rollout_maintenance_lock(&self.config.codex_home)
-                    .map_err(migration_error)?
-                    .ok_or_else(|| ThreadStoreError::Conflict {
-                        message: "rollout compression or another migration is already running"
-                            .to_string(),
-                    })?,
+                codex_rollout::acquire_rollout_maintenance_lock(&self.config.codex_home)
+                    .await
+                    .map_err(migration_error)?,
             ),
         };
         let mut paths =

@@ -120,6 +120,7 @@ pub use list::read_thread_item_from_rollout;
 pub use list::read_thread_item_from_rollout_with_indexed_preview;
 pub use list::rollout_date_parts;
 pub use maintenance::RolloutMaintenanceGuard;
+pub use maintenance::acquire_rollout_maintenance_lock;
 pub use maintenance::try_acquire_rollout_maintenance_lock;
 pub use metadata::builder_from_items;
 pub use metadata::history_rollout_path_with_rollout_id;
