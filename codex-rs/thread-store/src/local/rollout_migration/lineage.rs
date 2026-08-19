@@ -24,6 +24,7 @@ use sha2::Digest;
 use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 
+use super::line_parser;
 use super::migration_error;
 use super::parse_rollout_timestamp;
 use crate::ThreadStoreResult;
@@ -281,7 +282,7 @@ async fn inspect_predecessor(path: &Path) -> ThreadStoreResult<Option<LegacyLine
         .map_err(migration_error)?;
     let mut saw_session_meta = false;
     while let Some(raw) = reader.next_line().await.map_err(migration_error)? {
-        let Ok(line) = serde_json::from_str::<RolloutLine>(raw.as_str()) else {
+        let Ok(line) = line_parser::parse_paginated_rollout_line(raw.as_bytes()) else {
             continue;
         };
         match line.item {
@@ -680,7 +681,7 @@ async fn paginated_end_ordinal(path: &Path) -> ThreadStoreResult<u64> {
         if raw.trim().is_empty() {
             continue;
         }
-        let line = serde_json::from_str::<RolloutLine>(raw.as_str()).map_err(|error| {
+        let line = line_parser::parse_paginated_rollout_line(raw.as_bytes()).map_err(|error| {
             migration_error(format!(
                 "Paginated reference dependency {} contains an invalid record: {error}",
                 path.display()
@@ -760,7 +761,7 @@ async fn inspect_source(path: &Path) -> ThreadStoreResult<InspectedSource> {
         if raw.trim().is_empty() {
             continue;
         }
-        let line = match serde_json::from_str::<RolloutLine>(raw.as_str()) {
+        let line = match line_parser::parse_paginated_rollout_line(raw.as_bytes()) {
             Ok(line) => line,
             Err(error) => {
                 let reference_record = serde_json::from_str::<serde_json::Value>(raw.as_str())

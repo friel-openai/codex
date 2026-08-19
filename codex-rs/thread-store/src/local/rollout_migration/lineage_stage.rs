@@ -514,7 +514,7 @@ where
                 source.path.display()
             )));
         }
-        let line = serde_json::from_str::<RolloutLine>(raw.as_str()).map_err(|error| {
+        let line = line_parser::parse_paginated_rollout_line(raw.as_bytes()).map_err(|error| {
             migration_error(format!(
                 "Paginated source {} contains an invalid record: {error}",
                 source.path.display()

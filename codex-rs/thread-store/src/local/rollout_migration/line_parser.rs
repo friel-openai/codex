@@ -30,6 +30,18 @@ pub(super) fn parse_legacy_rollout_line(bytes: &[u8]) -> Result<Option<RolloutLi
     parse_legacy_rollout_value(value)
 }
 
+/// Parse a Paginated rollout line without changing or skipping its contents.
+///
+/// With `serde_json/arbitrary_precision`, direct deserialization of an internally tagged enum can
+/// present a number as Serde's private map representation. Numeric fields then fail with
+/// `invalid type: map, expected f64`. Materializing `Value` first preserves the number before typed
+/// deserialization. Paginated callers still receive exactly one typed line for one source line, so
+/// ordinal validation remains authoritative.
+pub(super) fn parse_paginated_rollout_line(bytes: &[u8]) -> Result<RolloutLine, String> {
+    let value = serde_json::from_slice::<Value>(bytes).map_err(|error| error.to_string())?;
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
 pub(super) fn parse_legacy_rollout_value(mut value: Value) -> Result<Option<RolloutLine>, String> {
     if should_skip_retired_record(&value) {
         return Ok(None);

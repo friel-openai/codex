@@ -1674,6 +1674,141 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
 }
 
 #[tokio::test]
+async fn migration_accepts_paginated_numeric_token_count_records() {
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let segment_ids = [SegmentId::new(), SegmentId::new()];
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor_path = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_ids[0].to_string())
+        .join(filename.as_str());
+    let predecessor_end = write_paginated_segment(
+        predecessor_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[0],
+        /*start_ordinal*/ 0,
+        vec![user_message("numeric token predecessor")],
+    );
+    let active_path = home.path().join("sessions/2025/01/03").join(filename);
+    let active_end = write_paginated_segment(
+        active_path.as_path(),
+        home.path(),
+        thread_id,
+        segment_ids[1],
+        predecessor_end,
+        vec![
+            segment_reference(predecessor_path.clone(), thread_id, segment_ids[0]),
+            user_message("numeric token active"),
+        ],
+    );
+    let token_count = json!({
+        "timestamp": "2026-08-18T21:03:49.690Z",
+        "ordinal": active_end,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 319590193,
+                    "cached_input_tokens": 312717039,
+                    "cache_write_input_tokens": 6711808,
+                    "output_tokens": 364803,
+                    "reasoning_output_tokens": 57778,
+                    "total_tokens": 319954996
+                },
+                "last_token_usage": {
+                    "input_tokens": 203881,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 203740,
+                    "output_tokens": 280,
+                    "reasoning_output_tokens": 184,
+                    "total_tokens": 204161
+                },
+                "model_context_window": 258400
+            },
+            "rate_limits": {
+                "limit_id": "codex",
+                "limit_name": null,
+                "primary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 1,
+                    "resets_at": 1787087041
+                },
+                "secondary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 300,
+                    "resets_at": 1787102386
+                },
+                "credits": {
+                    "has_credits": true,
+                    "unlimited": true,
+                    "balance": null
+                },
+                "individual_limit": null,
+                "spend_control_reached": null,
+                "plan_type": "business",
+                "rate_limit_reached_type": null
+            }
+        }
+    });
+    let token_count = serde_json::to_string(&token_count).expect("serialize token count");
+    assert!(
+        serde_json::from_str::<RolloutLine>(token_count.as_str()).is_err(),
+        "fixture must reproduce direct streaming deserialization failure"
+    );
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(active_path.as_path())
+            .expect("open active segment"),
+        "{token_count}"
+    )
+    .expect("append token count");
+    let source_bytes = [
+        fs::read(predecessor_path.as_path()).expect("read predecessor source"),
+        fs::read(active_path.as_path()).expect("read active source"),
+    ];
+
+    let store = indexed_store(home.path()).await;
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![thread_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate Paginated numeric token count");
+    assert_eq!(report.outcomes.len(), 1);
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        report.outcomes[0].message
+    );
+    let materialized = codex_rollout::materialize_rollout_lines(
+        home.path(),
+        report.outcomes[0].rollout_path.as_path(),
+    )
+    .await
+    .expect("materialize migrated numeric token count");
+    assert!(
+        materialized
+            .iter()
+            .any(|line| matches!(line.item, RolloutItem::EventMsg(EventMsg::TokenCount(_))))
+    );
+    assert_eq!(
+        [
+            fs::read(predecessor_path).expect("reread predecessor source"),
+            fs::read(active_path).expect("reread active source"),
+        ],
+        source_bytes
+    );
+}
+
+#[tokio::test]
 async fn automatic_migration_rewrites_paginated_reference_lineage() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();

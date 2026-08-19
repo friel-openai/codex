@@ -4,6 +4,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 
 use super::parse_legacy_rollout_line;
+use super::parse_paginated_rollout_line;
 
 fn line(payload_type: &str, payload: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&json!({
@@ -45,6 +46,72 @@ fn parses_legacy_numeric_event_payloads_through_value() {
     let parsed = parse_legacy_rollout_line(&bytes)
         .expect("parse legacy token count")
         .expect("keep legacy token count");
+    assert!(matches!(
+        parsed.item,
+        RolloutItem::EventMsg(EventMsg::TokenCount(_))
+    ));
+}
+
+#[test]
+fn parses_paginated_numeric_event_payloads_through_value() {
+    let bytes = serde_json::to_vec(&json!({
+        "timestamp": "2026-08-18T21:03:49.690Z",
+        "ordinal": 11938,
+        "type": "event_msg",
+        "payload": {
+            "type": "token_count",
+            "info": {
+                "total_token_usage": {
+                    "input_tokens": 319590193,
+                    "cached_input_tokens": 312717039,
+                    "cache_write_input_tokens": 6711808,
+                    "output_tokens": 364803,
+                    "reasoning_output_tokens": 57778,
+                    "total_tokens": 319954996
+                },
+                "last_token_usage": {
+                    "input_tokens": 203881,
+                    "cached_input_tokens": 0,
+                    "cache_write_input_tokens": 203740,
+                    "output_tokens": 280,
+                    "reasoning_output_tokens": 184,
+                    "total_tokens": 204161
+                },
+                "model_context_window": 258400
+            },
+            "rate_limits": {
+                "limit_id": "codex",
+                "limit_name": null,
+                "primary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 1,
+                    "resets_at": 1787087041
+                },
+                "secondary": {
+                    "used_percent": 0.0,
+                    "window_minutes": 300,
+                    "resets_at": 1787102386
+                },
+                "credits": {
+                    "has_credits": true,
+                    "unlimited": true,
+                    "balance": null
+                },
+                "individual_limit": null,
+                "spend_control_reached": null,
+                "plan_type": "business",
+                "rate_limit_reached_type": null
+            }
+        }
+    }))
+    .expect("serialize Paginated token count");
+
+    assert!(
+        serde_json::from_slice::<codex_rollout::RolloutLine>(&bytes).is_err(),
+        "the streaming enum path must reproduce the production failure"
+    );
+    let parsed = parse_paginated_rollout_line(&bytes).expect("parse Paginated token count");
+    assert_eq!(parsed.ordinal, Some(11938));
     assert!(matches!(
         parsed.item,
         RolloutItem::EventMsg(EventMsg::TokenCount(_))
