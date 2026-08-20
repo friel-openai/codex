@@ -266,10 +266,11 @@ async fn prepare_with_response_history(
     {
         let source = resolve_fork_source(store, thread_id).await?;
         let mut history_access =
-            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 thread_id,
                 source.path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
             )
             .await?;
         let lifecycle = history_access
@@ -328,10 +329,11 @@ async fn prepare_with_response_history(
         let source = resolve_fork_source(store, thread_id).await?;
         trace_fork_stage("resolved_source_for_indexed_attempt");
         let mut history_access =
-            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 thread_id,
                 source.path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
             )
             .await?;
         trace_fork_stage("repaired_active_history");
@@ -843,7 +845,7 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     }
     if !active_scan.segment_checkpoint
         || !store
-            .has_complete_history_projection_at(thread_id, resolved.rollout_id, file_metadata.len())
+            .has_complete_history_projection_at(resolved.rollout_id, file_metadata.len())
             .await?
     {
         fallback!("certified_context_or_complete_projection_missing");
@@ -983,10 +985,11 @@ async fn resolve_compatibility_fork_lineage(
     let source = resolve_fork_source(store, thread_id).await?;
     trace_fork_stage("resolved_source_for_compatibility");
     let mut history_access =
-        super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+        super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
             store,
             thread_id,
             source.path.as_path(),
+            super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
         )
         .await?;
     trace_fork_stage("repaired_compatibility_history");

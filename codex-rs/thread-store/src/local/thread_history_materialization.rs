@@ -6,6 +6,7 @@ use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -25,6 +26,25 @@ pub(super) async fn materialize_to_sqlite(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     rollout_path: &Path,
+) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(store, thread_id, rollout_path, /*end*/ None).await
+}
+
+/// Project an authenticated decoded prefix without consuming a fork ancestor's later records.
+pub(super) async fn materialize_prefix_to_sqlite(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    end: HistoryPosition,
+) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(store, thread_id, rollout_path, Some(end)).await
+}
+
+async fn materialize_to_sqlite_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    end: Option<HistoryPosition>,
 ) -> ThreadStoreResult<()> {
     const MAX_PROJECTION_BATCH_RECORDS: usize = 256;
     const MAX_PROJECTION_BATCH_BYTES: u64 = 4 * 1024 * 1024;
@@ -85,17 +105,28 @@ pub(super) async fn materialize_to_sqlite(
     let expected_ordinal = projection_state
         .as_ref()
         .map_or(initial_ordinal, |state| state.next_ordinal);
-    let end_offset = tokio::fs::metadata(rollout_path)
+    let file_len = tokio::fs::metadata(rollout_path)
         .await
         .map_err(thread_store_io_error)?
         .len();
+    let end_offset = end.map_or(file_len, |end| end.end_byte_offset);
+    if end_offset > file_len {
+        return Err(thread_history_error(format!(
+            "rollout {} ends at byte {file_len}, before selected byte {end_offset}",
+            rollout_path.display()
+        )));
+    }
     let byte_count =
         end_offset
             .checked_sub(start_offset)
             .ok_or_else(|| ThreadStoreError::Internal {
-                message: "durable rollout shrank before projection".to_string(),
+                message: format!(
+                    "durable rollout shrank before projection: {} ends at selected byte \
+                     {end_offset}, before checkpoint byte {start_offset}",
+                    rollout_path.display()
+                ),
             })?;
-    if byte_count == 0 {
+    if byte_count == 0 && end.is_none() {
         return Ok(());
     }
 
@@ -350,6 +381,16 @@ pub(super) async fn materialize_to_sqlite(
         }
     }
 
+    if let Some(end) = end
+        && (next_offset != end.end_byte_offset || next_ordinal != end.end_ordinal_exclusive)
+    {
+        return Err(thread_history_error(format!(
+            "rollout {} projected through byte {next_offset}, ordinal {next_ordinal}; expected byte {}, ordinal {}",
+            rollout_path.display(),
+            end.end_byte_offset,
+            end.end_ordinal_exclusive
+        )));
+    }
     if pending_rejected_line_count == 0 {
         apply_paginated_projection_batch(
             store,

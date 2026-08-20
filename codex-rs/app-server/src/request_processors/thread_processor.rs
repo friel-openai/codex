@@ -4445,15 +4445,16 @@ impl ThreadRequestProcessor {
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
             .clamp(1, THREAD_ITEMS_MAX_LIMIT);
         let sort_direction = sort_direction.unwrap_or(SortDirection::Asc);
-        let use_unprojected_history = self
-            .unprojected_paginated_history_threads
-            .lock()
-            .await
-            .contains(&thread_id)
-            || match cursor.as_deref() {
-                Some(cursor) => parse_thread_items_cursor(cursor).is_ok(),
-                None => !self.has_paginated_history_projection(thread_id).await?,
-            };
+        let use_unprojected_history = match cursor.as_deref() {
+            Some(cursor) => parse_thread_items_cursor(cursor).is_ok(),
+            None => {
+                self.unprojected_paginated_history_threads
+                    .lock()
+                    .await
+                    .contains(&thread_id)
+                    || !self.has_paginated_history_projection(thread_id).await?
+            }
+        };
         if use_unprojected_history
             && let Some(response) = self
                 .unprojected_paginated_thread_items_list_response(

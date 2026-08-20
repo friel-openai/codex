@@ -302,38 +302,21 @@ async fn indexed_same_thread_lineage_from_resolved(
     }))
 }
 
-/// Checks the newest projected root turn without resolving the selected rollout a second time.
+/// Checks the complete root checkpoint without resolving the selected rollout a second time.
 ///
-/// Forked histories return `None` so callers retain the complete lineage check. A complete
-/// same-thread native `history_base` projection is already one logical ordinal range. An empty
-/// in-progress turn is valid: a process can durably write `TurnStarted` before its first item, and
-/// migration deliberately skips a malformed or partial item record at the end of a Legacy file.
-pub(in crate::local) async fn has_nonempty_newest_root_turn_for_resolved(
+/// Forked histories retain the caller's complete lineage check. A complete same-thread native
+/// `history_base` projection is already one logical ordinal range. Empty turns are valid in any
+/// status; out-of-band projection mutations invalidate the checkpoint through SQLite triggers.
+pub(in crate::local) async fn has_complete_root_projection_for_resolved(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     resolved: ResolvedThreadRollout,
-) -> ThreadStoreResult<Option<bool>> {
-    let Some(lineage) =
-        indexed_same_thread_lineage_from_resolved(store, thread_id, resolved).await?
-    else {
-        return Ok(None);
-    };
-    let page = list_turns_from_lineage(
-        store,
-        ListTurnsParams {
-            thread_id,
-            include_archived: true,
-            cursor: None,
-            page_size: 1,
-            sort_direction: crate::SortDirection::Desc,
-            items_view: StoredTurnItemsView::Summary,
-        },
-        &lineage,
+) -> ThreadStoreResult<bool> {
+    Ok(
+        indexed_same_thread_lineage_from_resolved(store, thread_id, resolved)
+            .await?
+            .is_some(),
     )
-    .await?;
-    Ok(Some(page.turns.first().is_none_or(|turn| {
-        !turn.items.is_empty() || turn.status == StoredTurnStatus::InProgress
-    })))
 }
 
 /// Read an existing segmented legacy projection without exposing indexed cursors.

@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use super::LocalThreadStore;
 use super::RolloutMigrationRateLimiter;
@@ -9,13 +10,13 @@ use super::lineage::LegacyLineageMigrationPlan;
 use super::lineage::LegacyLineagePredecessor;
 use super::lineage::plan_legacy_lineage;
 use super::lineage::validate_segment_migration;
+use super::lineage_compatibility::stage_compatible_lineage;
 use super::lineage_journal::LineageMigrationJournal;
 use super::lineage_journal::LineageMigrationPhase;
 use super::lineage_journal::read_lineage_migration_journal;
 use super::lineage_journal::write_lineage_migration_journal;
 use super::lineage_publish::publish_lineage_targets;
 use super::lineage_publish::verify_published_lineage_targets;
-use super::lineage_stage::stage_legacy_lineage;
 use super::migration_error;
 use super::publish::decompress_rollout_to_path;
 use super::publish::sync_parent_directory;
@@ -32,6 +33,7 @@ impl LocalThreadStore {
         for position in plan
             .sources
             .iter()
+            .filter(|source| !source.materialized_predecessor)
             .filter_map(|source| match source.predecessor.as_ref() {
                 Some(LegacyLineagePredecessor::HistoryBase(position)) => Some(*position),
                 _ => None,
@@ -197,9 +199,10 @@ impl LocalThreadStore {
         limiter: &mut RolloutMigrationRateLimiter,
         stop_after: Option<LineageMigrationPhase>,
     ) -> ThreadStoreResult<PathBuf> {
+        super::lineage::expand_filtered_native_rollbacks(self, &mut plan).await?;
+        let started = Instant::now();
         self.validate_legacy_lineage_plan(&plan).await?;
-        self.validate_legacy_lineage_desktop_compatibility(&mut plan)
-            .await?;
+        tracing::info!(thread_id = %plan.selected_thread_id, phase = "validate_plan", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");
         let stage_root = journal_path.with_extension("staging");
         let mut journal = if tokio::fs::try_exists(journal_path)
             .await
@@ -211,6 +214,31 @@ impl LocalThreadStore {
             write_lineage_migration_journal(journal_path, &journal).await?;
             journal
         };
+        if journal.verify_plan(&plan).is_err()
+            && journal.permits_selected_source_append(&plan).await?
+            && self
+                .state_db
+                .as_ref()
+                .ok_or_else(|| migration_error("lineage migration requires SQLite metadata"))?
+                .get_thread(plan.selected_thread_id)
+                .await
+                .map_err(migration_error)?
+                .is_some_and(|metadata| metadata.rollout_path == selected_source_path)
+        {
+            // ProjectionDurable can include published targets, or even a selected target if the
+            // process died before recording Selected. Only restart while the original source is
+            // still selected. Retain old files and projections because another history may use them.
+            if tokio::fs::try_exists(&stage_root)
+                .await
+                .map_err(migration_error)?
+            {
+                tokio::fs::remove_dir_all(&stage_root)
+                    .await
+                    .map_err(migration_error)?;
+            }
+            journal = LineageMigrationJournal::from_plan(&plan);
+            write_lineage_migration_journal(journal_path, &journal).await?;
+        }
         if journal.requires_target_identity_upgrade(&plan)? {
             self.restart_preselection_lineage_after_target_upgrade(journal_path, &journal, limiter)
                 .await?;
@@ -219,7 +247,111 @@ impl LocalThreadStore {
         }
         journal.verify_plan(&plan)?;
 
+        if !journal.replay_native_rollbacks
+            && matches!(
+                journal.phase,
+                LineageMigrationPhase::Planned
+                    | LineageMigrationPhase::TargetsDurable
+                    | LineageMigrationPhase::ProjectionDurable
+            )
+            && plan.sources.iter().any(|source| {
+                source.history_mode == codex_protocol::protocol::ThreadHistoryMode::Legacy
+                    && source.has_rollback
+            })
+        {
+            journal.verify_sources().await?;
+            let selected = self
+                .state_db
+                .as_ref()
+                .ok_or_else(|| migration_error("lineage migration requires SQLite metadata"))?
+                .get_thread(plan.selected_thread_id)
+                .await
+                .map_err(migration_error)?;
+            if selected.is_some_and(|metadata| metadata.rollout_path == selected_source_path) {
+                let mut current_plan =
+                    super::lineage::plan_legacy_lineage_with_native_prefix_reuse(
+                        self.config.codex_home.as_path(),
+                        selected_source_path,
+                    )
+                    .await?;
+                super::lineage::expand_filtered_native_rollbacks(self, &mut current_plan).await?;
+                if current_plan.replay_native_rollbacks {
+                    self.validate_legacy_lineage_plan(&current_plan).await?;
+                    if journal.targets.iter().any(|old| {
+                        current_plan
+                            .targets
+                            .iter()
+                            .any(|new| new.rollout_id == old.rollout_id)
+                    }) {
+                        return Err(migration_error(
+                            "native rollback replan reuses an old target identity",
+                        ));
+                    }
+                    // Published predecessors may already belong to another fork. Restart only the
+                    // child journal, retaining every old target and its projection.
+                    plan = current_plan;
+                    journal = LineageMigrationJournal::from_plan(&plan);
+                    write_lineage_migration_journal(journal_path, &journal).await?;
+                }
+            }
+        }
+
+        if journal.phase == LineageMigrationPhase::Planned && !journal.reuse_native_prefixes {
+            journal.verify_sources().await?;
+            let current = self
+                .state_db
+                .as_ref()
+                .ok_or_else(|| migration_error("lineage migration requires SQLite metadata"))?
+                .get_thread(plan.selected_thread_id)
+                .await
+                .map_err(migration_error)?;
+            if current.is_some_and(|metadata| metadata.rollout_path == selected_source_path) {
+                let mut current_plan =
+                    super::lineage::plan_legacy_lineage_with_native_prefix_reuse(
+                        self.config.codex_home.as_path(),
+                        selected_source_path,
+                    )
+                    .await?;
+                super::lineage::expand_filtered_native_rollbacks(self, &mut current_plan).await?;
+                self.validate_legacy_lineage_plan(&current_plan).await?;
+                if current_plan.targets != plan.targets
+                    && journal.targets.iter().any(|old| {
+                        current_plan
+                            .targets
+                            .iter()
+                            .any(|new| new.rollout_id == old.rollout_id)
+                    })
+                {
+                    return Err(migration_error(
+                        "native-prefix replan reuses an old target identity",
+                    ));
+                }
+                plan = current_plan;
+                journal = LineageMigrationJournal::from_plan(&plan);
+                write_lineage_migration_journal(journal_path, &journal).await?;
+            }
+        }
+
+        let ancestor_ids = if plan.replay_native_rollbacks {
+            plan.sources
+                .iter()
+                .chain(&plan.authentication_sources)
+                .map(|source| source.thread_id)
+                .chain(plan.history_bases.iter().map(|source| source.thread_id))
+                .chain(
+                    plan.reference_dependencies
+                        .iter()
+                        .map(|source| source.thread_id),
+                )
+                .filter(|thread_id| *thread_id != plan.selected_thread_id)
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        let _ancestor_writers = self.try_reserve_rollout_writers(&ancestor_ids).await?;
+
         if journal.phase == LineageMigrationPhase::Planned {
+            let started = Instant::now();
             stop_after_phase(stop_after, journal.phase)?;
             journal.verify_sources().await?;
             if tokio::fs::try_exists(stage_root.as_path())
@@ -230,64 +362,99 @@ impl LocalThreadStore {
                     .await
                     .map_err(migration_error)?;
             }
-            let staged = stage_legacy_lineage(&plan, stage_root.as_path()).await?;
+            let staged = stage_compatible_lineage(
+                self.config.codex_home.as_path(),
+                &mut plan,
+                stage_root.as_path(),
+            )
+            .await?;
             journal.record_staged_targets(staged.as_slice())?;
             write_lineage_migration_journal(journal_path, &journal).await?;
+            tracing::info!(thread_id = %plan.selected_thread_id, phase = "stage_targets", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");
             stop_after_phase(stop_after, journal.phase)?;
         }
 
         if journal.phase == LineageMigrationPhase::TargetsDurable {
+            let started = Instant::now();
             journal.verify_sources().await?;
             journal.verify_staged_targets().await?;
-            for target in &journal.targets {
-                let staged_path = target
-                    .staged_path
-                    .as_ref()
-                    .ok_or_else(|| migration_error("lineage target is missing its staged path"))?;
-                thread_history::delete_thread(self, target.rollout_id).await?;
-                prepare_lineage_target_projection(
-                    self,
-                    target.rollout_id,
-                    staged_path,
-                    target.start_ordinal.ok_or_else(|| {
-                        migration_error("lineage target is missing its start ordinal")
-                    })?,
-                )
-                .await?;
-                self.project_rollout_in_batches(target.rollout_id, staged_path, limiter)
+            let complete_root =
+                super::lineage_projection::complete_staged_root(&plan, &journal).await?;
+            if !super::lineage_projection::try_project_staged_targets(
+                self,
+                &journal,
+                complete_root,
+                limiter,
+                super::lineage_projection::BULK_PROJECTION_BUDGET,
+            )
+            .await?
+            {
+                if let Some(root) = complete_root {
+                    thread_history::delete_thread(self, root).await?;
+                    thread_history::reset_projection_for_replacement(
+                        self, root, /*next_rollout_ordinal*/ 0,
+                    )
                     .await?;
-                let projection = thread_history::projection_state(self, target.rollout_id)
-                    .await?
-                    .ok_or_else(|| {
-                        migration_error("staged lineage target has no SQLite projection")
+                }
+                for target in &journal.targets {
+                    let staged_path = target.staged_path.as_ref().ok_or_else(|| {
+                        migration_error("lineage target is missing its staged path")
                     })?;
-                if projection.next_byte_offset
-                    != target.byte_count.ok_or_else(|| {
-                        migration_error("lineage target is missing its byte count")
-                    })?
-                    || projection.next_ordinal
-                        != target.end_ordinal_exclusive.ok_or_else(|| {
-                            migration_error("lineage target is missing its ordinal boundary")
+                    let start_ordinal = target.start_ordinal.ok_or_else(|| {
+                        migration_error("lineage target is missing its start ordinal")
+                    })?;
+                    if let Some(root) = complete_root {
+                        thread_history::reset_projection_for_replacement(self, root, start_ordinal)
+                            .await?;
+                    }
+                    if complete_root != Some(target.rollout_id) {
+                        thread_history::delete_thread(self, target.rollout_id).await?;
+                        prepare_lineage_target_projection(
+                            self,
+                            target.rollout_id,
+                            staged_path,
+                            start_ordinal,
+                        )
+                        .await?;
+                    }
+                    self.project_rollout_in_batches(
+                        target.rollout_id,
+                        staged_path,
+                        complete_root.filter(|root| *root != target.rollout_id),
+                        limiter,
+                    )
+                    .await?;
+                    let projection = thread_history::projection_state(self, target.rollout_id)
+                        .await?
+                        .ok_or_else(|| {
+                            migration_error("staged lineage target has no SQLite projection")
+                        })?;
+                    if projection.next_byte_offset
+                        != target.byte_count.ok_or_else(|| {
+                            migration_error("lineage target is missing its byte count")
                         })?
-                {
-                    return Err(migration_error(
-                        "SQLite projection does not cover a complete staged lineage target",
-                    ));
+                        || projection.next_ordinal
+                            != target.end_ordinal_exclusive.ok_or_else(|| {
+                                migration_error("lineage target is missing its ordinal boundary")
+                            })?
+                        || (complete_root == Some(target.rollout_id)
+                            && !projection.lineage_complete)
+                    {
+                        return Err(migration_error(
+                            "SQLite projection does not cover a complete staged lineage target",
+                        ));
+                    }
                 }
             }
             journal.advance(LineageMigrationPhase::ProjectionDurable)?;
             write_lineage_migration_journal(journal_path, &journal).await?;
+            tracing::info!(thread_id = %plan.selected_thread_id, phase = "project_targets", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");
             stop_after_phase(stop_after, journal.phase)?;
         }
 
         if journal.phase == LineageMigrationPhase::ProjectionDurable {
+            let started = Instant::now();
             journal.verify_sources().await?;
-            publish_lineage_targets(journal_path, &mut journal).await?;
-            let selected_target = journal
-                .targets
-                .iter()
-                .find(|target| target.selected)
-                .ok_or_else(|| migration_error("lineage journal has no selected target"))?;
             let state_db = self.state_db.as_ref().ok_or_else(|| {
                 migration_error("lineage migration requires SQLite thread metadata")
             })?;
@@ -296,6 +463,12 @@ impl LocalThreadStore {
                 .await
                 .map_err(migration_error)?
                 .ok_or_else(|| migration_error("selected lineage thread is missing"))?;
+            publish_lineage_targets(journal_path, &mut journal).await?;
+            let selected_target = journal
+                .targets
+                .iter()
+                .find(|target| target.selected)
+                .ok_or_else(|| migration_error("lineage journal has no selected target"))?;
             if current.rollout_path != selected_target.path
                 && !state_db
                     .replace_rollout_path_if_current(
@@ -319,10 +492,12 @@ impl LocalThreadStore {
             }
             journal.advance(LineageMigrationPhase::Selected)?;
             write_lineage_migration_journal(journal_path, &journal).await?;
+            tracing::info!(thread_id = %plan.selected_thread_id, phase = "publish_targets", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");
             stop_after_phase(stop_after, journal.phase)?;
         }
 
         if journal.phase == LineageMigrationPhase::Selected {
+            let started = Instant::now();
             verify_published_lineage_targets(&journal).await?;
             let selected_target = journal
                 .targets
@@ -348,17 +523,15 @@ impl LocalThreadStore {
                     .ok_or_else(|| {
                         migration_error("published lineage target has no SQLite projection")
                     })?;
-                if projection.next_byte_offset
-                    != target.byte_count.ok_or_else(|| {
-                        migration_error("published lineage target is missing its byte count")
-                    })?
-                    || projection.next_ordinal
-                        != target.end_ordinal_exclusive.ok_or_else(|| {
-                            migration_error(
-                                "published lineage target is missing its ordinal boundary",
-                            )
-                        })?
-                {
+                let expected_bytes = target.byte_count.ok_or_else(|| {
+                    migration_error("published lineage target is missing its byte count")
+                })?;
+                let expected_ordinal = target.end_ordinal_exclusive.ok_or_else(|| {
+                    migration_error("published lineage target is missing its ordinal boundary")
+                })?;
+                let complete = projection.next_byte_offset == expected_bytes
+                    && projection.next_ordinal == expected_ordinal;
+                if !complete {
                     return Err(migration_error(
                         "published lineage projection failed verification",
                     ));
@@ -366,6 +539,7 @@ impl LocalThreadStore {
             }
             journal.advance(LineageMigrationPhase::Verified)?;
             write_lineage_migration_journal(journal_path, &journal).await?;
+            tracing::info!(thread_id = %plan.selected_thread_id, phase = "verify_targets", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");
             stop_after_phase(stop_after, journal.phase)?;
         }
 
@@ -440,6 +614,7 @@ impl LocalThreadStore {
                 self.project_rollout_in_batches(
                     target.rollout_id,
                     projection_path.as_path(),
+                    /*complete_root*/ None,
                     limiter,
                 )
                 .await?;

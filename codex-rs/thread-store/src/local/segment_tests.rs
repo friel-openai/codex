@@ -1202,11 +1202,40 @@ async fn missing_projection_rebuilds_compressed_segmented_paginated_lineage() {
         .await
         .expect("resolve compressed-rebuild lineage");
     assert_eq!(lineage.segments.len(), 3);
-    for segment in &lineage.segments[..2] {
+    for (index, segment) in lineage.segments.iter().take(2).enumerate() {
         let source = codex_rollout::existing_rollout_path(segment.rollout_path())
             .await
             .expect("immutable predecessor path");
-        compress_rollout_for_test(source.as_path());
+        // A fork may select a prefix of a larger immutable ancestor. Neither the plain nor
+        // compressed rebuild may include the records after its saved history_base boundary.
+        let mut ordinal = segment.end_ordinal_exclusive.expect("predecessor cutoff");
+        let mut file = tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .await
+            .expect("open predecessor for test suffix");
+        for item in turn_items(
+            thread_id,
+            "excluded-turn",
+            "excluded-item",
+            "after the selected boundary",
+        ) {
+            let mut bytes = serde_json::to_vec(&RolloutLine {
+                timestamp: "2025-01-03T12:00:00Z".to_string(),
+                ordinal: Some(ordinal),
+                item,
+            })
+            .expect("serialize excluded record");
+            bytes.push(b'\n');
+            file.write_all(&bytes)
+                .await
+                .expect("append excluded record");
+            ordinal = ordinal.checked_add(1).expect("test ordinal");
+        }
+        drop(file);
+        if index == 1 {
+            compress_rollout_for_test(source.as_path());
+        }
     }
 
     let rollout_id = lineage.root_rollout_id;
@@ -1260,12 +1289,12 @@ async fn missing_projection_rebuilds_compressed_segmented_paginated_lineage() {
             "compressed-turn-2"
         ]
     );
-    for segment in &lineage.segments[..2] {
-        assert!(
+    for (index, segment) in lineage.segments.iter().take(2).enumerate() {
+        assert_eq!(segment.rollout_path().exists(), index == 0);
+        assert_eq!(
             segment.rollout_path().with_extension("jsonl.zst").exists(),
-            "projection rebuild must leave immutable predecessors compressed"
+            index == 1
         );
-        assert!(!segment.rollout_path().exists());
     }
 }
 

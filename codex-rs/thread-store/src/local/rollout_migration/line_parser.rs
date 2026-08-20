@@ -39,10 +39,16 @@ pub(super) fn parse_legacy_rollout_line(bytes: &[u8]) -> Result<Option<RolloutLi
 /// ordinal validation remains authoritative.
 pub(super) fn parse_paginated_rollout_line(bytes: &[u8]) -> Result<RolloutLine, String> {
     let value = serde_json::from_slice::<Value>(bytes).map_err(|error| error.to_string())?;
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    super::payload_decoder::decode(value).map_err(|error| error.to_string())
 }
 
-pub(super) fn parse_legacy_rollout_value(mut value: Value) -> Result<Option<RolloutLine>, String> {
+pub(super) fn parse_legacy_rollout_value(value: Value) -> Result<Option<RolloutLine>, String> {
+    normalize_legacy_rollout_value(value)?
+        .map(|value| super::payload_decoder::decode(value).map_err(|error| error.to_string()))
+        .transpose()
+}
+
+pub(super) fn normalize_legacy_rollout_value(mut value: Value) -> Result<Option<Value>, String> {
     if should_skip_retired_record(&value) {
         return Ok(None);
     }
@@ -51,9 +57,7 @@ pub(super) fn parse_legacy_rollout_value(mut value: Value) -> Result<Option<Roll
     normalize_legacy_rate_limit_resets(&mut value);
     normalize_legacy_review_entry(&mut value);
     normalize_legacy_command_cwd(&mut value)?;
-    serde_json::from_value(value)
-        .map(Some)
-        .map_err(|error| error.to_string())
+    Ok(Some(value))
 }
 
 fn should_skip_retired_record(value: &Value) -> bool {

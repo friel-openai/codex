@@ -31,6 +31,10 @@ use crate::types::canonical_history_mode_from_rollout_items;
 
 const ROLLOUT_SIZE_BYTES_METRIC: &str = "codex.rollout.size_bytes";
 
+#[cfg(test)]
+#[path = "live_writer_selection_tests.rs"]
+mod selection_tests;
+
 pub(super) async fn create_thread(
     store: &LocalThreadStore,
     params: CreateThreadParams,
@@ -133,6 +137,8 @@ pub(super) async fn resume_thread(
     };
     let supplied_empty_placeholder = has_supplied_history
         && std::fs::metadata(rollout_path.as_path()).is_ok_and(|metadata| metadata.len() == 0);
+    #[cfg(test)]
+    selection_tests::pause_before_history_access(params.thread_id).await;
     let mut history_access = if !supplied_empty_placeholder {
         let session_meta = codex_rollout::read_session_meta_line(rollout_path.as_path())
             .await
@@ -150,17 +156,19 @@ pub(super) async fn resume_thread(
         .await?
         .is_some()
         {
-            super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 params.thread_id,
                 rollout_path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
             )
             .await?
         } else {
-            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 params.thread_id,
                 rollout_path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
             )
             .await?
         }
@@ -185,6 +193,9 @@ pub(super) async fn resume_thread(
     } else {
         store.writer_lock_coordinator.acquire(params.thread_id)?
     };
+    // Supplied empty histories and external files can bypass reserved repair. Recheck every
+    // resume after obtaining the writer lock; flushing an old recorder would reselect its file.
+    require_selected_rollout_path(store, params.thread_id, rollout_path.as_path()).await?;
     super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
     let cwd = params
         .metadata
@@ -277,6 +288,25 @@ pub(super) async fn resume_thread(
 }
 
 /// Returns the authoritative selected path without requiring a paginated rollout to parse first.
+/// The caller must retain writer ownership while consuming the checked selection.
+pub(super) async fn require_selected_rollout_path(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    expected: &std::path::Path,
+) -> ThreadStoreResult<()> {
+    if let Some(selected) = selected_rollout_path(store, thread_id).await?
+        && codex_rollout::plain_rollout_path(expected)
+            != codex_rollout::plain_rollout_path(&selected)
+    {
+        return Err(ThreadStoreError::Conflict {
+            message: format!(
+                "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
+            ),
+        });
+    }
+    Ok(())
+}
+
 async fn selected_rollout_path(
     store: &LocalThreadStore,
     thread_id: ThreadId,

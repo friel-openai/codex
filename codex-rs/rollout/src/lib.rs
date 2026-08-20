@@ -25,6 +25,7 @@ mod segment_checkpoint;
 pub(crate) mod session_index;
 mod sqlite_metrics;
 pub mod state_db;
+mod writer_lock;
 
 pub use codex_history::CompactedItem;
 pub use codex_history::InitialHistory;
@@ -84,6 +85,7 @@ pub use codex_protocol::protocol::SessionMeta;
 pub use compression::RolloutLineReader;
 pub use compression::existing_rollout_path;
 pub use compression::open_rollout_line_reader;
+pub use compression::open_rollout_line_reader_with_capacity;
 pub use compression::plain_rollout_path;
 pub use compression::spawn_rollout_compression_worker;
 
@@ -120,8 +122,14 @@ pub use list::read_thread_item_from_rollout;
 pub use list::read_thread_item_from_rollout_with_indexed_preview;
 pub use list::rollout_date_parts;
 pub use maintenance::RolloutMaintenanceGuard;
+pub use maintenance::RolloutMaintenanceJobGuard;
+pub use maintenance::RolloutMaintenanceReadGuard;
+pub use maintenance::acquire_rollout_maintenance_job_lock;
 pub use maintenance::acquire_rollout_maintenance_lock;
+pub use maintenance::acquire_rollout_maintenance_read_lock;
+pub use maintenance::try_acquire_rollout_maintenance_job_lock;
 pub use maintenance::try_acquire_rollout_maintenance_lock;
+pub use maintenance::try_acquire_rollout_maintenance_read_lock;
 pub use metadata::builder_from_items;
 pub use metadata::history_rollout_path_with_rollout_id;
 pub use metadata::rollout_id_from_path;
@@ -171,6 +179,8 @@ pub use session_index::find_thread_names_by_ids;
 pub use session_index::remove_thread_name_entries;
 pub use state_db::StateDbHandle;
 pub use state_db::sqlite_telemetry_recorder;
+pub use writer_lock::RolloutWriterLockCoordinator;
+pub use writer_lock::RolloutWriterLockGuard;
 
 #[cfg(test)]
 mod tests;
