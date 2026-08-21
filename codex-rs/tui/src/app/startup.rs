@@ -80,6 +80,7 @@ impl App {
         initial_prompt: Option<String>,
         initial_images: Vec<PathBuf>,
         session_selection: SessionSelection,
+        fork_handoff_socket: Option<PathBuf>,
         feedback: codex_feedback::CodexFeedback,
         is_first_run: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
@@ -392,10 +393,18 @@ impl App {
                     &[("source", "cli_subcommand")],
                 );
                 let forked = match startup_draft
-                    .run_until(
-                        tui,
-                        app_server.fork_thread(config.clone(), target_session.thread_id),
-                    )
+                    .run_until(tui, async {
+                        match fork_handoff_socket.as_deref() {
+                            Some(path) => {
+                                app_server.import_fork_handoff(config.clone(), path).await
+                            }
+                            None => {
+                                app_server
+                                    .fork_thread(config.clone(), target_session.thread_id)
+                                    .await
+                            }
+                        }
+                    })
                     .await
                 {
                     Ok(forked) => forked,
@@ -460,6 +469,7 @@ impl App {
                             &mut app_server,
                             side_config.clone(),
                             &target_session,
+                            fork_handoff_socket.as_deref(),
                         ),
                     )
                     .await
