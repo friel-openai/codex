@@ -537,6 +537,21 @@ client_request_definitions! {
         serialization: thread_or_path(params.thread_id, params.path),
         response: v2::ThreadForkResponse,
     },
+    #[experimental("thread/fork/prepare")]
+    /// Freeze a loaded source for initialization by another local app-server.
+    ThreadForkPrepare => "thread/fork/prepare" {
+        params: v2::ThreadForkParams,
+        serialization: thread_or_path(params.thread_id, params.path),
+        response: v2::ThreadForkPrepareResponse,
+    },
+    #[experimental("thread/fork/import")]
+    /// Claim a local one-shot fork snapshot and initialize its independent runtime.
+    ThreadForkImport => "thread/fork/import" {
+        params: v2::ThreadForkImportParams,
+        serialization: None,
+        manual_payload_conversion: manual,
+        response: v2::ThreadForkResponse,
+    },
     ThreadArchive => "thread/archive" {
         params: v2::ThreadArchiveParams,
         serialization: thread_id(params.thread_id),

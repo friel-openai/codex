@@ -633,6 +633,22 @@ pub struct ThreadForkResponse {
     pub multi_agent_mode: MultiAgentMode,
 }
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadForkPrepareResponse {
+    /// Private, expiring, one-shot socket on the app-server host. History stays in memory.
+    pub socket_path: LegacyAppPathString,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadForkImportParams {
+    /// Socket returned by `thread/fork/prepare` on this host.
+    pub socket_path: LegacyAppPathString,
+}
+
 impl ThreadForkResponse {
     /// Parses valid absolute instruction source paths and omits malformed legacy values.
     pub fn instruction_source_path_uris(&self) -> Vec<PathUri> {

@@ -418,6 +418,8 @@ To branch from a stored session, call `thread/fork` with the `thread.id`. This c
 
 Like `thread/resume`, experimental clients can pass `excludeTurns: true` to `thread/fork` to return only thread metadata in `thread.turns` and page history with `thread/turns/list`. Metadata-only forks do not replay restored `thread/tokenUsage/updated`. Ephemeral forks of paginated threads require `excludeTurns: true`.
 
+For an independent local app-server, experimental `thread/fork/prepare` accepts the same parameters but requires a loaded `threadId`, latest history (no turn boundary or `path`), `excludeTurns: true`, and no `deferGoalContinuation`. Request it from the source-owning server, then pass the returned `socketPath` to `thread/fork/import` on the receiving server. Preparation starts no runtime; import initializes the child once and returns `ThreadForkResponse`. The private one-shot socket expires after 120 seconds, carries at most 64 MiB, and each source server permits two pending handoffs. The source can continue writing while the receiver initializes. Durable forks retain complete reference-backed history, with deletion protection until the child reference is durable; `ephemeral: true` transfers only bounded context and creates no child rollout.
+
 ### Example: List threads (with pagination & filters)
 
 `thread/list` lets you render a history UI. Results default to `createdAt` (newest first) descending.
