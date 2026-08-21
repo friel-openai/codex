@@ -26,20 +26,24 @@ const MAX_HANDOFF_BYTES: usize = 64 * 1024 * 1024;
 const HANDOFF_TTL: Duration = Duration::from_secs(120);
 const HANDOFF_VERSION: u32 = 1;
 
+/// Selects local creation, owner-side snapshot export, or receiver-side snapshot import.
 pub(super) enum ForkHandoff {
     Local,
     Export(OwnedSemaphorePermit),
     Import(Box<ImportedFork>),
 }
 
+/// Validated snapshot and source settings retained through durable child creation.
 pub(super) struct ImportedFork {
     pub(super) source: StoredThread,
     pub(super) prepared: PreparedFork,
     pub(super) settings: PersistedResumeSettings,
 }
 
+/// Bounded transfer of the captured history and settings, independent of the parent's runtime.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ForkSeed<'a> {
+    /// Rejects transfers encoded with a different handoff protocol.
     version: u32,
     params: ThreadForkParams,
     source: StoredThread,
@@ -58,6 +62,7 @@ struct ResponseItemSeed<'a> {
     metadata: Option<Cow<'a, CodexHarnessMetadata>>,
 }
 
+/// Removes the private socket when the transfer completes, expires, or is cancelled.
 struct HandoffSocket(PathBuf);
 
 impl Drop for HandoffSocket {
@@ -70,6 +75,7 @@ impl Drop for HandoffSocket {
     }
 }
 
+/// Enforces the transfer size limit during serialization rather than after allocation.
 struct SeedBuffer(Vec<u8>);
 
 impl io::Write for SeedBuffer {

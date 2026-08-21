@@ -736,8 +736,10 @@ impl AppServerSession {
         params.exclude_turns = true;
         let request_id = self.next_request_id();
         let response: codex_app_server_protocol::ThreadForkPrepareResponse = self
-            .request_with_maintenance(ClientRequest::ThreadForkPrepare { request_id, params })
-            .await?;
+            .client
+            .request_typed(ClientRequest::ThreadForkPrepare { request_id, params })
+            .await
+            .map_err(|err| bootstrap_request_error("thread/fork/prepare failed in TUI", err))?;
         response
             .socket_path
             .to_inferred_path_uri()
@@ -754,13 +756,17 @@ impl AppServerSession {
     ) -> Result<AppServerStartedThread> {
         let request_id = self.next_request_id();
         let response: ThreadForkResponse = self
-            .request_with_maintenance(ClientRequest::ThreadForkImport {
+            .client
+            .request_typed(ClientRequest::ThreadForkImport {
                 request_id,
                 params: codex_app_server_protocol::ThreadForkImportParams {
                     socket_path: codex_utils_path_uri::LegacyAppPathString::from_path(socket_path),
                 },
             })
-            .await?;
+            .await
+            .map_err(|err| {
+                bootstrap_request_error("thread/fork/import failed during TUI bootstrap", err)
+            })?;
         let presentation = if config.ephemeral {
             ForkPresentation::SideConversation
         } else {
@@ -831,6 +837,12 @@ impl AppServerSession {
                     .await
                     .map_err(|err| {
                         bootstrap_request_error("thread/fork failed during TUI bootstrap", err)
+                    })
+                    .wrap_err_with(|| {
+                        format!(
+                            "paginated thread/fork was rejected before the legacy retry: {}",
+                            source.message
+                        )
                     })?
             }
             Err(err) => {

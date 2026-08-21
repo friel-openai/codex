@@ -633,6 +633,7 @@ pub struct ThreadForkResponse {
     pub multi_agent_mode: MultiAgentMode,
 }
 
+/// Identifies an owner-prepared snapshot that another local app-server can claim once.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
@@ -641,6 +642,7 @@ pub struct ThreadForkPrepareResponse {
     pub socket_path: LegacyAppPathString,
 }
 
+/// Claims a prepared snapshot without acquiring the live parent's writer lock.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]

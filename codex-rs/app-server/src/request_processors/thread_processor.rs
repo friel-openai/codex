@@ -6334,7 +6334,28 @@ impl ThreadRequestProcessor {
         }
     }
 
-    pub(super) async fn thread_fork_inner(
+    // Keep the large fork future out of the prepare/import caller's poll frame. Nested
+    // unoptimized frames otherwise exhaust the embedded app-server's worker stack at startup.
+    pub(super) fn thread_fork_inner(
+        &self,
+        request_id: ConnectionRequestId,
+        params: ThreadForkParams,
+        app_server_client_name: Option<String>,
+        app_server_client_version: Option<String>,
+        client_mcp_extensions: ClientMcpExtensions,
+        handoff: ForkHandoff,
+    ) -> impl std::future::Future<Output = Result<(), JSONRPCErrorError>> + Send + '_ {
+        Box::pin(self.thread_fork_inner_impl(
+            request_id,
+            params,
+            app_server_client_name,
+            app_server_client_version,
+            client_mcp_extensions,
+            handoff,
+        ))
+    }
+
+    async fn thread_fork_inner_impl(
         &self,
         request_id: ConnectionRequestId,
         params: ThreadForkParams,

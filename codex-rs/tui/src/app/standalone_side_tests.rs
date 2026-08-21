@@ -70,10 +70,16 @@ async fn standalone_side_starts_real_fork_and_returns_blank_replay_inner(
     let codex_home = tempfile::tempdir_in("/tmp")?;
     #[cfg(not(unix))]
     let codex_home = tempdir()?;
-    let config = ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .build()
         .await?;
+    if history_mode == ThreadHistoryMode::Legacy {
+        // Preserve the Legacy fixture instead of testing its automatic conversion on resume.
+        config
+            .features
+            .disable(Feature::BackgroundPaginatedRolloutMigration)?;
+    }
     let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
     let parent_thread_id = match history_mode {
         ThreadHistoryMode::Paginated => app_server.start_thread(&config).await?.session.thread_id,

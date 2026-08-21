@@ -286,7 +286,10 @@ impl Drop for RolloutWriterLockGuard {
         };
 
         // Close the writer lock before deleting it so cleanup works on Windows too.
-        drop(std::mem::replace(&mut self.state, WriterLockState::Unreserved));
+        drop(std::mem::replace(
+            &mut self.state,
+            WriterLockState::Unreserved,
+        ));
         // An imported fork may outlive the source process. Keep its inode so compression and
         // subsequent writers cannot acquire a different lock file for the same thread.
         match OpenOptions::new().read(true).write(true).open(&self.path) {

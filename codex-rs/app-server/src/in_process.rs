@@ -1022,7 +1022,14 @@ mod tests {
         let codex_home = TempDir::new_in("/tmp").expect("short socket temp dir");
         #[cfg(not(unix))]
         let codex_home = TempDir::new().expect("temp dir");
-        let config = Arc::new(build_test_config(codex_home.path()).await);
+        let mut config = build_test_config(codex_home.path()).await;
+        // This fixture appends unordinalized records at the config barrier to test Legacy's
+        // later freeze. Automatic migration freezes Paginated history before that barrier.
+        config
+            .features
+            .disable(codex_features::Feature::BackgroundPaginatedRolloutMigration)
+            .expect("keep the config-barrier fixture Legacy");
+        let config = Arc::new(config);
         let model_provider = config.model_provider_id.as_str();
         let interrupted_thread_id = app_test_support::create_fake_rollout(
             codex_home.path(),
@@ -1241,8 +1248,10 @@ mod tests {
             /*experimental_api*/ true,
         )
         .await;
-        let mut start_params = ThreadStartParams::default();
-        start_params.history_mode = Some(codex_app_server_protocol::ThreadHistoryMode::Paginated);
+        let start_params = ThreadStartParams {
+            history_mode: Some(codex_app_server_protocol::ThreadHistoryMode::Paginated),
+            ..Default::default()
+        };
         let response = client
             .request(ClientRequest::ThreadStart {
                 request_id: RequestId::Integer(100),
@@ -1262,10 +1271,12 @@ mod tests {
                 },
             }).await.expect("inject transport").expect("append source context");
             for ephemeral in [true, false] {
-                let mut params = ThreadForkParams::default();
-                params.thread_id = source_id.clone();
-                params.ephemeral = ephemeral;
-                params.exclude_turns = true;
+                let params = ThreadForkParams {
+                    thread_id: source_id.clone(),
+                    ephemeral,
+                    exclude_turns: true,
+                    ..Default::default()
+                };
                 let response = client
                     .request(ClientRequest::ThreadForkPrepare {
                         request_id: RequestId::Integer(102),
