@@ -28,6 +28,7 @@ impl App {
     pub(super) async fn handle_start_placed_side(
         &mut self,
         tui: &mut tui::Tui,
+        app_server: &mut AppServerSession,
         parent_thread_id: ThreadId,
         placement: ForkPanePlacement,
     ) -> Result<AppRunControl> {
@@ -61,6 +62,29 @@ impl App {
 
         let launch_config = self.placed_side_launch_config();
         let terminal_info = codex_terminal_detection::terminal_info();
+        if terminal_info.multiplexer.is_none()
+            && ghostty_placement(&terminal_info, Some(placement)).is_none()
+        {
+            self.chat_widget
+                .add_error_message(SIDE_PLACEMENT_REQUIRES_PANE_HOST_MESSAGE.to_string());
+            tui.frame_requester().schedule_frame();
+            return Ok(AppRunControl::Continue);
+        }
+        let handoff = match app_server
+            .prepare_fork_handoff(
+                Self::standalone_side_config(&launch_config),
+                parent_thread_id,
+            )
+            .await
+        {
+            Ok(path) => path,
+            Err(error) => {
+                self.chat_widget
+                    .add_error_message(placed_side_spawn_failure_message(&format!("{error:#}")));
+                tui.frame_requester().schedule_frame();
+                return Ok(AppRunControl::Continue);
+            }
+        };
         let result = if let Some(multiplexer) = terminal_info.multiplexer.as_ref() {
             spawn_standalone_side_in_new_pane(
                 multiplexer,
@@ -68,6 +92,7 @@ impl App {
                 &launch_config,
                 &self.harness_overrides.additional_writable_roots,
                 placement,
+                &handoff,
             )
             .await
         } else if let Some(placement) = ghostty_placement(&terminal_info, Some(placement)) {
@@ -76,6 +101,7 @@ impl App {
                 &launch_config,
                 &self.harness_overrides.additional_writable_roots,
                 placement,
+                &handoff,
             )
             .await
         } else {
