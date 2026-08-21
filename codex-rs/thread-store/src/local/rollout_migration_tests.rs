@@ -72,6 +72,7 @@ use super::lineage_journal::LineageMigrationJournal;
 use super::lineage_journal::LineageMigrationPhase;
 use super::lineage_journal::read_lineage_migration_journal;
 use super::lineage_journal::write_lineage_migration_journal;
+use super::lineage_rewrite::rewrite_generated_item_ids;
 use super::lineage_stage::measure_legacy_lineage;
 use super::lineage_stage::stage_legacy_lineage;
 use super::migration_journal_path;
@@ -110,7 +111,7 @@ fn lineage_target_filename_accepts_legacy_filename_timestamp() {
     );
 }
 
-fn write_rollout(
+pub(super) fn write_rollout(
     home: &Path,
     thread_id: ThreadId,
     source: SessionSource,
@@ -163,7 +164,7 @@ fn write_rollout_with_fork(
     path
 }
 
-fn write_legacy_segment(
+pub(super) fn write_legacy_segment(
     path: &Path,
     home: &Path,
     thread_id: ThreadId,
@@ -204,7 +205,7 @@ fn write_legacy_segment(
     }
 }
 
-fn write_paginated_segment(
+pub(super) fn write_paginated_segment(
     path: &Path,
     home: &Path,
     thread_id: ThreadId,
@@ -269,7 +270,11 @@ fn set_paginated_subagent_history_start(path: &Path, boundary: u64) {
     fs::write(path, output).expect("rewrite Paginated session metadata");
 }
 
-fn segment_reference(path: PathBuf, thread_id: ThreadId, segment_id: SegmentId) -> RolloutItem {
+pub(super) fn segment_reference(
+    path: PathBuf,
+    thread_id: ThreadId,
+    segment_id: SegmentId,
+) -> RolloutItem {
     RolloutItem::RolloutReference(RolloutReferenceItem {
         rollout_id: Some(thread_id),
         rollout_path: path,
@@ -302,11 +307,180 @@ fn compress_rollout(path: &Path) -> PathBuf {
     compressed_path
 }
 
-fn user_message(text: &str) -> RolloutItem {
+pub(super) fn user_message(text: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
         message: text.to_string(),
         ..UserMessageEvent::default()
     }))
+}
+
+#[tokio::test]
+async fn generated_id_rewrite_matches_replay_and_preserves_explicit_ids() {
+    let home = TempDir::new().expect("create home");
+    let thread_id = ThreadId::new();
+    let segments = [SegmentId::new(), SegmentId::new()];
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let oldest = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segments[0].to_string())
+        .join(&filename);
+    let reasoning = |text: &str| {
+        RolloutItem::EventMsg(EventMsg::AgentReasoning(
+            codex_protocol::protocol::AgentReasoningEvent {
+                text: text.to_string(),
+            },
+        ))
+    };
+    write_legacy_segment(
+        &oldest,
+        home.path(),
+        thread_id,
+        segments[0],
+        vec![
+            turn_started("split"),
+            user_message("generated item-1"),
+            reasoning("first"),
+        ],
+    );
+    let active = home.path().join("sessions/2025/01/03").join(filename);
+    write_legacy_segment(
+        &active,
+        home.path(),
+        thread_id,
+        segments[1],
+        vec![
+            segment_reference(oldest, thread_id, segments[0]),
+            reasoning("second"),
+            exec_completion("split", "item-1"),
+            RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                thread_id,
+                turn_id: "split".to_string(),
+                item: TurnItem::Reasoning(ReasoningItem {
+                    id: "item-2".to_string(),
+                    summary_text: vec!["explicit".to_string()],
+                    raw_content: Vec::new(),
+                }),
+                started_at_ms: None,
+                completed_at_ms: 1,
+            })),
+            agent_message("generated answer"),
+            RolloutItem::EventMsg(EventMsg::ContextCompacted(
+                codex_protocol::protocol::ContextCompactedEvent,
+            )),
+            RolloutItem::EventMsg(EventMsg::EnteredReviewMode(
+                codex_protocol::protocol::EnteredReviewModeEvent {
+                    target: codex_protocol::protocol::ReviewTarget::UncommittedChanges,
+                    user_facing_hint: None,
+                    turn_id: None,
+                    item_id: None,
+                },
+            )),
+            RolloutItem::EventMsg(EventMsg::ExitedReviewMode(
+                codex_protocol::protocol::ExitedReviewModeEvent {
+                    turn_id: None,
+                    item_id: None,
+                    review_output: None,
+                },
+            )),
+            RolloutItem::EventMsg(EventMsg::EnteredReviewMode(
+                codex_protocol::protocol::EnteredReviewModeEvent {
+                    target: codex_protocol::protocol::ReviewTarget::UncommittedChanges,
+                    user_facing_hint: None,
+                    turn_id: None,
+                    item_id: Some("item-5".to_string()),
+                },
+            )),
+            turn_complete("split"),
+        ],
+    );
+    let mut plan = plan_legacy_lineage(home.path(), &active)
+        .await
+        .expect("plan lineage");
+    let mut rewritten = stage_legacy_lineage(&plan, &home.path().join("rewrite"))
+        .await
+        .expect("stage original IDs");
+    plan.synthetic_item_id_remap.extend([
+        ("item-1".to_string(), "item-10000000000".to_string()),
+        ("item-2".to_string(), "item-30000000000".to_string()),
+        ("item-3".to_string(), "item-40000000000".to_string()),
+        ("item-4".to_string(), "i".to_string()),
+        ("item-5".to_string(), "item-60000000000".to_string()),
+        ("item-6".to_string(), "item-70000000000".to_string()),
+    ]);
+    let expected = stage_legacy_lineage(&plan, &home.path().join("reference"))
+        .await
+        .expect("replay with remap");
+    rewrite_generated_item_ids(&mut rewritten, &plan.synthetic_item_id_remap)
+        .await
+        .expect("rewrite generated IDs");
+    for (actual, expected) in rewritten.iter().zip(&expected) {
+        assert_eq!(
+            fs::read(&actual.staged_path).expect("rewritten bytes"),
+            fs::read(&expected.staged_path).expect("reference bytes")
+        );
+        assert_eq!(
+            (
+                actual.byte_count,
+                actual.record_count,
+                &actual.sha256,
+                actual.start_ordinal,
+                actual.end_ordinal_exclusive
+            ),
+            (
+                expected.byte_count,
+                expected.record_count,
+                &expected.sha256,
+                expected.start_ordinal,
+                expected.end_ordinal_exclusive
+            )
+        );
+    }
+    let active_bytes = fs::read(&rewritten[1].staged_path).expect("active canonical bytes");
+    let lines = active_bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice::<serde_json::Value>(line).expect("canonical JSON"))
+        .collect::<Vec<_>>();
+    let ids = lines
+        .iter()
+        .filter_map(|line| {
+            line.pointer("/payload/item/id")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        ids,
+        vec![
+            "item-30000000000",
+            "item-1",
+            "item-2",
+            "item-40000000000",
+            "i",
+            "item-60000000000",
+            "item-70000000000",
+            "item-5"
+        ]
+    );
+
+    let remap = std::mem::take(&mut plan.synthetic_item_id_remap);
+    let mut damaged = stage_legacy_lineage(&plan, &home.path().join("damaged"))
+        .await
+        .expect("stage damage fixture");
+    let mut bytes = fs::read(&damaged[0].staged_path).expect("read damage fixture");
+    *bytes.last_mut().expect("nonempty staged file") = b' ';
+    fs::write(&damaged[0].staged_path, bytes).expect("damage unpublished staging");
+    let error = rewrite_generated_item_ids(&mut damaged, &remap)
+        .await
+        .expect_err("reject changed staging");
+    assert!(error.to_string().contains("staged file changed"));
+    for source in &plan.sources {
+        assert_eq!(
+            hash_file(&source.path).await.expect("original source hash"),
+            (source.byte_count, source.sha256.clone())
+        );
+    }
 }
 
 fn agent_message(text: &str) -> RolloutItem {
@@ -370,7 +544,7 @@ fn item_completed(turn_id: &str, item_id: &str) -> RolloutItem {
     }))
 }
 
-fn turn_started(turn_id: &str) -> RolloutItem {
+pub(super) fn turn_started(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
         turn_id: turn_id.to_string(),
         trace_id: None,
@@ -380,7 +554,7 @@ fn turn_started(turn_id: &str) -> RolloutItem {
     }))
 }
 
-fn turn_complete(turn_id: &str) -> RolloutItem {
+pub(super) fn turn_complete(turn_id: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
         turn_id: turn_id.to_string(),
         last_agent_message: None,
@@ -392,7 +566,7 @@ fn turn_complete(turn_id: &str) -> RolloutItem {
     }))
 }
 
-fn completed_user_message(
+pub(super) fn completed_user_message(
     thread_id: ThreadId,
     turn_id: &str,
     item_id: &str,
@@ -548,7 +722,7 @@ fn assert_manifest_target_matches_published_rollout(
     );
 }
 
-fn set_history_base(path: &Path, history_base: HistoryPosition) {
+pub(super) fn set_history_base(path: &Path, history_base: HistoryPosition) {
     let contents = fs::read_to_string(path).expect("read rollout");
     let mut lines = contents.lines();
     let mut head: serde_json::Value =
@@ -614,7 +788,7 @@ SELECT
     .expect("read thread history row counts")
 }
 
-fn apply_options() -> RolloutMigrationOptions {
+pub(super) fn apply_options() -> RolloutMigrationOptions {
     RolloutMigrationOptions {
         mode: RolloutMigrationMode::Apply,
         max_mib_per_second: Some(1024),
@@ -622,7 +796,7 @@ fn apply_options() -> RolloutMigrationOptions {
     }
 }
 
-async fn indexed_store(home: &Path) -> LocalThreadStore {
+pub(super) async fn indexed_store(home: &Path) -> LocalThreadStore {
     let config = test_config(home);
     let rollout_config = RolloutConfig {
         codex_home: config.codex_home.clone(),
@@ -637,7 +811,67 @@ async fn indexed_store(home: &Path) -> LocalThreadStore {
     LocalThreadStore::new(config, Some(state_db))
 }
 
-async fn list_active_summary_turns(store: &LocalThreadStore, thread_id: ThreadId) -> TurnPage {
+#[tokio::test]
+async fn native_thread_load_does_not_wait_for_an_unrelated_migration_job() {
+    let home = TempDir::new().expect("create Codex home");
+    let legacy_id = ThreadId::new();
+    write_rollout(
+        home.path(),
+        legacy_id,
+        SessionSource::Cli,
+        vec![user_message("legacy")],
+    );
+    let native_id = ThreadId::new();
+    let native_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{native_id}.jsonl"));
+    write_paginated_segment(
+        &native_path,
+        home.path(),
+        native_id,
+        SegmentId::new(),
+        /*start_ordinal*/ 0,
+        vec![user_message("native")],
+    );
+    let store = indexed_store(home.path()).await;
+    super::super::thread_history_materialization::materialize_to_sqlite(
+        &store,
+        native_id,
+        native_path.as_path(),
+    )
+    .await
+    .expect("materialize ready native projection");
+    let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())
+        .expect("open migration lock")
+        .expect("claim unrelated job");
+    store.start_automatic_rollout_migration();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        store.await_automatic_rollout_migration(native_id),
+    )
+    .await
+    .expect("native thread must not wait for the migration worker")
+    .expect("native thread is ready");
+    assert!(
+        !super::startup::processed_thread_ids(&store)
+            .await
+            .contains(&native_id)
+    );
+    drop(job);
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        store.await_automatic_rollout_migration(legacy_id),
+    )
+    .await
+    .expect("legacy migration finishes after contention")
+    .expect("legacy migration succeeds");
+}
+
+pub(super) async fn list_active_summary_turns(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+) -> TurnPage {
     store
         .list_turns(ListTurnsParams {
             thread_id,
@@ -1224,6 +1458,499 @@ async fn lineage_migration_targets_are_scoped_to_divergent_selected_lineages() {
 }
 
 #[tokio::test]
+async fn sequential_fork_migrations_preserve_shared_legacy_and_native_ancestors() {
+    async fn snapshot(
+        store: &LocalThreadStore,
+        id: ThreadId,
+    ) -> Vec<(String, String, serde_json::Value)> {
+        list_active_summary_turns(store, id)
+            .await
+            .turns
+            .into_iter()
+            .flat_map(|turn| {
+                turn.items.into_iter().map(move |item| {
+                    (
+                        turn.turn_id.clone(),
+                        item.item_id,
+                        serde_json::from_slice(&item.item_json).expect("projected item JSON"),
+                    )
+                })
+            })
+            .collect()
+    }
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let parent_segments = [SegmentId::new(), SegmentId::new()];
+    let filename = format!("rollout-2025-01-03T12-00-00-{parent_id}.jsonl");
+    let oldest = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(parent_id.to_string())
+        .join(parent_segments[0].to_string())
+        .join(&filename);
+    write_legacy_segment(
+        &oldest,
+        home.path(),
+        parent_id,
+        parent_segments[0],
+        vec![
+            turn_started("shared-oldest"),
+            user_message("shared oldest"),
+            turn_complete("shared-oldest"),
+        ],
+    );
+    let parent_source = home.path().join("sessions/2025/01/03").join(filename);
+    write_legacy_segment(
+        &parent_source,
+        home.path(),
+        parent_id,
+        parent_segments[1],
+        vec![
+            segment_reference(oldest.clone(), parent_id, parent_segments[0]),
+            turn_started("shared-parent"),
+            user_message("shared parent"),
+            turn_complete("shared-parent"),
+        ],
+    );
+    let children = [ThreadId::new(), ThreadId::new(), ThreadId::new()];
+    let child_segments = [SegmentId::new(), SegmentId::new(), SegmentId::new()];
+    let child_paths = children.map(|id| {
+        home.path()
+            .join("sessions/2025/01/03")
+            .join(format!("rollout-2025-01-03T12-00-01-{id}.jsonl"))
+    });
+    for index in 0..children.len() {
+        write_legacy_segment(
+            &child_paths[index],
+            home.path(),
+            children[index],
+            child_segments[index],
+            vec![
+                segment_reference(parent_source.clone(), parent_id, parent_segments[1]),
+                turn_started(&format!("child-{index}")),
+                user_message(&format!("branch {index}")),
+                turn_complete(&format!("child-{index}")),
+            ],
+        );
+    }
+    let store = indexed_store(home.path()).await;
+    let parent_report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![parent_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate parent first");
+    assert_eq!(
+        parent_report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated
+    );
+    let parent_target = parent_report.outcomes[0].rollout_path.clone();
+    let parent_meta = codex_rollout::read_session_meta_line(&parent_target)
+        .await
+        .expect("parent metadata");
+    assert!(parent_meta.meta.history_base.is_some());
+    let mut expected_prefix = snapshot(&store, parent_id).await;
+    assert_eq!(expected_prefix.len(), 2);
+    let mut preserved = vec![oldest, parent_source, parent_target.clone()]
+        .into_iter()
+        .map(|path| {
+            let bytes = fs::read(&path).expect("read preserved source");
+            (path, bytes)
+        })
+        .collect::<Vec<_>>();
+
+    let mut native_predecessor = parent_target;
+    let mut native_owner = parent_id;
+    for index in 0..children.len() {
+        if index > 0 {
+            let meta = codex_rollout::read_session_meta_line(&native_predecessor)
+                .await
+                .expect("native predecessor");
+            let mut reference = segment_reference(
+                native_predecessor.clone(),
+                native_owner,
+                meta.meta.segment_id.expect("native segment identity"),
+            );
+            let RolloutItem::RolloutReference(reference_item) = &mut reference else {
+                unreachable!()
+            };
+            reference_item.rollout_id = codex_rollout::rollout_id_from_path(&native_predecessor);
+            write_legacy_segment(
+                &child_paths[index],
+                home.path(),
+                children[index],
+                child_segments[index],
+                vec![
+                    reference,
+                    turn_started(&format!("child-{index}")),
+                    user_message(&format!("branch {index}")),
+                    turn_complete(&format!("child-{index}")),
+                ],
+            );
+        }
+        preserved.push((
+            child_paths[index].clone(),
+            fs::read(&child_paths[index]).expect("child source"),
+        ));
+        let report = store
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![children[index]],
+                ..apply_options()
+            })
+            .await
+            .expect("migrate next fork");
+        assert_eq!(
+            report.outcomes[0].status,
+            RolloutMigrationStatus::Migrated,
+            "{:?}",
+            report.outcomes[0].message
+        );
+        let target = report.outcomes[0].rollout_path.clone();
+        let after = snapshot(&store, children[index]).await;
+        assert_eq!(&after[..expected_prefix.len()], expected_prefix.as_slice());
+        assert_eq!(after.len(), expected_prefix.len() + 1);
+        assert_eq!(
+            after.last().expect("child item").2["content"][0]["text"],
+            format!("branch {index}")
+        );
+        for (path, bytes) in &preserved {
+            assert_eq!(fs::read(path).expect("preserved branch"), *bytes);
+        }
+        preserved.push((target.clone(), fs::read(&target).expect("published branch")));
+        if index > 0 {
+            native_predecessor = target;
+            native_owner = children[index];
+            expected_prefix = after;
+        }
+    }
+    let restarted = indexed_store(home.path()).await;
+    for child_id in children {
+        let report = restarted
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![child_id],
+                ..apply_options()
+            })
+            .await
+            .expect("restart migration");
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.status == RolloutMigrationStatus::AlreadyPaginated)
+        );
+    }
+    for (path, bytes) in preserved {
+        assert_eq!(fs::read(path).expect("preserved after restart"), bytes);
+    }
+}
+
+#[tokio::test]
+async fn legacy_fork_reuses_compressed_native_parent_with_decoded_byte_boundary() {
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let parent_segment = SegmentId::new();
+    let parent = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{parent_id}.jsonl"));
+    let end = write_paginated_segment(
+        &parent,
+        home.path(),
+        parent_id,
+        parent_segment,
+        /*start_ordinal*/ 0,
+        vec![
+            turn_started("parent"),
+            completed_user_message(
+                parent_id,
+                "parent",
+                "parent-item",
+                "compressed native parent",
+            ),
+            turn_complete("parent"),
+        ],
+    );
+    let logical_bytes = fs::metadata(&parent).expect("plain parent metadata").len();
+    let parent = compress_rollout(&parent);
+    let parent_bytes = fs::read(&parent).expect("compressed parent bytes");
+    assert_ne!(logical_bytes, parent_bytes.len() as u64);
+    let child_id = ThreadId::new();
+    let child = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-01-{child_id}.jsonl"));
+    write_legacy_segment(
+        &child,
+        home.path(),
+        child_id,
+        SegmentId::new(),
+        vec![
+            segment_reference(parent.clone(), parent_id, parent_segment),
+            user_message("child"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+    let plan = plan_legacy_lineage(home.path(), &child)
+        .await
+        .expect("plan compressed parent");
+    assert_eq!(plan.sources.len(), 1);
+    assert_eq!(
+        plan.reference_dependencies[0].end_byte_offset,
+        logical_bytes
+    );
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![child_id],
+            ..apply_options()
+        })
+        .await
+        .expect("migrate compressed native fork");
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        report.outcomes[0].message
+    );
+    let meta = codex_rollout::read_session_meta_line(&report.outcomes[0].rollout_path)
+        .await
+        .expect("read migrated child");
+    assert_eq!(
+        meta.meta.history_base,
+        Some(HistoryPosition {
+            thread_id: parent_id,
+            end_ordinal_exclusive: end,
+            end_byte_offset: logical_bytes,
+        })
+    );
+    assert_eq!(
+        fs::read(parent).expect("preserved compressed parent"),
+        parent_bytes
+    );
+}
+
+#[tokio::test]
+async fn old_planned_journal_upgrades_native_parent_reuse_without_changing_sources() {
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let parent_segment = SegmentId::new();
+    let parent = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{parent_id}.jsonl"));
+    write_paginated_segment(
+        &parent,
+        home.path(),
+        parent_id,
+        parent_segment,
+        /*start_ordinal*/ 0,
+        vec![
+            turn_started("parent"),
+            completed_user_message(parent_id, "parent", "parent-item", "native parent"),
+            turn_complete("parent"),
+        ],
+    );
+    let child_id = ThreadId::new();
+    let child = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-01-{child_id}.jsonl"));
+    write_legacy_segment(
+        &child,
+        home.path(),
+        child_id,
+        SegmentId::new(),
+        vec![
+            segment_reference(parent.clone(), parent_id, parent_segment),
+            user_message("child"),
+        ],
+    );
+    let before = [
+        fs::read(&parent).expect("parent"),
+        fs::read(&child).expect("child"),
+    ];
+    let store = indexed_store(home.path()).await;
+    let journal_path = migration_journal_path(home.path(), child_id);
+    let mut initial = LineageMigrationJournal::from_plan(
+        &plan_legacy_lineage(home.path(), &child)
+            .await
+            .expect("current plan"),
+    );
+    initial.reuse_native_prefixes = false;
+    write_lineage_migration_journal(&journal_path, &initial)
+        .await
+        .expect("select old planning policy");
+    let old_plan = plan_legacy_lineage(home.path(), &child)
+        .await
+        .expect("old plan");
+    assert_eq!(old_plan.sources.len(), 2);
+    let mut old_json = serde_json::to_value(LineageMigrationJournal::from_plan(&old_plan))
+        .expect("old journal JSON");
+    old_json
+        .as_object_mut()
+        .expect("journal object")
+        .remove("reuse_native_prefixes");
+    fs::write(
+        &journal_path,
+        serde_json::to_vec(&old_json).expect("encode old journal"),
+    )
+    .expect("write old v4 journal");
+    let report = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![child_id],
+            ..apply_options()
+        })
+        .await
+        .expect("recover old Planned journal");
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        report.outcomes[0].message
+    );
+    assert_eq!(
+        [
+            fs::read(parent).expect("parent"),
+            fs::read(child).expect("child")
+        ],
+        before
+    );
+    assert!(!journal_path.exists());
+}
+
+#[tokio::test]
+async fn old_durable_native_parent_journals_keep_their_recorded_targets() {
+    for phase in [
+        LineageMigrationPhase::TargetsDurable,
+        LineageMigrationPhase::ProjectionDurable,
+    ] {
+        let home = TempDir::new().expect("create Codex home");
+        let parent_id = ThreadId::new();
+        let parent_segment = SegmentId::new();
+        let parent = home
+            .path()
+            .join("sessions/2025/01/03")
+            .join(format!("rollout-2025-01-03T12-00-00-{parent_id}.jsonl"));
+        write_paginated_segment(
+            &parent,
+            home.path(),
+            parent_id,
+            parent_segment,
+            /*start_ordinal*/ 0,
+            vec![turn_started("empty-parent"), turn_complete("empty-parent")],
+        );
+        let child_id = ThreadId::new();
+        let child = home
+            .path()
+            .join("sessions/2025/01/03")
+            .join(format!("rollout-2025-01-03T12-00-01-{child_id}.jsonl"));
+        write_legacy_segment(
+            &child,
+            home.path(),
+            child_id,
+            SegmentId::new(),
+            vec![
+                segment_reference(parent.clone(), parent_id, parent_segment),
+                user_message("child"),
+            ],
+        );
+        let store = indexed_store(home.path()).await;
+        let journal_path = migration_journal_path(home.path(), child_id);
+        let mut policy = LineageMigrationJournal::from_plan(
+            &plan_legacy_lineage(home.path(), &child)
+                .await
+                .expect("current plan"),
+        );
+        policy.reuse_native_prefixes = false;
+        write_lineage_migration_journal(&journal_path, &policy)
+            .await
+            .expect("old planning policy");
+        let old_plan = plan_legacy_lineage(home.path(), &child)
+            .await
+            .expect("old plan");
+        assert_eq!(old_plan.sources.len(), 2);
+        let staged = stage_legacy_lineage(&old_plan, &journal_path.with_extension("staging"))
+            .await
+            .expect("stage old native-parent plan");
+        let expected = staged
+            .iter()
+            .map(|target| {
+                (
+                    target.final_path.clone(),
+                    target.byte_count,
+                    target.sha256.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut journal = LineageMigrationJournal::from_plan(&old_plan);
+        journal
+            .record_staged_targets(&staged)
+            .expect("record old durable targets");
+        let mut old_json = serde_json::to_value(journal).expect("journal JSON");
+        old_json
+            .as_object_mut()
+            .expect("journal object")
+            .remove("reuse_native_prefixes");
+        fs::write(
+            &journal_path,
+            serde_json::to_vec(&old_json).expect("old v4 JSON"),
+        )
+        .expect("old journal");
+        let mut limiter =
+            RolloutMigrationRateLimiter::new(/*max_mib_per_second*/ None).expect("limiter");
+        if phase == LineageMigrationPhase::ProjectionDurable {
+            let plan = plan_legacy_lineage(home.path(), &child)
+                .await
+                .expect("recover old plan");
+            let error = store
+                .migrate_legacy_lineage_until_phase_for_test(
+                    &child,
+                    &journal_path,
+                    plan,
+                    &mut limiter,
+                    phase,
+                )
+                .await
+                .expect_err("stop after durable projection");
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected lineage migration stop")
+            );
+            let mut journal = read_lineage_migration_journal(&journal_path)
+                .await
+                .expect("durable journal");
+            super::lineage_publish::publish_lineage_targets(&journal_path, &mut journal)
+                .await
+                .expect("publish before phase update");
+            let selected = &staged.last().expect("selected target").final_path;
+            let db = store.state_db.as_ref().expect("state db");
+            assert!(
+                db.replace_rollout_path_if_current(child_id, &child, selected)
+                    .await
+                    .expect("select old target before phase update")
+            );
+            assert!(
+                db.mark_thread_paginated(child_id)
+                    .await
+                    .expect("mark selected target")
+            );
+        }
+        store
+            .recover_legacy_lineage(&journal_path, &mut limiter)
+            .await
+            .expect("recover old durable plan");
+        for (path, bytes, sha256) in expected {
+            assert_eq!(
+                hash_file(&path).await.expect("recorded target"),
+                (bytes, sha256)
+            );
+        }
+        assert!(!journal_path.exists());
+    }
+}
+
+#[tokio::test]
 async fn lineage_migration_stages_one_contiguous_paginated_ordinal_space() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -1241,7 +1968,7 @@ async fn lineage_migration_stages_one_contiguous_paginated_ordinal_space() {
         home.path(),
         thread_id,
         segment_ids[0],
-        vec![user_message("oldest")],
+        vec![user_message("oldest"), compacted(Vec::new())],
     );
     let middle = immutable_root
         .join(segment_ids[1].to_string())
@@ -1273,6 +2000,16 @@ async fn lineage_migration_stages_one_contiguous_paginated_ordinal_space() {
     let measured = measure_legacy_lineage(&plan)
         .await
         .expect("measure lineage without writing");
+    assert!(plan.sources.iter().all(|source| !source.has_rollback));
+    let mut full_rollback_plan = plan.clone();
+    full_rollback_plan.sources[0].has_rollback = true;
+    assert_eq!(
+        measure_legacy_lineage(&full_rollback_plan)
+            .await
+            .expect("measure with the full rollback planner"),
+        measured,
+        "skipping rollback planning must preserve every staged byte and target identity"
+    );
     let stage_root = home.path().join("rollout-migrations/staging-a");
     let staged = stage_legacy_lineage(&plan, stage_root.as_path())
         .await
@@ -1857,23 +2594,16 @@ async fn automatic_migration_rewrites_paginated_reference_lineage() {
     let store = indexed_store(home.path()).await;
 
     store.start_automatic_rollout_migration();
-    tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if super::startup::processed_thread_ids(&store)
-                .await
-                .contains(&thread_id)
-            {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("automatic discovery selects the Paginated reference lineage");
+    tokio::task::yield_now().await;
+    assert!(
+        super::startup::processed_thread_ids(&store)
+            .await
+            .is_empty()
+    );
     store
         .await_automatic_rollout_migration(thread_id)
         .await
-        .expect("wait for automatic Paginated reference migration");
+        .expect("request automatic Paginated reference migration");
     let selected_path = store
         .state_db()
         .await
@@ -3043,6 +3773,136 @@ async fn context_dependent_legacy_fixture() -> ContextDependentLegacyFixture {
     .await
 }
 
+#[tokio::test]
+async fn desktop_compatible_staging_can_reuse_a_validated_plan() {
+    let fixture = context_dependent_legacy_fixture().await;
+    let mut plan = plan_legacy_lineage(fixture.home.path(), &fixture.selected_path)
+        .await
+        .expect("plan fixture");
+    let first = super::lineage_compatibility::stage_compatible_lineage(
+        fixture.home.path(),
+        &mut plan,
+        &fixture.home.path().join("first"),
+    )
+    .await
+    .expect("first compatible staging");
+    assert!(!plan.synthetic_item_id_remap.is_empty());
+    let remap = plan.synthetic_item_id_remap.clone();
+    let second = super::lineage_compatibility::stage_compatible_lineage(
+        fixture.home.path(),
+        &mut plan,
+        &fixture.home.path().join("second"),
+    )
+    .await
+    .expect("repeat compatible staging");
+    assert_eq!(plan.synthetic_item_id_remap, remap);
+    for (first, second) in first.iter().zip(&second) {
+        assert_eq!(
+            fs::read(&first.staged_path).expect("first target"),
+            fs::read(&second.staged_path).expect("second target")
+        );
+        assert_eq!(
+            (&first.sha256, first.byte_count, first.record_count),
+            (&second.sha256, second.byte_count, second.record_count)
+        );
+    }
+}
+
+#[tokio::test]
+async fn durable_v4_journal_retains_older_collision_id_allocation() {
+    for phase in [
+        LineageMigrationPhase::TargetsDurable,
+        LineageMigrationPhase::ProjectionDurable,
+    ] {
+        let fixture =
+            context_dependent_legacy_fixture_with_counts([7, 3, 1, 1], "item-4", "item-11").await;
+        let store = indexed_store(fixture.home.path()).await;
+        let mut old_plan = plan_legacy_lineage(fixture.home.path(), &fixture.selected_path)
+            .await
+            .expect("plan old allocation");
+        let initial_stage = tempfile::tempdir().expect("initial staging");
+        super::lineage_compatibility::stage_compatible_lineage(
+            fixture.home.path(),
+            &mut old_plan,
+            initial_stage.path(),
+        )
+        .await
+        .expect("derive valid remap");
+        // The previous HashMap iteration could allocate these two unused IDs in either order.
+        let first = old_plan.synthetic_item_id_remap["item-1"].clone();
+        let second = old_plan.synthetic_item_id_remap["item-2"].clone();
+        old_plan
+            .synthetic_item_id_remap
+            .insert("item-1".to_string(), second);
+        old_plan
+            .synthetic_item_id_remap
+            .insert("item-2".to_string(), first);
+        let journal_path = migration_journal_path(fixture.home.path(), fixture.thread_id);
+        let staged = stage_legacy_lineage(&old_plan, &journal_path.with_extension("staging"))
+            .await
+            .expect("stage old allocation");
+        let expected = staged
+            .iter()
+            .map(|target| {
+                (
+                    target.final_path.clone(),
+                    target.byte_count,
+                    target.sha256.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut journal = LineageMigrationJournal::from_plan(&old_plan);
+        journal
+            .record_staged_targets(&staged)
+            .expect("record durable old staging");
+        assert_eq!(
+            serde_json::to_value(&journal).expect("journal JSON")["version"],
+            4
+        );
+        write_lineage_migration_journal(&journal_path, &journal)
+            .await
+            .expect("write old v4 journal");
+        let mut limiter = RolloutMigrationRateLimiter::new(/*max_mib_per_second*/ None)
+            .expect("migration limiter");
+        if phase == LineageMigrationPhase::ProjectionDurable {
+            let current_plan = plan_legacy_lineage(fixture.home.path(), &fixture.selected_path)
+                .await
+                .expect("current plan");
+            let error = store
+                .migrate_legacy_lineage_until_phase_for_test(
+                    &fixture.selected_path,
+                    &journal_path,
+                    current_plan,
+                    &mut limiter,
+                    phase,
+                )
+                .await
+                .expect_err("stop after old projection is durable");
+            assert!(
+                error
+                    .to_string()
+                    .contains("injected lineage migration stop")
+            );
+            let first = &staged[0];
+            fs::create_dir_all(first.final_path.parent().expect("target parent"))
+                .expect("create target parent");
+            fs::rename(&first.staged_path, &first.final_path)
+                .expect("simulate publication before journal update");
+        }
+        store
+            .recover_legacy_lineage(&journal_path, &mut limiter)
+            .await
+            .expect("recover old allocation");
+        for (path, bytes, sha256) in expected {
+            assert_eq!(
+                hash_file(&path).await.expect("published old target"),
+                (bytes, sha256)
+            );
+        }
+        assert_context_dependent_migration_projection(&store, &fixture).await;
+    }
+}
+
 async fn context_dependent_legacy_fixture_with_counts(
     item_counts: [usize; 4],
     expected_bounded_item_id: &str,
@@ -3485,6 +4345,187 @@ async fn automatic_migration_streams_large_reference_lineage_with_malformed_tail
     .await
     .expect("rehash large Legacy sources");
     assert_eq!(hashes_after, source_hashes);
+}
+
+#[tokio::test]
+async fn lineage_migration_publishes_complete_root_before_selection() {
+    let home = TempDir::new().expect("create Codex home");
+    let parent_id = ThreadId::new();
+    let thread_id = ThreadId::new();
+    let segments = [SegmentId::new(), SegmentId::new(), SegmentId::new()];
+    let parent = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(parent_id.to_string())
+        .join(segments[0].to_string())
+        .join(format!("rollout-2025-01-03T12-00-00-{parent_id}.jsonl"));
+    write_legacy_segment(
+        &parent,
+        home.path(),
+        parent_id,
+        segments[0],
+        vec![
+            turn_started("parent"),
+            user_message("parent message"),
+            turn_complete("parent"),
+        ],
+    );
+    let mut reference = segment_reference(parent, parent_id, segments[0]);
+    let RolloutItem::RolloutReference(reference_item) = &mut reference else {
+        panic!("reference fixture");
+    };
+    reference_item.nth_user_message = Some(usize::MAX);
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let middle = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segments[1].to_string())
+        .join(&filename);
+    write_legacy_segment(
+        &middle,
+        home.path(),
+        thread_id,
+        segments[1],
+        vec![
+            reference,
+            turn_started("split"),
+            user_message("split message"),
+            RolloutItem::EventMsg(EventMsg::AgentReasoning(
+                codex_protocol::protocol::AgentReasoningEvent {
+                    text: "first reasoning".into(),
+                },
+            )),
+        ],
+    );
+    let active = home.path().join("sessions/2025/01/03").join(filename);
+    write_legacy_segment(
+        &active,
+        home.path(),
+        thread_id,
+        segments[2],
+        vec![
+            segment_reference(middle, thread_id, segments[1]),
+            RolloutItem::EventMsg(EventMsg::AgentReasoning(
+                codex_protocol::protocol::AgentReasoningEvent {
+                    text: "second reasoning".into(),
+                },
+            )),
+            turn_complete("split"),
+        ],
+    );
+    let store = indexed_store(home.path()).await;
+    let plan = plan_legacy_lineage(home.path(), &active)
+        .await
+        .expect("plan lineage");
+    let eligible_plan = plan.clone();
+    let journal_path = migration_journal_path(home.path(), thread_id);
+    let mut limiter = RolloutMigrationRateLimiter::new(None).expect("migration limiter");
+    let stopped = store
+        .migrate_legacy_lineage_until_phase_for_test(
+            &active,
+            &journal_path,
+            plan,
+            &mut limiter,
+            LineageMigrationPhase::ProjectionDurable,
+        )
+        .await
+        .expect_err("stop before selecting the target");
+    assert!(
+        stopped
+            .to_string()
+            .contains("injected lineage migration stop"),
+        "{stopped}"
+    );
+    let journal = read_lineage_migration_journal(&journal_path)
+        .await
+        .expect("read journal");
+    assert_eq!(journal.phase, LineageMigrationPhase::ProjectionDurable);
+    let root = journal.targets.last().expect("selected target").rollout_id;
+    assert_eq!(
+        super::lineage_projection::complete_staged_root(&eligible_plan, &journal)
+            .await
+            .expect("complete staged root"),
+        Some(root)
+    );
+    for (cutoff, filters) in [(Some(1), None), (None, Some(vec!["filtered".to_string()]))] {
+        let mut restricted = eligible_plan.clone();
+        let Some(LegacyLineagePredecessor::RolloutReference(reference)) =
+            &mut restricted.sources[1].predecessor
+        else {
+            panic!("parent reference");
+        };
+        reference.nth_user_message = cutoff;
+        reference.compacted_replacement_history_filter_texts = filters;
+        assert_eq!(
+            super::lineage_projection::complete_staged_root(&restricted, &journal)
+                .await
+                .expect("inspect restricted lineage"),
+            None
+        );
+    }
+    let selected_staging = journal
+        .targets
+        .last()
+        .expect("selected target")
+        .staged_path
+        .as_ref()
+        .expect("selected staging path");
+    let original = fs::read(selected_staging).expect("read staged metadata");
+    set_paginated_subagent_history_start(selected_staging, /*boundary*/ 1);
+    assert_eq!(
+        super::lineage_projection::complete_staged_root(&eligible_plan, &journal)
+            .await
+            .expect("inspect subagent lineage"),
+        None
+    );
+    fs::write(selected_staging, original).expect("restore authenticated staged bytes");
+    assert!(
+        thread_history::projection_state(&store, root)
+            .await
+            .expect("projection")
+            .expect("root checkpoint")
+            .lineage_complete
+    );
+    let before = complete_projection_rows(&store, root).await;
+    drop(store);
+    let restarted = indexed_store(home.path()).await;
+    restarted
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("recover publication");
+    assert!(
+        restarted
+            .rebuild_history_projection(thread_id)
+            .await
+            .expect("reference rebuild")
+    );
+    assert_eq!(complete_projection_rows(&restarted, root).await, before);
+}
+
+pub(super) async fn complete_projection_rows(
+    store: &LocalThreadStore,
+    rollout_id: ThreadId,
+) -> Vec<Vec<String>> {
+    let pool = store
+        .thread_history_db()
+        .await
+        .expect("projection database");
+    let mut tables = Vec::new();
+    for query in [
+        "SELECT json_array(turn_id, rollout_ordinal, status, error_json, started_at, completed_at, duration_ms, first_user_item_id, final_agent_item_id, rollout_byte_offset, rollout_end_ordinal, rollout_end_byte_offset) FROM thread_turns WHERE thread_id = ? ORDER BY rollout_ordinal",
+        "SELECT json_array(turn_id, item_id, rollout_ordinal, created_at_ms, item_json, item_type, updated_at_ordinal) FROM thread_items WHERE thread_id = ? ORDER BY rollout_ordinal",
+        "SELECT json_array(next_rollout_byte_offset, next_rollout_ordinal) FROM thread_history_projection_state WHERE thread_id = ?",
+    ] {
+        tables.push(
+            sqlx::query_scalar::<_, String>(query)
+                .bind(rollout_id.to_string())
+                .fetch_all(pool)
+                .await
+                .expect("read complete projection rows"),
+        );
+    }
+    tables
 }
 
 #[tokio::test]
@@ -4237,6 +5278,125 @@ async fn migration_refuses_source_mutation_after_lineage_journal_is_durable() {
 }
 
 #[tokio::test]
+async fn automatic_migration_recovers_an_appended_source_before_selection() {
+    for phase in [
+        LineageMigrationPhase::Planned,
+        LineageMigrationPhase::TargetsDurable,
+        LineageMigrationPhase::ProjectionDurable,
+    ] {
+        let home = TempDir::new().expect("create Codex home");
+        let thread_id = ThreadId::new();
+        let segments = [SegmentId::new(), SegmentId::new()];
+        let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+        let predecessor = home
+            .path()
+            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+            .join(thread_id.to_string())
+            .join(segments[0].to_string())
+            .join(&filename);
+        let active = home.path().join("sessions/2025/01/03").join(filename);
+        write_legacy_segment(
+            &predecessor,
+            home.path(),
+            thread_id,
+            segments[0],
+            vec![user_message("immutable marker")],
+        );
+        write_legacy_segment(
+            &active,
+            home.path(),
+            thread_id,
+            segments[1],
+            vec![
+                segment_reference(predecessor.clone(), thread_id, segments[0]),
+                user_message("original active marker"),
+            ],
+        );
+        let store = indexed_store(home.path()).await;
+        let plan = plan_legacy_lineage(home.path(), &active)
+            .await
+            .expect("plan lineage");
+        let journal = migration_journal_path(home.path(), thread_id);
+        let mut limiter = RolloutMigrationRateLimiter::new(Some(1024)).expect("limiter");
+        store
+            .migrate_legacy_lineage_until_phase_for_test(
+                &active,
+                &journal,
+                plan,
+                &mut limiter,
+                phase,
+            )
+            .await
+            .expect_err("stop before selection");
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(&active)
+            .expect("open source");
+        for item in [
+            turn_started("appended-turn"),
+            user_message("appended marker"),
+            turn_complete("appended-turn"),
+        ] {
+            writeln!(
+                file,
+                "{}",
+                serde_json::to_string(&RolloutLine {
+                    timestamp: TIMESTAMP.to_string(),
+                    ordinal: None,
+                    item,
+                })
+                .expect("serialize append")
+            )
+            .expect("append complete record");
+        }
+        drop(file);
+        let source_bytes = [fs::read(&predecessor).unwrap(), fs::read(&active).unwrap()];
+        drop(store);
+        let restarted = indexed_store(home.path()).await;
+        restarted.start_automatic_rollout_migration();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            restarted.await_automatic_rollout_migration(thread_id),
+        )
+        .await
+        .expect("automatic migration must finish")
+        .unwrap_or_else(|error| panic!("phase {phase:?}: {error}"));
+        restarted
+            .await_automatic_rollout_migration(thread_id)
+            .await
+            .expect("second read");
+        let selected = restarted
+            .state_db
+            .as_ref()
+            .unwrap()
+            .get_thread(thread_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.history_mode, ThreadHistoryMode::Paginated);
+        let items = codex_rollout::materialize_rollout_lines(home.path(), &selected.rollout_path)
+            .await
+            .expect("read migrated history");
+        let history = serde_json::to_string(&items).unwrap();
+        for marker in [
+            "immutable marker",
+            "original active marker",
+            "appended marker",
+        ] {
+            assert!(
+                history.contains(marker),
+                "phase {phase:?}: missing {marker}"
+            );
+        }
+        assert_eq!(
+            [fs::read(&predecessor).unwrap(), fs::read(&active).unwrap()],
+            source_bytes
+        );
+        assert!(!journal.exists());
+    }
+}
+
+#[tokio::test]
 async fn lineage_migration_plan_rejects_reference_cycles() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -4654,6 +5814,10 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
         /*start_ordinal*/ 0,
         vec![
             started("parent-turn-1"),
+            rollout_response_item(input_response_message(
+                "user",
+                "included Paginated parent marker",
+            )),
             completed_user_message(
                 parent_id,
                 "parent-turn-1",
@@ -4662,6 +5826,10 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
             ),
             completed("parent-turn-1"),
             started("parent-turn-2"),
+            rollout_response_item(input_response_message(
+                "user",
+                "excluded Paginated parent marker",
+            )),
             completed_user_message(
                 parent_id,
                 "parent-turn-2",
@@ -4671,7 +5839,7 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
             completed("parent-turn-2"),
         ],
     );
-    assert_eq!(parent_end, 7);
+    assert_eq!(parent_end, 9);
     let parent_bytes = fs::read(parent_path.as_path()).expect("read Paginated parent");
     let child_id = ThreadId::new();
     let child_segment_id = SegmentId::new();
@@ -4722,7 +5890,10 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
     assert_eq!(manifest.sources.len(), 1);
     assert!(manifest.history_base_dependencies.is_empty());
     assert_eq!(manifest.reference_dependencies.len(), 1);
-    assert_eq!(manifest.reference_dependencies[0].path, parent_path);
+    assert_eq!(
+        manifest.reference_dependencies[0].path,
+        fs::canonicalize(&parent_path).expect("canonical parent path")
+    );
     assert_eq!(
         manifest.reference_dependencies[0].segment_id,
         parent_segment_id
@@ -4771,6 +5942,112 @@ async fn migration_retains_filtered_paginated_immutable_reference() {
         fs::read(child_path.as_path()).expect("reread Legacy child"),
         child_bytes
     );
+
+    let target = &report.outcomes[0].rollout_path;
+    let rollout_id = codex_rollout::rollout_id_from_path(target).expect("selected rollout ID");
+    let expected_items = materialized
+        .iter()
+        .flat_map(|line| codex_app_server_protocol::project_rollout_line(line).changed_items)
+        .map(|change| {
+            (
+                change.turn_id,
+                serde_json::to_value(change.item).expect("expected item"),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    // The retained reference trims the parent before its second turn, but the child keeps
+    // ordinals assigned after the full parent. Older files may also number their metadata zero.
+    let original = fs::read(target).expect("read retained-reference rollout");
+    let mut forged = Vec::new();
+    for mut line in read_rollout(target) {
+        line.ordinal = Some(
+            line.ordinal
+                .expect("paginated ordinal")
+                .checked_add(10)
+                .expect("forged ordinal"),
+        );
+        serde_json::to_writer(&mut forged, &line).expect("serialize forged reference");
+        forged.push(b'\n');
+    }
+    fs::write(target, forged).expect("write reference past parent end");
+    let error = store
+        .rebuild_history_projection(child_id)
+        .await
+        .expect_err("fork cutoff must not conceal an invalid source endpoint");
+    assert!(error.to_string().contains("cutoff"), "{error}");
+    fs::write(target, &original).expect("restore retained reference");
+
+    for metadata_ordinal in [parent_end, 0] {
+        let mut lines = read_rollout(target);
+        lines.first_mut().expect("session metadata").ordinal = Some(metadata_ordinal);
+        let mut bytes = Vec::new();
+        for line in lines {
+            serde_json::to_writer(&mut bytes, &line).expect("serialize retained reference");
+            bytes.push(b'\n');
+        }
+        fs::write(target, bytes).expect("write retained-reference metadata");
+        thread_history::delete_thread(&store, rollout_id)
+            .await
+            .expect("remove retained-reference projection");
+        assert!(
+            store
+                .rebuild_history_projection(child_id)
+                .await
+                .expect("rebuild retained-reference projection")
+        );
+        let turns = list_active_summary_turns(&store, child_id).await;
+        let actual_items = turns
+            .turns
+            .into_iter()
+            .flat_map(|turn| turn.items)
+            .map(|item| {
+                (
+                    item.turn_id,
+                    serde_json::from_slice::<serde_json::Value>(&item.item_json)
+                        .expect("projected item"),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual_items, expected_items);
+    }
+    fs::write(target, original).expect("restore canonical metadata");
+
+    // Older Paginated references can retain text filters that the projection rebuilder
+    // deliberately leaves to the unprojected-history reader.
+    let mut lines = read_rollout(target);
+    let reference = lines
+        .iter_mut()
+        .find_map(|line| match &mut line.item {
+            RolloutItem::RolloutReference(reference) => Some(reference),
+            _ => None,
+        })
+        .expect("retained reference");
+    reference.compacted_replacement_history_filter_texts =
+        Some(vec!["filtered developer instruction".to_string()]);
+    let mut filtered = Vec::new();
+    for line in lines {
+        serde_json::to_writer(&mut filtered, &line).expect("serialize filtered history");
+        filtered.push(b'\n');
+    }
+    fs::write(target, &filtered).expect("write older filtered history");
+    thread_history::delete_thread(&store, rollout_id)
+        .await
+        .expect("remove filtered projection");
+    let repeated = store
+        .migrate_rollouts(RolloutMigrationOptions {
+            thread_ids: vec![child_id],
+            ..apply_options()
+        })
+        .await
+        .expect("preserve filtered-history fallback");
+    assert_eq!(
+        repeated.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated,
+        "{:?}",
+        repeated.outcomes[0].message
+    );
+    assert_eq!(fs::read(target).expect("reread filtered history"), filtered);
 }
 
 #[tokio::test]
@@ -6647,6 +7924,53 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
     assert_eq!(
         projection.next_byte_offset,
         fs::metadata(&path).expect("read rollout metadata").len()
+    );
+
+    // A lineage conversion can finish publication before its complete projection fails.
+    // Retrying must repair that state even after the publication journal is gone.
+    let published = fs::read(&path).expect("read published rollout");
+    thread_history::delete_thread(&store, thread_id)
+        .await
+        .expect("remove projection without recreating the journal");
+    let dry_run = store
+        .migrate_rollouts(RolloutMigrationOptions::default())
+        .await
+        .expect("inspect published rollout without repairing it");
+    assert_eq!(
+        dry_run.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated
+    );
+    assert_eq!(projection_checkpoint(&store, thread_id).await, None);
+    let writer = store
+        .writer_lock_coordinator
+        .acquire(thread_id)
+        .expect("hold writer during journal-less repair");
+    let busy = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("defer busy journal-less repair");
+    assert_eq!(busy.outcomes[0].status, RolloutMigrationStatus::SkippedBusy);
+    drop(writer);
+    let repaired = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("repair published rollout without a journal");
+    assert_eq!(
+        repaired.outcomes[0].status,
+        RolloutMigrationStatus::AlreadyPaginated,
+        "{:?}",
+        repaired.outcomes[0].message
+    );
+    assert_eq!(repaired.outcomes[0].rollout_path, path);
+    assert!(
+        store
+            .has_history_projection(thread_id)
+            .await
+            .expect("check repaired projection")
+    );
+    assert_eq!(
+        fs::read(&path).expect("reread published rollout"),
+        published
     );
 }
 

@@ -6,24 +6,29 @@
 //! response and gives older colliding items new explicit IDs. Paginated reads then use one stable
 //! ID for every item regardless of page depth.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
 use codex_app_server_protocol::ThreadHistoryBuilder;
+use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::ThreadHistoryItemChange;
 use codex_app_server_protocol::ThreadHistoryTurnChange;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::Turn;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStatus;
-use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 
+use super::canonical_projection::project_canonical_record;
+use super::jsonl_spans::JsonlSpanKind;
 use super::lineage::LegacyLineageMigrationPlan;
+use super::lineage_rewrite::rewrite_generated_item_ids;
+use super::lineage_stage::StagedLineageTarget;
 use super::lineage_stage::stage_legacy_lineage;
 use super::migration_error;
 use crate::ThreadStoreResult;
@@ -32,6 +37,38 @@ pub(super) async fn validate_bounded_desktop_history(
     codex_home: &Path,
     plan: &mut LegacyLineageMigrationPlan,
 ) -> ThreadStoreResult<()> {
+    let stage = tempfile::tempdir().map_err(migration_error)?;
+    stage_compatible_lineage(codex_home, plan, stage.path()).await?;
+    Ok(())
+}
+
+/// Returns the exact staged files whose visible Legacy history was checked. Publication must use
+/// these files rather than replaying the entire source lineage after the check succeeds.
+pub(super) async fn stage_compatible_lineage(
+    codex_home: &Path,
+    plan: &mut LegacyLineageMigrationPlan,
+    stage_root: &Path,
+) -> ThreadStoreResult<Vec<StagedLineageTarget>> {
+    // Derive the remap from original generated IDs even when a caller reuses a validated plan.
+    plan.synthetic_item_id_remap.clear();
+    if plan
+        .sources
+        .iter()
+        .all(|source| source.history_mode == ThreadHistoryMode::Paginated)
+    {
+        return stage_legacy_lineage(plan, stage_root).await;
+    }
+    let removed_turn_ids = if plan.replay_native_rollbacks {
+        super::lineage_stage::build_rollback_plan(
+            plan,
+            &mut super::turn_context_cache::TurnContextCache::default(),
+        )
+        .await?
+        .map(|plan| plan.removed_turn_ids().clone())
+        .unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
     let selected = plan
         .sources
         .last()
@@ -56,14 +93,18 @@ pub(super) async fn validate_bounded_desktop_history(
         .flat_map(|turn| turn.items.iter().map(|item| item.id().to_string()))
         .collect::<HashSet<_>>();
 
-    let stage = tempfile::tempdir().map_err(migration_error)?;
-    let staged = stage_legacy_lineage(plan, stage.path()).await?;
+    let mut staged = stage_legacy_lineage(plan, stage_root).await?;
     let mut canonical = canonical_turns_from_rollouts(
         staged_paths(staged.as_slice()).as_slice(),
         &retained_turn_ids,
         &retained_item_ids,
     )
     .await?;
+    if !canonical.all_turn_ids.is_disjoint(&removed_turn_ids) {
+        return Err(migration_error(
+            "mixed-format rollback retained a removed turn; source files were not changed",
+        ));
+    }
     plan.synthetic_item_id_remap = derive_initial_synthetic_item_id_remap(
         reference_limit,
         initial_turns.as_slice(),
@@ -72,7 +113,8 @@ pub(super) async fn validate_bounded_desktop_history(
         canonical.max_synthetic_item_index,
     )?;
     if !plan.synthetic_item_id_remap.is_empty() {
-        let staged = stage_legacy_lineage(plan, stage.path()).await?;
+        tracing::info!(thread_id = %plan.selected_thread_id, remapped_ids = plan.synthetic_item_id_remap.len(), "rewriting generated IDs to preserve initial Desktop item IDs");
+        rewrite_generated_item_ids(&mut staged, &plan.synthetic_item_id_remap).await?;
         canonical = canonical_turns_from_rollouts(
             staged_paths(staged.as_slice()).as_slice(),
             &retained_turn_ids,
@@ -86,7 +128,7 @@ pub(super) async fn validate_bounded_desktop_history(
         canonical.turns.as_slice(),
         /*compare_item_ids*/ true,
     )?;
-    Ok(())
+    Ok(staged)
 }
 
 fn staged_paths(staged: &[super::lineage_stage::StagedLineageTarget]) -> Vec<PathBuf> {
@@ -112,6 +154,8 @@ struct CanonicalItem {
 /// visible in the bounded Legacy response, the subset of generated IDs that could collide with
 /// those turns, and the largest generated ID needed to allocate collision-free replacements.
 struct CanonicalProjection {
+    /// Every emitted turn, including turns outside the bounded Desktop response.
+    all_turn_ids: HashSet<String>,
     /// Canonical versions of turns visible before migration.
     turns: Vec<Turn>,
     /// Canonical item IDs that are also used by the bounded Legacy response.
@@ -122,6 +166,7 @@ struct CanonicalProjection {
 
 /// Incremental projection restricted to the bounded Desktop response.
 struct CanonicalProjectionBuilder<'a> {
+    all_turn_ids: HashSet<String>,
     turns: HashMap<String, CanonicalTurn>,
     items: HashMap<(String, String), CanonicalItem>,
     retained_item_owners: HashMap<String, HashSet<String>>,
@@ -133,6 +178,7 @@ struct CanonicalProjectionBuilder<'a> {
 impl<'a> CanonicalProjectionBuilder<'a> {
     fn new(retained_turn_ids: &'a HashSet<String>, retained_item_ids: &'a HashSet<String>) -> Self {
         Self {
+            all_turn_ids: HashSet::new(),
             turns: HashMap::new(),
             items: HashMap::new(),
             retained_item_owners: HashMap::new(),
@@ -142,9 +188,9 @@ impl<'a> CanonicalProjectionBuilder<'a> {
         }
     }
 
-    fn apply(&mut self, ordinal: u64, line: &codex_rollout::RolloutLine) {
-        let changes = project_rollout_line(line);
+    fn apply(&mut self, ordinal: u64, changes: ThreadHistoryChangeSet) {
         for turn_id in changes.removed_turn_ids {
+            self.all_turn_ids.remove(&turn_id);
             for owners in self.retained_item_owners.values_mut() {
                 owners.remove(turn_id.as_str());
             }
@@ -155,6 +201,7 @@ impl<'a> CanonicalProjectionBuilder<'a> {
             }
         }
         for turn in changes.changed_turns {
+            self.all_turn_ids.insert(turn.turn_id.clone());
             if self.retained_turn_ids.contains(turn.turn_id.as_str()) {
                 apply_turn_change(&mut self.turns, ordinal, turn);
             }
@@ -196,6 +243,7 @@ impl<'a> CanonicalProjectionBuilder<'a> {
             })
             .collect();
         CanonicalProjection {
+            all_turn_ids: self.all_turn_ids,
             turns,
             retained_item_ids: self
                 .retained_item_owners
@@ -214,17 +262,20 @@ async fn canonical_turns_from_rollouts(
 ) -> ThreadStoreResult<CanonicalProjection> {
     let mut projection = CanonicalProjectionBuilder::new(retained_turn_ids, retained_item_ids);
     for path in paths {
-        let mut reader = codex_rollout::open_rollout_line_reader(path.as_path())
-            .await
-            .map_err(migration_error)?;
-        while let Some(line) = reader.next_line().await.map_err(migration_error)? {
-            let Ok(line) = serde_json::from_str::<codex_rollout::RolloutLine>(line.as_str()) else {
-                continue;
-            };
-            let ordinal = line
-                .ordinal
-                .ok_or_else(|| migration_error("staged rollout line is missing its ordinal"))?;
-            projection.apply(ordinal, &line);
+        let file = tokio::fs::File::open(path).await.map_err(migration_error)?;
+        let mut reader =
+            tokio::io::BufReader::with_capacity(super::PROJECTION_BATCH_BYTES as usize, file);
+        let mut bytes = Vec::new();
+        while super::canonical_projection::read_canonical_chunk(&mut reader, &mut bytes).await? {
+            for span in super::canonical_projection::candidate_spans(&bytes)? {
+                if span.kind == JsonlSpanKind::Copy {
+                    continue;
+                }
+                for record in bytes[span.range].split_inclusive(|byte| *byte == b'\n') {
+                    let line = project_canonical_record(record).map_err(migration_error)?;
+                    projection.apply(line.ordinal, line.changes);
+                }
+            }
         }
     }
     Ok(projection.finish())
@@ -310,7 +361,8 @@ fn derive_initial_synthetic_item_id_remap(
     let mut previous_index = None;
     let mut matched_migrated_turn = false;
     let mut visible_ids = HashMap::<String, String>::new();
-    let mut desired_owners = HashMap::<String, String>::new();
+    // Collision replacements affect immutable target bytes. Allocate them in a stable order.
+    let mut desired_owners = BTreeMap::<String, String>::new();
     for turn in bounded {
         let Some((index, canonical_turn)) = canonical_by_id.get(turn.id.as_str()).copied() else {
             if matched_migrated_turn {

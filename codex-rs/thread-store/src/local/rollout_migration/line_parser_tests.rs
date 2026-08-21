@@ -6,6 +6,93 @@ use serde_json::json;
 use super::parse_legacy_rollout_line;
 use super::parse_paginated_rollout_line;
 
+fn assert_decoder_equivalence(value: serde_json::Value) -> bool {
+    let old = serde_json::from_value::<codex_rollout::RolloutLine>(value.clone());
+    let new = codex_rollout::decode_rollout_line(value);
+    match (old, new) {
+        (Ok(old), Ok(new)) => {
+            let old = serde_json::to_vec(&old).expect("serialize old decoded record");
+            let new = serde_json::to_vec(&new).expect("serialize new decoded record");
+            if old == new {
+                return true;
+            }
+            // Some protocol payloads contain HashMaps. Independent decodes can serialize those
+            // keys in different orders even when both use the same decoder.
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(&old).expect("old JSON")
+                    == serde_json::from_slice::<serde_json::Value>(&new).expect("new JSON"),
+                "decoded rollout contents differ"
+            );
+            false
+        }
+        (Err(_), Err(_)) => true,
+        (old, new) => panic!(
+            "decoder acceptance differs: old error {:?}, new error {:?}",
+            old.err(),
+            new.err()
+        ),
+    }
+}
+
+#[test]
+fn value_decoders_preserve_acceptance_and_canonical_bytes() {
+    for encoded in [
+        r#"{"timestamp":"old","timestamp":"new","ordinal":null,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":0.1234567890123456789,"window_minutes":300,"resets_at":1800000000}}}}"#,
+        r#"{"payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"hello"}]},"metadata":{"client_authored":true},"type":"response_item","ordinal":18446744073709551615,"timestamp":"now"}"#,
+        r#"{"timestamp":"now","ordinal":3,"type":"event_msg","metadata":"ignored","payload":{"type":"warning","message":"old","message":"new"}}"#,
+        r#"{"timestamp":"now","ordinal":-1,"type":"event_msg","payload":{"type":"warning","message":"bad ordinal"}}"#,
+        r#"{"timestamp":"now","type":"event_msg","payload":{"type":"unknown"}}"#,
+    ] {
+        let value = serde_json::from_str(encoded).expect("parse fixture JSON");
+        assert_decoder_equivalence(value);
+    }
+}
+
+/// Optional differential admission over private incident files without checking them into Git.
+#[tokio::test]
+#[ignore = "set CODEX_ROLLOUT_DECODER_CORPUS to a directory of copied rollouts"]
+async fn value_decoders_match_supplied_rollout_corpus() {
+    let mut directories = vec![std::path::PathBuf::from(
+        std::env::var_os("CODEX_ROLLOUT_DECODER_CORPUS").expect("rollout corpus directory"),
+    )];
+    let mut records = 0_u64;
+    let mut reordered = 0_u64;
+    while let Some(directory) = directories.pop() {
+        for entry in std::fs::read_dir(directory).expect("read corpus directory") {
+            let entry = entry.expect("read corpus entry");
+            let path = entry.path();
+            if entry.file_type().expect("read corpus file type").is_dir() {
+                directories.push(path);
+                continue;
+            }
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.starts_with("rollout-")
+                || !(name.ends_with(".jsonl") || name.ends_with(".jsonl.zst"))
+            {
+                continue;
+            }
+            let mut reader = codex_rollout::open_rollout_line_reader(&path)
+                .await
+                .expect("open corpus rollout");
+            while let Some(raw) = reader.next_line().await.expect("read corpus record") {
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+                    continue;
+                };
+                reordered += u64::from(!assert_decoder_equivalence(value.clone()));
+                if let Ok(Some(normalized)) = super::normalize_legacy_rollout_value(value) {
+                    reordered += u64::from(!assert_decoder_equivalence(normalized));
+                }
+                records += 1;
+            }
+        }
+    }
+    assert!(records > 0, "corpus contains no rollout records");
+    eprintln!(
+        "compared {records} raw and normalized rollout records; {reordered} object-key reorderings"
+    );
+}
+
 fn line(payload_type: &str, payload: serde_json::Value) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "timestamp": "2025-01-03T12:00:00Z",

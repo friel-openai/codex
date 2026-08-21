@@ -1071,7 +1071,7 @@ async fn history_repair_writer_token_is_bound_to_one_reserved_thread() {
     let source = supervisor_rollout(
         owned,
         Some(SegmentId::new()),
-        "gAAAAABqfQkApRY563QcNHss2A4AKN3hJ027UTP8TRjRMwBjGzwdQ1xZ-6mLXPG8wa8TVLFB3ggULSAKlfpl7C4YbWdR4_R28-k0urBPtKk2Amtf8DdoShe_vVF4ffJ0XoIvR1ryVWmP",
+        "synthetic poisoned supervisor instruction",
     );
     let path = write_rollout(home.path(), owned, source.as_slice());
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
@@ -1089,6 +1089,33 @@ async fn history_repair_writer_token_is_bound_to_one_reserved_thread() {
     };
 
     assert!(error.to_string().contains(&unowned.to_string()));
+}
+
+#[tokio::test]
+async fn clean_history_remains_available_during_an_unrelated_migration_job() {
+    let home = TempDir::new().expect("temp home");
+    let thread_id = ThreadId::from_u128(/*value*/ 0x7017);
+    let source = supervisor_rollout(
+        thread_id,
+        Some(SegmentId::new()),
+        "gAAAAABqfQkApRY563QcNHss2A4AKN3hJ027UTP8TRjRMwBjGzwdQ1xZ-6mLXPG8wa8TVLFB3ggULSAKlfpl7C4YbWdR4_R28-k0urBPtKk2Amtf8DdoShe_vVF4ffJ0XoIvR1ryVWmP",
+    );
+    let path = write_rollout(home.path(), thread_id, source.as_slice());
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())
+        .expect("open migration job lock")
+        .expect("claim migration job");
+    let access = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        repair_compatibility_history_before_access(&store, thread_id, &path),
+    )
+    .await
+    .expect("clean access must not wait for the unrelated job")
+    .expect("read clean history");
+    assert!(access.writer_token(&store, thread_id).await.is_err());
+    assert_eq!(std::fs::read(path).expect("reread source"), source);
+    drop(access);
+    drop(job);
 }
 
 #[tokio::test]

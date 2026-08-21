@@ -3,7 +3,6 @@
 use std::sync::LazyLock;
 
 use codex_protocol::protocol::SessionSource;
-use serde::de::Error as _;
 use serde_json::Value;
 
 pub(crate) mod compression;
@@ -13,6 +12,7 @@ mod maintenance;
 pub(crate) mod metadata;
 mod model_context;
 mod ordinal;
+pub use ordinal::rollout_ordinal_from_slice;
 mod persistence_metrics;
 pub(crate) mod policy;
 pub(crate) mod recorder;
@@ -25,6 +25,7 @@ mod segment_checkpoint;
 pub(crate) mod session_index;
 mod sqlite_metrics;
 pub mod state_db;
+mod writer_lock;
 
 pub use codex_history::CompactedItem;
 pub use codex_history::InitialHistory;
@@ -45,25 +46,7 @@ pub(crate) use codex_protocol::protocol;
 /// remains format-neutral and resume and projection use the same item decoder.
 /// Remove it once Serde supports format-specific buffering.
 pub fn decode_rollout_line(value: Value) -> serde_json::Result<RolloutLine> {
-    let Value::Object(mut fields) = value else {
-        return serde_json::from_value(value);
-    };
-    let timestamp = fields
-        .remove("timestamp")
-        .ok_or_else(|| serde_json::Error::missing_field("timestamp"))
-        .and_then(serde_json::from_value)?;
-    let ordinal = fields
-        .remove("ordinal")
-        .map(serde_json::from_value::<Option<u64>>)
-        .transpose()?
-        .flatten();
-    let item = serde_json::from_value(Value::Object(fields))?;
-
-    Ok(RolloutLine {
-        timestamp,
-        ordinal,
-        item,
-    })
+    serde_json::from_value(value)
 }
 
 pub const SESSIONS_SUBDIR: &str = "sessions";
@@ -84,6 +67,7 @@ pub use codex_protocol::protocol::SessionMeta;
 pub use compression::RolloutLineReader;
 pub use compression::existing_rollout_path;
 pub use compression::open_rollout_line_reader;
+pub use compression::open_rollout_line_reader_with_capacity;
 pub use compression::plain_rollout_path;
 pub use compression::spawn_rollout_compression_worker;
 
@@ -120,8 +104,14 @@ pub use list::read_thread_item_from_rollout;
 pub use list::read_thread_item_from_rollout_with_indexed_preview;
 pub use list::rollout_date_parts;
 pub use maintenance::RolloutMaintenanceGuard;
+pub use maintenance::RolloutMaintenanceJobGuard;
+pub use maintenance::RolloutMaintenanceReadGuard;
+pub use maintenance::acquire_rollout_maintenance_job_lock;
 pub use maintenance::acquire_rollout_maintenance_lock;
+pub use maintenance::acquire_rollout_maintenance_read_lock;
+pub use maintenance::try_acquire_rollout_maintenance_job_lock;
 pub use maintenance::try_acquire_rollout_maintenance_lock;
+pub use maintenance::try_acquire_rollout_maintenance_read_lock;
 pub use metadata::builder_from_items;
 pub use metadata::history_rollout_path_with_rollout_id;
 pub use metadata::rollout_id_from_path;
@@ -171,6 +161,8 @@ pub use session_index::find_thread_names_by_ids;
 pub use session_index::remove_thread_name_entries;
 pub use state_db::StateDbHandle;
 pub use state_db::sqlite_telemetry_recorder;
+pub use writer_lock::RolloutWriterLockCoordinator;
+pub use writer_lock::RolloutWriterLockGuard;
 
 #[cfg(test)]
 mod tests;

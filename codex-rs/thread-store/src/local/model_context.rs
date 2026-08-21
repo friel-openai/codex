@@ -71,10 +71,11 @@ pub(super) async fn load_latest_model_context(
     let rollout_id = resolved.rollout_id;
 
     let mut history_access =
-        super::goal_supervisor_runtime_repair::repair_active_history_before_access(
+        super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
             store,
             params.thread_id,
             path.as_path(),
+            super::goal_supervisor_runtime_repair::RepairAccess::ActiveOnly,
         )
         .await?;
     path = codex_rollout::existing_rollout_path(path.as_path())
@@ -93,10 +94,11 @@ pub(super) async fn load_latest_model_context(
     } else {
         drop(history_access);
         history_access =
-            super::goal_supervisor_runtime_repair::repair_compatibility_history_before_access(
+            super::goal_supervisor_runtime_repair::repair_selected_history_before_access(
                 store,
                 params.thread_id,
                 path.as_path(),
+                super::goal_supervisor_runtime_repair::RepairAccess::Compatibility,
             )
             .await?;
         path = codex_rollout::existing_rollout_path(path.as_path())
@@ -620,8 +622,11 @@ fn scan_model_context_from_lineage_blocking(
             Some(end_byte_offset) => ReverseJsonlScanner::new_at(file, end_byte_offset)?,
             None => ReverseJsonlScanner::new(file)?,
         };
-        while let Some(outcome) = scanner.scan_next::<RolloutLine>()? {
-            let ScanOutcome::Parsed(line) = outcome else {
+        while let Some(outcome) = scanner.scan_next::<serde_json::Value>()? {
+            let ScanOutcome::Parsed(value) = outcome else {
+                continue;
+            };
+            let Ok(Some(line)) = RolloutRecorder::parse_rollout_line_value(value) else {
                 continue;
             };
             if let Some(ordinal) = line.ordinal

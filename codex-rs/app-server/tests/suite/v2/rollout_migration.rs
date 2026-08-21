@@ -6,14 +6,19 @@ use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
+use codex_app_server_protocol::ThreadReadParams;
+use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadResumeParams;
 use codex_app_server_protocol::ThreadResumeResponse;
+use codex_app_server_protocol::ThreadSetNameParams;
+use codex_app_server_protocol::ThreadSetNameResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::ThreadTurnsListParams;
 use codex_app_server_protocol::ThreadTurnsListResponse;
 use codex_app_server_protocol::TurnItemsView;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_app_server_protocol::build_turns_from_rollout_items;
 use codex_protocol::SegmentId;
@@ -28,6 +33,8 @@ use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnAbortedEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
@@ -66,6 +73,282 @@ struct LegacyMigrationFixture {
     bounded_items: Vec<(String, String, Vec<u8>)>,
     bounded_turn_ids: HashSet<String>,
     total_item_count: usize,
+}
+
+#[tokio::test]
+async fn native_thread_remains_interactive_during_an_unrelated_migration() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    responses::mount_sse_once(
+        &server,
+        responses::sse(vec![
+            responses::ev_response_created("native-during-migration"),
+            responses::ev_assistant_message("native-message", "still responsive"),
+            responses::ev_completed("native-during-migration"),
+        ]),
+    )
+    .await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(home.path())?;
+    let native_id = ThreadId::new();
+    let native_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{native_id}.jsonl"));
+    write_paginated_segment(
+        &native_path,
+        home.path(),
+        native_id,
+        SegmentId::new(),
+        /*start_ordinal*/ 0,
+        vec![
+            legacy_turn_started("native-turn"),
+            paginated_completed_user_message(
+                native_id,
+                "native-turn",
+                "native-item",
+                "native history",
+            ),
+            legacy_turn_completed("native-turn"),
+        ],
+    )?;
+    let legacy_id = ThreadId::new();
+    let legacy_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{legacy_id}.jsonl"));
+    write_legacy_segment(
+        &legacy_path,
+        home.path(),
+        legacy_id,
+        SegmentId::new(),
+        vec![legacy_user_message("unrelated migration".to_string())],
+    )?;
+    let legacy_bytes = fs::read(&legacy_path)?;
+    let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())?
+        .expect("hold unrelated migration job");
+    let mut app = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let read_id = app
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: native_id.to_string(),
+            include_turns: true,
+        })
+        .await?;
+    let read: ThreadReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(read_id)).await??;
+    assert_eq!(read.thread.history_mode, ThreadHistoryMode::Paginated);
+    let resume_id = app
+        .send_thread_resume_request(ThreadResumeParams {
+            thread_id: native_id.to_string(),
+            exclude_turns: true,
+            ..Default::default()
+        })
+        .await?;
+    let _: ThreadResumeResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app.read_response(resume_id)).await??;
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        app.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: native_id.to_string(),
+            input: vec![UserInput::Text {
+                text: "continue while another thread migrates".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        }),
+    )
+    .await??;
+    assert_eq!(fs::read(&legacy_path)?, legacy_bytes);
+    drop(job);
+    timeout(DEFAULT_READ_TIMEOUT, app.shutdown_gracefully()).await??;
+
+    let mut restarted = TestAppServer::builder()
+        .with_codex_home(home.path())
+        .build_initialized()
+        .await?;
+    let read_id = restarted
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: native_id.to_string(),
+            include_turns: true,
+        })
+        .await?;
+    let read: ThreadReadResponse =
+        timeout(DEFAULT_READ_TIMEOUT, restarted.read_response(read_id)).await??;
+    assert!(read.thread.turns.iter().flat_map(|turn| &turn.items).any(
+        |item| matches!(item, ThreadItem::AgentMessage { text, .. } if text == "still responsive")
+    ));
+    timeout(DEFAULT_READ_TIMEOUT, restarted.shutdown_gracefully()).await??;
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_migration_accepts_empty_terminal_turns_and_remains_interactive() -> Result<()> {
+    for paginated in [false, true] {
+        for interrupted in [false, true] {
+            let server = responses::start_mock_server().await;
+            responses::mount_sse_sequence(
+                &server,
+                vec![responses::sse(vec![
+                    responses::ev_response_created("response-after-migration"),
+                    responses::ev_assistant_message("message-after-migration", "still works"),
+                    responses::ev_completed("response-after-migration"),
+                ])],
+            )
+            .await;
+            let home = TempDir::new()?;
+            MockResponsesConfig::new(&server.uri()).write(home.path())?;
+            let thread_id = ThreadId::new();
+            let segments = [SegmentId::new(), SegmentId::new()];
+            let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+            let predecessor = home
+                .path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segments[0].to_string())
+                .join(&filename);
+            let active = home.path().join("sessions/2025/01/03").join(filename);
+            let first_items = vec![
+                legacy_turn_started("populated-turn"),
+                if paginated {
+                    paginated_completed_user_message(
+                        thread_id,
+                        "populated-turn",
+                        "retained-item",
+                        "retained history",
+                    )
+                } else {
+                    legacy_user_message("retained history".to_string())
+                },
+                legacy_turn_completed("populated-turn"),
+            ];
+            let terminal = if interrupted {
+                RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
+                    turn_id: Some("empty-turn".to_string()),
+                    reason: TurnAbortReason::Interrupted,
+                    started_at: Some(1_735_905_600),
+                    completed_at: Some(1_735_905_601),
+                    duration_ms: Some(1_000),
+                }))
+            } else {
+                legacy_turn_completed("empty-turn")
+            };
+            let active_items = vec![
+                legacy_segment_reference(predecessor.clone(), thread_id, segments[0]),
+                legacy_turn_started("empty-turn"),
+                terminal,
+            ];
+            if paginated {
+                let end = write_paginated_segment(
+                    &predecessor,
+                    home.path(),
+                    thread_id,
+                    segments[0],
+                    /*start_ordinal*/ 0,
+                    first_items,
+                )?;
+                write_paginated_segment(
+                    &active,
+                    home.path(),
+                    thread_id,
+                    segments[1],
+                    end,
+                    active_items,
+                )?;
+            } else {
+                write_legacy_segment(
+                    &predecessor,
+                    home.path(),
+                    thread_id,
+                    segments[0],
+                    first_items,
+                )?;
+                write_legacy_segment(&active, home.path(), thread_id, segments[1], active_items)?;
+                // Historical writers can leave a partial final record after an empty turn.
+                fs::OpenOptions::new()
+                    .append(true)
+                    .open(&active)?
+                    .write_all(b"{\"type\":\"event_msg\",\"payload\":")?;
+            }
+            let original_bytes = [fs::read(&predecessor)?, fs::read(&active)?];
+
+            let (before_restart, _) =
+                migrate_and_read_public_history(home.path(), thread_id, DEFAULT_READ_TIMEOUT)
+                    .await?;
+            let (after_restart, _) =
+                migrate_and_read_public_history(home.path(), thread_id, DEFAULT_READ_TIMEOUT)
+                    .await?;
+            assert_eq!(before_restart, after_restart);
+            assert_eq!(before_restart.len(), 1);
+            assert_eq!(
+                [fs::read(&predecessor)?, fs::read(&active)?],
+                original_bytes
+            );
+
+            let mut app = TestAppServer::builder()
+                .with_codex_home(home.path())
+                .build_initialized()
+                .await?;
+            let read_id = app
+                .send_thread_read_request(ThreadReadParams {
+                    thread_id: thread_id.to_string(),
+                    include_turns: false,
+                })
+                .await?;
+            let read: ThreadReadResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app.read_response(read_id)).await??;
+            assert_eq!(read.thread.history_mode, ThreadHistoryMode::Paginated);
+            let turns_id = app
+                .send_thread_turns_list_request(ThreadTurnsListParams {
+                    thread_id: thread_id.to_string(),
+                    cursor: None,
+                    limit: Some(10),
+                    sort_direction: Some(SortDirection::Asc),
+                    items_view: Some(TurnItemsView::Full),
+                })
+                .await?;
+            let turns: ThreadTurnsListResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app.read_response(turns_id)).await??;
+            let empty = turns
+                .data
+                .iter()
+                .find(|turn| turn.id == "empty-turn")
+                .expect("migration retains the empty terminal turn");
+            assert!(empty.items.is_empty());
+            assert_eq!(
+                empty.status,
+                if interrupted {
+                    TurnStatus::Interrupted
+                } else {
+                    TurnStatus::Completed
+                }
+            );
+            let resume_id = app
+                .send_thread_resume_request(ThreadResumeParams {
+                    thread_id: thread_id.to_string(),
+                    exclude_turns: true,
+                    ..Default::default()
+                })
+                .await?;
+            let _: ThreadResumeResponse =
+                timeout(DEFAULT_READ_TIMEOUT, app.read_response(resume_id)).await??;
+            timeout(
+                DEFAULT_READ_TIMEOUT,
+                app.start_turn_and_wait_for_completion(TurnStartParams {
+                    thread_id: thread_id.to_string(),
+                    input: vec![UserInput::Text {
+                        text: "continue after migration".to_string(),
+                        text_elements: Vec::new(),
+                    }],
+                    ..Default::default()
+                }),
+            )
+            .await??;
+            timeout(DEFAULT_READ_TIMEOUT, app.shutdown_gracefully()).await??;
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -316,9 +599,12 @@ async fn large_unmarked_paginated_history_uses_compatibility_reader_and_restarts
     let (first_projection, first_path) =
         migrate_and_read_public_history(home.path(), thread_id, std::time::Duration::from_secs(60))
             .await?;
-    let (second_projection, second_path) =
-        migrate_and_read_public_history(home.path(), thread_id, std::time::Duration::from_secs(60))
-            .await?;
+    let (second_projection, second_path) = read_public_history_after_restart(
+        home.path(),
+        thread_id,
+        std::time::Duration::from_secs(60),
+    )
+    .await?;
 
     assert_eq!(first_path, path);
     assert_eq!(second_path, path);
@@ -375,6 +661,14 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
         }),
     )
     .await??;
+    let name_id = primary
+        .send_thread_set_name_request(ThreadSetNameParams {
+            thread_id: thread.id.clone(),
+            name: "Original desktop thread name".to_string(),
+        })
+        .await?;
+    let _: ThreadSetNameResponse =
+        timeout(DEFAULT_READ_TIMEOUT, primary.read_response(name_id)).await??;
     timeout(DEFAULT_READ_TIMEOUT, primary.shutdown_gracefully()).await??;
 
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
@@ -414,6 +708,10 @@ async fn migrated_legacy_thread_cold_resume_preserves_model_context() -> Result<
         thread: resumed, ..
     } = timeout(DEFAULT_READ_TIMEOUT, secondary.read_response(resume_id)).await??;
     assert_eq!(resumed.history_mode, ThreadHistoryMode::Paginated);
+    assert_eq!(
+        resumed.name.as_deref(),
+        Some("Original desktop thread name")
+    );
 
     timeout(
         DEFAULT_READ_TIMEOUT,
@@ -561,6 +859,42 @@ async fn migrate_and_read_public_history(
         .clone()
         .expect("resumed local thread rollout path");
 
+    let items = read_public_history_projection(&mut app_server, thread_id, read_timeout).await?;
+
+    timeout(DEFAULT_READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
+    Ok((items, rollout_path))
+}
+
+async fn read_public_history_after_restart(
+    home: &Path,
+    thread_id: ThreadId,
+    read_timeout: std::time::Duration,
+) -> Result<(Vec<(String, String, Vec<u8>)>, PathBuf)> {
+    let mut app_server = TestAppServer::builder()
+        .with_codex_home(home)
+        .build_initialized()
+        .await?;
+    let read_id = app_server
+        .send_thread_read_request(ThreadReadParams {
+            thread_id: thread_id.to_string(),
+            include_turns: false,
+        })
+        .await?;
+    let ThreadReadResponse { thread } =
+        timeout(read_timeout, app_server.read_response(read_id)).await??;
+    let rollout_path = thread
+        .path
+        .expect("local thread rollout path after restart");
+    let items = read_public_history_projection(&mut app_server, thread_id, read_timeout).await?;
+    timeout(DEFAULT_READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
+    Ok((items, rollout_path))
+}
+
+async fn read_public_history_projection(
+    app_server: &mut TestAppServer,
+    thread_id: ThreadId,
+    read_timeout: std::time::Duration,
+) -> Result<Vec<(String, String, Vec<u8>)>> {
     let turns_id = app_server
         .send_thread_turns_list_request(ThreadTurnsListParams {
             thread_id: thread_id.to_string(),
@@ -587,8 +921,7 @@ async fn migrate_and_read_public_history(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    timeout(DEFAULT_READ_TIMEOUT, app_server.shutdown_gracefully()).await??;
-    Ok((items, rollout_path))
+    Ok(items)
 }
 
 async fn legacy_migration_fixture(
