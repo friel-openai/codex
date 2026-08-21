@@ -141,14 +141,36 @@ pub(super) async fn await_thread_migration(
     let mut receiver = if let Some(receiver) = existing_receiver {
         receiver
     } else {
-        let Some(resolved) =
+        let Some(mut resolved) =
             thread_rollout_resolver::resolve_current_including_archived(store, thread_id).await?
         else {
             return Ok(());
         };
         let journal = migration_journal_path(&store.config.codex_home, thread_id);
-        let before = rollout_fingerprint(&resolved.path).await?;
-        let inspection = match inspect_rollout_path(store, &resolved.path).await {
+        let mut before = rollout_fingerprint(&resolved.path).await?;
+        // A complete native root projection already covers its immutable predecessors. Walking
+        // those predecessors again made every nonresident page inventory the entire home.
+        // Leading RolloutReference roots still require classification and automatic conversion.
+        let complete_native_root =
+            resolved
+                .authenticated_session_meta
+                .as_ref()
+                .is_some_and(|metadata| {
+                    metadata.history_mode == ThreadHistoryMode::Paginated
+                        && metadata.history_base.is_some()
+                })
+                && crate::local::thread_history::has_complete_root_projection_for_resolved(
+                    store,
+                    thread_id,
+                    resolved.clone(),
+                )
+                .await?;
+        let inspection = if complete_native_root {
+            Ok(StartupInspection::Paginated)
+        } else {
+            inspect_rollout_path(store, &resolved.path).await
+        };
+        let inspection = match inspection {
             Ok(inspection) => inspection,
             Err(error) => {
                 if tokio::fs::try_exists(&journal)
@@ -171,14 +193,58 @@ pub(super) async fn await_thread_migration(
                 }
             }
         };
-        let native_history_ready = match inspection {
-            StartupInspection::Paginated => store.has_history_projection(thread_id).await?,
+        let mut native_history_ready = match inspection {
+            StartupInspection::Paginated => {
+                complete_native_root || store.has_history_projection(thread_id).await?
+            }
             StartupInspection::Compatible => true,
             StartupInspection::Legacy
             | StartupInspection::ReferenceBacked
             | StartupInspection::Skipped
             | StartupInspection::Unresolved => false,
         };
+        if matches!(inspection, StartupInspection::Paginated)
+            && !native_history_ready
+            && !tokio::fs::try_exists(&journal)
+                .await
+                .map_err(migration_error)?
+        {
+            // Projection repair has its own writer reservations. It must not queue behind a
+            // different thread's Legacy conversion or acquire that conversion's home-wide job.
+            match store.try_complete_history_projection(thread_id).await {
+                Ok(true) => {
+                    let Some(current) =
+                        thread_rollout_resolver::resolve_current_including_archived(
+                            store, thread_id,
+                        )
+                        .await?
+                    else {
+                        return Ok(());
+                    };
+                    // Ordinal recovery can select a corrected sibling during projection repair.
+                    resolved = current;
+                    before = rollout_fingerprint(&resolved.path).await?;
+                    native_history_ready = store.has_history_projection(thread_id).await?;
+                }
+                result => {
+                    let work = MigrationWork {
+                        thread_id,
+                        path: resolved.path.clone(),
+                        rollout_id: resolved.rollout_id,
+                        source_fingerprint: before,
+                    };
+                    native_history_ready =
+                        retained_selected_source_is_unchanged(store, &work).await?;
+                    if native_history_ready && let Err(error) = result {
+                        warn!(
+                            thread_id = %thread_id,
+                            path = %resolved.path.display(),
+                            "native projection repair retained the selected source; using its supported reader: {error}"
+                        );
+                    }
+                }
+            }
+        }
         let already_native = !tokio::fs::try_exists(&journal)
             .await
             .map_err(migration_error)?

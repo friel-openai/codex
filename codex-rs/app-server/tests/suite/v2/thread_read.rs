@@ -139,6 +139,9 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 #[cfg(not(windows))]
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+#[path = "thread_read_warm.rs"]
+mod warm;
+
 fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentStateCheckpoint {
     let window_id = Uuid::now_v7();
     let cwd = codex_home.abs();
