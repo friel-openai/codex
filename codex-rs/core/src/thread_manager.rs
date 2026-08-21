@@ -1530,7 +1530,9 @@ impl ThreadManager {
         };
         model_history_override.extend_from_slice(synthesized_suffix);
         let shared_model_response_items = prepared.shared_model_response_items.clone();
-        let mut shared_model_state = if let Some(items) = &shared_model_response_items {
+        let mut shared_model_state = if let Some(items) = &shared_model_response_items
+            && prepared.model_state_origin == codex_thread_store::ForkModelStateOrigin::LoadedSource
+        {
             if let Ok(source) = self.state.get_thread(source_thread_id).await {
                 Some(
                     source

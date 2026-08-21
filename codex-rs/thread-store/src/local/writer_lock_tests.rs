@@ -17,7 +17,7 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
     let thread_id = ThreadId::default();
     let other_thread_id = ThreadId::default();
 
-    let owner = primary.acquire(thread_id).expect("acquire writer lock");
+    let mut owner = primary.acquire(thread_id).expect("acquire writer lock");
     let lock_path = home
         .path()
         .join(WRITER_LOCK_DIR)
@@ -33,7 +33,24 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
         .acquire(other_thread_id)
         .expect("other thread should acquire its own lock");
 
+    owner.share_for_fork().expect("admit immutable fork reader");
+    let reader = secondary
+        .acquire_fork_reader(thread_id)
+        .expect("reserve imported fork");
+    assert!(matches!(
+        owner.require_exclusive(),
+        Err(ThreadStoreError::Conflict { message: _ })
+    ));
     drop(owner);
+    assert!(
+        lock_path.exists(),
+        "source exit must preserve the reader's lock inode"
+    );
+    assert!(matches!(
+        primary.acquire(thread_id),
+        Err(ThreadStoreError::Conflict { message: _ })
+    ));
+    drop(reader);
     assert!(!lock_path.exists());
     let next_owner = secondary
         .acquire(thread_id)
