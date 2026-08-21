@@ -116,6 +116,16 @@ macro_rules! experimental_type_entry {
     };
 }
 
+#[cfg(test)]
+macro_rules! stable_type_entry {
+    (#[experimental($reason:expr)] $ty:ty) => {
+        ""
+    };
+    ($ty:ty) => {
+        stringify!($ty)
+    };
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClientRequestSerializationScope {
     Global(&'static str),
@@ -414,6 +424,13 @@ macro_rules! client_request_definitions {
         pub(crate) const EXPERIMENTAL_CLIENT_METHOD_RESPONSE_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $response),
+            )*
+        ];
+        #[cfg(test)]
+        pub(crate) const STABLE_CLIENT_METHOD_TYPES: &[&str] = &[
+            $(
+                stable_type_entry!($(#[experimental($reason)])? $params),
+                stable_type_entry!($(#[experimental($reason)])? $response),
             )*
         ];
 
@@ -1485,6 +1502,13 @@ macro_rules! server_request_definitions {
         pub(crate) const EXPERIMENTAL_SERVER_METHOD_RESPONSE_TYPES: &[&str] = &[
             $(
                 experimental_type_entry!($(#[experimental($reason)])? $response),
+            )*
+        ];
+        #[cfg(test)]
+        pub(crate) const STABLE_SERVER_METHOD_TYPES: &[&str] = &[
+            $(
+                stable_type_entry!($(#[experimental($reason)])? $params),
+                stable_type_entry!($(#[experimental($reason)])? $response),
             )*
         ];
 
