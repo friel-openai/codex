@@ -5014,19 +5014,85 @@ async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
         assert!(journal_path.exists());
         drop(store);
 
-        let restarted = indexed_store(home.path()).await;
-        let recovered = restarted
-            .migrate_rollouts(apply_options())
-            .await
-            .expect("recover lineage migration");
-        assert_eq!(recovered.outcomes.len(), 1, "phase {phase:?}");
-        assert_eq!(
-            recovered.outcomes[0].status,
-            RolloutMigrationStatus::Migrated,
-            "phase {phase:?}: {:?}",
-            recovered.outcomes[0].message
+        let independent_id = ThreadId::new();
+        write_rollout(
+            home.path(),
+            independent_id,
+            SessionSource::Cli,
+            vec![user_message("independent")],
         );
+        let restarted = indexed_store(home.path()).await;
+        restarted.start_automatic_rollout_migration();
+        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+        restarted
+            .rollout_migration_coordinator
+            .journal_barriers
+            .lock()
+            .await
+            .insert(independent_id, barrier.clone());
+        let other_store = restarted.clone();
+        let independent = tokio::spawn(async move {
+            other_store
+                .await_automatic_rollout_migration(independent_id)
+                .await
+        });
+        let independent_journal = migration_journal_path(home.path(), independent_id);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while restarted
+                .rollout_migration_coordinator
+                .journal_barriers
+                .lock()
+                .await
+                .contains_key(&independent_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("independent migration journal");
+        let other_journal_bytes = fs::read(&independent_journal).expect("independent journal");
+        let recovery_store = restarted.clone();
+        let recovery = tokio::spawn(async move {
+            recovery_store
+                .await_automatic_rollout_migration(thread_id)
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !super::startup::processed_thread_ids(&restarted)
+                .await
+                .contains(&thread_id)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recovery queued");
+        assert!(
+            !recovery.is_finished(),
+            "recovery requires exclusive admission"
+        );
+        assert_eq!(
+            fs::read(&independent_journal).expect("retained other journal"),
+            other_journal_bytes
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait())
+            .await
+            .expect("release independent migration");
+        for request in [independent, recovery] {
+            tokio::time::timeout(std::time::Duration::from_secs(5), request)
+                .await
+                .expect("migration completes")
+                .expect("join")
+                .expect("migration");
+        }
         assert!(!journal_path.exists());
+        assert!(!independent_journal.exists());
+        assert!(
+            restarted
+                .has_history_projection(independent_id)
+                .await
+                .expect("independent projection")
+        );
         let selected = restarted
             .state_db
             .as_ref()
