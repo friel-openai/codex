@@ -563,6 +563,7 @@ mod search;
 mod thread_enrichment;
 mod thread_fork_goal;
 mod thread_input;
+mod thread_fork_handoff;
 mod thread_processor;
 mod thread_queue_processor;
 mod thread_sections;
