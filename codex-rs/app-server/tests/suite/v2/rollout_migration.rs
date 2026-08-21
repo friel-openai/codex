@@ -540,10 +540,29 @@ async fn automatic_migration_accepts_paginated_numeric_records_and_restarts() ->
 
 #[tokio::test]
 async fn automatic_ordinal_recovery_preserves_native_fork_boundaries_and_restarts() -> Result<()> {
+    assert_ordinal_recovery_preserves_fork_boundaries(RecoveryPredecessor::HistoryBase).await
+}
+
+#[tokio::test]
+async fn automatic_reference_ordinal_recovery_preserves_fork_boundaries_and_restarts() -> Result<()>
+{
+    assert_ordinal_recovery_preserves_fork_boundaries(RecoveryPredecessor::RolloutReference).await
+}
+
+/// Exercises both current native segments and reference-backed segments awaiting migration.
+enum RecoveryPredecessor {
+    HistoryBase,
+    RolloutReference,
+}
+
+async fn assert_ordinal_recovery_preserves_fork_boundaries(
+    predecessor: RecoveryPredecessor,
+) -> Result<()> {
     let home = TempDir::new()?;
     MockResponsesConfig::new("http://127.0.0.1:1").write(home.path())?;
     let thread_id = ThreadId::new();
     let predecessor_id = ThreadId::new();
+    let predecessor_segment_id = SegmentId::new();
     let predecessor_path = home
         .path()
         .join("sessions/rollout_segments/2025/01/03")
@@ -554,7 +573,7 @@ async fn automatic_ordinal_recovery_preserves_native_fork_boundaries_and_restart
         &predecessor_path,
         home.path(),
         thread_id,
-        SegmentId::new(),
+        predecessor_segment_id,
         /*start_ordinal*/ 0,
         vec![
             legacy_turn_started("recovery-predecessor-turn"),
@@ -576,41 +595,63 @@ async fn automatic_ordinal_recovery_preserves_native_fork_boundaries_and_restart
         "payload": { "type": "token_count", "info": null,
             "rate_limits": { "primary": { "used_percent": 12.5, "window_minutes": 300, "resets_at": 1786689000 } } }
     }))?;
+    let mut active_items = vec![
+        legacy_turn_started("recovery-active-turn"),
+        token.item,
+        paginated_completed_user_message(
+            thread_id,
+            "recovery-active-turn",
+            "recovered-item",
+            "after checkpoint",
+        ),
+        legacy_turn_completed("recovery-active-turn"),
+    ];
+    let token_index = match predecessor {
+        RecoveryPredecessor::HistoryBase => 2,
+        RecoveryPredecessor::RolloutReference => {
+            active_items.insert(
+                0,
+                RolloutItem::RolloutReference(RolloutReferenceItem {
+                    rollout_path: predecessor_path.clone(),
+                    thread_id: Some(thread_id),
+                    rollout_id: Some(predecessor_id),
+                    rollout_timestamp: None,
+                    segment_id: Some(predecessor_segment_id),
+                    max_depth: codex_rollout::MAX_ROLLOUT_REFERENCE_DEPTH,
+                    nth_user_message: None,
+                    compacted_replacement_history_filter_texts: None,
+                }),
+            );
+            3
+        }
+    };
     write_paginated_segment(
         &active_path,
         home.path(),
         thread_id,
         SegmentId::new(),
         predecessor_end,
-        vec![
-            legacy_turn_started("recovery-active-turn"),
-            token.item,
-            paginated_completed_user_message(
-                thread_id,
-                "recovery-active-turn",
-                "recovered-item",
-                "after checkpoint",
-            ),
-            legacy_turn_completed("recovery-active-turn"),
-        ],
+        active_items,
     )?;
     let mut records = fs::read_to_string(&active_path)?
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<serde_json::Result<Vec<_>>>()?;
-    records[0]["payload"]["history_base"] = json!({
-        "thread_id": predecessor_id, "end_ordinal_exclusive": predecessor_end,
-        "end_byte_offset": fs::metadata(&predecessor_path)?.len()
-    });
+    if matches!(predecessor, RecoveryPredecessor::HistoryBase) {
+        records[0]["payload"]["history_base"] = json!({
+            "thread_id": predecessor_id, "end_ordinal_exclusive": predecessor_end,
+            "end_byte_offset": fs::metadata(&predecessor_path)?.len()
+        });
+    }
     let mut original = Vec::new();
     let mut old_fork_byte_offset = 0;
     for (index, record) in records.iter_mut().enumerate() {
-        if index >= 3 {
+        if index > token_index {
             record["ordinal"] = json!(record["ordinal"].as_u64().expect("ordinal") - 1);
         }
         serde_json::to_writer(&mut original, record)?;
         original.push(b'\n');
-        if index == 2 {
+        if index == token_index {
             old_fork_byte_offset = original.len() as u64;
         }
     }
@@ -623,7 +664,7 @@ async fn automatic_ordinal_recovery_preserves_native_fork_boundaries_and_restart
         .path()
         .join("sessions/2025/01/03")
         .join(format!("rollout-2025-01-03T12-00-01-{child_id}.jsonl"));
-    let child_start = predecessor_end + 3;
+    let child_start = predecessor_end + token_index as u64 + 1;
     write_paginated_segment(
         &child_path,
         home.path(),

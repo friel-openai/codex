@@ -14,6 +14,7 @@ use std::task::Poll;
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -565,6 +566,58 @@ where
     let mut session_meta = codex_rollout::read_session_meta_line(source.path.as_path())
         .await
         .map_err(migration_error)?;
+    // Older writers reused a trailing token_count ordinal when its numeric payload failed
+    // decoding. Only an unbounded selected source can be corrected without translating an
+    // inherited cutoff. Published sources and their already-issued boundaries stay unchanged.
+    let recover_token_count_ordinal = target.selected
+        && index + 1 == plan.sources.len()
+        && source.thread_id == plan.selected_thread_id
+        && source.rollout_id == plan.selected_rollout_id
+        && target.thread_id == plan.selected_thread_id
+        && source.replay_end.is_none()
+        && source.native_replay.is_none()
+        && !source.materialized_predecessor
+        && !plan.replay_native_rollbacks
+        && session_meta.meta.subagent_history_start_ordinal.is_none()
+        && source
+            .predecessor
+            .as_ref()
+            .is_none_or(|predecessor| match predecessor {
+                LegacyLineagePredecessor::RolloutReference(reference) => {
+                    reference_is_history_base_compatible(reference)
+                }
+                LegacyLineagePredecessor::HistoryBase(_) => true,
+            });
+    let advance_source_ordinal = |expected: &mut u64,
+                                  ordinal: u64,
+                                  previous_raw: Option<&str>|
+     -> ThreadStoreResult<()> {
+        if ordinal != *expected {
+            let reused_token_count = recover_token_count_ordinal
+                && expected.checked_sub(1) == Some(ordinal)
+                && previous_raw.is_some_and(|raw| {
+                    line_parser::parse_paginated_rollout_line(raw.as_bytes()).is_ok_and(
+                        |previous| {
+                            previous.ordinal == Some(ordinal)
+                                && matches!(
+                                    previous.item,
+                                    RolloutItem::EventMsg(EventMsg::TokenCount(_))
+                                )
+                        },
+                    )
+                });
+            if !reused_token_count {
+                return Err(migration_error(format!(
+                    "Paginated source {} has a non-contiguous ordinal: expected {expected}, found {ordinal}",
+                    source.path.display(),
+                )));
+            }
+        }
+        *expected = ordinal
+            .checked_add(1)
+            .ok_or_else(|| migration_error("Paginated source ordinal overflow"))?;
+        Ok(())
+    };
     session_meta.meta.history_mode = ThreadHistoryMode::Paginated;
     session_meta.meta.history_base = history_base;
     session_meta.meta.segment_id = target.segment_id;
@@ -587,6 +640,7 @@ where
 
     let mut saw_session_meta = false;
     let mut saw_reference = false;
+    let mut previous_raw = None;
     let retained_reference = target_rollout_reference(plan, index)?;
     let mut reader = super::open_migration_line_reader(source.path.as_path())
         .await
@@ -612,17 +666,11 @@ where
                 "session_meta" | "rollout_reference" | "fork_reference"
             ) {
                 let ordinal = envelope.ordinal()?;
-                if ordinal != replay.source_next_ordinal {
-                    return Err(migration_error(format!(
-                        "Paginated source {} has a non-contiguous ordinal: expected {}, found {ordinal}",
-                        source.path.display(),
-                        replay.source_next_ordinal
-                    )));
-                }
-                replay.source_next_ordinal = replay
-                    .source_next_ordinal
-                    .checked_add(1)
-                    .ok_or_else(|| migration_error("Paginated source ordinal overflow"))?;
+                advance_source_ordinal(
+                    &mut replay.source_next_ordinal,
+                    ordinal,
+                    previous_raw.as_deref(),
+                )?;
                 envelope
                     .write_with_ordinal(raw.as_bytes(), replay.next_ordinal, writer)
                     .await?;
@@ -630,6 +678,9 @@ where
                     .next_ordinal
                     .checked_add(1)
                     .ok_or_else(|| migration_error("Paginated rollout ordinal overflow"))?;
+                if recover_token_count_ordinal {
+                    previous_raw = Some(raw);
+                }
                 continue;
             }
         }
@@ -661,17 +712,11 @@ where
         if plan.replay_native_rollbacks && !saw_session_meta {
             replay.source_next_ordinal = ordinal;
         }
-        if ordinal != replay.source_next_ordinal {
-            return Err(migration_error(format!(
-                "Paginated source {} has a non-contiguous ordinal: expected {}, found {ordinal}",
-                source.path.display(),
-                replay.source_next_ordinal
-            )));
-        }
-        replay.source_next_ordinal = replay
-            .source_next_ordinal
-            .checked_add(1)
-            .ok_or_else(|| migration_error("Paginated source ordinal overflow"))?;
+        advance_source_ordinal(
+            &mut replay.source_next_ordinal,
+            ordinal,
+            previous_raw.as_deref(),
+        )?;
         let Some(line) = source.filter_native_line(line)? else {
             continue;
         };
@@ -748,6 +793,9 @@ where
                     .checked_add(1)
                     .ok_or_else(|| migration_error("Paginated rollout ordinal overflow"))?;
             }
+        }
+        if recover_token_count_ordinal {
+            previous_raw = Some(raw);
         }
     }
     if !saw_session_meta {

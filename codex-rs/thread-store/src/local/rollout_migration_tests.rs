@@ -2590,6 +2590,326 @@ async fn migration_accepts_paginated_numeric_token_count_records() {
     );
 }
 
+/// Reproduces three writer restarts, including one immediately before a compaction record.
+fn write_token_count_ordinal_reuse_fixture(home: &Path) -> (ThreadId, PathBuf, PathBuf) {
+    let thread_id = ThreadId::new();
+    let segments = [SegmentId::new(), SegmentId::new()];
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor = home
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segments[0].to_string())
+        .join(&filename);
+    let start = write_paginated_segment(
+        &predecessor,
+        home,
+        thread_id,
+        segments[0],
+        /*start_ordinal*/ 0,
+        vec![
+            started("predecessor-turn"),
+            completed_user_message(thread_id, "predecessor-turn", "predecessor-item", "before"),
+            completed("predecessor-turn"),
+        ],
+    );
+    let active = home.join("sessions/2025/01/03").join(filename);
+    let token: RolloutLine = serde_json::from_value(json!({
+        "timestamp": TIMESTAMP, "ordinal": 0, "type": "event_msg",
+        "payload": { "type": "token_count", "info": null,
+            "rate_limits": { "primary": { "used_percent": 12.5, "window_minutes": 300, "resets_at": 1786689000 } } }
+    }))
+    .expect("decode numeric token_count");
+    write_paginated_segment(
+        &active,
+        home,
+        thread_id,
+        segments[1],
+        start,
+        vec![
+            segment_reference(predecessor.clone(), thread_id, segments[0]),
+            started("active-turn"),
+            token.item.clone(),
+            completed_user_message(thread_id, "active-turn", "first-item", "first recovered"),
+            token.item.clone(),
+            compacted(Vec::new()),
+            token.item,
+            completed_user_message(thread_id, "active-turn", "second-item", "second recovered"),
+            completed("active-turn"),
+        ],
+    );
+    let mut records = read_rollout(&active);
+    let mut bytes = Vec::new();
+    for (index, record) in records.iter_mut().enumerate() {
+        let reuses = [4, 6, 8]
+            .into_iter()
+            .filter(|reuse| *reuse <= index)
+            .count();
+        record.ordinal = record.ordinal.map(|ordinal| ordinal - reuses as u64);
+        serde_json::to_writer(&mut bytes, record).expect("serialize reused ordinal");
+        bytes.push(b'\n');
+    }
+    fs::write(&active, bytes).expect("write repeated token_count ordinals");
+    (thread_id, predecessor, active)
+}
+
+#[tokio::test]
+async fn migration_recovers_selected_token_count_ordinals_and_planned_restart() {
+    for canonical in [true, false] {
+        let home = TempDir::new().expect("create Codex home");
+        let (thread_id, predecessor, active) = write_token_count_ordinal_reuse_fixture(home.path());
+        if !canonical {
+            let mut bytes = Vec::new();
+            for raw in fs::read_to_string(&active).expect("read active").lines() {
+                let mut record: serde_json::Value = serde_json::from_str(raw).expect("decode JSON");
+                if record["payload"]["type"] == "token_count" {
+                    record["payload"]["rate_limits"]["primary"]["used_percent"] =
+                        serde_json::from_str("12.50").expect("noncanonical numeric spelling");
+                }
+                serde_json::to_writer(&mut bytes, &record).expect("write noncanonical JSON");
+                bytes.push(b'\n');
+            }
+            fs::write(&active, bytes).expect("write noncanonical source");
+        }
+        let originals = [fs::read(&predecessor).unwrap(), fs::read(&active).unwrap()];
+        let store = indexed_store(home.path()).await;
+        let plan = plan_legacy_lineage(home.path(), &active)
+            .await
+            .expect("plan recovery");
+        assert_eq!(
+            plan.sources.last().unwrap().canonical_paginated_suffix,
+            canonical
+        );
+        let measured = measure_legacy_lineage(&plan)
+            .await
+            .expect("measure recovered lineage");
+        let journal = migration_journal_path(home.path(), thread_id);
+        let mut limiter = RolloutMigrationRateLimiter::new(/*max_mib_per_second*/ None)
+            .expect("migration limiter");
+        let error = store
+            .migrate_legacy_lineage_until_phase_for_test(
+                &active,
+                &journal,
+                plan,
+                &mut limiter,
+                LineageMigrationPhase::Planned,
+            )
+            .await
+            .expect_err("leave an interrupted Planned migration journal");
+        assert!(
+            error
+                .to_string()
+                .contains("injected lineage migration stop")
+        );
+        drop(store);
+
+        let restarted = indexed_store(home.path()).await;
+        let report = restarted
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..apply_options()
+            })
+            .await
+            .expect("recover Planned migration");
+        assert_eq!(
+            report.outcomes[0].status,
+            RolloutMigrationStatus::Migrated,
+            "{:?}",
+            report.outcomes[0]
+        );
+        let selected = &report.outcomes[0].rollout_path;
+        assert_ne!(selected, &active);
+        assert!(!journal.exists());
+        assert!(
+            restarted
+                .has_history_projection(thread_id)
+                .await
+                .expect("complete recovered projection")
+        );
+        for target in &measured {
+            let bytes = decoded_rollout_bytes(&target.final_path);
+            assert_eq!(bytes.len() as u64, target.byte_count);
+            assert_eq!(format!("{:x}", Sha256::digest(&bytes)), target.sha256);
+            let records = read_rollout(&target.final_path);
+            assert_eq!(records.first().unwrap().ordinal, Some(target.start_ordinal));
+            assert_eq!(
+                records.last().unwrap().ordinal,
+                Some(target.end_ordinal_exclusive - 1)
+            );
+            assert!(
+                records
+                    .windows(2)
+                    .all(|pair| pair[0].ordinal.unwrap() + 1 == pair[1].ordinal.unwrap())
+            );
+        }
+        let original_items = read_rollout(&active)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_) => None,
+                item => Some(item),
+            })
+            .collect::<Vec<_>>();
+        let recovered_items = read_rollout(selected)
+            .into_iter()
+            .filter_map(|line| match line.item {
+                RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_) => None,
+                item => Some(item),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            serde_json::to_value(recovered_items).expect("serialize recovered items"),
+            serde_json::to_value(original_items).expect("serialize original items"),
+            "recovery changes ordinals, not payloads"
+        );
+        // A turn summary contains only its first user item; query every projected item to
+        // check that both same-turn completions survived the ordinal repair and compaction.
+        let items = restarted
+            .list_items(ListItemsParams {
+                thread_id,
+                turn_id: None,
+                include_archived: false,
+                cursor: None,
+                page_size: 10,
+                sort_direction: SortDirection::Asc,
+                sort_key: ItemSortKey::CreatedAtOrdinal,
+                after_updated_at_ordinal: None,
+            })
+            .await
+            .expect("read all recovered items");
+        assert!(items.next_cursor.is_none());
+        assert_eq!(
+            items
+                .items
+                .iter()
+                .map(|item| item.item_id.as_str())
+                .collect::<Vec<_>>(),
+            ["predecessor-item", "first-item", "second-item"]
+        );
+        let repeated = restarted
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..apply_options()
+            })
+            .await
+            .expect("repeat migration");
+        assert_eq!(
+            repeated.outcomes[0].status,
+            RolloutMigrationStatus::AlreadyPaginated
+        );
+        assert_eq!(
+            [fs::read(&predecessor).unwrap(), fs::read(&active).unwrap()],
+            originals
+        );
+    }
+}
+
+#[tokio::test]
+async fn migration_rejects_unproven_or_inherited_token_count_ordinal_reuse() {
+    for damage in ["non-token duplicate", "gap", "ancestor", "hidden prefix"] {
+        let home = TempDir::new().expect("create Codex home");
+        let (thread_id, predecessor, active) = write_token_count_ordinal_reuse_fixture(home.path());
+        let mut paths = vec![predecessor, active.clone()];
+        let mut records = read_rollout(&active);
+        match damage {
+            "non-token duplicate" => records[3].item = completed("unrelated-event"),
+            "gap" => records[4].ordinal = records[3].ordinal.map(|ordinal| ordinal + 2),
+            "hidden prefix" => {
+                let RolloutItem::SessionMeta(metadata) = &mut records[0].item else {
+                    unreachable!()
+                };
+                metadata.meta.subagent_history_start_ordinal = Some(1);
+            }
+            "ancestor" => {}
+            _ => unreachable!(),
+        }
+        let mut bytes = Vec::new();
+        for record in &records {
+            serde_json::to_writer(&mut bytes, record).expect("serialize damage");
+            bytes.push(b'\n');
+        }
+        fs::write(&active, bytes).expect("write damage");
+        if damage == "ancestor" {
+            let RolloutItem::SessionMeta(metadata) = &records[0].item else {
+                unreachable!()
+            };
+            let segment = metadata.meta.segment_id.expect("active segment");
+            let rotated = home
+                .path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segment.to_string())
+                .join(active.file_name().unwrap());
+            fs::create_dir_all(rotated.parent().unwrap()).expect("create rotated directory");
+            fs::rename(&active, &rotated).expect("rotate corrupted source");
+            write_paginated_segment(
+                &active,
+                home.path(),
+                thread_id,
+                SegmentId::new(),
+                records.last().unwrap().ordinal.unwrap() + 1,
+                vec![
+                    segment_reference(rotated.clone(), thread_id, segment),
+                    started("newest-turn"),
+                    completed("newest-turn"),
+                ],
+            );
+            paths.push(rotated);
+        }
+        let originals = paths
+            .iter()
+            .map(fs::read)
+            .collect::<std::io::Result<Vec<_>>>()
+            .unwrap();
+        let store = indexed_store(home.path()).await;
+        let report = store
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..apply_options()
+            })
+            .await
+            .expect("report unsupported damage");
+        assert_eq!(
+            report.outcomes[0].status,
+            RolloutMigrationStatus::Failed,
+            "{damage}: {:?}",
+            report.outcomes[0]
+        );
+        assert!(
+            report.outcomes[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("non-contiguous ordinal")),
+            "{damage}: {:?}",
+            report.outcomes[0]
+        );
+        assert_eq!(
+            store
+                .state_db
+                .as_ref()
+                .unwrap()
+                .get_thread(thread_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .rollout_path,
+            active
+        );
+        assert!(
+            !store
+                .has_history_projection(thread_id)
+                .await
+                .expect("no complete projection")
+        );
+        assert_eq!(
+            paths
+                .iter()
+                .map(fs::read)
+                .collect::<std::io::Result<Vec<_>>>()
+                .unwrap(),
+            originals
+        );
+    }
+}
+
 #[tokio::test]
 async fn automatic_migration_rewrites_paginated_reference_lineage() {
     let home = TempDir::new().expect("create Codex home");
