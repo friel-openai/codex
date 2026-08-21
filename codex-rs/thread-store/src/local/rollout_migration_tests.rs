@@ -205,6 +205,8 @@ pub(super) fn write_legacy_segment(
     }
 }
 
+/// Writes ordinalized native records. User-message shorthand becomes canonical ItemCompleted,
+/// retaining one physical record; tests of malformed native history must append raw records.
 pub(super) fn write_paginated_segment(
     path: &Path,
     home: &Path,
@@ -229,12 +231,40 @@ pub(super) fn write_paginated_segment(
         ..SessionMeta::default()
     };
     let mut next_ordinal = start_ordinal;
+    let mut active_turn_id = None;
     for item in std::iter::once(RolloutItem::SessionMeta(SessionMetaLine {
         meta: metadata,
         git: None,
     }))
     .chain(items)
     {
+        if let RolloutItem::EventMsg(EventMsg::TurnStarted(event)) = &item {
+            active_turn_id = Some(event.turn_id.clone());
+        }
+        let item = match item {
+            RolloutItem::EventMsg(EventMsg::UserMessage(event)) => {
+                let item = super::legacy_event::user_message_item(event, &mut || {
+                    Ok(format!("native-fixture-item-{next_ordinal}"))
+                })
+                .expect("canonical fixture user item");
+                RolloutItem::EventMsg(EventMsg::ItemCompleted(ItemCompletedEvent {
+                    thread_id,
+                    turn_id: active_turn_id
+                        .clone()
+                        .unwrap_or_else(|| format!("native-fixture-turn-{next_ordinal}")),
+                    item,
+                    started_at_ms: None,
+                    completed_at_ms: 1_735_905_601_000,
+                }))
+            }
+            item => item,
+        };
+        if matches!(
+            &item,
+            RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
+        ) {
+            active_turn_id = None;
+        }
         let line = RolloutLine {
             timestamp: TIMESTAMP.to_string(),
             ordinal: Some(next_ordinal),
@@ -832,7 +862,12 @@ async fn native_thread_load_does_not_wait_for_an_unrelated_migration_job() {
         native_id,
         SegmentId::new(),
         /*start_ordinal*/ 0,
-        vec![user_message("native")],
+        vec![completed_user_message(
+            native_id,
+            "native-turn",
+            "native-item",
+            "native",
+        )],
     );
     let store = indexed_store(home.path()).await;
     super::super::thread_history_materialization::materialize_to_sqlite(
@@ -2492,9 +2527,20 @@ async fn migration_accepts_paginated_numeric_token_count_records() {
         }
     });
     let token_count = serde_json::to_string(&token_count).expect("serialize token count");
-    assert!(
-        serde_json::from_str::<RolloutLine>(token_count.as_str()).is_err(),
-        "fixture must reproduce direct streaming deserialization failure"
+    assert_eq!(
+        serde_json::to_value(
+            serde_json::from_str::<RolloutLine>(&token_count)
+                .expect("manual rollout decoder accepts numeric token count"),
+        )
+        .expect("serialize direct decode"),
+        serde_json::to_value(
+            RolloutRecorder::parse_rollout_line_value(
+                serde_json::from_str(&token_count).expect("token count JSON"),
+            )
+            .expect("canonical rollout decoder")
+            .expect("numeric token count record"),
+        )
+        .expect("serialize canonical decode")
     );
     writeln!(
         fs::OpenOptions::new()
@@ -2799,7 +2845,15 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
         thread_id,
         segment_ids[0],
         /*start_ordinal*/ 0,
-        vec![user_message("mixed native oldest")],
+        vec![
+            turn_started("oldest-native-turn"),
+            completed_user_message(
+                thread_id,
+                "oldest-native-turn",
+                "oldest-native-item",
+                "mixed native oldest",
+            ),
+        ],
     );
     let oldest_position = HistoryPosition {
         thread_id: rollout_ids[0],
@@ -2819,7 +2873,12 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
         thread_id,
         segment_ids[1],
         oldest_end,
-        vec![user_message("mixed native middle")],
+        vec![completed_user_message(
+            thread_id,
+            "middle-native-turn",
+            "middle-native-item",
+            "mixed native middle",
+        )],
     );
     set_history_base(middle_path.as_path(), oldest_position);
 
@@ -2844,7 +2903,12 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
                 nth_user_message: None,
                 compacted_replacement_history_filter_texts: None,
             }),
-            user_message("mixed compatibility active"),
+            completed_user_message(
+                thread_id,
+                "active-native-turn",
+                "active-native-item",
+                "mixed compatibility active",
+            ),
         ],
     );
     let source_bytes = [
@@ -2886,7 +2950,12 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
         })
         .await
         .expect("apply mixed migration");
-    assert_eq!(applied.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_eq!(
+        applied.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        applied.outcomes[0]
+    );
     let selected_path = applied.outcomes[0].rollout_path.as_path();
     assert!(
         !fs::read_to_string(selected_path)
@@ -2904,6 +2973,16 @@ async fn migration_rewrites_a_legacy_reference_after_a_native_history_base() {
     ] {
         assert_eq!(json.matches(message).count(), 1, "{message}");
     }
+    let turns = list_active_summary_turns(&store, thread_id).await;
+    let oldest_item = turns
+        .turns
+        .iter()
+        .flat_map(|turn| &turn.items)
+        .find(|item| item.item_id == "oldest-native-item")
+        .expect("retained native ancestor must remain visible in SQLite history");
+    let oldest_item: serde_json::Value =
+        serde_json::from_slice(&oldest_item.item_json).expect("decode projected native ancestor");
+    assert_eq!(oldest_item["content"][0]["text"], "mixed native oldest");
     assert_eq!(
         [
             fs::read(oldest_path).expect("reread oldest source"),
@@ -2932,7 +3011,12 @@ async fn native_history_base_migration_translates_subagent_history_boundary() {
         thread_id,
         segment_ids[0],
         /*start_ordinal*/ 0,
-        vec![user_message("inherited parent context")],
+        vec![completed_user_message(
+            thread_id,
+            "inherited-parent-turn",
+            "inherited-parent-item",
+            "inherited parent context",
+        )],
     );
     let active = home.path().join("sessions/2025/01/03").join(filename);
     write_paginated_segment(
@@ -2943,7 +3027,12 @@ async fn native_history_base_migration_translates_subagent_history_boundary() {
         predecessor_end,
         vec![
             segment_reference(predecessor, thread_id, segment_ids[0]),
-            user_message("subagent-owned context"),
+            completed_user_message(
+                thread_id,
+                "subagent-owned-turn",
+                "subagent-owned-item",
+                "subagent-owned context",
+            ),
         ],
     );
     set_paginated_subagent_history_start(active.as_path(), predecessor_end + 2);
@@ -2956,7 +3045,12 @@ async fn native_history_base_migration_translates_subagent_history_boundary() {
         })
         .await
         .expect("migrate bounded Paginated subagent");
-    assert_eq!(report.outcomes[0].status, RolloutMigrationStatus::Migrated);
+    assert_eq!(
+        report.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        report.outcomes[0]
+    );
     let selected = report.outcomes[0].rollout_path.as_path();
     let metadata = codex_rollout::read_session_meta_line(selected)
         .await
@@ -3283,7 +3377,12 @@ async fn migration_rejects_history_base_source_change_after_targets_are_durable(
     let late_line = RolloutLine {
         timestamp: "2025-01-03T12:00:01Z".to_string(),
         ordinal: Some(history_base.end_ordinal_exclusive),
-        item: agent_message("late parent append"),
+        item: completed_user_message(
+            parent_id,
+            "late-parent-turn",
+            "late-parent-item",
+            "late parent append",
+        ),
     };
     writeln!(
         parent,
@@ -6223,6 +6322,108 @@ async fn migration_rejects_paginated_reference_with_non_contiguous_ordinals() {
 }
 
 #[tokio::test]
+async fn migration_rejects_paginated_legacy_events_before_publication() {
+    let home = TempDir::new().expect("temporary home");
+    let thread_id = ThreadId::new();
+    let segment_id = SegmentId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let predecessor = home
+        .path()
+        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(segment_id.to_string())
+        .join(&filename);
+    let predecessor_end = write_paginated_segment(
+        &predecessor,
+        home.path(),
+        thread_id,
+        segment_id,
+        /*start_ordinal*/ 0,
+        vec![completed_user_message(
+            thread_id,
+            "native-turn",
+            "native-item",
+            "native predecessor",
+        )],
+    );
+    let source = home.path().join("sessions/2025/01/03").join(filename);
+    let legacy_ordinal = write_paginated_segment(
+        &source,
+        home.path(),
+        thread_id,
+        SegmentId::new(),
+        predecessor_end,
+        vec![segment_reference(
+            predecessor.clone(),
+            thread_id,
+            segment_id,
+        )],
+    );
+    writeln!(
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .expect("append malformed native event"),
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: TIMESTAMP.to_string(),
+            ordinal: Some(legacy_ordinal),
+            item: user_message("legacy presentation under a native header"),
+        })
+        .expect("serialize intentionally legacy-only native record")
+    )
+    .expect("write intentionally legacy-only native record");
+    let original_bytes = [
+        fs::read(&predecessor).expect("predecessor"),
+        fs::read(&source).expect("source"),
+    ];
+    let store = indexed_store(home.path()).await;
+    for options in [RolloutMigrationOptions::default(), apply_options()] {
+        let report = store
+            .migrate_rollouts(RolloutMigrationOptions {
+                thread_ids: vec![thread_id],
+                ..options
+            })
+            .await
+            .expect("inspect incompatible native source");
+        assert_eq!(
+            report.outcomes[0].status,
+            RolloutMigrationStatus::Failed,
+            "{:?}",
+            report.outcomes[0]
+        );
+        assert!(
+            report.outcomes[0]
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("legacy-only presentation events")),
+            "{:?}",
+            report.outcomes[0]
+        );
+        assert_eq!(
+            store
+                .state_db
+                .as_ref()
+                .expect("state")
+                .get_thread(thread_id)
+                .await
+                .expect("metadata")
+                .expect("selected thread")
+                .rollout_path,
+            source
+        );
+        assert_no_migration_artifacts(home.path(), &source, thread_id).await;
+    }
+    assert_eq!(
+        [
+            fs::read(&predecessor).expect("retained predecessor"),
+            fs::read(&source).expect("retained source")
+        ],
+        original_bytes
+    );
+}
+
+#[tokio::test]
 async fn migration_rejects_paginated_reference_change_after_targets_are_durable() {
     let home = TempDir::new().expect("create Codex home");
     let parent_id = ThreadId::new();
@@ -6287,7 +6488,12 @@ async fn migration_rejects_paginated_reference_change_after_targets_are_durable(
     let late_line = RolloutLine {
         timestamp: "2025-01-03T12:00:01Z".to_string(),
         ordinal: Some(parent_end),
-        item: agent_message("late parent append"),
+        item: completed_user_message(
+            parent_id,
+            "late-parent-turn",
+            "late-parent-item",
+            "late parent append",
+        ),
     };
     writeln!(
         parent,

@@ -1187,6 +1187,21 @@ async fn inspect_source(
                 continue;
             }
         };
+        // Native replay preserves payloads instead of canonicalizing legacy presentation events.
+        // Reject such inputs before staging: a later projection failure must not follow selection.
+        if session_meta.meta.history_mode == ThreadHistoryMode::Paginated
+            && session_meta
+                .meta
+                .subagent_history_start_ordinal
+                .is_none_or(|start| line.ordinal.is_none_or(|ordinal| ordinal >= start))
+            && codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
+            && !codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Paginated)
+        {
+            return Err(migration_error(format!(
+                "Paginated source {} contains legacy-only presentation events; retain its supported reader",
+                path.display()
+            )));
+        }
         if canonical_paginated_suffix
             && !matches!(
                 &line.item,

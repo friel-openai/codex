@@ -506,9 +506,14 @@ async fn automatic_migration_accepts_paginated_numeric_records_and_restarts() ->
         }
     })
     .to_string();
-    assert!(
-        serde_json::from_str::<RolloutLine>(&token_count).is_err(),
-        "fixture must retain the direct arbitrary-precision enum failure"
+    assert_eq!(
+        serde_json::to_value(serde_json::from_str::<RolloutLine>(&token_count)?)?,
+        serde_json::to_value(
+            codex_rollout::RolloutRecorder::parse_rollout_line_value(serde_json::from_str(
+                &token_count
+            )?,)?
+            .expect("canonical numeric event")
+        )?
     );
     writeln!(
         fs::OpenOptions::new().append(true).open(&active_path)?,
@@ -529,6 +534,189 @@ async fn automatic_migration_accepts_paginated_numeric_records_and_restarts() ->
     assert_eq!(
         [fs::read(predecessor_path)?, fs::read(active_path)?],
         source_bytes
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_ordinal_recovery_preserves_native_fork_boundaries_and_restarts() -> Result<()> {
+    let home = TempDir::new()?;
+    MockResponsesConfig::new("http://127.0.0.1:1").write(home.path())?;
+    let thread_id = ThreadId::new();
+    let predecessor_id = ThreadId::new();
+    let predecessor_path = home
+        .path()
+        .join("sessions/rollout_segments/2025/01/03")
+        .join(format!(
+            "rollout-2025-01-03T11-59-59-{thread_id}_{predecessor_id}.jsonl"
+        ));
+    let predecessor_end = write_paginated_segment(
+        &predecessor_path,
+        home.path(),
+        thread_id,
+        SegmentId::new(),
+        /*start_ordinal*/ 0,
+        vec![
+            legacy_turn_started("recovery-predecessor-turn"),
+            paginated_completed_user_message(
+                thread_id,
+                "recovery-predecessor-turn",
+                "predecessor-item",
+                "before checkpoint",
+            ),
+            legacy_turn_completed("recovery-predecessor-turn"),
+        ],
+    )?;
+    let active_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl"));
+    let token: RolloutLine = serde_json::from_value(json!({
+        "timestamp": "2025-01-03T12:00:00Z", "ordinal": 0, "type": "event_msg",
+        "payload": { "type": "token_count", "info": null,
+            "rate_limits": { "primary": { "used_percent": 12.5, "window_minutes": 300, "resets_at": 1786689000 } } }
+    }))?;
+    write_paginated_segment(
+        &active_path,
+        home.path(),
+        thread_id,
+        SegmentId::new(),
+        predecessor_end,
+        vec![
+            legacy_turn_started("recovery-active-turn"),
+            token.item,
+            paginated_completed_user_message(
+                thread_id,
+                "recovery-active-turn",
+                "recovered-item",
+                "after checkpoint",
+            ),
+            legacy_turn_completed("recovery-active-turn"),
+        ],
+    )?;
+    let mut records = fs::read_to_string(&active_path)?
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<serde_json::Result<Vec<_>>>()?;
+    records[0]["payload"]["history_base"] = json!({
+        "thread_id": predecessor_id, "end_ordinal_exclusive": predecessor_end,
+        "end_byte_offset": fs::metadata(&predecessor_path)?.len()
+    });
+    let mut original = Vec::new();
+    let mut old_fork_byte_offset = 0;
+    for (index, record) in records.iter_mut().enumerate() {
+        if index >= 3 {
+            record["ordinal"] = json!(record["ordinal"].as_u64().expect("ordinal") - 1);
+        }
+        serde_json::to_writer(&mut original, record)?;
+        original.push(b'\n');
+        if index == 2 {
+            old_fork_byte_offset = original.len() as u64;
+        }
+    }
+    fs::write(&active_path, &original)?;
+
+    // This child was forked at the last valid physical boundary before the reused ordinal.
+    // Parent recovery must not reinterpret or rewrite that already-issued HistoryPosition.
+    let child_id = ThreadId::new();
+    let child_path = home
+        .path()
+        .join("sessions/2025/01/03")
+        .join(format!("rollout-2025-01-03T12-00-01-{child_id}.jsonl"));
+    let child_start = predecessor_end + 3;
+    write_paginated_segment(
+        &child_path,
+        home.path(),
+        child_id,
+        SegmentId::new(),
+        child_start,
+        vec![
+            legacy_turn_started("recovery-child-turn"),
+            paginated_completed_user_message(
+                child_id,
+                "recovery-child-turn",
+                "child-item",
+                "fork remains bounded",
+            ),
+            legacy_turn_completed("recovery-child-turn"),
+        ],
+    )?;
+    let contents = fs::read_to_string(&child_path)?;
+    let mut lines = contents.lines();
+    let mut head: serde_json::Value = serde_json::from_str(lines.next().expect("child metadata"))?;
+    head["payload"]["history_base"] = json!({
+        "thread_id": thread_id, "end_ordinal_exclusive": child_start,
+        "end_byte_offset": old_fork_byte_offset
+    });
+    let mut child_bytes = serde_json::to_vec(&head)?;
+    child_bytes.push(b'\n');
+    for line in lines {
+        child_bytes.extend_from_slice(line.as_bytes());
+        child_bytes.push(b'\n');
+    }
+    fs::write(&child_path, &child_bytes)?;
+    let predecessor_bytes = fs::read(&predecessor_path)?;
+    let sqlite = codex_state::SqliteConfig::new_for_testing(home.path().abs());
+    let state =
+        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
+    for (id, path) in [(thread_id, &active_path), (child_id, &child_path)] {
+        let mut metadata = codex_state::ThreadMetadataBuilder::new(
+            id,
+            path.clone(),
+            chrono::Utc::now(),
+            SessionSource::Cli,
+        );
+        metadata.history_mode = codex_protocol::protocol::ThreadHistoryMode::Paginated;
+        metadata.cwd = home.path().to_path_buf();
+        state
+            .upsert_thread(&metadata.build("mock_provider"))
+            .await?;
+    }
+
+    let (first_items, corrected_path) =
+        read_public_history_after_restart(home.path(), thread_id, DEFAULT_READ_TIMEOUT).await?;
+    assert_ne!(
+        corrected_path, active_path,
+        "recovery must use a fresh rollout identity"
+    );
+    assert_eq!(
+        first_items
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["predecessor-item", "recovered-item"]
+    );
+    let store = LocalThreadStore::new(
+        LocalThreadStoreConfig {
+            codex_home: home.path().to_path_buf(),
+            sqlite,
+            default_model_provider_id: "mock_provider".to_string(),
+        },
+        Some(state),
+    );
+    assert!(
+        store.has_history_projection(thread_id).await?,
+        "recovery must publish the complete projection before selection"
+    );
+    let (resumed_items, resumed_path) =
+        migrate_and_read_public_history(home.path(), thread_id, DEFAULT_READ_TIMEOUT).await?;
+    assert_eq!((resumed_items, resumed_path), (first_items, corrected_path));
+    let (child_items, _) =
+        read_public_history_after_restart(home.path(), child_id, DEFAULT_READ_TIMEOUT).await?;
+    assert_eq!(
+        child_items
+            .iter()
+            .map(|(_, id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["predecessor-item", "child-item"]
+    );
+    assert_eq!(
+        [
+            fs::read(&predecessor_path)?,
+            fs::read(&active_path)?,
+            fs::read(&child_path)?
+        ],
+        [predecessor_bytes, original, child_bytes]
     );
     Ok(())
 }

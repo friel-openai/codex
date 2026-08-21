@@ -10,6 +10,7 @@ mod list_threads;
 mod live_writer;
 mod model_context;
 mod move_thread_to_section;
+mod ordinal_recovery;
 mod paginated_fork;
 mod pending_thread_metadata;
 mod projection_rebuild;

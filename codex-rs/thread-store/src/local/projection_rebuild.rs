@@ -24,6 +24,7 @@ use tracing::warn;
 
 use super::LocalThreadStore;
 use super::live_writer;
+use super::ordinal_recovery;
 use super::thread_history;
 use super::thread_history_materialization;
 use super::thread_rollout_resolver;
@@ -166,6 +167,9 @@ pub(super) async fn schedule(store: LocalThreadStore, thread_id: ThreadId) {
         {
             scheduled.state = ScheduledProjectionRebuildState::Waiting(Some(abort));
         }
+        Some(scheduled)
+            if scheduled.generation == generation
+                && matches!(scheduled.state, ScheduledProjectionRebuildState::Rebuilding) => {}
         _ => abort.abort(),
     }
 }
@@ -221,6 +225,10 @@ fn register(
     Some(ProjectionRebuildRegistration { active, thread_id })
 }
 
+#[expect(
+    clippy::await_holding_invalid_type,
+    reason = "staging cleanup and publication must exclude other projection rebuilds in this store"
+)]
 async fn rebuild_registered(
     store: &LocalThreadStore,
     thread_id: ThreadId,
@@ -254,11 +262,20 @@ async fn rebuild_registered(
         {
             return Ok(false);
         }
+        let ordinal_recovery = ordinal_recovery::prepare(store, &selected, &session_meta).await?;
+        let projection_lineage = match ordinal_recovery.as_ref() {
+            Some(recovery) => {
+                store
+                    .resolve_rollout_lineage_from_path(thread_id, &recovery.rollout_path)
+                    .await?
+            }
+            None => lineage.clone(),
+        };
 
         let staging_thread_id = ThreadId::new();
         let staging_guard =
             ProjectionStagingGuard::create(store, thread_id, staging_thread_id).await?;
-        let staged_result = stage_lineage(store, staging_thread_id, &lineage).await;
+        let staged_result = stage_lineage(store, staging_thread_id, &projection_lineage).await;
         if let Err(error) = staged_result {
             discard_staging(store, staging_thread_id, staging_guard).await?;
             return Err(error);
@@ -268,8 +285,17 @@ async fn rebuild_registered(
         #[cfg(test)]
         pause_after_staging(thread_id).await;
 
-        let _lifecycle = store.live_writer_locks.reserve_lifecycle(thread_id).await;
-        let _writers = store.reserve_rollout_writers(&[thread_id]).await?;
+        // Ordinal recovery already holds both reservations through corrected-file publication.
+        let _lifecycle = if ordinal_recovery.is_none() {
+            Some(store.live_writer_locks.reserve_lifecycle(thread_id).await)
+        } else {
+            None
+        };
+        let _writers = if ordinal_recovery.is_none() {
+            Some(store.reserve_rollout_writers(&[thread_id]).await?)
+        } else {
+            None
+        };
         match live_writer::persist_thread_reserved(store, thread_id).await {
             Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
             Err(error) => {
@@ -282,7 +308,7 @@ async fn rebuild_registered(
             discard_staging(store, staging_thread_id, staging_guard).await?;
             continue;
         }
-        let active = current
+        let active = projection_lineage
             .segments
             .last()
             .ok_or_else(|| projection_error("selected lineage has no active segment"))?;
@@ -329,8 +355,15 @@ async fn rebuild_registered(
                 continue;
             }
         }
-        thread_history::publish_staged_projection(store, selected.rollout_id, staging_thread_id)
-            .await?;
+        thread_history::publish_staged_projection(
+            store,
+            projection_lineage.root_rollout_id,
+            staging_thread_id,
+        )
+        .await?;
+        if let Some(recovery) = ordinal_recovery {
+            recovery.select(store, thread_id).await?;
+        }
         staging_guard.remove().await?;
         return Ok(true);
     }

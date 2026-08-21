@@ -293,6 +293,19 @@ async fn materialize_to_sqlite_inner(
         let changes = if subagent_history_start_ordinal.is_some_and(|start| ordinal < start) {
             ThreadHistoryChangeSet::default()
         } else {
+            // Older files can claim Paginated while retaining legacy-only presentation events.
+            // The stateless projector ignores those events; blessing its checkpoint would hide
+            // their history, even if canonical ItemCompleted records were appended afterward.
+            if codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
+                && !codex_rollout::is_persisted_rollout_item(
+                    &line.item,
+                    ThreadHistoryMode::Paginated,
+                )
+            {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "materialize_paginated_legacy_event",
+                });
+            }
             project_rollout_line(&line)
         };
         let fallback_created_at_ms = if changes
