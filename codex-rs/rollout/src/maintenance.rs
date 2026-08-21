@@ -1,12 +1,14 @@
 //! Coordinates maintenance jobs that replace local rollout files.
 //!
-//! New migration jobs serialize with each other while clean history readers retain shared
-//! ownership of the original maintenance lock. Old binaries and history repair still acquire
-//! that original lock exclusively. Compression yields when a reader or migration is waiting.
+//! Migrations with reserved dependencies may overlap. Unknown ancestry and older migration
+//! implementations retain exclusive job ownership. Clean history readers share the original
+//! maintenance lock; old binaries and history repair acquire it exclusively. Compression yields
+//! when a reader or migration is waiting.
 //!
 //! This is separate from per-thread writer locks, which protect live rollout appenders. It is also
 //! separate from compression's durable run marker, which throttles how often compression scans.
 
+use codex_protocol::ThreadId;
 use std::fs;
 use std::fs::File;
 use std::fs::OpenOptions;
@@ -16,6 +18,14 @@ use std::path::Path;
 const ROLLOUT_MAINTENANCE_LOCK: &str = "rollout-maintenance.lock";
 const ROLLOUT_MAINTENANCE_JOB_LOCK: &str = "rollout-maintenance-job.lock";
 const ROLLOUT_MAINTENANCE_FOREGROUND_LOCK: &str = "rollout-maintenance-foreground.lock";
+
+/// Bounds migration memory and SQLite contention across processes sharing one Codex home.
+pub const MAX_CONCURRENT_ROLLOUT_MIGRATIONS: usize = 2;
+
+/// Keeps compression aware of queued migrations even between nonblocking lock attempts.
+pub struct RolloutMaintenanceIntentGuard {
+    _file: File,
+}
 
 /// Holds exclusive ownership of operations that replace local rollout files.
 pub struct RolloutMaintenanceGuard {
@@ -28,11 +38,80 @@ pub struct RolloutMaintenanceReadGuard {
     _file: File,
 }
 
-/// Serializes new migration and compression jobs without excluding unrelated clean readers.
+/// Reserves a migration against compression and incompatible maintenance implementations.
 pub struct RolloutMaintenanceJobGuard {
     _job: File,
     _compatibility: RolloutMaintenanceReadGuard,
     _foreground: File,
+    /// Stable lock files are never unlinked: otherwise another process could lock a new inode.
+    _dependencies: Vec<File>,
+    _slot: Option<File>,
+}
+
+pub async fn acquire_rollout_maintenance_intent(
+    codex_home: &Path,
+) -> io::Result<RolloutMaintenanceIntentGuard> {
+    Ok(RolloutMaintenanceIntentGuard {
+        _file: acquire_foreground_intent(codex_home).await?,
+    })
+}
+
+/// Try to admit a migration whose complete dependency identities the caller will revalidate.
+/// Busy dependencies or capacity return immediately and release every partial reservation.
+pub fn try_acquire_rollout_migration_dependency_lock(
+    codex_home: &Path,
+    thread_ids: &[ThreadId],
+) -> io::Result<Option<RolloutMaintenanceJobGuard>> {
+    if thread_ids.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty migration dependency set",
+        ));
+    }
+    let foreground = open_lock(codex_home, ROLLOUT_MAINTENANCE_FOREGROUND_LOCK)?;
+    match foreground.try_lock_shared() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+    }
+    let job = open_lock(codex_home, ROLLOUT_MAINTENANCE_JOB_LOCK)?;
+    match job.try_lock_shared() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+        Err(std::fs::TryLockError::Error(error)) => return Err(error),
+    }
+    let Some(compatibility) = try_acquire_rollout_maintenance_read_lock(codex_home)? else {
+        return Ok(None);
+    };
+    let mut ids = thread_ids.to_vec();
+    ids.sort_unstable_by_key(ThreadId::to_string);
+    ids.dedup();
+    let mut dependencies = Vec::with_capacity(ids.len());
+    for thread_id in ids {
+        let file = open_lock(codex_home, &format!("rollout-migration-{thread_id}.lock"))?;
+        match file.try_lock() {
+            Ok(()) => dependencies.push(file),
+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    for slot in 0..MAX_CONCURRENT_ROLLOUT_MIGRATIONS {
+        let file = open_lock(codex_home, &format!("rollout-migration-slot-{slot}.lock"))?;
+        match file.try_lock() {
+            Ok(()) => {
+                return Ok(Some(RolloutMaintenanceJobGuard {
+                    _job: job,
+                    _compatibility: compatibility,
+                    _foreground: foreground,
+                    _dependencies: dependencies,
+                    _slot: Some(file),
+                }));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => return Err(error),
+        }
+    }
+    Ok(None)
 }
 
 /// Retains compression's original exclusive protocol while foreground waiters ask it to stop.
@@ -166,6 +245,8 @@ fn try_acquire_foreground_job(
         _job: job,
         _compatibility: compatibility,
         _foreground: foreground,
+        _dependencies: Vec::new(),
+        _slot: None,
     }))
 }
 
