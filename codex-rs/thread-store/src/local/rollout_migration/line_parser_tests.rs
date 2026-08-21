@@ -193,11 +193,15 @@ fn parses_paginated_numeric_event_payloads_through_value() {
     }))
     .expect("serialize Paginated token count");
 
-    assert!(
-        serde_json::from_slice::<codex_rollout::RolloutLine>(&bytes).is_err(),
-        "the streaming enum path must reproduce the production failure"
-    );
     let parsed = parse_paginated_rollout_line(&bytes).expect("parse Paginated token count");
+    assert_eq!(
+        serde_json::to_value(
+            serde_json::from_slice::<codex_rollout::RolloutLine>(&bytes)
+                .expect("manual rollout decoder accepts numeric token count"),
+        )
+        .expect("serialize direct decode"),
+        serde_json::to_value(&parsed).expect("serialize canonical decode")
+    );
     assert_eq!(parsed.ordinal, Some(11938));
     assert!(matches!(
         parsed.item,

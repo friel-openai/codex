@@ -1496,6 +1496,62 @@ async fn append_rollout_item_to_path_assigns_next_paginated_ordinal() -> std::io
     Ok(())
 }
 
+#[test]
+fn rate_limit_decimal_spellings_decode_through_tagged_rollout_events() {
+    for spelling in [
+        "12.50",
+        "1.25e1",
+        "125e-1",
+        "12.50000000000000000000000000000001",
+    ] {
+        let window =
+            format!(r#"{{"used_percent":{spelling},"window_minutes":300,"resets_at":1786689000}}"#);
+        let event =
+            format!(r#"{{"type":"token_count","info":null,"rate_limits":{{"primary":{window}}}}}"#);
+        let record = format!(
+            r#"{{"timestamp":"2025-01-03T12:00:00Z","ordinal":274,"type":"event_msg","payload":{event}}}"#
+        );
+        let direct_window: codex_protocol::protocol::RateLimitWindow =
+            serde_json::from_str(&window).expect("decode direct rate-limit number");
+        let direct_event: EventMsg =
+            serde_json::from_str(&event).expect("decode tagged token count");
+        let direct_rollout: RolloutLine =
+            serde_json::from_str(&record).expect("decode nested rollout event");
+        let canonical = RolloutRecorder::parse_rollout_line_bytes(record.as_bytes())
+            .expect("decode canonical rollout")
+            .expect("numeric event retained");
+        let expected_window = codex_protocol::protocol::RateLimitWindow {
+            used_percent: 12.5,
+            window_minutes: Some(300),
+            resets_at: Some(1786689000),
+        };
+        assert_eq!(direct_window, expected_window, "{spelling}");
+        for decoded in [
+            RolloutItem::EventMsg(direct_event),
+            direct_rollout.item,
+            canonical.item,
+        ] {
+            let RolloutItem::EventMsg(EventMsg::TokenCount(event)) = decoded else {
+                panic!("numeric event changed variants");
+            };
+            assert_eq!(
+                event.rate_limits.expect("limits").primary,
+                Some(expected_window.clone()),
+                "{spelling}"
+            );
+        }
+    }
+    for invalid in [r#""12.5""#, "null", "{}", "1e10000"] {
+        let event = format!(
+            r#"{{"type":"token_count","info":null,"rate_limits":{{"primary":{{"used_percent":{invalid}}}}}}}"#
+        );
+        assert!(
+            serde_json::from_str::<EventMsg>(&event).is_err(),
+            "reject {invalid}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn append_rollout_item_uses_ordinal_from_arbitrary_precision_token_count()
 -> std::io::Result<()> {
