@@ -39,7 +39,7 @@ struct IndexedRollout {
 impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        Self::scan_paths(vec![
+        Self::scan_paths(codex_home, vec![
             codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
             codex_home.join(SESSIONS_SUBDIR),
         ])
@@ -51,10 +51,11 @@ impl RolloutReferenceIndex {
     /// Reference counts exclude archived history and must not be used to decide whether a
     /// rollout can be deleted or compressed.
     pub async fn scan_unarchived(codex_home: &Path) -> io::Result<Self> {
-        Self::scan_paths(vec![codex_home.join(SESSIONS_SUBDIR)]).await
+        Self::scan_paths(codex_home, vec![codex_home.join(SESSIONS_SUBDIR)]).await
     }
 
-    async fn scan_paths(mut stack: Vec<PathBuf>) -> io::Result<Self> {
+    async fn scan_paths(codex_home: &Path, mut stack: Vec<PathBuf>) -> io::Result<Self> {
+        let canonical_home = tokio::fs::canonicalize(codex_home).await.ok();
         let mut rollouts_by_id = HashMap::new();
         let mut direct_references_by_rollout = HashMap::new();
         while let Some(directory) = stack.pop() {
@@ -98,6 +99,9 @@ impl RolloutReferenceIndex {
                 }
                 if let Some(reference) = leading_reference
                     && !references_detached_segment(codex_home, &reference)
+                    && !canonical_home
+                        .as_ref()
+                        .is_some_and(|home| references_detached_segment(home, &reference))
                     && let Some(referenced_rollout_id) =
                         reference.rollout_id.or(reference.thread_id)
                 {
