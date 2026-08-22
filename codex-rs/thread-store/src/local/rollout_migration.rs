@@ -341,9 +341,8 @@ impl LocalThreadStore {
                 );
             }
             let result = self
-                .migrate_rollout_path(path.clone(), &options, &mut limiter, admission)
+                .migrate_rollout_path(path.clone(), &options, &mut limiter, admission, Some(guard))
                 .await;
-            drop(guard);
             if matches!(admission, MigrationAdmission::RequiresExclusive) {
                 continue;
             }
@@ -398,7 +397,7 @@ impl LocalThreadStore {
         on_progress: &mut impl FnMut(RolloutMigrationProgress),
     ) -> ThreadStoreResult<RolloutMigrationReport> {
         let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
-        let _maintenance_guard = match options.mode {
+        let inventory_guard = match options.mode {
             RolloutMigrationMode::DryRun => None,
             RolloutMigrationMode::Apply => Some(
                 codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
@@ -455,16 +454,26 @@ impl LocalThreadStore {
                 !thread_id.is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
             });
         }
+        drop(inventory_guard);
         let total_paths = paths.len();
         let mut report = RolloutMigrationReport::default();
 
         for (index, path) in paths.into_iter().enumerate() {
+            let job_guard = match options.mode {
+                RolloutMigrationMode::DryRun => None,
+                RolloutMigrationMode::Apply => Some(
+                    codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
+                        .await
+                        .map_err(migration_error)?,
+                ),
+            };
             let outcome = self
                 .migrate_rollout_path(
                     path,
                     &options,
                     &mut limiter,
                     &mut MigrationAdmission::Manual,
+                    job_guard,
                 )
                 .await?;
             let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
@@ -487,7 +496,12 @@ impl LocalThreadStore {
         options: &RolloutMigrationOptions,
         limiter: &mut RolloutMigrationRateLimiter,
         admission: &mut MigrationAdmission,
+        job_guard: Option<codex_rollout::RolloutMaintenanceJobGuard>,
     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
+        // Compression can replace an inventoried file before this path acquires its job.
+        path = codex_rollout::existing_rollout_path(&path)
+            .await
+            .unwrap_or(path);
         let metadata = match codex_rollout::read_session_meta_line(&path).await {
             Ok(metadata) => metadata,
             Err(error) => {
@@ -584,8 +598,12 @@ impl LocalThreadStore {
                     .len()
                     > 0;
                 let recovery = if lineage_journal {
-                    let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
-                    self.recover_legacy_lineage(&journal_path, limiter).await
+                    match self.writer_lock_coordinator.acquire(thread_id) {
+                        Ok(_writer_guard) => {
+                            self.recover_legacy_lineage(&journal_path, limiter).await
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     self.recover_published_migration(thread_id, &path, &journal_path, limiter)
                         .await
@@ -609,6 +627,9 @@ impl LocalThreadStore {
             } else {
                 Ok(RolloutMigrationStatus::AlreadyPaginated)
             };
+            // Repair takes lifecycle before exclusive maintenance. A job's shared maintenance
+            // lease must not survive into projection's lifecycle wait behind a queued writer.
+            drop(job_guard);
             let result = match result {
                 Ok(RolloutMigrationStatus::Migrated) => self
                     .ensure_complete_migrated_projection(thread_id)
@@ -807,6 +828,7 @@ impl LocalThreadStore {
             };
             drop(_writer_guard);
             drop(_live_writer_guard);
+            drop(job_guard);
             let result = match result {
                 Ok(selected_path) => {
                     path = selected_path;
