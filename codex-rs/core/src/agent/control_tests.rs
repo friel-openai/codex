@@ -7059,6 +7059,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()> 
 }
 
 #[derive(Clone, Copy)]
+// Startup failures must persist the same retry state as failures after a helper starts.
 enum SupervisorFailurePhase {
     Startup,
     Running,
