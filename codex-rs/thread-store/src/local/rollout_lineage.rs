@@ -483,7 +483,7 @@ impl LocalThreadStore {
                 && parsed
                     .iter()
                     .filter_map(|(_, line)| line.ordinal)
-                    .last()
+                    .next_back()
                     .and_then(|ordinal| ordinal.checked_add(1))
                     != segment.end_ordinal_exclusive
             {
