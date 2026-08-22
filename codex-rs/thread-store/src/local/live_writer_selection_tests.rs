@@ -114,6 +114,21 @@ async fn resume_rejects_selection_changed_while_old_rollout_is_retained() {
         .await
         .expect("select first");
     let store = LocalThreadStore::new(config, Some(db));
+    #[cfg(unix)]
+    {
+        let alias = home.path().join("session-alias");
+        std::os::unix::fs::symlink(&directory, &alias).expect("session directory alias");
+        let alias_path = alias.join(first.file_name().expect("rollout filename"));
+        let access = goal_supervisor_runtime_repair::repair_selected_history_before_access(
+            &store,
+            thread_id,
+            &alias_path,
+            goal_supervisor_runtime_repair::RepairAccess::Recent,
+        )
+        .await
+        .expect("directory alias retains the selected rollout");
+        drop(access);
+    }
     let persistence = ThreadPersistenceMetadata {
         cwd: Some(home.path().to_path_buf()),
         model_provider: "test-provider".to_string(),

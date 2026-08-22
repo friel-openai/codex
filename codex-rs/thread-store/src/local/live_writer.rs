@@ -79,8 +79,21 @@ pub(super) async fn resume_thread(
     }
     if let Some(requested_path) = params.rollout_path.as_deref()
         && let Some(selected_path) = selected_rollout_path(store, params.thread_id).await?
-        && codex_rollout::plain_rollout_path(requested_path)
-            != codex_rollout::plain_rollout_path(selected_path.as_path())
+        && codex_rollout::plain_rollout_path(
+            super::helpers::scoped_rollout_path(
+                store.config.codex_home.clone(),
+                requested_path,
+                "Codex home",
+            )?
+            .as_path(),
+        ) != codex_rollout::plain_rollout_path(
+            super::helpers::scoped_rollout_path(
+                store.config.codex_home.clone(),
+                selected_path.as_path(),
+                "Codex home",
+            )?
+            .as_path(),
+        )
     {
         return Err(ThreadStoreError::InvalidRequest {
             message: format!(
@@ -297,6 +310,19 @@ pub(super) async fn require_selected_rollout_path(
         && codex_rollout::plain_rollout_path(expected)
             != codex_rollout::plain_rollout_path(&selected)
     {
+        // Fork confinement canonicalizes its source; SQLite may retain a symlinked home.
+        // Resolve existing files before normalizing compression, and fail closed on lookup errors.
+        if let (Some(expected), Some(selected)) = (
+            codex_rollout::existing_rollout_path(expected).await,
+            codex_rollout::existing_rollout_path(&selected).await,
+        ) && let (Ok(expected), Ok(selected)) = (
+            tokio::fs::canonicalize(expected).await,
+            tokio::fs::canonicalize(selected).await,
+        ) && codex_rollout::plain_rollout_path(&expected)
+            == codex_rollout::plain_rollout_path(&selected)
+        {
+            return Ok(());
+        }
         return Err(ThreadStoreError::Conflict {
             message: format!(
                 "selected rollout changed while acquiring history access for thread {thread_id}; reload the thread before retrying"
