@@ -21,8 +21,12 @@ use tempfile::TempDir;
 use tokio::time::timeout;
 
 #[cfg(unix)]
+#[test_case::test_case(false; "plain")]
+#[test_case::test_case(true; "compressed")]
 #[tokio::test]
-async fn selected_rollout_alias_supports_fork_and_explicit_resume_after_restart() -> Result<()> {
+async fn selected_rollout_alias_supports_fork_and_explicit_resume_after_restart(
+    compressed: bool,
+) -> Result<()> {
     use codex_app_server_protocol::ThreadResumeParams;
     use codex_app_server_protocol::ThreadResumeResponse;
     use codex_protocol::ThreadId;
@@ -58,6 +62,16 @@ async fn selected_rollout_alias_supports_fork_and_explicit_resume_after_restart(
     let canonical_sessions = std::fs::canonicalize(home.path().join("sessions"))?;
     let alias = home.path().join("sessions-alias");
     std::os::unix::fs::symlink(&canonical_sessions, &alias)?;
+    if compressed {
+        std::fs::write(
+            canonical_source.with_extension("jsonl.zst"),
+            zstd::stream::encode_all(
+                std::fs::read(&canonical_source)?.as_slice(),
+                /*level*/ 0,
+            )?,
+        )?;
+        std::fs::remove_file(&canonical_source)?;
+    }
     metadata.rollout_path = alias.join(canonical_source.strip_prefix(canonical_sessions)?);
     state.upsert_thread(&metadata).await?;
     drop(state);
