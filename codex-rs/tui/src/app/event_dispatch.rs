@@ -2569,8 +2569,15 @@ impl App {
                 parent_thread_id,
                 placement,
             } => {
+                let terminal_info = codex_terminal_detection::terminal_info();
                 return self
-                    .handle_start_placed_side(tui, app_server, parent_thread_id, placement)
+                    .handle_start_placed_side(
+                        tui,
+                        app_server,
+                        parent_thread_id,
+                        placement,
+                        &terminal_info,
+                    )
                     .await;
             }
             AppEvent::OpenSkillsList => {
