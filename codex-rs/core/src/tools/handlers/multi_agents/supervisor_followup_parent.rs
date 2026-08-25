@@ -162,7 +162,7 @@ struct SupervisorFollowupParentResult {
 }
 
 impl ToolOutput for SupervisorFollowupParentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "followup_parent")
     }
 

@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
+use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::future::join_all;
 use schemars::JsonSchema;
 use serde::Deserialize;

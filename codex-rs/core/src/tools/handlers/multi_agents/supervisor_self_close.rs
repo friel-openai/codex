@@ -127,7 +127,7 @@ pub(crate) struct SupervisorSelfCloseResult {
 }
 
 impl ToolOutput for SupervisorSelfCloseResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "close_self")
     }
 

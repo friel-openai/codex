@@ -2743,7 +2743,9 @@ async fn record_interrupted_tool_call(
     let output = match &item {
         ResponseItem::FunctionCall { call_id, .. } => ResponseItem::FunctionCallOutput {
             id: None,
-            call_id: call_id.clone(),
+            call_id: Some(call_id.clone()),
+            name: None,
+            namespace: None,
             output: FunctionCallOutputPayload::from_text(INTERRUPTED_TOOL_CALL_OUTPUT.to_string()),
             internal_chat_message_metadata_passthrough: None,
         },

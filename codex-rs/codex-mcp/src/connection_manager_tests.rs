@@ -485,9 +485,7 @@ async fn connection_statuses_observe_clients_without_starting_them() {
     manager.insert_test_client("starting", pending.clone());
     manager.insert_test_client("deferred", pending);
     let (trigger, _receiver) = watch::channel(/*init*/ false);
-    Arc::get_mut(&mut manager.servers.get_mut("deferred").unwrap().connection)
-        .unwrap()
-        .startup_trigger = Some(trigger.clone());
+    manager.servers.get_mut("deferred").unwrap().startup_trigger = Some(trigger.clone());
 
     let statuses = tokio::time::timeout(
         Duration::from_millis(/*millis*/ 100),
@@ -507,7 +505,10 @@ async fn connection_statuses_observe_clients_without_starting_them() {
     ]);
     assert_eq!(statuses, expected);
     assert!(!*trigger.borrow());
-    manager.test_client("connected").cancel_token.cancel();
+    manager.servers["connected"]
+        .connection
+        .connection_cancel_token()
+        .cancel();
     expected.insert("connected".to_string(), Status::Cancelled);
     assert_eq!(manager.connection_statuses().await, expected);
 }
@@ -549,8 +550,13 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
         })
     };
     let manager = create_test_manager_with_failed_apps_startup(Vec::new(), factory);
-    let client = manager.test_client(CODEX_APPS_MCP_SERVER_NAME);
-    assert!(client.client().await.is_err());
+    let client = &manager.servers[CODEX_APPS_MCP_SERVER_NAME].connection;
+    assert!(
+        client
+            .await_current_startup(Arc::clone(&manager.session_route))
+            .await
+            .is_err()
+    );
     let expected = |status| HashMap::from([(CODEX_APPS_MCP_SERVER_NAME.to_string(), status)]);
     assert_eq!(
         manager.connection_statuses().await,
@@ -562,7 +568,9 @@ async fn connection_statuses_follow_latest_reconnect_outcome() {
         Status::Failed,
         Status::Connected,
     ] {
-        client.reconnect_failed_startup().await;
+        client
+            .reconnect_failed_startup(Arc::clone(&manager.session_route))
+            .await;
         started.notified().await;
         assert_eq!(
             manager.connection_statuses().await,
@@ -2864,7 +2872,7 @@ async fn list_all_tools_applies_legacy_mcp_prefix_by_default() {
 async fn call_tool_requires_connection_without_waiting_for_startup() {
     let client = create_test_managed_client(vec![create_test_tool("docs", "search")]).await;
     let (client, startup_started, release_startup) = create_gated_async_managed_client(client);
-    let startup_client = client.clone();
+    let startup_client = client.client.clone();
     let approval_policy = Constrained::allow_any(AskForApproval::OnRequest);
     let permission_profile = Constrained::allow_any(PermissionProfile::default());
     let mut manager = McpConnectionSet::new_uninitialized(
@@ -2891,7 +2899,7 @@ async fn call_tool_requires_connection_without_waiting_for_startup() {
     .expect_err("pending server must not accept ready-only calls");
     assert!(pending_call.to_string().contains("not connected"));
 
-    let startup = tokio::spawn(async move { startup_client.client().await });
+    let startup = tokio::spawn(startup_client);
     startup_started.await.expect("server startup should begin");
     release_startup.send(()).expect("release server startup");
     startup
@@ -4068,7 +4076,7 @@ async fn no_local_runtime_fails_local_stdio_but_keeps_local_http_server() {
     assert!(manager.contains_server("stdio"));
     assert!(manager.contains_server("http"));
     assert!(
-        !manager
+        manager
             .servers
             .get("http")
             .expect("http server")
@@ -4845,10 +4853,9 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() -> 
     let managed_client = create_test_managed_client(tools).await;
     let (pending_client, startup_started, release_startup) =
         create_gated_async_managed_client(managed_client);
-    let startup = tokio::spawn({
-        let pending_client = pending_client.clone();
-        async move { pending_client.client().await }
-    });
+    // The pool owns cancellation. Dropping a cloned AsyncManagedClient cancels that same client;
+    // drive only its shared startup future in this helper task.
+    let startup = tokio::spawn(pending_client.client.clone());
     startup_started.await?;
     previous
         .servers
@@ -4910,10 +4917,9 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
     drop(previous);
     drop(reused);
 
-    assert!(
-        cancellation.is_cancelled(),
-        "disabling a reused pending MCP server should cancel its obsolete startup"
-    );
+    tokio::time::timeout(Duration::from_secs(1), cancellation.cancelled())
+        .await
+        .expect("disabling a reused pending MCP server should cancel its obsolete startup");
     release_startup
         .send(())
         .map_err(|()| anyhow!("pending startup should remain available for test cleanup"))?;
@@ -4939,10 +4945,15 @@ async fn reconciliation_retries_non_oauth_authentication_failures() {
         .expect("server")
         .connection
         .replace_connection_for_test(failed_connection);
+    let failed_connection_id = previous.servers["docs"].connection.connection_id();
 
     let reconciled = reconcile_reusable_server(&previous, config, runtime_context).await;
 
-    assert!(!previous.shares_test_connection_with(&reconciled, "docs"));
+    assert_ne!(
+        reconciled.servers["docs"].connection.connection_id(),
+        failed_connection_id,
+        "reconciliation must replace the failed physical client in the shared slot"
+    );
 }
 
 #[test]

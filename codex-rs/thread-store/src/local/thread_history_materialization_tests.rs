@@ -635,6 +635,7 @@ async fn legacy_projection_materializes_implicit_commentary_without_a_final_answ
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "implicit commentary".to_string(),
                     phase: Some(MessagePhase::Commentary),
+                    delivery: None,
                     memory_citation: None,
                 })),
             ),
@@ -705,6 +706,7 @@ async fn legacy_projection_does_not_report_commentary_as_a_final_answer() {
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
                     message: "progress update".to_string(),
                     phase: Some(MessagePhase::Commentary),
+                    delivery: None,
                     memory_citation: None,
                 })),
             ),
@@ -1379,6 +1381,7 @@ async fn paginated_projection_streams_across_multiple_byte_batches() {
                     text: format!("{index:03}:{payload}"),
                 }],
                 phase: Some(MessagePhase::Commentary),
+                delivery: None,
                 memory_citation: None,
             }),
         ));
@@ -4945,6 +4948,7 @@ fn legacy_agent_message(message: &str) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
         message: message.to_string(),
         phase: Some(MessagePhase::FinalAnswer),
+        delivery: None,
         memory_citation: None,
     }))
 }

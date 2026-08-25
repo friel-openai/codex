@@ -62,7 +62,7 @@ pub(crate) struct SupervisorSnoozeResult {
 }
 
 impl ToolOutput for SupervisorSnoozeResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "snooze")
     }
 

@@ -1,7 +1,7 @@
 use super::*;
 use crate::agent::status::is_final;
-use crate::session_prefix::format_inter_agent_completion_message;
 use crate::context::SubagentNotification;
+use crate::session_prefix::format_inter_agent_completion_message;
 
 /// Input whose submission remains paired with any required communication telemetry context.
 enum AgentDeliveryInput {

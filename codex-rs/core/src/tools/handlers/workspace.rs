@@ -212,8 +212,13 @@ impl ToolExecutor<ToolInvocation> for SetWorkspaceCwdHandler {
                 session
                     .services
                     .agents_md_manager
-                    .refresh(config.as_ref(), &environments)
-                    .await;
+                    .refresh(config.as_ref(), &environments, turn.windows_sandbox_level)
+                    .await
+                    .map_err(|err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "workspace.set_cwd could not refresh AGENTS.md instructions: {err}"
+                        ))
+                    })?;
 
                 metadata_persisted = if let Some(live_thread) = session.live_thread() {
                     let git_info = GitInfoPatch {

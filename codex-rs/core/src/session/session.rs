@@ -295,8 +295,14 @@ impl SessionConfiguration {
                 self.legacy_fallback_cwd.clone(),
                 environment_selections.to_vec(),
             )),
-            workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(environment_selections)),
-            profile_workspace_roots: Some(self.profile_workspace_roots().to_vec()),
+            workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(
+                environment_selections,
+            )),
+            profile_workspace_roots: Some(
+                self.permission_profile_state
+                    .profile_workspace_roots()
+                    .to_vec(),
+            ),
             windows_sandbox_level: Some(self.windows_sandbox_level),
             reasoning_effort: self.collaboration_mode.reasoning_effort(),
             reasoning_summary: self.model_reasoning_summary,

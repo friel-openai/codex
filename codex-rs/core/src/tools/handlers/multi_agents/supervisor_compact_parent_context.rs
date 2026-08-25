@@ -99,7 +99,7 @@ impl From<SupervisorParentCompactionResult> for CompactParentContextResult {
 }
 
 impl ToolOutput for CompactParentContextResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "compact_parent_context")
     }
 
