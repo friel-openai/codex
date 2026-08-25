@@ -12,8 +12,8 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 
 const PINNED_RESPONSES_TOOLS: &str =
-    include_str!("../fixtures/collaboration_responses_v2_root_9dd3d6a1.json");
-const PINNED_ERROR_WIRE: &str = include_str!("../fixtures/collaboration_error_wire_9dd3d6a1.json");
+    include_str!("../fixtures/collaboration_responses_v2_root_fcbdb578.json");
+const PINNED_ERROR_WIRE: &str = include_str!("../fixtures/collaboration_error_wire_fcbdb578.json");
 const COLLABORATION_NAMESPACE: &str = "collaboration";
 
 fn collaboration_tools(tools: &Value) -> Vec<Value> {
@@ -191,8 +191,9 @@ async fn responses_error_wire_keeps_pinned_collaboration_contract_impl() -> Resu
             })
         })
         .collect::<Vec<_>>();
-    let actual = serde_json::to_string_pretty(&actual)?;
-    assert_eq!(actual.trim_end(), PINNED_ERROR_WIRE.trim_end());
+    let actual = serde_json::to_value(actual)?;
+    let expected: Value = serde_json::from_str(PINNED_ERROR_WIRE)?;
+    assert_eq!(actual, expected);
 
     Ok(())
 }

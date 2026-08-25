@@ -31,7 +31,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::router::ToolRouter;
 
-const PINNED_UPSTREAM: &str = "9dd3d6a13ef146cdcb60376f94a85d41918d16e3";
+const PINNED_UPSTREAM: &str = "fcbdb57851be70192fd0c21faa9e529146e93ff1";
 const V1_NAMESPACE: &str = "multi_agent_v1";
 const V2_NAMESPACE: &str = "collaboration";
 const V1_TOOLS: &[&str] = &[
@@ -417,13 +417,12 @@ async fn collaboration_manifest() -> Value {
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tools/fixtures/collaboration_contract_9dd3d6a1.json")
+        .join("src/tools/fixtures/collaboration_contract_fcbdb578.json")
 }
 
 #[tokio::test]
 async fn canonical_collaboration_contract_matches_pinned_upstream() {
     let actual = collaboration_manifest().await;
-    let actual = serde_json::to_string_pretty(&actual).expect("serialize contract manifest");
     let path = fixture_path();
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
@@ -431,7 +430,9 @@ async fn canonical_collaboration_contract_matches_pinned_upstream() {
             path.display()
         )
     });
-    assert_eq!(actual.trim_end(), expected.trim_end());
+    let expected: Value = serde_json::from_str(&expected).expect("parse contract manifest");
+    // JSON object insertion order is not part of the contract; tool arrays remain ordered.
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test]
@@ -509,22 +510,22 @@ fn canonical_handler_sources_without_internal_adapters_match_pinned_upstream() {
         (
             "send_message.rs",
             include_str!("handlers/multi_agents_v2/send_message.rs"),
-            include_str!("fixtures/collaboration_source_9dd3d6a1/send_message.rs"),
+            include_str!("fixtures/collaboration_source_fcbdb578/send_message.rs"),
         ),
         (
             "followup_task.rs",
             include_str!("handlers/multi_agents_v2/followup_task.rs"),
-            include_str!("fixtures/collaboration_source_9dd3d6a1/followup_task.rs"),
+            include_str!("fixtures/collaboration_source_fcbdb578/followup_task.rs"),
         ),
         (
             "wait.rs",
             include_str!("handlers/multi_agents_v2/wait.rs"),
-            include_str!("fixtures/collaboration_source_9dd3d6a1/wait.rs"),
+            include_str!("fixtures/collaboration_source_fcbdb578/wait.rs"),
         ),
         (
             "interrupt_agent.rs",
             include_str!("handlers/multi_agents_v2/interrupt_agent.rs"),
-            include_str!("fixtures/collaboration_source_9dd3d6a1/interrupt_agent.rs"),
+            include_str!("fixtures/collaboration_source_fcbdb578/interrupt_agent.rs"),
         ),
     ] {
         assert_eq!(actual, expected, "{name} differs from pinned upstream");
