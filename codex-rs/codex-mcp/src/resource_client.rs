@@ -70,7 +70,8 @@ pub struct McpEventStream {
     request: Option<CancellableEventStreamRequest>,
     runtime_handle: Handle,
     hosted_event_server_removals: watch::Receiver<()>,
-    pooled_client: McpPooledClient,
+    /// Keeps this stream's physical connection alive until completion or cancellation.
+    pooled_client: Option<McpPooledClient>,
 }
 
 impl McpEventStream {
@@ -100,7 +101,7 @@ impl McpEventStream {
             }
             response = &mut request.handle.rx => {
                 self.request = None;
-                self.connection = None;
+                self.pooled_client = None;
 
                 match response {
                     Ok(Ok(_))
@@ -120,7 +121,7 @@ impl McpEventStream {
         }) = self.request.take()
         {
             drop(notifications);
-            let pooled_client = self.pooled_client.clone();
+            let pooled_client = self.pooled_client.take();
             self.runtime_handle.spawn(async move {
                 let _ = tokio::time::timeout(
                     Duration::from_secs(30),
@@ -302,7 +303,7 @@ impl McpResourceClient {
             request: Some(request),
             runtime_handle: Handle::current(),
             hosted_event_server_removals,
-            pooled_client,
+            pooled_client: Some(pooled_client),
         })
     }
 }

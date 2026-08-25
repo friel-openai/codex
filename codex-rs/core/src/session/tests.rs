@@ -3567,7 +3567,8 @@ disabled_tools = [
 
 #[tokio::test]
 async fn record_initial_history_reconstructs_forked_transcript() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
 
     session
@@ -4080,12 +4081,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
-    assert_eq!(
-        child_rollout_items
+    assert!(
+        matches!(child_rollout_items.first(), Some(RolloutItem::SessionMeta(meta))
+        if meta.meta.history_base.is_some())
+    );
+    assert!(
+        !child_rollout_items
             .iter()
-            .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
-            .count(),
-        1
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
     );
     let child_response_items = child_rollout_items
         .iter()
@@ -4336,7 +4339,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
     assert!(
         child_rollout_items
             .iter()
-            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .any(|line| matches!(&line.item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()))
     );
     assert!(
         child_rollout_items
@@ -4559,6 +4562,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
     .await;
 
     let mut builder = test_codex().with_config(|config| {
+        config
+            .features
+            .disable(Feature::AgentPromptInjection)
+            .unwrap();
+        config.features.disable(Feature::MultiAgentV2).unwrap();
+        config.features.disable(Feature::Collab).unwrap();
         config.permissions.approval_policy =
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
     });
@@ -4651,7 +4660,8 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
 #[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),

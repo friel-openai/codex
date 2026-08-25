@@ -68,7 +68,7 @@ struct PromoteAgentResult {
 }
 
 impl ToolOutput for PromoteAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "promote_agent")
     }
 

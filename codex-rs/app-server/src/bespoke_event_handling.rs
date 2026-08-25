@@ -1505,6 +1505,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
             .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
         text,
         phase: Some(MessagePhase::Commentary),
+        delivery: None,
         memory_citation: None,
     })
 }
@@ -4201,6 +4202,7 @@ mod tests {
                     id,
                     text,
                     phase,
+                    delivery,
                     memory_citation,
                 } = notification.item
                 else {
@@ -4212,6 +4214,7 @@ mod tests {
                     "Agent message: ready for review from /root/goal_supervisor"
                 );
                 assert_eq!(phase, Some(MessagePhase::Commentary));
+                assert_eq!(delivery, None);
                 assert_eq!(memory_citation, None);
             }
             other => bail!("unexpected message: {other:?}"),

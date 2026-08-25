@@ -259,6 +259,12 @@ impl RolloutMigrationFailure {
     }
 }
 
+impl From<ThreadStoreError> for RolloutMigrationFailure {
+    fn from(error: ThreadStoreError) -> Self {
+        Self::new(RolloutMigrationFailureReason::Unknown, error)
+    }
+}
+
 type ClassifiedMigrationResult<T> = Result<T, RolloutMigrationFailure>;
 
 fn with_failure_reason<T>(
@@ -380,7 +386,14 @@ impl LocalThreadStore {
                 );
             }
             let result = self
-                .migrate_rollout_path(path.clone(), &options, &mut limiter, admission, Some(guard))
+                .migrate_rollout_path(
+                    path.clone(),
+                    &options,
+                    None,
+                    &mut limiter,
+                    admission,
+                    Some(guard),
+                )
                 .await;
             if matches!(admission, MigrationAdmission::RequiresExclusive) {
                 continue;
@@ -498,7 +511,7 @@ impl LocalThreadStore {
         let legacy_names = if options.mode == RolloutMigrationMode::Apply {
             let thread_ids = paths
                 .iter()
-                .filter_map(|path| thread_id_from_rollout_filename(path))
+                .filter_map(|path| codex_rollout::thread_id_from_path(path))
                 .collect();
             codex_rollout::find_thread_names_by_ids(&self.config.codex_home, &thread_ids)
                 .await
@@ -522,7 +535,7 @@ impl LocalThreadStore {
                 .migrate_rollout_path(
                     path,
                     &options,
-                    &legacy_names,
+                    Some(&legacy_names),
                     &mut limiter,
                     &mut MigrationAdmission::Manual,
                     job_guard,
@@ -546,7 +559,7 @@ impl LocalThreadStore {
         &self,
         mut path: PathBuf,
         options: &RolloutMigrationOptions,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
         admission: &mut MigrationAdmission,
         job_guard: Option<codex_rollout::RolloutMaintenanceJobGuard>,
@@ -666,8 +679,14 @@ impl LocalThreadStore {
                         Err(error) => Err(error),
                     }
                 } else {
-                    self.recover_published_migration(thread_id, &path, &journal_path, legacy_names, limiter)
-                        .await
+                    self.recover_published_migration(
+                        thread_id,
+                        &path,
+                        &journal_path,
+                        legacy_names,
+                        limiter,
+                    )
+                    .await
                 };
                 match recovery {
                     Ok(recovered_path) => {
@@ -701,8 +720,12 @@ impl LocalThreadStore {
                 Ok(RolloutMigrationStatus::Migrated) => self
                     .ensure_complete_migrated_projection(thread_id)
                     .await
-                    .map_err(|error| RolloutMigrationFailure::new(
-                        RolloutMigrationFailureReason::SqliteMaterializationFailed, error))
+                    .map_err(|error| {
+                        RolloutMigrationFailure::new(
+                            RolloutMigrationFailureReason::SqliteMaterializationFailed,
+                            error,
+                        )
+                    })
                     .map(|()| RolloutMigrationStatus::Migrated),
                 Ok(RolloutMigrationStatus::AlreadyPaginated)
                     if options.mode == RolloutMigrationMode::Apply =>
@@ -710,17 +733,22 @@ impl LocalThreadStore {
                     // Text-filtered histories can legitimately retain their supported reader.
                     self.try_complete_history_projection(thread_id)
                         .await
-                        .map_err(|error| RolloutMigrationFailure::new(
-                            RolloutMigrationFailureReason::SqliteMaterializationFailed, error))
+                        .map_err(|error| {
+                            RolloutMigrationFailure::new(
+                                RolloutMigrationFailureReason::SqliteMaterializationFailed,
+                                error,
+                            )
+                        })
                         .map(|_| RolloutMigrationStatus::AlreadyPaginated)
                 }
                 result => result,
             };
             let bytes_processed = limiter.bytes_processed.saturating_sub(bytes_before);
             return Ok(Some(match result {
-                Err(RolloutMigrationFailure { error: ThreadStoreError::Conflict { message }, .. }) => {
-                    skipped_busy_outcome(thread_id, path, message, bytes_processed)
-                }
+                Err(RolloutMigrationFailure {
+                    error: ThreadStoreError::Conflict { message },
+                    ..
+                }) => skipped_busy_outcome(thread_id, path, message, bytes_processed),
                 result => migration_outcome(thread_id, path, result, bytes_processed),
             }));
         }
@@ -733,7 +761,7 @@ impl LocalThreadStore {
                     return Ok(Some(migration_outcome(
                         thread_id,
                         path,
-                        Err(error),
+                        Err(error.into()),
                         /*bytes_processed*/ 0,
                     )));
                 }
@@ -749,6 +777,7 @@ impl LocalThreadStore {
                                 thread_id: Some(thread_id),
                                 rollout_path: path,
                                 status: RolloutMigrationStatus::Eligible,
+                                failure_reason: None,
                                 bytes_processed: plan
                                     .sources
                                     .iter()
@@ -760,19 +789,24 @@ impl LocalThreadStore {
                             Err(error) => migration_outcome(
                                 thread_id,
                                 path,
-                                Err(error),
+                                Err(error.into()),
                                 /*bytes_processed*/ 0,
                             ),
                         },
                         Err(error) => migration_outcome(
                             thread_id,
                             path,
-                            Err(error),
+                            Err(error.into()),
                             /*bytes_processed*/ 0,
                         ),
                     },
                     Err(error) => {
-                        migration_outcome(thread_id, path, Err(error), /*bytes_processed*/ 0)
+                        migration_outcome(
+                            thread_id,
+                            path,
+                            Err(error.into()),
+                            /*bytes_processed*/ 0,
+                        )
                     }
                 }));
             }
@@ -782,6 +816,7 @@ impl LocalThreadStore {
                         thread_id: Some(thread_id),
                         rollout_path: path,
                         status: RolloutMigrationStatus::Eligible,
+                        failure_reason: None,
                         bytes_processed: manifest.source_bytes,
                         message: Some(
                             "measured one-file Legacy migration without publishing artifacts"
@@ -790,7 +825,12 @@ impl LocalThreadStore {
                         manifest: Some(manifest),
                     },
                     Err(error) => {
-                        migration_outcome(thread_id, path, Err(error), /*bytes_processed*/ 0)
+                        migration_outcome(
+                            thread_id,
+                            path,
+                            Err(error.into()),
+                            /*bytes_processed*/ 0,
+                        )
                     }
                 },
             ));
@@ -855,9 +895,10 @@ impl LocalThreadStore {
             return Ok(Some(migration_outcome(
                 thread_id,
                 path,
-                Err(migration_error(
-                    "rollout metadata changed while waiting for the writer lock",
-                )),
+                Err(
+                    migration_error("rollout metadata changed while waiting for the writer lock")
+                        .into(),
+                ),
                 /*bytes_processed*/ 0,
             )));
         }
@@ -872,7 +913,7 @@ impl LocalThreadStore {
                 return Ok(Some(migration_outcome(
                     thread_id,
                     path,
-                    Err(error),
+                    Err(error.into()),
                     /*bytes_processed*/ 0,
                 )));
             }
@@ -923,6 +964,7 @@ impl LocalThreadStore {
                     thread_id: Some(thread_id),
                     rollout_path: path,
                     status: RolloutMigrationStatus::Migrated,
+                    failure_reason: None,
                     bytes_processed,
                     message: Some(
                         "migrated authenticated segmented lineage to native history_base without deleting sources"
@@ -933,7 +975,7 @@ impl LocalThreadStore {
                 Err(ThreadStoreError::Conflict { message }) => {
                     skipped_busy_outcome(thread_id, path, message, bytes_processed)
                 }
-                Err(error) => migration_outcome(thread_id, path, Err(error), bytes_processed),
+                Err(error) => migration_outcome(thread_id, path, Err(error.into()), bytes_processed),
             }));
         }
         let bytes_before = limiter.bytes_processed;
@@ -975,7 +1017,7 @@ impl LocalThreadStore {
         rollout_path: &Path,
         journal_path: &Path,
         kind: RolloutMigrationKind,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ClassifiedMigrationResult<()> {
         if let Some(state_db) = &self.state_db
@@ -1029,7 +1071,9 @@ impl LocalThreadStore {
         }
 
         let source_metadata = with_failure_reason(
-            tokio::fs::metadata(rollout_path).await.map_err(migration_error),
+            tokio::fs::metadata(rollout_path)
+                .await
+                .map_err(migration_error),
             RolloutMigrationFailureReason::RolloutReadFailed,
         )?;
         let source_modified = source_metadata.modified().ok();
@@ -1149,8 +1193,13 @@ impl LocalThreadStore {
 
         // SQLite sees only the final staged bytes, so all projection failures share one reason.
         let projection_result = async {
-            self.project_rollout_in_batches(rollout_id, &staged_path, /*complete_root*/ None, limiter)
-                .await?;
+            self.project_rollout_in_batches(
+                rollout_id,
+                &staged_path,
+                /*complete_root*/ None,
+                limiter,
+            )
+            .await?;
             let projection = thread_history::projection_state(self, rollout_id)
                 .await?
                 .ok_or_else(|| migration_error("completed rollout has no SQLite projection"))?;
@@ -1386,7 +1435,7 @@ impl LocalThreadStore {
         thread_id: ThreadId,
         rollout_path: &Path,
         journal_path: &Path,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ThreadStoreResult<PathBuf> {
         let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
@@ -1500,7 +1549,7 @@ impl LocalThreadStore {
         &self,
         thread_id: ThreadId,
         journal_path: &Path,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
     ) -> ThreadStoreResult<()> {
         self.promote_legacy_name(thread_id, legacy_names).await?;
         tokio::fs::remove_file(journal_path)
@@ -1512,7 +1561,7 @@ impl LocalThreadStore {
     async fn promote_legacy_name(
         &self,
         thread_id: ThreadId,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
     ) -> ThreadStoreResult<()> {
         if let Some(state_db) = &self.state_db {
             let metadata = state_db
@@ -1530,9 +1579,26 @@ impl LocalThreadStore {
             {
                 return Ok(());
             }
-            let legacy_name = distinct_thread_metadata_title(&metadata)
-                .or_else(|| legacy_names.get(&thread_id).cloned())
+            let mut legacy_name = distinct_thread_metadata_title(&metadata)
+                .or_else(|| {
+                    legacy_names
+                        .and_then(|names| names.get(&thread_id))
+                        .cloned()
+                })
                 .filter(|name| !name.trim().is_empty());
+            // A supplied batch already searched the index, including IDs without names.
+            if legacy_name.is_none()
+                && metadata
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty())
+                && legacy_names.is_none()
+            {
+                legacy_name =
+                    codex_rollout::find_thread_name_by_id(&self.config.codex_home, &thread_id)
+                        .await
+                        .map_err(migration_error)?;
+            }
             if !state_db
                 .mark_thread_paginated(thread_id, legacy_name.as_deref())
                 .await

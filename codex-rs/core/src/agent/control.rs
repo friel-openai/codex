@@ -11,7 +11,6 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
-use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout_budget::RolloutBudget;
@@ -1208,7 +1207,9 @@ fn synthetic_supervisor_list_agents_items(page: ListedAgentsPage) -> Vec<Rollout
         RolloutItem::ResponseItem(
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                call_id: Some(SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string()),
+                name: None,
+                namespace: None,
                 output,
                 internal_chat_message_metadata_passthrough: None,
             }

@@ -205,7 +205,7 @@ async fn background_migration_disables_cached_legacy_resume_shortcut() -> Result
                 ResumeModelSettings::RestoreFromThread,
             )
             .await?;
-        assert_eq!(app_server.next_request_id, next_request_id + 2);
+        assert_eq!(app_server.next_request_id, next_request_id + 3);
         assert!(!legacy.turns.is_empty());
 
         app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);

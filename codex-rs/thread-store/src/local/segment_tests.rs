@@ -62,6 +62,79 @@ use crate::ThreadStore;
 use crate::ThreadStoreError;
 
 #[tokio::test]
+async fn native_snapshot_reference_matches_the_persisted_immutable_identity() {
+    let home = TempDir::new().expect("temp dir");
+    let store = LocalThreadStore::new(test_config(home.path()), None);
+    let thread_id = ThreadId::new();
+    store
+        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
+        .await
+        .expect("create native thread");
+    append_canonical_message(&store, thread_id, "native snapshot").await;
+    let frozen = store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+        .await
+        .expect("freeze native snapshot");
+
+    let resolved = codex_rollout::resolve_rollout_reference_path(home.path(), &frozen.reference)
+        .await
+        .expect("resolve the snapshot's compatibility reference");
+    assert_eq!(resolved, frozen.reference.rollout_path);
+    let metadata = codex_rollout::read_session_meta_line(&resolved)
+        .await
+        .expect("read metadata");
+    assert_eq!(frozen.reference.segment_id, metadata.meta.segment_id);
+    assert_eq!(
+        frozen.reference.rollout_id,
+        frozen.history_base.map(|base| base.thread_id)
+    );
+    let history = codex_rollout::materialize_rollout_items(home.path(), &resolved)
+        .await
+        .expect("materialize native snapshot");
+    assert!(has_canonical_message(&history, "native snapshot"));
+}
+
+#[tokio::test]
+async fn durable_live_thread_can_freeze_before_its_first_append() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(test_config(home.path()), None));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create durable thread");
+    let path = live_thread
+        .local_rollout_path()
+        .await
+        .expect("read path")
+        .expect("local path");
+    assert!(!path.exists(), "creation defers the initial file write");
+
+    let frozen = store
+        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+        .await
+        .expect("freeze before first append");
+    let metadata = codex_rollout::read_session_meta_line(&frozen.reference.rollout_path)
+        .await
+        .expect("read frozen metadata");
+    assert_eq!(metadata.meta.id, thread_id);
+
+    tokio::fs::remove_file(&path)
+        .await
+        .expect("simulate lost active file");
+    assert!(
+        store
+            .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
+            .await
+            .is_err(),
+        "a previously materialized missing file must not be recreated"
+    );
+    assert!(!path.exists());
+}
+
+#[tokio::test]
 async fn deferred_live_thread_stays_pathless_until_freeze_materializes_its_canonical_journal() {
     let home = TempDir::new().expect("temp dir");
     let config = test_config(home.path());

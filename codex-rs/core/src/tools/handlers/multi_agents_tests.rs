@@ -2343,8 +2343,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.agents.len(), 1);
-    assert_eq!(result.agents[0].agent_name, agent_path.as_str());
+    assert_eq!(result.agents.len(), 2);
+    assert!(
+        result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == "/root")
+    );
+    assert!(
+        result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == agent_path.as_str())
+    );
 }
 
 #[tokio::test]

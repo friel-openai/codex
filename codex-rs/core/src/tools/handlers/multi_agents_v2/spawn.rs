@@ -189,10 +189,7 @@ async fn handle_agent_start(
     let mut config = if is_adoption {
         build_agent_resume_config(turn.as_ref())?
     } else {
-        build_agent_spawn_config(
-            &session.get_base_instructions().await,
-            turn.as_ref(),
-        )?
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?
     };
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
     if !is_adoption {

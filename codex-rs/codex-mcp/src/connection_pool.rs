@@ -984,6 +984,14 @@ impl McpConnectionLease {
         StableMcpConnectionState::Ready(connection.id)
     }
 
+    /// Observe the current physical client without starting or reconnecting it.
+    pub(crate) async fn connection_status(&self) -> codex_protocol::mcp::McpServerConnectionStatus {
+        match self.current() {
+            Ok(connection) => connection.client.connection_status().await,
+            Err(_) => codex_protocol::mcp::McpServerConnectionStatus::Cancelled,
+        }
+    }
+
     pub(crate) fn optional_startup_deadline(
         &self,
         default: tokio::time::Instant,

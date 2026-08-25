@@ -1984,7 +1984,7 @@ async fn old_durable_native_parent_journals_keep_their_recorded_targets() {
                     .expect("select old target before phase update")
             );
             assert!(
-                db.mark_thread_paginated(child_id)
+                db.mark_thread_paginated(child_id, /*legacy_name*/ None)
                     .await
                     .expect("mark selected target")
             );
@@ -8443,6 +8443,46 @@ async fn migration_migrates_archived_rollouts_without_unarchiving_them() {
         .expect("read archived projected turns");
     assert_eq!(turns.turns.len(), 1);
     assert_eq!(turns.turns[0].items.len(), 2);
+}
+
+#[tokio::test]
+async fn migration_name_promotion_reuses_a_completed_batch_lookup() {
+    for batch_lookup_completed in [false, true] {
+        let home = TempDir::new().expect("create Codex home");
+        let thread_id = ThreadId::new();
+        write_rollout(
+            home.path(),
+            thread_id,
+            SessionSource::Cli,
+            vec![user_message("question")],
+        );
+        let store = indexed_store(home.path()).await;
+        let names = std::collections::HashMap::new();
+        codex_rollout::append_thread_name(home.path(), thread_id, "indexed name")
+            .await
+            .expect("append name after batch lookup");
+
+        store
+            .promote_legacy_name(thread_id, batch_lookup_completed.then_some(&names))
+            .await
+            .expect("promote legacy name");
+
+        let metadata = store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read metadata")
+            .expect("thread");
+        assert_eq!(
+            (metadata.history_mode, metadata.name),
+            (
+                ThreadHistoryMode::Paginated,
+                (!batch_lookup_completed).then(|| "indexed name".to_string()),
+            ),
+        );
+    }
 }
 
 #[tokio::test]

@@ -213,6 +213,20 @@ pub(super) async fn await_thread_migration(
                 }
             }
         };
+        if matches!(
+            inspection,
+            StartupInspection::Legacy | StartupInspection::ReferenceBacked
+        ) && let Some(_migration_guard) =
+            codex_rollout::try_acquire_rollout_migration_dependency_lock(
+                &store.config.codex_home,
+                &[thread_id],
+            )
+            .map_err(migration_error)?
+        {
+            // With migration excluded for this task, a busy writer belongs to an active session,
+            // not a competing converter. Report that conflict instead of retrying indefinitely.
+            drop(store.writer_lock_coordinator.acquire(thread_id)?);
+        }
         let mut native_history_ready = match inspection {
             StartupInspection::Paginated => {
                 complete_native_root || store.has_history_projection(thread_id).await?

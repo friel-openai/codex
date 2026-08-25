@@ -491,7 +491,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             serde_json::to_string(&codex_rollout::RolloutLine {
                 timestamp: "2026-08-13T00:00:00Z".to_string(),
                 ordinal: Some(0),
-                item: RolloutItem::SessionMeta(session_meta),
+                item: RolloutItem::SessionMeta(session_meta.clone()),
             })
             .expect("serialize resumed metadata")
         ),
@@ -503,11 +503,10 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: thread_id,
-                history: Arc::new(vec![checkpoint_settings_item(
-                    &config,
-                    restored_cwd,
-                    restored_environment.clone(),
-                )]),
+                history: Arc::new(vec![
+                    RolloutItem::SessionMeta(session_meta),
+                    checkpoint_settings_item(&config, restored_cwd, restored_environment.clone()),
+                ]),
                 rollout_path: Some(rollout_path),
             }),
             auth_manager,
@@ -526,6 +525,43 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
         .shutdown_and_wait()
         .await
         .expect("shutdown resumed thread");
+}
+
+#[tokio::test]
+async fn cold_resume_named_profile_uses_current_roots_without_rewriting_environment_cwd() {
+    let mut config = test_config().await;
+    let old_root = config.codex_home.join("old-workspace");
+    let current_root = config.codex_home.join("current-workspace");
+    config
+        .permissions
+        .set_workspace_roots(vec![current_root.clone()]);
+    let selected = TurnEnvironmentSelection {
+        environment_id: "selected-environment".to_string(),
+        cwd: PathUri::from_abs_path(&old_root),
+        workspace_roots: vec![PathUri::from_abs_path(&old_root)],
+        config: EnvironmentConfigState::FromThread,
+    };
+    let mut item = checkpoint_settings_item(&config, old_root, selected.clone());
+    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+        panic!("checkpoint settings");
+    };
+    event.thread_settings.active_permission_profile =
+        Some(codex_protocol::models::ActivePermissionProfile {
+            id: "removed-profile".to_string(),
+            extends: None,
+        });
+    let mut expected = selected;
+    expected.workspace_roots = vec![PathUri::from_abs_path(&current_root)];
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, std::slice::from_ref(&item)),
+        Some(vec![expected.clone()]),
+    );
+    config.permissions.set_workspace_roots(Vec::new());
+    expected.workspace_roots.clear();
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, &[item]),
+        Some(vec![expected]),
+    );
 }
 
 /// Resuming a thread preserves its stored ID instead of invoking the new manager's factory.

@@ -85,13 +85,7 @@ async fn handle_resume_agent(
         .get_status(receiver_thread_id)
         .await;
     let (receiver_agent, error) = if matches!(status, AgentStatus::NotFound) {
-        match Box::pin(try_resume_open_agent(
-            &session,
-            &turn,
-            receiver_thread_id,
-        ))
-        .await
-        {
+        match Box::pin(try_resume_open_agent(&session, &turn, receiver_thread_id)).await {
             Ok(()) => {
                 status = session
                     .services

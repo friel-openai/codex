@@ -1146,7 +1146,7 @@ impl Session {
         }
         self.services
             .thread_extension_data
-            .insert(turn_context.model_info.clone());
+            .insert(turn_context.model_info.as_ref().clone());
         let turn_context = Arc::new(turn_context);
         if git_enrichment_policy == GitEnrichmentPolicy::Fresh
             && turn_context
@@ -1261,7 +1261,7 @@ impl Session {
         }
         self.services
             .thread_extension_data
-            .insert(refreshed.model_info.clone());
+            .insert(refreshed.model_info.as_ref().clone());
         Arc::new(refreshed)
     }
 
