@@ -608,7 +608,7 @@ async fn prepare_with_response_history(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -621,7 +621,7 @@ async fn prepare_with_response_history(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         })
     } else {
@@ -647,7 +647,7 @@ async fn prepare_with_response_history(
     let prefix_rollout_path = prefix_segment.rollout_path.clone();
     let end_byte_offset =
         prefix_segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
@@ -1973,7 +1973,7 @@ pub(super) async fn history_base_at_boundary(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -1986,7 +1986,7 @@ pub(super) async fn history_base_at_boundary(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         }))
     } else {

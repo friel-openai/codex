@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -412,6 +413,7 @@ impl LocalThreadStore {
         )>,
     > {
         let mut model_context_scan = ModelContextScan::default();
+        let selected_rollout_id = lineage.segments.last().map(|segment| segment.rollout_id);
         let mut model_context_complete = false;
         let mut canonical_session_meta = None;
         let mut full_history_segments = include_full_history.then(Vec::new);
@@ -433,31 +435,23 @@ impl LocalThreadStore {
                 "Codex home",
             )?;
             let reserved = reservation.contains(segment.thread_id);
-            let materialized_path = if reserved {
-                codex_rollout::materialize_rollout_for_reference(rollout_path.as_path())
-                    .await
-                    .map_err(|err| ThreadStoreError::Internal {
-                        message: format!(
-                            "failed to materialize referenced rollout {}: {err}",
-                            rollout_path.display()
-                        ),
-                    })?
-            } else {
+            if !reserved {
                 // Maintenance ownership prevents compression/repair while these immutable
                 // files are read. Their ancestor's live writer owns a different physical file.
-                if rollout_path_is_compressed(&rollout_path)
-                    || !rollout_path.starts_with(&immutable_root)
+                if !rollout_path.starts_with(&immutable_root)
                     || codex_rollout::rollout_id_from_path(&rollout_path)
                         != Some(segment.rollout_id)
                     || segment.end_ordinal_exclusive.is_none()
                 {
                     return Ok(None);
                 }
+            }
+            let materialized_path = if reserved && selected_rollout_id == Some(segment.rollout_id) {
+                materialize_standalone_fork_source(&rollout_path).await?
+            } else {
                 rollout_path
             };
-            let mut bytes = tokio::fs::read(materialized_path.as_path())
-                .await
-                .map_err(lineage_io_error)?;
+            let mut bytes = read_rollout_bytes(materialized_path.as_path()).await?;
             if let Some(end_ordinal_exclusive) = segment.end_ordinal_exclusive {
                 let end_byte_offset = match segment.jsonl_end_byte_offset {
                     Some(end_byte_offset) => validated_history_byte_offset(
@@ -591,7 +585,8 @@ impl LocalThreadStore {
                     malformed_lineage(segment.thread_id, "rollout byte offset overflow")
                 })?,
             };
-            segment.end_byte_offset = Some(end_byte_offset);
+            segment.end_byte_offset =
+                (!rollout_path_is_compressed(&materialized_path)).then_some(end_byte_offset);
             segment.jsonl_end_byte_offset = Some(end_byte_offset);
             segment.rollout_path = materialized_path;
         }
@@ -623,6 +618,7 @@ impl LocalThreadStore {
         mut lineage: RolloutLineage,
         reservation: &RolloutWriterReservation,
     ) -> ThreadStoreResult<RolloutLineage> {
+        let selected_rollout_id = lineage.segments.last().map(|segment| segment.rollout_id);
         let source =
             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
                 .await?
@@ -642,15 +638,34 @@ impl LocalThreadStore {
                 rollout_path.as_path(),
                 "Codex home",
             )?;
-            let materialized_path =
-                codex_rollout::materialize_rollout_for_reference(rollout_path.as_path())
-                    .await
-                    .map_err(|err| ThreadStoreError::Internal {
-                        message: format!(
-                            "failed to materialize referenced rollout {}: {err}",
-                            rollout_path.display()
-                        ),
-                    })?;
+            let materialized_path = if selected_rollout_id == Some(segment.rollout_id) {
+                materialize_standalone_fork_source(&rollout_path).await?
+            } else {
+                rollout_path.clone()
+            };
+            if rollout_path_is_compressed(&materialized_path) {
+                let bytes = read_rollout_bytes(&materialized_path).await?;
+                segment.jsonl_end_byte_offset = match segment.end_ordinal_exclusive {
+                    Some(end_ordinal_exclusive) => Some(match segment.jsonl_end_byte_offset {
+                        Some(end_byte_offset) => validated_history_byte_offset(
+                            &bytes,
+                            HistoryPosition {
+                                thread_id: segment.rollout_id,
+                                end_ordinal_exclusive,
+                                end_byte_offset,
+                            },
+                        )?,
+                        None => byte_offset_for_ordinal_in_bytes(&bytes, end_ordinal_exclusive)?
+                            .ok_or_else(|| {
+                                malformed_lineage(segment.rollout_id, "missing fork byte boundary")
+                            })?,
+                    }),
+                    None => Some(bytes.len() as u64),
+                };
+                segment.end_byte_offset = None;
+                segment.rollout_path = materialized_path;
+                continue;
+            }
             // A previously computed boundary is reusable only when it still names the same
             // immutable segment under the combined writer reservation.
             let reusable_end_byte_offset = if materialized_path == rollout_path
@@ -857,13 +872,8 @@ impl LocalThreadStore {
             if end.end_ordinal_exclusive < head.first_local_ordinal {
                 return Ok(None);
             }
-            let materialized_path =
-                codex_rollout::materialize_rollout_for_reference(resolved_path.as_path())
-                    .await
-                    .map_err(lineage_io_error)?;
-            let bytes = tokio::fs::read(materialized_path.as_path())
-                .await
-                .map_err(lineage_io_error)?;
+            let materialized_path = resolved_path;
+            let bytes = read_rollout_bytes(materialized_path.as_path()).await?;
             let Some(expected_end_byte_offset) =
                 byte_offset_for_ordinal_in_bytes(bytes.as_slice(), end.end_ordinal_exclusive)?
             else {
@@ -1515,6 +1525,35 @@ pub(super) async fn leading_same_thread_reference_ordinal(
         .map(|(ordinal, _)| ordinal))
 }
 
+async fn materialize_standalone_fork_source(path: &Path) -> ThreadStoreResult<PathBuf> {
+    if !rollout_path_is_compressed(path) {
+        return Ok(path.to_path_buf());
+    }
+    let head = read_rollout_head(path).await?;
+    // Older readers require a newly shared standalone source to be plain JSONL. Existing
+    // shared ancestors must remain unchanged while another process may archive their owner.
+    if head.session_meta.meta.history_base.is_none() && head.leading_reference.is_none() {
+        codex_rollout::materialize_rollout_for_reference(path)
+            .await
+            .map_err(lineage_io_error)
+    } else {
+        Ok(path.to_path_buf())
+    }
+}
+
+pub(super) async fn read_rollout_bytes(path: &Path) -> ThreadStoreResult<Vec<u8>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let mut reader = codex_rollout::open_rollout_seekable_reader(&path)?;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes)?;
+        Ok::<_, io::Error>(bytes)
+    })
+    .await
+    .map_err(|error| lineage_io_error(io::Error::other(error)))?
+    .map_err(lineage_io_error)
+}
+
 async fn next_rollout_line(
     reader: &mut codex_rollout::RolloutLineReader,
 ) -> ThreadStoreResult<Option<RolloutLine>> {
@@ -1605,6 +1644,19 @@ async fn trim_to_history_position(
         .await
         .ok_or_else(|| malformed_lineage(end.thread_id, "missing source rollout"))?;
     if rollout_path_is_compressed(segment.rollout_path.as_path()) {
+        let path = segment.rollout_path.clone();
+        let contains_prefix = tokio::task::spawn_blocking(move || {
+            codex_rollout::rollout_contains_prefix(&path, end.end_byte_offset)
+        })
+        .await
+        .map_err(|error| lineage_io_error(io::Error::other(error)))?
+        .map_err(lineage_io_error)?;
+        if !contains_prefix {
+            return Err(malformed_lineage(
+                end.thread_id,
+                "cutoff byte offset is past the source rollout",
+            ));
+        }
         segment.jsonl_end_byte_offset = Some(end.end_byte_offset);
         segment.end_byte_offset = None;
         return Ok(());

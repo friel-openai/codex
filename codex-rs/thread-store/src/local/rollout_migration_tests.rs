@@ -80,9 +80,9 @@ use super::lineage_rewrite::rewrite_generated_item_ids;
 use super::lineage_stage::measure_legacy_lineage;
 use super::lineage_stage::stage_legacy_lineage;
 use super::migration_journal_path;
-use super::telemetry::RolloutMigrationTrigger;
 use super::rewritten_staged_rollout_path;
 use super::staged_rollout_path;
+use super::telemetry::RolloutMigrationTrigger;
 use super::thread_history;
 use super::write_migration_journal;
 use crate::ItemSortKey;
@@ -698,6 +698,7 @@ fn bounded_subagent_items(cwd: &Path) -> Vec<RolloutItem> {
         }),
         started("child-turn"),
         RolloutItem::TurnContext(TurnContextItem {
+            cyber_access_program: None,
             turn_id: Some("child-turn".to_string()),
             cwd: serde_json::from_value(json!(cwd)).expect("absolute cwd"),
             workspace_roots: None,
@@ -1077,6 +1078,46 @@ async fn migration_skips_non_selected_reverted_rollout_and_projects_selected_rol
     let turns = list_active_summary_turns(&store, thread_id).await;
     assert_eq!(turns.turns.len(), 1);
     assert_eq!(turns.turns[0].items.len(), 2);
+}
+
+#[tokio::test]
+async fn migration_name_promotion_reuses_a_completed_batch_lookup() {
+    for batch_lookup_completed in [false, true] {
+        let home = TempDir::new().expect("create Codex home");
+        let thread_id = ThreadId::new();
+        write_rollout(
+            home.path(),
+            thread_id,
+            SessionSource::Cli,
+            vec![user_message("question")],
+        );
+        let store = indexed_store(home.path()).await;
+        let names = std::collections::HashMap::new();
+        codex_rollout::append_thread_name(home.path(), thread_id, "indexed name")
+            .await
+            .expect("append name after batch lookup");
+
+        store
+            .promote_legacy_name(thread_id, batch_lookup_completed.then_some(&names))
+            .await
+            .expect("promote legacy name");
+
+        let metadata = store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read metadata")
+            .expect("thread");
+        assert_eq!(
+            (metadata.history_mode, metadata.name),
+            (
+                ThreadHistoryMode::Paginated,
+                (!batch_lookup_completed).then(|| "indexed name".to_string()),
+            ),
+        );
+    }
 }
 
 #[tokio::test]
@@ -1986,7 +2027,7 @@ async fn old_durable_native_parent_journals_keep_their_recorded_targets() {
                     .expect("select old target before phase update")
             );
             assert!(
-                db.mark_thread_paginated(child_id)
+                db.mark_thread_paginated(child_id, /*legacy_name*/ None)
                     .await
                     .expect("mark selected target")
             );

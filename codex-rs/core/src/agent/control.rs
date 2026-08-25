@@ -11,7 +11,6 @@ use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
-use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout_budget::RolloutBudget;
@@ -93,8 +92,8 @@ mod legacy;
 mod ownership;
 mod ownership_tree;
 mod residency;
-mod service_tier;
 mod resume;
+mod service_tier;
 mod spawn;
 mod user_authorization;
 
@@ -316,19 +315,14 @@ impl AgentControl {
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
         input: Vec<UserInput>,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let last_task_message = non_empty_task_message(render_input_preview(&input));
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
             .io
             .submit_turn_input(
-                TurnInputRequest::user_input(input).on_start(TurnStartOptions {
-                    parent_turn_id,
-                    root_turn_id,
-                    ..Default::default()
-                }),
+                TurnInputRequest::user_input(input).on_start(start_options),
                 TurnInputMode::StartOrSteer,
             )
             .await
@@ -1212,7 +1206,9 @@ fn synthetic_supervisor_list_agents_items(page: ListedAgentsPage) -> Vec<Rollout
         RolloutItem::ResponseItem(
             ResponseItem::FunctionCallOutput {
                 id: None,
-                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                call_id: Some(SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string()),
+                name: None,
+                namespace: None,
                 output,
                 internal_chat_message_metadata_passthrough: None,
             }

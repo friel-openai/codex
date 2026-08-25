@@ -50,6 +50,7 @@ fn compacted() -> CompactedItem {
 fn thread_settings() -> ThreadSettingsAppliedEvent {
     let cwd: AbsolutePathBuf = serde_json::from_value(json!("/tmp")).expect("absolute test cwd");
     ThreadSettingsAppliedEvent {
+        thread_id: None,
         thread_settings: ThreadSettingsSnapshot {
             model: "gpt-test".to_string(),
             model_provider_id: "test-provider".to_string(),

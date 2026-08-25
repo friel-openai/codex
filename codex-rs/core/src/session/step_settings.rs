@@ -203,6 +203,7 @@ impl ModelInfoOverrides {
             personality_enabled,
             // The models manager already owns its catalog.
             model_catalog: None,
+            custom_models: Default::default(),
         }
     }
 }

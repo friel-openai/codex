@@ -139,6 +139,7 @@ fn identity_with_catalog_limit(
     McpConnectionIdentity::new(
         "test",
         &server,
+        /*host_plugin_root*/ None,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
         resolved_environment,
@@ -164,6 +165,7 @@ fn identity_with_auth(auth: &CodexAuth) -> McpConnectionIdentity {
     McpConnectionIdentity::new(
         "test",
         &server,
+        /*host_plugin_root*/ None,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
         &Ok(None),
@@ -193,6 +195,7 @@ fn identity_with_agent_plugin(agent_plugin: bool) -> McpConnectionIdentity {
     McpConnectionIdentity::new(
         "test",
         &server,
+        /*host_plugin_root*/ None,
         OAuthCredentialsStoreMode::default(),
         AuthKeyringBackendKind::default(),
         &Ok(None),
@@ -346,8 +349,7 @@ fn route_with_events(
     async_channel::Receiver<Event>,
 ) {
     let manager = ElicitationRequestManager::new(
-        approval_policy,
-        permission_profile,
+        crate::mcp::tests::test_elicitation_config("test", approval_policy, permission_profile),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),

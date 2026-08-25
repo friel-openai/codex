@@ -24,8 +24,8 @@ use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
-use core_test_support::responses::strip_metadata_from_items;
 use codex_rollout::CertifiedSegmentStateCheckpoint;
+use core_test_support::responses::strip_metadata_from_items;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -147,6 +147,7 @@ fn checkpoint_compacted(history: Vec<ResponseItem>) -> CompactedItem {
 
 fn complete_thread_settings() -> ThreadSettingsAppliedEvent {
     ThreadSettingsAppliedEvent {
+        thread_id: None,
         thread_settings: ThreadSettingsSnapshot {
             model: "test-model".to_string(),
             model_provider_id: "test-provider".to_string(),
@@ -1316,6 +1317,7 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
         MissingContextBaseline::CompactedSnapshot => vec![
             RolloutItem::WorldState(WorldStateItem::full(object!({}))),
             RolloutItem::Compacted(CompactedItem {
+                segment_state_checkpoint: None,
                 message: String::new(),
                 replacement_history: Some(Vec::new()),
                 mcp_resource_origins: None,

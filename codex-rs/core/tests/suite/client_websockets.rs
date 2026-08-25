@@ -848,6 +848,95 @@ async fn responses_websocket_request_prewarm_traces_logical_request() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn fork_reconnect_preserves_inherited_parent_input() {
+    skip_if_no_network!();
+    let server = start_websocket_server(vec![
+        vec![
+            vec![
+                ev_response_created("parent-warmup"),
+                ev_completed("parent-warmup"),
+            ],
+            vec![
+                ev_response_created("parent-result"),
+                ev_assistant_message("parent-message", "parent answer"),
+                ev_completed("parent-result"),
+            ],
+        ],
+        vec![
+            vec![
+                ev_response_created("child-first"),
+                ev_completed("child-first"),
+            ],
+            vec![
+                ev_response_created("child-result"),
+                ev_completed("child-result"),
+            ],
+        ],
+    ])
+    .await;
+    let test = test_codex()
+        .with_history_mode(codex_protocol::protocol::ThreadHistoryMode::Paginated)
+        .build_with_websocket_server(&server)
+        .await
+        .expect("websocket Codex");
+    test.submit_turn("inherited websocket parent prompt")
+        .await
+        .expect("parent completes");
+    let prepared = test
+        .thread_store
+        .prepare_fork(codex_thread_store::PrepareForkParams {
+            thread_id: test.session_configured.thread_id,
+            boundary: codex_thread_store::ForkBoundary::Latest,
+        })
+        .await
+        .expect("prepare fork");
+    let (child, _) = test
+        .thread_manager
+        .fork_prepared_thread(
+            test.config.clone(),
+            prepared,
+            /*thread_source*/ None,
+            /*parent_trace*/ None,
+            codex_protocol::mcp::ClientMcpExtensions::default(),
+            /*reserved_thread_id*/ None,
+        )
+        .await
+        .expect("fork with inherited context");
+    child
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "new child prompt".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await
+        .expect("child turn starts");
+    wait_for_event(&child.thread, |event| {
+        matches!(event, EventMsg::TurnComplete(_))
+    })
+    .await;
+    let connections = server.connections();
+    assert_eq!(
+        connections.len(),
+        2,
+        "the child must open its own connection"
+    );
+    let first_child = connections[1][0].body_json();
+    // The opt-in response-ID cache belongs to spawned agents. Ordinary task forks
+    // reconnect with their inherited context rather than the parent's response ID.
+    assert_eq!(first_child.get("previous_response_id"), None);
+    assert_eq!(first_child["generate"], false);
+    let child_turn = connections[1][1].body_json();
+    assert_eq!(child_turn["previous_response_id"], "child-first");
+    let child_input = serde_json::to_string(&child_turn["input"]).unwrap();
+    assert!(child_input.contains("inherited websocket parent prompt"));
+    assert!(child_input.contains("parent answer"));
+    assert!(child_input.contains("new child prompt"));
+    child.thread.shutdown_and_wait().await.expect("stop child");
+    test.codex.shutdown_and_wait().await.expect("stop parent");
+    server.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn responses_websocket_reuses_connection_after_session_drop() {
     skip_if_no_network!();
 

@@ -12,8 +12,8 @@ use pretty_assertions::assert_eq;
 use serde_json::Value;
 
 const PINNED_RESPONSES_TOOLS: &str =
-    include_str!("../fixtures/collaboration_responses_v2_root_fcbdb578.json");
-const PINNED_ERROR_WIRE: &str = include_str!("../fixtures/collaboration_error_wire_fcbdb578.json");
+    include_str!("../fixtures/collaboration_responses_v2_root_a43ad35.json");
+const PINNED_ERROR_WIRE: &str = include_str!("../fixtures/collaboration_error_wire_a43ad35.json");
 const COLLABORATION_NAMESPACE: &str = "collaboration";
 
 fn collaboration_tools(tools: &Value) -> Vec<Value> {

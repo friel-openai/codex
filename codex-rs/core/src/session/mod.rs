@@ -453,7 +453,6 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -964,13 +963,20 @@ impl Session {
         token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         let configured_config = Arc::clone(&config);
         let configured_multi_agent_version = config.multi_agent_version_override();
-        let multi_agent_version = configured_or_persisted_multi_agent_version(
-            &conversation_history,
-            configured_multi_agent_version,
-        )
-        .or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        // Internal sessions must not gain agent tools from Frodex's default v2 setting.
+        let multi_agent_version = if inherited_multi_agent_version
+            == Some(MultiAgentVersion::Disabled)
+        {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            configured_or_persisted_multi_agent_version(
+                &conversation_history,
+                configured_multi_agent_version,
+            )
+            .or_else(|| {
+                resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+            })
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -1892,7 +1898,7 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.record_items(
                         startup_response_items.iter(),
-                        turn_context.model_info.truncation_policy.into(),
+                        turn_context.model_info().truncation_policy.into(),
                     );
                 }
                 let mut startup_rollout_items = startup_response_items
@@ -2147,7 +2153,11 @@ impl Session {
             if let Some(shared_model_response_items) = shared_model_response_items {
                 state.replace_shared_history(shared_model_response_items, reference_context_item);
             } else {
-                state.replace_annotated_history(history, reference_context_item, HistoryReplacement::Reset);
+                state.replace_annotated_history(
+                    history,
+                    reference_context_item,
+                    HistoryReplacement::Reset,
+                );
             }
             if let Some(world_state) = world_state_baseline {
                 state.history.set_world_state_baseline(world_state);
@@ -2195,6 +2205,7 @@ impl Session {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
                 msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
@@ -2211,6 +2222,7 @@ impl Session {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
                 msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
@@ -2234,6 +2246,7 @@ impl Session {
         let recomputed_token_count =
             Self::recompute_token_usage_state_in_state(&mut state, turn_context.as_ref());
         let checkpoint = Self::segment_state_checkpoint_from_state(
+            self.thread_id(),
             &state,
             self.services.turn_environments.selections(),
         );
@@ -2276,6 +2289,7 @@ impl Session {
                 self.deliver_event_raw(Event {
                     id: turn_context.sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                         message: format!(
                             "The rollback was not applied because its current-state checkpoint could not be persisted. The original thread state was restored: {error}"
                         ),
@@ -2291,6 +2305,7 @@ impl Session {
                 self.deliver_event_raw(Event {
                     id: turn_context.sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                         message: format!(
                             "The rollback checkpoint may have committed, but Codex could not verify it. Restart this thread before continuing: {error}"
                         ),
@@ -2345,6 +2360,7 @@ impl Session {
         reason = "checkpoint fields are constructed from one locked session-state snapshot"
     )]
     fn segment_state_checkpoint_from_state(
+        thread_id: ThreadId,
         state: &SessionState,
         environment_selections: Vec<TurnEnvironmentSelection>,
     ) -> CertifiedSegmentStateCheckpoint {
@@ -2374,6 +2390,7 @@ impl Session {
                 .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
             state.reference_context_item(),
             ThreadSettingsAppliedEvent {
+                thread_id: Some(thread_id),
                 thread_settings: state
                     .session_configuration
                     .thread_settings_snapshot(&environment_selections),
@@ -2386,6 +2403,7 @@ impl Session {
     async fn current_segment_state_checkpoint(&self) -> CertifiedSegmentStateCheckpoint {
         let state = self.state.lock().await;
         Self::segment_state_checkpoint_from_state(
+            self.thread_id(),
             &state,
             self.services.turn_environments.selections(),
         )
@@ -2625,6 +2643,7 @@ impl Session {
             config.active_project = next_config.active_project.clone();
             let selected_model = state
                 .session_configuration
+                .step_settings
                 .collaboration_mode
                 .model()
                 .to_string();
@@ -2660,12 +2679,12 @@ impl Session {
                         "updated the selected custom-model alias after a config rename"
                     );
                     state.model_routing.rename_profile(&selected_model, &alias);
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(alias),
-                            /*effort*/ None,
-                            /*developer_instructions*/ None,
-                        );
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(alias),
+                        /*effort*/ None,
+                        /*developer_instructions*/ None,
+                    );
                 }
                 model_alias_refresh::SelectedAliasUpdate::DetachedProfile { candidate } => {
                     warn!(
@@ -2673,13 +2692,13 @@ impl Session {
                         concrete_model = candidate.model,
                         "detached the thread from a removed custom-model alias"
                     );
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(candidate.model),
-                            Some(candidate.reasoning_effort),
-                            /*developer_instructions*/ None,
-                        );
-                    state.session_configuration.service_tier = candidate.service_tier;
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(candidate.model),
+                        Some(candidate.reasoning_effort),
+                        /*developer_instructions*/ None,
+                    );
+                    settings.service_tier = candidate.service_tier;
                     state.model_routing = Default::default();
                 }
                 model_alias_refresh::SelectedAliasUpdate::DetachedAlias { model } => {
@@ -2688,12 +2707,12 @@ impl Session {
                         concrete_model = model,
                         "detached the thread from a removed custom-model alias"
                     );
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(model),
-                            /*effort*/ None,
-                            /*developer_instructions*/ None,
-                        );
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(model),
+                        /*effort*/ None,
+                        /*developer_instructions*/ None,
+                    );
                     state.model_routing = Default::default();
                 }
             }
@@ -4588,7 +4607,11 @@ impl Session {
             segment_state_checkpoint: None,
         };
 
-        state.replace_annotated_history(items, reference_context_item.clone(), HistoryReplacement::Compaction);
+        state.replace_annotated_history(
+            items,
+            reference_context_item.clone(),
+            HistoryReplacement::Compaction,
+        );
         let world_state_snapshot = world_state_baseline.map(|world_state| world_state.snapshot());
         let world_state_item = world_state_snapshot
             .as_ref()
@@ -4607,7 +4630,7 @@ impl Session {
                     realtime_active: settings.realtime_active,
                 });
         let thread_settings = ThreadSettingsAppliedEvent {
-            thread_id: self.conversation_id,
+            thread_id: Some(self.thread_id()),
             thread_settings: state
                 .session_configuration
                 .thread_settings_snapshot(&self.services.turn_environments.selections()),

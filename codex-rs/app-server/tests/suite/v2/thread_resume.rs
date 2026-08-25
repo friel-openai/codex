@@ -174,6 +174,13 @@ async fn thread_resume_paginated_model_context_preserves_original_metadata() -> 
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+
+    app_test_support::append_fake_paginated_user_message(
+        &rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id),
+        &conversation_id,
+        "Saved user message",
+    )
+    .await?;
     let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
     let startup_cwd = read_session_meta_line(&path).await?.meta.cwd;
     let settings: ThreadSettingsAppliedEvent = serde_json::from_value(json!({
@@ -969,9 +976,11 @@ async fn thread_resume_preserves_goal_first_and_fork_approvals_reviewer() -> Res
         } = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(fork_id)).await??;
         assert_eq!(approvals_reviewer, ApprovalsReviewer::User);
         timeout(DEFAULT_READ_TIMEOUT, mcp.shutdown_gracefully()).await??;
-        let (items, _, _) =
-            RolloutRecorder::load_rollout_items(fork_thread.path.as_ref().expect("fork rollout"))
-                .await?;
+        let items = codex_rollout::materialize_rollout_items(
+            codex_home.path(),
+            fork_thread.path.as_ref().expect("fork rollout"),
+        )
+        .await?;
         assert_eq!(
             items
                 .into_iter()
@@ -3064,7 +3073,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
     .await??;
     assert_eq!(
         creation_error.error.message,
-        "goal token budget 101 exceeds the maximum allowed goal token budget of 100"
+        "thread goal token budgets are disabled in Frodex"
     );
 
     let creation_id = mcp
@@ -3078,7 +3087,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
         .await?;
     let creation: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(creation_id)).await??;
-    assert_eq!(creation.goal.token_budget, Some(100));
+    assert_eq!(creation.goal.token_budget, None);
 
     let clear_budget_id = mcp
         .send_raw_request(
@@ -3088,7 +3097,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
         .await?;
     let clear_budget: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(clear_budget_id)).await??;
-    assert_eq!(clear_budget.goal.token_budget, Some(100));
+    assert_eq!(clear_budget.goal.token_budget, None);
 
     let oversized_update_id = mcp
         .send_raw_request(
@@ -3106,7 +3115,7 @@ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()
     .await??;
     assert_eq!(
         update_error.error.message,
-        "goal token budget 101 exceeds the maximum allowed goal token budget of 100"
+        "thread goal token budgets are disabled in Frodex"
     );
 
     Ok(())
@@ -3161,26 +3170,21 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
     )
     .await??;
 
-    let goal_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "objective": "keep polishing",
-                "status": "budgetLimited",
-                "tokenBudget": 10,
-            })),
+    // Existing budget-limited goals remain readable, but the API cannot create new ones.
+    let state_db = StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
+        "mock_provider".into(),
+    )
+    .await?;
+    state_db
+        .thread_goals()
+        .replace_thread_goal(
+            ThreadId::from_string(&thread.id)?,
+            "keep polishing",
+            codex_state::ThreadGoalStatus::BudgetLimited,
+            None,
         )
         .await?;
-    let goal: ThreadGoalSetResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(goal_id)).await??;
-    assert_eq!(goal.goal.status, ThreadGoalStatus::BudgetLimited);
-
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/goal/updated"),
-    )
-    .await??;
 
     let replacement_id = mcp
         .send_raw_request(
@@ -3195,7 +3199,7 @@ async fn thread_goal_set_preserves_budget_limited_same_objective() -> Result<()>
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(replacement_id)).await??;
 
     assert_eq!(replacement.goal.status, ThreadGoalStatus::BudgetLimited);
-    assert_eq!(replacement.goal.token_budget, Some(10));
+    assert_eq!(replacement.goal.token_budget, None);
     assert_eq!(replacement.goal.tokens_used, 0);
     assert_eq!(replacement.goal.time_used_seconds, 0);
 
@@ -3317,7 +3321,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
                 "threadId": thread_id,
                 "objective": "keep polishing",
                 "status": "active",
-                "tokenBudget": 40,
+                "tokenBudget": null,
             })),
         )
         .await?;
@@ -3363,7 +3367,7 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
                 "threadId": thread_id.to_string(),
                 "objective": "keep polishing with clearer wording",
                 "status": "active",
-                "tokenBudget": 40,
+                "tokenBudget": null,
             })),
         )
         .await?;
@@ -3382,8 +3386,8 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
     assert_eq!(persisted_goal.goal_id, updated_goal.goal_id);
     assert_eq!(thread_metadata.preview.as_deref(), Some("keep polishing"));
     assert_eq!(edit.goal.objective, "keep polishing with clearer wording");
-    assert_eq!(edit.goal.status, ThreadGoalStatus::BudgetLimited);
-    assert_eq!(edit.goal.token_budget, Some(40));
+    assert_eq!(edit.goal.status, ThreadGoalStatus::Active);
+    assert_eq!(edit.goal.token_budget, None);
     assert_eq!(edit.goal.tokens_used, 50);
     assert_eq!(edit.goal.time_used_seconds, 12);
     assert_eq!(edit.goal.created_at, goal.goal.created_at);
@@ -3392,44 +3396,23 @@ async fn thread_goal_set_edits_objective_without_resetting_usage() -> Result<()>
 }
 
 #[tokio::test]
-async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Result<()> {
-    let (release_original_turn, original_turn_gate) = oneshot::channel();
-    let (release_edited_turn, edited_turn_gate) = oneshot::channel();
+async fn thread_goal_external_objective_edit_invalidates_active_turn_lineage() -> Result<()> {
+    let (release_turn, turn_gate) = oneshot::channel();
     let (server, _response_completions) = start_streaming_sse_server(vec![
         ungated_goal_response(responses::sse(vec![
             responses::ev_response_created("create-original-goal"),
             responses::ev_function_call(
                 "create-original-goal-call",
                 "create_goal",
-                r#"{"objective":"keep its original owner","token_budget":100}"#,
+                r#"{"objective":"keep its original owner"}"#,
             ),
-            responses::ev_completed_with_tokens("create-original-goal", /*total_tokens*/ 5),
+            responses::ev_completed("create-original-goal"),
         ])),
         vec![StreamingSseChunk {
-            gate: Some(original_turn_gate),
+            gate: Some(turn_gate),
             body: responses::sse_completed("finish-original-user-turn"),
         }],
-        ungated_goal_response(responses::sse_completed("reopen-original-user-turn")),
-        ungated_goal_response(responses::sse_completed("finish-intervening-user-turn")),
-        ungated_goal_response(responses::sse(vec![
-            responses::ev_response_created("goal-continuation-after-intervening-turn"),
-            responses::ev_completed_with_tokens(
-                "goal-continuation-after-intervening-turn",
-                /*total_tokens*/ 40,
-            ),
-        ])),
-        vec![StreamingSseChunk {
-            gate: Some(edited_turn_gate),
-            body: responses::sse_completed("second-goal-continuation"),
-        }],
-        ungated_goal_response(responses::sse_completed("reopened-goal-turn")),
-        ungated_goal_response(responses::sse(vec![
-            responses::ev_response_created("rootless-goal-continuation"),
-            responses::ev_completed_with_tokens(
-                "rootless-goal-continuation",
-                /*total_tokens*/ 100,
-            ),
-        ])),
+        ungated_goal_response(responses::sse_completed("reopen-after-external-edit")),
     ])
     .await;
     let codex_home = TempDir::new()?;
@@ -3442,7 +3425,6 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
         .build_initialized()
         .await?;
     let thread = mcp.start_thread(ThreadStartParams::default()).await?.thread;
-
     let start_id = mcp
         .send_turn_start_request(TurnStartParams {
             thread_id: thread.id.clone(),
@@ -3461,6 +3443,22 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
     )
     .await?;
 
+    // Frodex uses a separate supervisor instead of budget-driven parent turns. Pausing
+    // the edited goal isolates upstream's active-turn lineage invalidation from scheduling.
+    let edit_id = mcp
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread.id,
+                "objective": "externally updated goal",
+                "status": "paused",
+            })),
+        )
+        .await?;
+    let edited_goal: ThreadGoalSetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(edit_id)).await??;
+    assert_eq!(edited_goal.goal.objective, "externally updated goal");
+    assert_eq!(edited_goal.goal.status, ThreadGoalStatus::Paused);
     let injection_id = mcp
         .send_raw_request(
             "thread/inject_items",
@@ -3479,118 +3477,29 @@ async fn thread_goal_keeps_original_root_until_external_objective_edit() -> Resu
         .await?;
     let _: serde_json::Value =
         timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(injection_id)).await??;
-
-    let queue_id = mcp
-        .send_raw_request(
-            "thread/queue/add",
-            Some(json!({
-                "threadId": thread.id,
-                "input": [{
-                    "type": "text",
-                    "text": "an intervening user message",
-                    "textElements": [],
-                }],
-                "clientUserMessageId": "intervening-goal-message",
-            })),
-        )
-        .await?;
-    let _: serde_json::Value = timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(queue_id)).await??;
-    release_original_turn
+    release_turn
         .send(())
-        .expect("original turn should remain open until the user message is queued");
-
-    for _ in 0..3 {
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_notification_message("turn/completed"),
-        )
-        .await??;
-    }
+        .expect("turn remains open until the external edit");
     timeout(
         DEFAULT_READ_TIMEOUT,
-        server.wait_for_request_count(/*count*/ 6),
-    )
-    .await?;
-
-    let edit_id = mcp
-        .send_raw_request(
-            "thread/goal/set",
-            Some(json!({
-                "threadId": thread.id,
-                "objective": "externally updated goal",
-                "status": "active",
-            })),
-        )
-        .await?;
-    let edited_goal: ThreadGoalSetResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(edit_id)).await??;
-    assert_eq!(edited_goal.goal.objective, "externally updated goal");
-    timeout(
-        DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_notification_message("thread/goal/updated"),
+        mcp.read_stream_until_notification_message("turn/completed"),
     )
     .await??;
 
-    let get_id = mcp
-        .send_raw_request("thread/goal/get", Some(json!({ "threadId": thread.id })))
-        .await?;
-    let _: codex_app_server_protocol::ThreadGoalGetResponse =
-        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(get_id)).await??;
-    release_edited_turn
-        .send(())
-        .expect("goal turn should remain open until its external edit");
-
-    for _ in 0..2 {
-        timeout(
-            DEFAULT_READ_TIMEOUT,
-            mcp.read_stream_until_notification_message("turn/completed"),
-        )
-        .await??;
-    }
-
     let requests = server.requests().await;
-    assert_eq!(requests.len(), 8);
-    let reopened_original_request = serde_json::from_slice::<serde_json::Value>(&requests[2])?;
+    assert_eq!(requests.len(), 3);
+    let original = serde_json::from_slice::<serde_json::Value>(&requests[1])?;
     assert_eq!(
-        reopened_original_request["client_metadata"]["turn_id"].as_str(),
+        original["client_metadata"]["turn_id"].as_str(),
         Some(original_turn.turn.id.as_str())
     );
-    responses::assert_root_turn(&reopened_original_request, /*expected*/ None)?;
-    let intervening_request = serde_json::from_slice::<serde_json::Value>(&requests[3])?;
-    let intervening_turn_id = intervening_request["client_metadata"]["turn_id"]
-        .as_str()
-        .expect("intervening user turn ID");
-    responses::assert_root_turn(&intervening_request, Some(intervening_turn_id))?;
-    let first_continuation = serde_json::from_slice::<serde_json::Value>(&requests[4])?;
-    let first_continuation_turn_id = first_continuation["client_metadata"]["turn_id"]
-        .as_str()
-        .expect("first continuation turn ID");
-    let second_continuation = serde_json::from_slice::<serde_json::Value>(&requests[5])?;
-    for (request, parent_turn_id) in [
-        (&first_continuation, intervening_turn_id),
-        (&second_continuation, first_continuation_turn_id),
-    ] {
-        responses::assert_root_turn(request, Some(original_turn.turn.id.as_str()))?;
-        responses::assert_parent_turn(request, Some(parent_turn_id))?;
-    }
-    let edited_turn_id = second_continuation["client_metadata"]["turn_id"]
-        .as_str()
-        .expect("second continuation turn ID");
-
-    let reopened_request = serde_json::from_slice::<serde_json::Value>(&requests[6])?;
+    let reopened = serde_json::from_slice::<serde_json::Value>(&requests[2])?;
     assert_eq!(
-        reopened_request["client_metadata"]["turn_id"].as_str(),
-        Some(edited_turn_id)
+        reopened["client_metadata"]["turn_id"].as_str(),
+        Some(original_turn.turn.id.as_str())
     );
-    responses::assert_root_turn(&reopened_request, /*expected*/ None)?;
-    let continuation_request = serde_json::from_slice::<serde_json::Value>(&requests[7])?;
-    assert_ne!(
-        continuation_request["client_metadata"]["turn_id"].as_str(),
-        Some(edited_turn_id)
-    );
-    responses::assert_root_turn(&continuation_request, /*expected*/ None)?;
-    responses::assert_parent_turn(&continuation_request, /*expected*/ None)?;
-
+    responses::assert_root_turn(&reopened, /*expected*/ None)?;
+    responses::assert_parent_turn(&reopened, /*expected*/ None)?;
     server.shutdown().await;
     Ok(())
 }
@@ -3667,7 +3576,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
             Some(json!({
                 "threadId": thread.id,
                 "objective": "do not serialize this objective",
-                "tokenBudget": 100,
+                "tokenBudget": null,
             })),
         )
         .await?;
@@ -3685,30 +3594,39 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
         .expect("created goal id");
     assert_eq!(created["event_params"]["thread_id"], thread.id);
     assert_eq!(created["event_params"]["turn_id"], serde_json::Value::Null);
-    assert_eq!(created["event_params"]["has_token_budget"], true);
+    assert_eq!(created["event_params"]["has_token_budget"], false);
     assert!(created["event_params"]["session_id"].is_string());
     assert!(created["event_params"]["app_server_client"].is_object());
     assert!(created["event_params"]["runtime"].is_object());
     assert!(created["event_params"].get("objective").is_none());
     assert!(created["event_params"].get("token_budget").is_none());
 
-    let usage = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "usage_accounted",
-        "budget_limited",
-    )
-    .await?;
-    let causal_turn_id = usage["event_params"]["turn_id"]
-        .as_str()
-        .expect("accounted usage turn id");
-    assert_eq!(usage["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(usage["event_params"]["cumulative_tokens_accounted"], 200);
-    assert!(
-        usage["event_params"]["cumulative_time_accounted_seconds"]
-            .as_i64()
-            .is_some()
-    );
+    // Frodex schedules a helper rather than another turn on the parent. Wait for that
+    // helper to finish before completing the goal, which cancels pending check-ins.
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let warning: serde_json::Value = mcp.read_notification("warning").await?;
+            if warning["message"]
+                .as_str()
+                .is_some_and(|message| message.starts_with("Goal supervisor check-in failed:"))
+            {
+                return Ok::<_, anyhow::Error>(());
+            }
+        }
+    })
+    .await??;
+
+    let complete_id = mcp
+        .send_raw_request(
+            "thread/goal/set",
+            Some(json!({
+                "threadId": thread.id,
+                "status": "complete",
+            })),
+        )
+        .await?;
+    let _: ThreadGoalSetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, mcp.read_response(complete_id)).await??;
 
     let requests = server
         .received_requests()
@@ -3725,17 +3643,17 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
         .expect("goal continuation should include turn metadata")
         .to_str()?;
     let metadata: serde_json::Value = serde_json::from_str(metadata_header)?;
-    assert_eq!(metadata["turn_trigger"].as_str(), Some("goal"));
+    assert_eq!(
+        metadata["agent_name"].as_str(),
+        Some("/root/goal_supervisor")
+    );
+    assert_eq!(metadata["parent_thread_id"], thread.id);
+    assert_ne!(metadata["thread_id"], thread.id);
 
-    let status = wait_for_goal_event(
-        &server,
-        DEFAULT_READ_TIMEOUT,
-        "status_changed",
-        "budget_limited",
-    )
-    .await?;
+    let status =
+        wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "status_changed", "complete").await?;
     assert_eq!(status["event_params"]["goal_id"], persisted_goal_id);
-    assert_eq!(status["event_params"]["turn_id"], causal_turn_id);
+    assert_eq!(status["event_params"]["turn_id"], serde_json::Value::Null);
     assert_eq!(
         status["event_params"]["cumulative_tokens_accounted"],
         serde_json::Value::Null
@@ -3752,9 +3670,13 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
         .nth(1)
         .expect("externally created goal continuation request");
     let goal_request_body = goal_request.body_json::<serde_json::Value>()?;
-    assert_eq!(
+    let goal_turn_id = goal_request_body["client_metadata"]["turn_id"]
+        .as_str()
+        .expect("goal continuation turn id");
+    assert!(!goal_turn_id.is_empty());
+    assert_ne!(
         goal_request_body["client_metadata"]["turn_id"],
-        causal_turn_id
+        response_requests[0].body_json::<serde_json::Value>()?["client_metadata"]["turn_id"]
     );
     responses::assert_root_turn(&goal_request_body, /*expected*/ None)?;
     responses::assert_parent_turn(&goal_request_body, /*expected*/ None)?;
@@ -3777,8 +3699,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
     )
     .await??;
 
-    let cleared =
-        wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "cleared", "budget_limited").await?;
+    let cleared = wait_for_goal_event(&server, DEFAULT_READ_TIMEOUT, "cleared", "complete").await?;
     assert_eq!(cleared["event_params"]["goal_id"], persisted_goal_id);
     assert_eq!(cleared["event_params"]["turn_id"], serde_json::Value::Null);
 
@@ -6095,7 +6016,9 @@ async fn thread_resume_supports_history_and_overrides() -> Result<()> {
 async fn thread_resume_reconstructs_typed_inter_agent_communication() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    mock_responses_config(&server.uri()).write(codex_home.path())?;
+    mock_responses_config(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let filename_ts = "2025-01-05T12-00-00";
     let meta_rfc3339 = "2025-01-05T12:00:00Z";

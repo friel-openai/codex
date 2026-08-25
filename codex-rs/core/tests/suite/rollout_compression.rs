@@ -35,6 +35,7 @@ use pretty_assertions::assert_eq;
 use wiremock::MockServer;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tracing_test::traced_test]
 async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
@@ -85,7 +86,7 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
             boundary: ForkBoundary::Latest,
         })
         .await?;
-    let child = test
+    let (child, _) = test
         .thread_manager
         .fork_prepared_thread(
             test.config.clone(),
@@ -115,16 +116,20 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
     let child_path = child.thread.rollout_path().context("child rollout")?;
     test.codex.shutdown_and_wait().await?;
     child.thread.shutdown_and_wait().await?;
-    assert_eq!(
-        codex_rollout::read_session_meta_line(&child_path)
-            .await?
-            .meta
-            .history_base
-            .map(|base| base.thread_id),
-        Some(test.session_configured.thread_id),
-    );
+    let history_base = codex_rollout::read_session_meta_line(&child_path)
+        .await?
+        .meta
+        .history_base
+        .expect("fork history base");
+    assert_ne!(history_base.thread_id, test.session_configured.thread_id);
+    let frozen_path = codex_rollout::find_rollout_path_by_rollout_id(
+        &test.config.codex_home,
+        history_base.thread_id,
+    )
+    .await?
+    .context("frozen fork prefix")?;
 
-    let paths = [&parent_path, &child_path];
+    let paths = [&parent_path, &frozen_path, &child_path];
     let original_bytes = paths
         .iter()
         .map(std::fs::read)
@@ -158,7 +163,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         }
     })
     .await
-    .context("shared rollout compression should finish")?;
+    .with_context(|| {
+        format!(
+            "shared rollout compression should finish: {:?}",
+            paths
+                .iter()
+                .map(|path| (
+                    path,
+                    path.exists(),
+                    path.with_extension("jsonl.zst").exists()
+                ))
+                .collect::<Vec<_>>()
+        )
+    })?;
     for (path, original) in paths.into_iter().zip(original_bytes) {
         let compressed = std::fs::File::open(path.with_extension("jsonl.zst"))?;
         assert_eq!(zstd::stream::decode_all(compressed)?, original);
@@ -218,6 +235,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
         "reading the ancestor must not materialize it"
     );
     assert!(parent_path.with_extension("jsonl.zst").exists());
+    assert!(
+        !frozen_path.exists(),
+        "reading the frozen prefix must not materialize it"
+    );
+    assert!(frozen_path.with_extension("jsonl.zst").exists());
     resumed.thread.shutdown_and_wait().await?;
     Ok(())
 }

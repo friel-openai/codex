@@ -31,7 +31,7 @@ use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::router::ToolRouter;
 
-const PINNED_UPSTREAM: &str = "fcbdb57851be70192fd0c21faa9e529146e93ff1";
+const PINNED_UPSTREAM: &str = "a43ad35f9a273e3890593c54a157d286c7de9c4b";
 const V1_NAMESPACE: &str = "multi_agent_v1";
 const V2_NAMESPACE: &str = "collaboration";
 const V1_TOOLS: &[&str] = &[
@@ -159,7 +159,9 @@ impl Scenario {
         }
         match self {
             Self::V1Deferred => {
-                Arc::make_mut(&mut turn.model_info).supports_search_tool = true;
+                crate::session::tests::update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+                });
             }
             Self::V1DepthLimit => {
                 turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -184,7 +186,10 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
+                crate::session::tests::update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).tool_mode =
+                        Some(ToolMode::CodeModeOnly);
+                });
             }
             Self::V2CodeModeOnlyDirectModel => {
                 config.multi_agent_v2.non_code_mode_only = true;
@@ -192,7 +197,10 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
+                crate::session::tests::update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).tool_mode =
+                        Some(ToolMode::CodeModeOnly);
+                });
             }
             Self::V2CustomNamespace => {
                 config.multi_agent_v2.tool_namespace = Some("agents".to_string());
@@ -229,12 +237,14 @@ impl Scenario {
                     agent_role: matches!(self, Self::V2GoalHelperUnsupported)
                         .then(|| "goal_supervisor".to_string()),
                 });
-                Arc::make_mut(&mut turn.model_info).multi_agent_version =
-                    Some(if matches!(self, Self::V2SubagentSupported) {
-                        MultiAgentVersion::V2
-                    } else {
-                        MultiAgentVersion::Disabled
-                    });
+                crate::session::tests::update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).multi_agent_version =
+                        Some(if matches!(self, Self::V2SubagentSupported) {
+                            MultiAgentVersion::V2
+                        } else {
+                            MultiAgentVersion::Disabled
+                        });
+                });
             }
             Self::V1Direct | Self::V2Root => {}
         }
@@ -342,6 +352,7 @@ async fn scenario_manifest_with(
     let step_context = StepContext::for_test(Arc::clone(&turn));
     let registry = build_core_tool_registry(
         step_context.turn.as_ref(),
+        &step_context.settings.model_info,
         &step_context.environments,
         step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -363,6 +374,7 @@ async fn scenario_manifest_with(
         .collect::<Vec<_>>();
     let router = ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        &step_context.settings.model_info,
         registry,
         Vec::new(),
         &ToolSearchHandlerCache::default(),
@@ -417,12 +429,20 @@ async fn collaboration_manifest() -> Value {
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/tools/fixtures/collaboration_contract_fcbdb578.json")
+        .join("src/tools/fixtures/collaboration_contract_a43ad35.json")
 }
 
 #[tokio::test]
 async fn canonical_collaboration_contract_matches_pinned_upstream() {
     let actual = collaboration_manifest().await;
+    // Emit evidence for reviewing an upstream refresh without overwriting the pinned fixture.
+    if let Some(path) = std::env::var_os("FRODEX_COLLABORATION_CONTRACT_EVIDENCE") {
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&actual).expect("encode actual contract"),
+        )
+        .expect("write contract evidence");
+    }
     let path = fixture_path();
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
@@ -510,22 +530,22 @@ fn canonical_handler_sources_without_internal_adapters_match_pinned_upstream() {
         (
             "send_message.rs",
             include_str!("handlers/multi_agents_v2/send_message.rs"),
-            include_str!("fixtures/collaboration_source_fcbdb578/send_message.rs"),
+            include_str!("fixtures/collaboration_source_a43ad35/send_message.rs"),
         ),
         (
             "followup_task.rs",
             include_str!("handlers/multi_agents_v2/followup_task.rs"),
-            include_str!("fixtures/collaboration_source_fcbdb578/followup_task.rs"),
+            include_str!("fixtures/collaboration_source_a43ad35/followup_task.rs"),
         ),
         (
             "wait.rs",
             include_str!("handlers/multi_agents_v2/wait.rs"),
-            include_str!("fixtures/collaboration_source_fcbdb578/wait.rs"),
+            include_str!("fixtures/collaboration_source_a43ad35/wait.rs"),
         ),
         (
             "interrupt_agent.rs",
             include_str!("handlers/multi_agents_v2/interrupt_agent.rs"),
-            include_str!("fixtures/collaboration_source_fcbdb578/interrupt_agent.rs"),
+            include_str!("fixtures/collaboration_source_a43ad35/interrupt_agent.rs"),
         ),
     ] {
         assert_eq!(actual, expected, "{name} differs from pinned upstream");

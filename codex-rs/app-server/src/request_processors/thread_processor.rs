@@ -2,14 +2,14 @@ use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
+use super::thread_fork_handoff::ForkHandoff;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
-use super::thread_fork_handoff::ForkHandoff;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
-use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
@@ -2081,8 +2081,8 @@ impl ThreadRequestProcessor {
             archive_thread_ids.reverse();
         }
         // Collaboration may resume an archived descendant without unarchiving it.
-        for thread_id_to_archive in std::iter::once(thread_id)
-            .chain(subtree_thread_ids.iter().copied().skip(1).rev())
+        for thread_id_to_archive in
+            std::iter::once(thread_id).chain(subtree_thread_ids.iter().copied().skip(1).rev())
         {
             let identity_preserved = current_agent_membership
                 .unload_candidate_runtime_preserving_identity(thread_id_to_archive)
@@ -6353,6 +6353,28 @@ impl ThreadRequestProcessor {
         &self,
         stored_thread: &StoredThread,
     ) -> Result<(), JSONRPCErrorError> {
+        if stored_thread.history_mode == ThreadHistoryMode::Legacy
+            && stored_thread
+                .rollout_path
+                .as_ref()
+                .is_some_and(|path| !path.starts_with(self.config.codex_home.as_path()))
+        {
+            let indexed = match self.state_db.as_ref() {
+                Some(state_db) => state_db
+                    .get_thread(stored_thread.thread_id)
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to check selected rollout: {error}"))
+                    })?
+                    .is_some(),
+                None => false,
+            };
+            // An explicitly supplied external Legacy file has no home-selected rollout until
+            // its first resume. Existing indexed selections still require the check below.
+            if !indexed {
+                return Ok(());
+            }
+        }
         let selected = self
             .thread_store
             .read_thread(StoreReadThreadParams {

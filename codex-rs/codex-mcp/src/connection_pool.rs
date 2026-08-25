@@ -416,8 +416,11 @@ impl McpPooledBindingClient {
         let route = Arc::new(McpSessionRoute::new(
             "binding-test".to_string(),
             crate::elicitation::ElicitationRequestManager::new(
-                codex_protocol::protocol::AskForApproval::Never,
-                codex_protocol::models::PermissionProfile::default(),
+                crate::mcp::tests::test_elicitation_config(
+                    "binding-test",
+                    codex_protocol::protocol::AskForApproval::Never,
+                    codex_protocol::models::PermissionProfile::default(),
+                ),
                 /*reviewer*/ None,
                 /*lifecycle*/ None,
                 crate::elicitation::ElicitationRequestRouter::default(),
@@ -498,7 +501,6 @@ impl McpPooledBindingClient {
         result?
     }
 
-    #[cfg(test)]
     pub(crate) fn tool_timeout(&self) -> Option<Duration> {
         self.managed.tool_timeout
     }
@@ -961,9 +963,10 @@ impl McpConnectionLease {
 
     pub(crate) fn cached_tools(&self) -> Option<(u64, Vec<ToolInfo>)> {
         let connection = self.current().ok()?;
-        let tools = connection.client.cached_tools().filter(|tools| {
-            connection.client.is_codex_apps_mcp_server || !tools.is_empty()
-        })?;
+        let tools = connection
+            .client
+            .cached_tools()
+            .filter(|tools| connection.client.is_codex_apps_mcp_server || !tools.is_empty())?;
         Some((connection.id, tools))
     }
 
@@ -1007,6 +1010,14 @@ impl McpConnectionLease {
             return StableMcpConnectionState::PendingOrClosed;
         }
         StableMcpConnectionState::Ready(connection.id)
+    }
+
+    /// Observe the current physical client without starting or reconnecting it.
+    pub(crate) async fn connection_status(&self) -> codex_protocol::mcp::McpServerConnectionStatus {
+        match self.current() {
+            Ok(connection) => connection.client.connection_status().await,
+            Err(_) => codex_protocol::mcp::McpServerConnectionStatus::Cancelled,
+        }
     }
 
     pub(crate) fn optional_startup_deadline(

@@ -1139,12 +1139,10 @@ pub(crate) async fn apply_bespoke_event_handling(
                 .await;
         }
         EventMsg::RawResponseItem(raw_response_item_event) => {
-            let mut notification = ServerNotification::RawResponseItemCompleted(
-                RawResponseItemCompletedNotification {
-                    thread_id: conversation_id.to_string(),
-                    turn_id: event_turn_id,
-                    item: raw_response_item_event.item,
-                },
+            let mut notification = raw_response_item_completed_notification(
+                conversation_id,
+                &event_turn_id,
+                raw_response_item_event.item,
             );
             if conversation.enabled(Feature::OmitAppServerNotificationMedia) {
                 notification = without_notification_media(notification);
@@ -1526,12 +1524,11 @@ async fn complete_command_execution_item(
         .await;
 }
 
-async fn maybe_emit_raw_response_item_completed(
+fn raw_response_item_completed_notification(
     conversation_id: ThreadId,
     turn_id: &str,
     item: codex_protocol::models::ResponseItem,
-    outgoing: &ThreadScopedOutgoingMessageSender,
-) {
+) -> ServerNotification {
     if let Some(thread_item) = inter_agent_message_item(&item) {
         let notification = ItemCompletedNotification {
             thread_id: conversation_id.to_string(),
@@ -1539,10 +1536,7 @@ async fn maybe_emit_raw_response_item_completed(
             item: thread_item,
             completed_at_ms: now_unix_timestamp_ms(),
         };
-        outgoing
-            .send_server_notification(ServerNotification::ItemCompleted(notification))
-            .await;
-        return;
+        return ServerNotification::ItemCompleted(notification);
     }
 
     let notification = RawResponseItemCompletedNotification {
@@ -1550,9 +1544,7 @@ async fn maybe_emit_raw_response_item_completed(
         turn_id: turn_id.to_string(),
         item,
     };
-    outgoing
-        .send_server_notification(ServerNotification::RawResponseItemCompleted(notification))
-        .await;
+    ServerNotification::RawResponseItemCompleted(notification)
 }
 
 pub(crate) fn is_inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> bool {
@@ -1568,8 +1560,8 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
             .unwrap_or_else(|| format!("item-{}", ThreadId::new())),
         text,
         phase: Some(MessagePhase::Commentary),
-        memory_citation: None,
         delivery: None,
+        memory_citation: None,
     })
 }
 
@@ -4310,7 +4302,12 @@ mod tests {
         );
         let item = communication.to_model_input_item();
 
-        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item.clone(), &outgoing)
+        outgoing
+            .send_server_notification(raw_response_item_completed_notification(
+                conversation_id,
+                "turn-1",
+                item.clone(),
+            ))
             .await;
 
         let msg = recv_broadcast_notification(&mut rx).await?;
@@ -4322,6 +4319,7 @@ mod tests {
                     id,
                     text,
                     phase,
+                    delivery,
                     memory_citation,
                 } = notification.item
                 else {
@@ -4333,6 +4331,7 @@ mod tests {
                     "Agent message: ready for review from /root/goal_supervisor"
                 );
                 assert_eq!(phase, Some(MessagePhase::Commentary));
+                assert_eq!(delivery, None);
                 assert_eq!(memory_citation, None);
             }
             other => bail!("unexpected message: {other:?}"),
@@ -4364,7 +4363,12 @@ mod tests {
         );
         let item = communication.to_model_input_item();
 
-        maybe_emit_raw_response_item_completed(conversation_id, "turn-1", item.clone(), &outgoing)
+        outgoing
+            .send_server_notification(raw_response_item_completed_notification(
+                conversation_id,
+                "turn-1",
+                item.clone(),
+            ))
             .await;
 
         let msg = recv_broadcast_notification(&mut rx).await?;

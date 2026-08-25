@@ -104,11 +104,10 @@ async fn materialize_to_sqlite_inner(
     let expected_ordinal = projection_state
         .as_ref()
         .map_or(initial_ordinal, |state| state.next_ordinal);
-    let mut file = open_projection_reader(rollout_path).await.map_err(thread_store_io_error)?;
-    let file_len = file.metadata()
+    let mut file = open_projection_reader(rollout_path)
         .await
-        .map_err(thread_store_io_error)?
-        .len();
+        .map_err(thread_store_io_error)?;
+    let file_len = file.metadata().await.map_err(thread_store_io_error)?.len();
     let end_offset = end.map_or(file_len, |end| end.end_byte_offset);
     if end_offset > file_len {
         return Err(thread_history_error(format!(
@@ -288,7 +287,8 @@ async fn materialize_to_sqlite_inner(
                 ),
             });
         }
-        let is_inherited_subagent_history = subagent_history_start_ordinal.is_some_and(|start| ordinal < start);
+        let is_inherited_subagent_history =
+            subagent_history_start_ordinal.is_some_and(|start| ordinal < start);
         let changes = if is_inherited_subagent_history {
             ThreadHistoryChangeSet::default()
         } else {
@@ -311,7 +311,8 @@ async fn materialize_to_sqlite_inner(
             .changed_items
             .iter()
             .any(|item| item.started_at_ms.is_none())
-            || (!is_inherited_subagent_history && matches!(&line.item, RolloutItem::RealtimeItem(_)))
+            || (!is_inherited_subagent_history
+                && matches!(&line.item, RolloutItem::RealtimeItem(_)))
         {
             match DateTime::parse_from_rfc3339(line.timestamp.as_str()) {
                 Ok(timestamp) => Some(timestamp.timestamp_millis()),
@@ -363,17 +364,19 @@ async fn materialize_to_sqlite_inner(
             });
         }
         pending_rejected_line_count = 0;
-        projections.push(RolloutProjectionStep::Line(Box::new(ProjectedRolloutLine {
-            ordinal,
-            start_byte_offset: line_start_offset,
-            end_byte_offset: line_end_offset,
-            fallback_created_at_ms,
-            changes,
-            realtime_item: match line.item {
-                RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => Some(item),
-                _ => None,
+        projections.push(RolloutProjectionStep::Line(Box::new(
+            ProjectedRolloutLine {
+                ordinal,
+                start_byte_offset: line_start_offset,
+                end_byte_offset: line_end_offset,
+                fallback_created_at_ms,
+                changes,
+                realtime_item: match line.item {
+                    RolloutItem::RealtimeItem(item) if !is_inherited_subagent_history => Some(item),
+                    _ => None,
+                },
             },
-        })));
+        )));
         next_ordinal = ordinal
             .checked_add(1)
             .ok_or_else(|| ThreadStoreError::Internal {
@@ -567,14 +570,16 @@ async fn materialize_legacy_to_sqlite_inner(
                     } else {
                         ThreadHistoryChangeSet::default()
                     };
-                    projections.push(RolloutProjectionStep::Line(Box::new(ProjectedRolloutLine {
-                        ordinal: next_rollout_ordinal,
-                        start_byte_offset,
-                        end_byte_offset: next_offset,
-                        fallback_created_at_ms: Some(created_at_ms),
-                        changes,
-                        realtime_item: None,
-                    })));
+                    projections.push(RolloutProjectionStep::Line(Box::new(
+                        ProjectedRolloutLine {
+                            ordinal: next_rollout_ordinal,
+                            start_byte_offset,
+                            end_byte_offset: next_offset,
+                            fallback_created_at_ms: Some(created_at_ms),
+                            changes,
+                            realtime_item: None,
+                        },
+                    )));
                     next_rollout_ordinal =
                         next_rollout_ordinal.checked_add(1).ok_or_else(|| {
                             ThreadStoreError::Internal {

@@ -113,9 +113,7 @@ fn finalize_active_segment<'a>(
 
     // Restore settings from the newest surviving context baseline or certified checkpoint.
     if !*previous_turn_settings_resolved {
-        if has_context_baseline
-            && let Some(settings) = active_segment.previous_turn_settings
-        {
+        if has_context_baseline && let Some(settings) = active_segment.previous_turn_settings {
             *previous_turn_settings = Some(settings);
             *previous_turn_settings_resolved = true;
         } else if let Some(settings) = active_segment.checkpoint_previous_turn_settings {

@@ -59,6 +59,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
@@ -100,6 +101,7 @@ use codex_thread_store::ThreadStore;
 use codex_thread_store::ThreadStoreError;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
@@ -137,6 +139,38 @@ fn persisted_thread_environment_selections(
         })
         .and_then(|settings| settings.environments.clone())
         .map(|selections| selections.environments)
+}
+
+fn persisted_root_environment_selections(
+    config: &Config,
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    let mut environments = persisted_thread_environment_selections(history)?;
+    let had_named_profile = history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(event.thread_settings.active_permission_profile.is_some())
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+    if had_named_profile {
+        // The app-server has resolved the saved profile ID against current config. Old roots
+        // must not restore authority removed by that profile or by its configured replacement.
+        for environment in &mut environments {
+            if matches!(environment.config, EnvironmentConfigState::FromThread) {
+                environment.workspace_roots = config
+                    .permissions
+                    .workspace_roots()
+                    .iter()
+                    .map(PathUri::from_abs_path)
+                    .collect();
+            }
+        }
+    }
+    Some(environments)
 }
 
 /// Test-only override for enabling thread-manager behaviors used by integration
@@ -1333,7 +1367,7 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
         let environments =
-            persisted_thread_environment_selections(initial_history.get_rollout_items());
+            persisted_root_environment_selections(&config, initial_history.get_rollout_items());
         let (agent_control, _lifecycle_mutation) = self
             .agent_control_for_initial_history(&config, &initial_history)
             .await?;
@@ -1512,7 +1546,6 @@ impl ThreadManager {
         &self,
         rollout_path: PathBuf,
     ) -> CodexResult<InitialHistory> {
-        let requested_rollout_path = rollout_path.clone();
         let stored_thread = self
             .state
             .thread_store
@@ -1523,7 +1556,7 @@ impl ThreadManager {
             })
             .await
             .map_err(thread_store_rollout_read_error)?;
-        stored_thread_to_initial_history(stored_thread, Some(requested_rollout_path))
+        stored_thread_to_initial_history(stored_thread, None)
     }
 
     /// Fork an existing thread from already-loaded store history.
@@ -2296,14 +2329,26 @@ impl ThreadManagerState {
                             "failed to prepare paginated fork source {source_thread_id}: {err}"
                         ))
                     })?;
+                    let frozen = prepared.frozen_segment.clone().ok_or_else(|| {
+                        CodexErr::Fatal(
+                            "prepared paginated fork source is missing its frozen segment"
+                                .to_string(),
+                        )
+                    })?;
+                    // Explicit rollback boundaries were counted in the complete history. An
+                    // indexed fork response can contain only model context plus projected turns.
+                    let source_items = if expected_source_items.is_some() {
+                        codex_rollout::materialize_rollout_items(
+                            codex_home,
+                            &frozen.reference.rollout_path,
+                        )
+                        .await?
+                    } else {
+                        prepared.response_history.as_ref().clone()
+                    };
                     (
-                        prepared.frozen_segment.clone().ok_or_else(|| {
-                            CodexErr::Fatal(
-                                "prepared paginated fork source is missing its frozen segment"
-                                    .to_string(),
-                            )
-                        })?,
-                        prepared.response_history.as_ref().clone(),
+                        frozen,
+                        source_items,
                         FullHistorySourceReservation::Prepared {
                             _prepared: Box::new(prepared),
                         },
@@ -2710,11 +2755,15 @@ impl ThreadManagerState {
             None => self.client_mcp_extensions_for_child(parent_thread_id).await,
         };
         let thread_source = initial_history.get_resumed_thread_source();
-        let environments = environment_selections.or_else(|| {
-            inherited_environments
-                .as_ref()
-                .map(TurnEnvironmentSnapshot::to_selections)
-        }).or_else(|| persisted_thread_environment_selections(initial_history.get_rollout_items()));
+        let environments = environment_selections
+            .or_else(|| {
+                persisted_thread_environment_selections(initial_history.get_rollout_items())
+            })
+            .or_else(|| {
+                inherited_environments
+                    .as_ref()
+                    .map(TurnEnvironmentSnapshot::to_selections)
+            });
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),

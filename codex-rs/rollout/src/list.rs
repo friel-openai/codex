@@ -792,6 +792,7 @@ async fn read_listing_session_meta_line(path: &Path) -> io::Result<SessionMetaLi
             | RolloutItem::TurnContext(_)
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::EventMsg(_) => {}
         }
     }

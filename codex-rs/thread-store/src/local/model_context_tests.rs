@@ -1212,6 +1212,30 @@ async fn replays_nested_archived_lineage_from_frozen_prefix() {
     );
     // The same frozen lineage must replay from compressed files, without materializing or
     // accidentally including the archived root's records after the inherited cutoff.
+    // Unordinaled and invalid records after the cutoff must not enter model context or
+    // make a bounded ancestor unreadable merely because it was compressed.
+    let mut root_suffix = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&archived_root)
+        .expect("open excluded root suffix");
+    use std::io::Write as _;
+    writeln!(
+        root_suffix,
+        "{}",
+        serde_json::to_string(&RolloutLine {
+            timestamp: "2025-01-03T13:01:02Z".to_string(),
+            ordinal: None,
+            item: user_message("excluded unordinaled suffix"),
+        })
+        .expect("encode excluded record")
+    )
+    .expect("append excluded record");
+    writeln!(
+        root_suffix,
+        "{{\"type\":\"event_msg\",\"payload\":\"unterminated"
+    )
+    .expect("append excluded malformed record");
+    drop(root_suffix);
     for path in [&archived_root, &middle_path, &child_path] {
         let input = std::fs::File::open(path).expect("open rollout");
         let output = std::fs::File::create(path.with_extension("jsonl.zst"))
@@ -1560,6 +1584,7 @@ fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoin
         /*world_state*/ None,
         /*reference_context*/ None,
         ThreadSettingsAppliedEvent {
+            thread_id: None,
             thread_settings: ThreadSettingsSnapshot {
                 model: "test-model".to_string(),
                 model_provider_id: "test-provider".to_string(),

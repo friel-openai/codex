@@ -120,6 +120,7 @@ fn agent_line(message: &str, ordinal: u64) -> RolloutLine {
         item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
             message: message.to_string(),
             phase: None,
+            delivery: None,
             memory_citation: None,
         })),
     }
@@ -216,6 +217,7 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
         timestamp: "2026-07-13T00:00:01Z".to_string(),
         ordinal: Some(ordinal),
         item: RolloutItem::TurnContext(TurnContextItem {
+            cyber_access_program: None,
             turn_id: Some(turn_id.to_string()),
             cwd: serde_json::from_value(json!(root)).expect("absolute test cwd"),
             workspace_roots: None,
@@ -273,6 +275,7 @@ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
         segment_state_checkpoint: None,
     };
     let settings = ThreadSettingsAppliedEvent {
+        thread_id: None,
         thread_settings: ThreadSettingsSnapshot {
             model: "test-model".to_string(),
             model_provider_id: "test-provider".to_string(),
@@ -1871,6 +1874,204 @@ async fn materialization_rejects_torn_ordinary_records_in_paginated_root() -> io
 }
 
 #[tokio::test]
+async fn compatibility_reference_expands_native_history_base_with_remaining_depth() -> io::Result<()>
+{
+    for same_thread in [false, true] {
+        let home = TempDir::new()?;
+        let (native_path, messages) = write_native_history_base_chain(home.path(), 8)?;
+        let parent = crate::read_session_meta_line(&native_path).await?.meta.id;
+        let child = if same_thread { parent } else { ThreadId::new() };
+        let path = active_rollout_path(home.path(), child, "2026-07-13T00-00-02");
+        write_rollout(
+            &path,
+            &[
+                meta_line_with_segment(child, None, 0),
+                legacy_reference_line(native_path, parent, 1),
+            ],
+        )?;
+        let complete = materialize_rollout_lines(home.path(), &path).await?;
+        assert_eq!(
+            event_messages(&complete),
+            messages.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let bounded = materialize_bounded_rollout_lines(home.path(), &path, 2).await?;
+        let retained = if same_thread { 2 } else { 3 };
+        assert_eq!(
+            event_messages(&bounded.lines),
+            messages[messages.len() - retained..]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+        );
+        assert!(bounded.has_older_reference);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mixed_reference_kinds_share_depth_and_preserve_native_predecessor_identity()
+-> io::Result<()> {
+    for predecessor_is_other_thread in [false, true] {
+        let home = TempDir::new()?;
+        let thread_id = ThreadId::new();
+        let predecessor_thread = if predecessor_is_other_thread {
+            ThreadId::new()
+        } else {
+            thread_id
+        };
+        let oldest = active_rollout_path(home.path(), predecessor_thread, "2026-07-13T00-00-00");
+        write_rollout(
+            &oldest,
+            &[
+                meta_line_with_segment(predecessor_thread, None, 0),
+                agent_line("oldest", 1),
+            ],
+        )?;
+        let predecessor_id = ThreadId::new();
+        let predecessor = native_segment_path(
+            home.path(),
+            predecessor_thread,
+            predecessor_id,
+            "2026-07-13T00-00-01",
+        );
+        write_rollout(
+            &predecessor,
+            &[
+                paginated_meta_line(predecessor_thread, 2, None),
+                legacy_reference_line(oldest.clone(), predecessor_thread, 3),
+                agent_line("predecessor", 4),
+            ],
+        )?;
+        let native_id = ThreadId::new();
+        let native = native_segment_path(home.path(), thread_id, native_id, "2026-07-13T00-00-02");
+        write_rollout(
+            &native,
+            &[
+                paginated_meta_line(
+                    thread_id,
+                    5,
+                    Some(HistoryPosition {
+                        thread_id: predecessor_id,
+                        end_ordinal_exclusive: 5,
+                        end_byte_offset: fs::metadata(&predecessor)?.len(),
+                    }),
+                ),
+                agent_line("native", 6),
+            ],
+        )?;
+        let root = active_rollout_path(home.path(), thread_id, "2026-07-13T00-00-03");
+        let mut reference = legacy_reference_line(native, thread_id, 8);
+        let RolloutItem::RolloutReference(item) = &mut reference.item else {
+            unreachable!()
+        };
+        item.rollout_id = Some(native_id);
+        write_rollout(
+            &root,
+            &[
+                meta_line_with_segment(thread_id, None, 7),
+                reference,
+                agent_line("root", 9),
+            ],
+        )?;
+        assert_eq!(
+            event_messages(&materialize_rollout_lines(home.path(), &root).await?),
+            vec!["oldest", "predecessor", "native", "root"]
+        );
+        // With two predecessors permitted, the nested same-thread compatibility reference is
+        // omitted even when its containing native segment belongs to a different thread.
+        fs::remove_file(oldest)?;
+        let bounded = materialize_bounded_rollout_lines(home.path(), &root, 2).await?;
+        assert_eq!(
+            event_messages(&bounded.lines),
+            vec!["predecessor", "native", "root"]
+        );
+        assert!(bounded.has_older_reference);
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn mixed_reference_kinds_share_fork_depth_and_cycle_detection() -> io::Result<()> {
+    let home = TempDir::new()?;
+    let mut thread_id = ThreadId::new();
+    let mut path = active_rollout_path(home.path(), thread_id, "2026-07-13T00-00-00");
+    write_rollout(
+        &path,
+        &[
+            meta_line_with_segment(thread_id, None, 0),
+            agent_line("oldest", 1),
+        ],
+    )?;
+    let mut end_ordinal_exclusive = 2;
+    for index in 0..=MAX_ROLLOUT_REFERENCE_DEPTH {
+        let next_thread = ThreadId::new();
+        let next_path = active_rollout_path(home.path(), next_thread, "2026-07-13T00-00-00");
+        let lines = if index % 2 == 0 {
+            vec![
+                paginated_meta_line(
+                    next_thread,
+                    0,
+                    Some(HistoryPosition {
+                        thread_id,
+                        end_ordinal_exclusive,
+                        end_byte_offset: fs::metadata(&path)?.len(),
+                    }),
+                ),
+                agent_line("native", 1),
+            ]
+        } else {
+            vec![
+                meta_line_with_segment(next_thread, None, 0),
+                legacy_reference_line(path, thread_id, 1),
+                agent_line("legacy", 2),
+            ]
+        };
+        end_ordinal_exclusive = lines.last().unwrap().ordinal.unwrap() + 1;
+        write_rollout(&next_path, &lines)?;
+        thread_id = next_thread;
+        path = next_path;
+    }
+    let error = materialize_rollout_lines(home.path(), &path)
+        .await
+        .err()
+        .expect("mixed fork depth is bounded");
+    assert!(error.to_string().contains("maximum depth"));
+
+    let first_thread = ThreadId::new();
+    let second_thread = ThreadId::new();
+    let first = active_rollout_path(home.path(), first_thread, "2026-07-13T00-00-01");
+    let second = active_rollout_path(home.path(), second_thread, "2026-07-13T00-00-01");
+    write_rollout(
+        &first,
+        &[
+            meta_line_with_segment(first_thread, None, 0),
+            legacy_reference_line(second.clone(), second_thread, 1),
+        ],
+    )?;
+    write_rollout(
+        &second,
+        &[
+            paginated_meta_line(
+                second_thread,
+                0,
+                Some(HistoryPosition {
+                    thread_id: first_thread,
+                    end_ordinal_exclusive: 2,
+                    end_byte_offset: fs::metadata(&first)?.len(),
+                }),
+            ),
+            agent_line("cycle", 1),
+        ],
+    )?;
+    let error = materialize_rollout_lines(home.path(), &first)
+        .await
+        .err()
+        .expect("mixed cycle is rejected");
+    assert!(error.to_string().contains("cycle"));
+    Ok(())
+}
+
+#[tokio::test]
 async fn native_history_base_complete_and_bounded_materialization() -> io::Result<()> {
     let home = TempDir::new()?;
     let (active_path, expected_messages) =
@@ -2776,24 +2977,30 @@ async fn materialization_rejects_depth_exhaustion() -> io::Result<()> {
     let home = TempDir::new()?;
     let referenced_thread = ThreadId::new();
     let referenced_segment = SegmentId::new();
+    let current_thread = ThreadId::new();
     let mut has_older_reference = false;
     let mut state = ExpansionState {
+        retain_source_metadata: false,
         active_segments: HashSet::new(),
+        active_history_bases: HashSet::new(),
         cache: None,
     };
     let error = expand_lines(
         home.path(),
-        vec![reference_line(
-            home.path().join("unresolved.jsonl"),
-            referenced_thread,
-            referenced_segment,
-            /*ordinal*/ 0,
-        )],
+        vec![
+            meta_line_with_segment(current_thread, None, 0),
+            reference_line(
+                home.path().join("unresolved.jsonl"),
+                referenced_thread,
+                referenced_segment,
+                /*ordinal*/ 0,
+            ),
+        ],
         &mut state,
         ExpansionCursor {
             graph_depth: MAX_ROLLOUT_REFERENCE_DEPTH,
             ordinary_reference_depth: 0,
-            current_thread_id: ThreadId::new(),
+            current_thread_id: current_thread,
         },
         /*inherited_filter_texts*/ None,
         MaterializationPolicy::Complete,

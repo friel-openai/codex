@@ -1811,12 +1811,12 @@ async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_h
             .custom_models
             .insert("old-profile".to_string(), profile.clone());
         state.session_configuration.original_config_do_not_use = Arc::new(current_config);
-        state.session_configuration.collaboration_mode =
-            state.session_configuration.collaboration_mode.with_updates(
-                Some("old-profile".to_string()),
-                /*effort*/ None,
-                /*developer_instructions*/ None,
-            );
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("old-profile".to_string()),
+            /*effort*/ None,
+            /*developer_instructions*/ None,
+        );
         state.model_routing.reconcile_profile("old-profile");
         state.model_routing.record_success(&fallback);
     }
@@ -1826,7 +1826,11 @@ async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_h
 
     let state = session.state.lock().await;
     assert_eq!(
-        state.session_configuration.collaboration_mode.model(),
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
         "new-profile"
     );
     assert_eq!(state.model_routing.last_success(), Some(&fallback));
@@ -1862,12 +1866,12 @@ async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tupl
             .custom_models
             .insert("removed-profile".to_string(), profile);
         state.session_configuration.original_config_do_not_use = Arc::new(current_config);
-        state.session_configuration.collaboration_mode =
-            state.session_configuration.collaboration_mode.with_updates(
-                Some("removed-profile".to_string()),
-                /*effort*/ None,
-                /*developer_instructions*/ None,
-            );
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("removed-profile".to_string()),
+            /*effort*/ None,
+            /*developer_instructions*/ None,
+        );
         state.model_routing.record_success(&fallback);
     }
     next_config.custom_models.clear();
@@ -1876,18 +1880,23 @@ async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tupl
 
     let state = session.state.lock().await;
     assert_eq!(
-        state.session_configuration.collaboration_mode.model(),
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
         fallback.model
     );
     assert_eq!(
         state
             .session_configuration
+            .step_settings
             .collaboration_mode
             .reasoning_effort(),
         fallback.reasoning_effort
     );
     assert_eq!(
-        state.session_configuration.service_tier,
+        state.session_configuration.step_settings.service_tier,
         fallback.service_tier
     );
     assert_eq!(state.model_routing.last_success(), None);
@@ -1920,13 +1929,13 @@ async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_r
             .custom_models
             .insert("removed-alias".to_string(), alias);
         state.session_configuration.original_config_do_not_use = Arc::new(current_config);
-        state.session_configuration.collaboration_mode =
-            state.session_configuration.collaboration_mode.with_updates(
-                Some("removed-alias".to_string()),
-                Some(Some(effort.clone())),
-                /*developer_instructions*/ None,
-            );
-        state.session_configuration.service_tier = Some(service_tier.clone());
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode = settings.collaboration_mode.with_updates(
+            Some("removed-alias".to_string()),
+            Some(Some(effort.clone())),
+            /*developer_instructions*/ None,
+        );
+        settings.service_tier = Some(service_tier.clone());
     }
     next_config.custom_models.clear();
 
@@ -1934,18 +1943,27 @@ async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_r
 
     let state = session.state.lock().await;
     assert_eq!(
-        state.session_configuration.collaboration_mode.model(),
+        state
+            .session_configuration
+            .step_settings
+            .collaboration_mode
+            .model(),
         "test-model"
     );
     assert_eq!(
         state
             .session_configuration
+            .step_settings
             .collaboration_mode
             .reasoning_effort(),
         Some(effort)
     );
     assert_eq!(
-        state.session_configuration.service_tier.as_deref(),
+        state
+            .session_configuration
+            .step_settings
+            .service_tier
+            .as_deref(),
         Some(service_tier.as_str())
     );
     assert_eq!(state.model_routing.last_success(), None);
@@ -3704,7 +3722,8 @@ disabled_tools = [
 
 #[tokio::test]
 async fn record_initial_history_reconstructs_forked_transcript() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
 
     session
@@ -3825,6 +3844,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         item: user_message("authoritative parent message"),
         metadata: Some(CodexHarnessMetadata {
             client_authored: true,
+            fallback_token_limit_override: None,
         }),
     }]);
     let reference_context_item = source_turn.to_turn_context_item();
@@ -4217,12 +4237,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
-    assert_eq!(
-        child_rollout_items
+    assert!(
+        matches!(child_rollout_items.first(), Some(RolloutItem::SessionMeta(meta))
+        if meta.meta.history_base.is_some())
+    );
+    assert!(
+        !child_rollout_items
             .iter()
-            .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
-            .count(),
-        1
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
     );
     let child_response_items = child_rollout_items
         .iter()
@@ -4473,7 +4495,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
     assert!(
         child_rollout_items
             .iter()
-            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .any(|line| matches!(&line.item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()))
     );
     assert!(
         child_rollout_items
@@ -4699,6 +4721,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
     let mut builder = test_codex().with_config(|config| {
         config.update_plan_enabled = true;
+        config
+            .features
+            .disable(Feature::AgentPromptInjection)
+            .unwrap();
+        config.features.disable(Feature::MultiAgentV2).unwrap();
+        config.features.disable(Feature::Collab).unwrap();
         config.permissions.approval_policy =
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
     });
@@ -4791,7 +4819,8 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
 #[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
@@ -7174,7 +7203,7 @@ async fn session_configuration_apply_preserves_absolute_cwd_write_root_on_cwd_up
 
 #[tokio::test]
 async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
-    let (mut session, _turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
+    let (mut session, turn_context, _rx) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
@@ -7208,16 +7237,16 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     assert!(futures::poll!(update.as_mut()).is_pending());
     let committed = session.thread_settings_snapshot().await;
     let history_before = session.clone_history().await;
-    let (window_number, window_ids) = session.advance_auto_compact_window().await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
     let mut checkpoint = Box::pin(tokio::task::unconstrained(
         session.replace_compacted_history(
+            &turn_context,
             vec![ResponseItemEnvelope::new(user_message("compacted history"))],
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             CompactedHistoryMetadata {
                 message: "summary".to_string(),
-                window_number,
-                window_ids,
+                prepared_window_advance,
             },
         ),
     ));
@@ -7243,12 +7272,15 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     assert_ne!(committed, restored);
     drop(refresh_guard);
     update.await.expect("accepted settings update");
-    checkpoint.await;
+    checkpoint
+        .await
+        .expect("checkpoint persists accepted settings");
 
     session.flush_rollout().await.expect("flush checkpoint");
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
-        .await
-        .expect("read persisted settings");
+    let items =
+        codex_rollout::materialize_rollout_items(&turn_context.config.codex_home, &rollout_path)
+            .await
+            .expect("read persisted settings");
     let snapshots = items
         .into_iter()
         .filter_map(|item| match item {
@@ -7903,7 +7935,6 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
-        fork_persistence: ForkPersistence::Copied,
         forked_from_ordinal_exclusive: None,
         next_internal_sub_id: AtomicU64::new(0),
         persistence_restart_required: std::sync::atomic::AtomicBool::new(false),
@@ -10312,7 +10343,6 @@ where
         goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
         services,
         git_enrichment_policy: GitEnrichmentPolicy::Fresh,
-        fork_persistence: ForkPersistence::Copied,
         forked_from_ordinal_exclusive: None,
         next_internal_sub_id: AtomicU64::new(0),
         persistence_restart_required: std::sync::atomic::AtomicBool::new(false),
@@ -12735,6 +12765,7 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
         InitialContextInjection::DoNotInject,
         CompactionReason::ModelDownshift,
         CompactionPhase::PreTurn,
+        crate::compact::CompactionReporting::Immediate,
     )
     .await
     .expect("compaction succeeds");

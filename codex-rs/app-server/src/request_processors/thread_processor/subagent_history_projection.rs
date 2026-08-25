@@ -150,6 +150,7 @@ async fn scan_segment(
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::WorldState(_) => {}
         }
     }

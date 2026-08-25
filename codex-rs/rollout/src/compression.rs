@@ -513,6 +513,9 @@ mod worker {
         }
         let mut stack = vec![root.to_path_buf()];
         let mut jobs = JoinSet::new();
+        // Physical segments share their logical thread's writer reservation. Do not let
+        // this worker mistake another compression job for an active foreground writer.
+        let mut job_threads = std::collections::HashMap::new();
         while let Some(dir) = stack.pop() {
             if started_at.elapsed() >= WORKER_MAX_RUNTIME || maintenance.should_yield()? {
                 break;
@@ -532,7 +535,7 @@ mod worker {
                     Ok(Some(entry)) => entry,
                     Ok(None) => break,
                     Err(err) => {
-                        drain_compression_jobs(&mut jobs, stats).await;
+                        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
                         return Err(err);
                     }
                 };
@@ -588,13 +591,15 @@ mod worker {
                 }
                 stats.scanned = stats.scanned.saturating_add(1);
                 metrics::file("scanned");
-                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
-                    collect_next_compression_job(&mut jobs, stats).await;
+                let thread_id = meta.meta.id;
+                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS
+                    || job_threads.values().any(|owner| *owner == thread_id)
+                {
+                    collect_next_compression_job(&mut jobs, &mut job_threads, stats).await;
                 }
                 let writers = Arc::clone(writers);
                 let maintenance = Arc::clone(maintenance);
-                let thread_id = meta.meta.id;
-                jobs.spawn_blocking(move || {
+                let job = jobs.spawn_blocking(move || {
                     let started_at = Instant::now();
                     // The guard moves with the blocking job through cancellation and publication.
                     let result = compress_rollout_if_cold_blocking(
@@ -606,9 +611,10 @@ mod worker {
                     let duration = started_at.elapsed();
                     (path, duration, result)
                 });
+                job_threads.insert(job.id(), thread_id);
             }
         }
-        drain_compression_jobs(&mut jobs, stats).await;
+        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
         Ok(())
     }
 
@@ -664,22 +670,29 @@ mod worker {
 
     async fn drain_compression_jobs(
         jobs: &mut JoinSet<CompressionJobResult>,
+        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
         stats: &mut CompressionStats,
     ) {
         while !jobs.is_empty() {
-            collect_next_compression_job(jobs, stats).await;
+            collect_next_compression_job(jobs, job_threads, stats).await;
         }
     }
 
     async fn collect_next_compression_job(
         jobs: &mut JoinSet<CompressionJobResult>,
+        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
         stats: &mut CompressionStats,
     ) {
-        let Some(result) = jobs.join_next().await else {
+        let Some(result) = jobs.join_next_with_id().await else {
             return;
         };
+        let job_id = match &result {
+            Ok((job_id, _)) => *job_id,
+            Err(error) => error.id(),
+        };
+        job_threads.remove(&job_id);
         match result {
-            Ok((_, duration, Ok(measurement))) => {
+            Ok((_, (_, duration, Ok(measurement)))) => {
                 let outcome = measurement.outcome;
                 match outcome {
                     CompressionOutcome::Compressed => {
@@ -705,7 +718,7 @@ mod worker {
                     }
                 }
             }
-            Ok((path, duration, Err(err))) => {
+            Ok((_, (path, duration, Err(err)))) => {
                 stats.failed = stats.failed.saturating_add(1);
                 metrics::file("failed");
                 metrics::file_duration("failed", duration);

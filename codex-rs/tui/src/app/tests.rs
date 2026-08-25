@@ -2,14 +2,14 @@
 
 #[path = "tests/advanced_reasoning_tests.rs"]
 mod advanced_reasoning_tests;
+#[path = "tests/approval_routing_tests.rs"]
+mod approval_routing;
 #[path = "tests/backend_banner_fallback_tests.rs"]
 mod backend_banner_fallback_tests;
 #[path = "tests/backend_banner_recovery_tests.rs"]
 mod backend_banner_recovery_tests;
 #[path = "tests/backend_banner_startup_tests.rs"]
 mod backend_banner_startup_tests;
-#[path = "tests/approval_routing_tests.rs"]
-mod approval_routing;
 #[path = "tests/background_exit_tests.rs"]
 mod background_exit_tests;
 #[path = "tests/connector_policy.rs"]

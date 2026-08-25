@@ -365,7 +365,8 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
         .expect("start parent thread");
     parent
         .thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent.thread.ensure_rollout_materialized().await;
     parent
@@ -633,7 +634,7 @@ fn assert_goal_supervisor_boot_history<'a>(
         history.clone().into_iter().any(|item| matches!(
             item,
             ResponseItem::FunctionCallOutput { call_id, .. }
-                if call_id == "synthetic_supervisor_list_agents"
+                if call_id.as_deref() == Some("synthetic_supervisor_list_agents")
         )),
         "goal supervisor helper should receive the synthetic list_agents output"
     );
@@ -666,7 +667,8 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
     let harness = AgentControlHarness::new_with_config(home, config.clone()).await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent_thread.ensure_rollout_materialized().await;
     parent_thread
@@ -1057,6 +1059,7 @@ async fn persist_thread_environment_for_resume(
         .session
         .persist_rollout_items(&[RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
             ThreadSettingsAppliedEvent {
+                thread_id: None,
                 thread_settings: settings,
             },
         ))])
@@ -1438,6 +1441,7 @@ async fn on_event_updates_status_from_failed_task_complete() {
         started_at: None,
         last_agent_message: None,
         error: Some(ErrorEvent {
+            misalignment: None,
             message: "boom".to_string(),
             codex_error_info: None,
         }),
@@ -1824,8 +1828,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         },
         Ok(_) => panic!("expected thread to be removed"),
     }
-    let child_lifecycle = harness
-        .control
+    let child_lifecycle = control
         .get_agent_metadata(spawned_agent.thread_id)
         .expect("cold child registration")
         .lifecycle;
@@ -1834,7 +1837,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
         /*visible_when_cold*/ true,
     );
     assert_eq!(
-        harness.control.get_status(spawned_agent.thread_id).await,
+        control.get_status(spawned_agent.thread_id).await,
         AgentStatus::Completed(Some("completed before reload".to_string()))
     );
 
@@ -2008,8 +2011,11 @@ async fn multi_agent_v1_cold_delivery_reloads_and_preserves_turn_ancestry() -> a
             child_thread_id,
             text_input("cold v1 delivery"),
             AgentInputDelivery::Queue,
-            Some(parent_turn_id.to_string()),
-            Some(root_turn_id.to_string()),
+            TurnStartOptions {
+                parent_turn_id: Some(parent_turn_id.to_string()),
+                root_turn_id: Some(root_turn_id.to_string()),
+                ..Default::default()
+            },
         )
         .await
         .expect("cold v1 delivery should reload and submit");
@@ -2099,6 +2105,7 @@ async fn cold_delivery_waits_for_completion_cleanup_before_reloading() -> anyhow
         child_thread_id,
         Op::InterAgentCommunication {
             communication: communication.clone(),
+            start_options: TurnStartOptions::default(),
         },
     );
     let control = harness.control.clone();
@@ -2111,8 +2118,7 @@ async fn cold_delivery_waits_for_completion_cleanup_before_reloading() -> anyhow
                 communication,
                 AgentCommunicationContext::new(AgentCommunicationKind::Message, parent_thread_id),
                 AgentInputDelivery::Queue,
-                /*parent_turn_id*/ None,
-                /*root_turn_id*/ None,
+                TurnStartOptions::default(),
             )
             .await
     });
@@ -2546,7 +2552,8 @@ async fn self_contained_paginated_forks_work_without_state_db() {
     let harness = AgentControlHarness::new_without_state_db().await;
     let (parent_thread_id, parent_thread) = harness.start_paginated_thread().await;
     parent_thread
-        .inject_user_message_without_turn("paginated source without sqlite".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("paginated source without sqlite")], None)
         .await;
     let parent_spawn_call_id = "spawn-call-without-sqlite";
     let turn_context = parent_thread.session.new_default_turn().await;
@@ -2770,13 +2777,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
         .await
         .expect("prepare excludeTurns history-base child for thread/fork");
     assert!(
-        prepared.copied_history.as_ref().is_some_and(|history| {
-            let serialized = serde_json::to_string(history.as_slice())
-                .expect("serialize copied persistence history");
-            serialized.contains("source before child boundary")
-                && serialized.contains("history-base child suffix")
-        }),
-        "excludeTurns preparation must retain full copied persistence history"
+        prepared.frozen_segment.is_some(),
+        "excludeTurns preparation must freeze the inherited boundary"
     );
     let (prepared_child, _) = harness
         .manager
@@ -2819,10 +2821,19 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
     .lines()
     .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse child rollout line"))
     .collect::<Vec<_>>();
+    let persisted_history = codex_rollout::materialize_rollout_items(
+        harness.config.codex_home.as_path(),
+        &prepared_child
+            .thread
+            .rollout_path()
+            .expect("prepared child rollout"),
+    )
+    .await
+    .expect("resolve persisted prepared child");
     assert!(
-        prepared_child_lines
-            .iter()
-            .all(|line| !matches!(line.item, RolloutItem::RolloutReference(_)))
+        !serde_json::to_string(&persisted_history)
+            .unwrap()
+            .contains("source after child boundary")
     );
     assert!(prepared_child_lines.iter().any(|line| {
         serde_json::to_string(&line.item)
@@ -2935,21 +2946,16 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
         .flush_rollout()
         .await
         .expect("persist spawn_subagent child");
-    let spawned_lines = std::fs::read_to_string(
-        spawned_child
+    // Interrupted subagent forks share immutable history; FullHistory above copies it.
+    let spawned_lines = codex_rollout::materialize_rollout_lines(
+        harness.config.codex_home.as_path(),
+        &spawned_child
             .thread
             .rollout_path()
             .expect("spawn_subagent child rollout path"),
     )
-    .expect("read spawn_subagent child rollout")
-    .lines()
-    .map(|line| serde_json::from_str::<RolloutLine>(line).expect("parse child rollout line"))
-    .collect::<Vec<_>>();
-    assert!(
-        spawned_lines
-            .iter()
-            .all(|line| !matches!(line.item, RolloutItem::RolloutReference(_)))
-    );
+    .await
+    .expect("materialize persisted subagent history");
     assert!(spawned_lines.iter().any(|line| {
         serde_json::to_string(&line.item)
             .expect("serialize spawn_subagent child item")
@@ -3561,7 +3567,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
     for excluded_text in [
         "Parent root guidance.",
         "Parent subagent guidance.",
-        "Parent developer instructions.",
+        "Developer context before.\nParent developer instructions.",
         "parent commentary",
         "parent unknown phase",
         "parent trigger message",
@@ -3719,7 +3725,8 @@ while True:
     );
     parent
         .thread
-        .inject_user_message_without_turn("parent seed".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed")], None)
         .await;
     parent
         .thread
@@ -4407,7 +4414,8 @@ async fn reference_backed_fork_persists_assignment_after_settings_across_resume(
     let harness = AgentControlHarness::new_with_multi_agent_v1().await;
     let (parent_thread_id, parent_thread) = harness.start_thread().await;
     parent_thread
-        .inject_user_message_without_turn("parent seed context".to_string())
+        .session
+        .inject_no_new_turn(vec![user_message("parent seed context")], None)
         .await;
     parent_thread
         .session
@@ -7550,6 +7558,8 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
         loop {
             if request_log.requests().len() == retry_requests
                 && harness.manager.list_thread_ids().await == vec![parent_thread_id]
+                // Removing the helper precedes the parent's persisted retry update.
+                && crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await == 2
             {
                 break;
             }
@@ -7566,9 +7576,6 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner(
         harness.manager.list_thread_ids().await,
         harness.manager.captured_ops(),
     );
-    for _ in 0..10 {
-        tokio::task::yield_now().await;
-    }
     assert_eq!(
         request_log.requests().len(),
         retry_requests,
@@ -7848,6 +7855,8 @@ while True:
         "collaboration.list_agents".to_string(),
         "collaboration.interrupt_agent".to_string(),
         "frodex.close_agent".to_string(),
+        "frodex.adopt_agent".to_string(),
+        "frodex.promote_agent".to_string(),
     ]);
     assert_eq!(
         child_tool_signatures
@@ -8057,8 +8066,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
             ),
             AgentCommunicationContext::new(AgentCommunicationKind::Followup, parent_thread_id),
             AgentInputDelivery::Queue,
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            TurnStartOptions::default(),
         )
         .await
         .expect("cold grandchild should reload");

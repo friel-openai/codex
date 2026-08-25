@@ -86,7 +86,6 @@ pub(crate) struct Session {
     pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
-    pub(super) fork_persistence: ForkPersistence,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
     pub(super) next_internal_sub_id: AtomicU64,
     /// Rejects later turns after checkpoint persistence becomes indeterminate.
@@ -320,8 +319,14 @@ impl SessionConfiguration {
                 self.legacy_fallback_cwd.clone(),
                 environment_selections.to_vec(),
             )),
-            workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(environment_selections)),
-            profile_workspace_roots: Some(self.profile_workspace_roots().to_vec()),
+            workspace_roots: Some(ThreadEnvironments::primary_workspace_roots_for(
+                environment_selections,
+            )),
+            profile_workspace_roots: Some(
+                self.permission_profile_state
+                    .profile_workspace_roots()
+                    .to_vec(),
+            ),
             windows_sandbox_level: Some(self.windows_sandbox_level),
         }
     }
@@ -732,29 +737,29 @@ impl Session {
             .forked_from_thread_id
             .or_else(|| initial_history.forked_from_id());
         session_configuration.forked_from_thread_id = forked_from_id;
-        let forked_from_ordinal_exclusive = match &fork_persistence {
-            ForkPersistence::Referenced { history_base, .. } => {
-                history_base.map(|position| position.end_ordinal_exclusive)
+        let forked_from_ordinal_exclusive = match &initial_history {
+            InitialHistory::Forked(items) => items.first().and_then(|item| match item {
+                RolloutItem::SessionMeta(meta) => meta
+                    .meta
+                    .history_base
+                    .map(|position| position.end_ordinal_exclusive),
+                _ => None,
+            }),
+            InitialHistory::Resumed(resumed) => {
+                // Both local and CCA thread stores place the resumed thread's
+                // canonical SessionMeta first. Never inspect inherited metadata:
+                // an ancestor's history_base describes a different fork boundary.
+                resumed.history.first().and_then(|item| match item {
+                    RolloutItem::SessionMeta(meta) if meta.meta.id == resumed.conversation_id => {
+                        codex_rollout::forked_from_ordinal_exclusive(
+                            &meta.meta,
+                            resumed.rollout_path.as_deref(),
+                        )
+                    }
+                    _ => None,
+                })
             }
-            ForkPersistence::Copied => match &initial_history {
-                InitialHistory::Resumed(resumed) => {
-                    // Both local and CCA thread stores place the resumed thread's
-                    // canonical SessionMeta first. Never inspect inherited metadata:
-                    // an ancestor's history_base describes a different fork boundary.
-                    resumed.history.first().and_then(|item| match item {
-                        RolloutItem::SessionMeta(meta)
-                            if meta.meta.id == resumed.conversation_id =>
-                        {
-                            codex_rollout::forked_from_ordinal_exclusive(
-                                &meta.meta,
-                                resumed.rollout_path.as_deref(),
-                            )
-                        }
-                        _ => None,
-                    })
-                }
-                InitialHistory::New | InitialHistory::Cleared | InitialHistory::Forked(_) => None,
-            },
+            InitialHistory::New | InitialHistory::Cleared => None,
         }
         .filter(|_| forked_from_id.is_some());
         let parent_thread_id = session_configuration
@@ -1606,7 +1611,6 @@ impl Session {
                 goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
                 git_enrichment_policy,
-                fork_persistence,
                 forked_from_ordinal_exclusive,
                 next_internal_sub_id: AtomicU64::new(0),
                 persistence_restart_required: AtomicBool::new(false),

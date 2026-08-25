@@ -913,8 +913,11 @@ mod tests {
     #[test]
     fn runtime_route_registry_preserves_refreshes_and_closes_every_route_at_shutdown() {
         let elicitation_requests = crate::elicitation::ElicitationRequestManager::new(
-            codex_protocol::protocol::AskForApproval::Never,
-            codex_protocol::models::PermissionProfile::default(),
+            crate::mcp::tests::test_elicitation_config(
+                "test",
+                codex_protocol::protocol::AskForApproval::Never,
+                codex_protocol::models::PermissionProfile::default(),
+            ),
             /*reviewer*/ None,
             /*lifecycle*/ None,
             crate::elicitation::ElicitationRequestRouter::default(),
@@ -995,6 +998,7 @@ mod tests {
     #[tokio::test]
     async fn cached_binding_is_rebuilt_when_physical_identity_changes() {
         let published = Arc::new(PublishedMcpRuntime {
+            selected_environments: HashMap::new(),
             connections: Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true)),
             config: Some(Arc::new(crate::mcp::tests::test_mcp_config(
                 std::env::temp_dir(),
@@ -1040,6 +1044,7 @@ mod tests {
     #[tokio::test]
     async fn shutting_down_runtime_does_not_return_or_cache_bindings() {
         let published = Arc::new(PublishedMcpRuntime {
+            selected_environments: HashMap::new(),
             connections: Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true)),
             config: Some(Arc::new(crate::mcp::tests::test_mcp_config(
                 std::env::temp_dir(),

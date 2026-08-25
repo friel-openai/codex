@@ -2021,7 +2021,7 @@ async fn guardian_ultrafast_usage_limit_falls_back_and_reuses_fast_during_cooldo
     let first_outcome = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-ultrafast-first"),
+        guardian_exec_command_request("shell-ultrafast-first"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -2031,7 +2031,7 @@ async fn guardian_ultrafast_usage_limit_falls_back_and_reuses_fast_during_cooldo
     let second_outcome = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-ultrafast-second"),
+        guardian_exec_command_request("shell-ultrafast-second"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -3354,7 +3354,7 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
 #[tokio::test]
 async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
 {
-    const TEST_STACK_SIZE_BYTES: usize = 4 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
 
     let handle =
         std::thread::Builder::new()
@@ -3716,7 +3716,7 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
 async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enabled() {
     let server = start_mock_server().await;
     let (session, mut turn) = guardian_test_session_and_turn(&server).await;
-    let parent_model = turn.model_info.slug.clone();
+    let parent_model = turn.model_info().slug.clone();
     let parent_service_tier = turn.config.service_tier.clone();
     let mut config = (*turn.config).clone();
     config.auto_review_use_ultrafast = true;
@@ -3759,7 +3759,7 @@ async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enable
             trust_candidate_constraints: true,
         })
     );
-    assert_eq!(turn.model_info.slug, parent_model);
+    assert_eq!(turn.model_info().slug, parent_model);
     assert_eq!(turn.config.service_tier, parent_service_tier);
     assert!(
         !turn
@@ -3899,6 +3899,10 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
 #[tokio::test]
 async fn guardian_review_session_config_disables_mcp_apps_plugins_memories_and_guardian_v2() {
     let mut parent_config = test_config().await;
+    parent_config
+        .features
+        .enable(Feature::AgentPromptInjection)
+        .expect("agent prompt injection is configurable");
     let server: McpServerConfig =
         toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
     parent_config
@@ -3934,6 +3938,11 @@ async fn guardian_review_session_config_disables_mcp_apps_plugins_memories_and_g
     assert!(!guardian_config.features.enabled(Feature::Apps));
     assert!(!guardian_config.features.enabled(Feature::Plugins));
     assert!(!guardian_config.features.enabled(Feature::GuardianV2));
+    assert!(
+        !guardian_config
+            .features
+            .enabled(Feature::AgentPromptInjection)
+    );
     assert!(!guardian_config.include_apps_instructions);
     assert!(!guardian_config.memories.use_memories);
     assert!(!guardian_config.memories.dedicated_tools);

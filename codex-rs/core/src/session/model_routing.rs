@@ -16,6 +16,8 @@ use tracing::info;
 use tracing::warn;
 
 use super::session::Session;
+use super::step_context::StepContext;
+use super::step_settings::ResolvedStepSettings;
 use super::turn_context::TurnContext;
 
 /// Explains why a custom-model routing profile changed its active request configuration.
@@ -104,6 +106,18 @@ impl Session {
         profile_name: &str,
         attempted: &HashSet<ModelRoutingCandidate>,
     ) -> Option<ModelRoutingSelection> {
+        let settings = base.current_settings.load_full();
+        self.select_model_routing_context_with_settings(base, profile_name, attempted, &settings)
+            .await
+    }
+
+    pub(super) async fn select_model_routing_context_with_settings(
+        &self,
+        base: &TurnContext,
+        profile_name: &str,
+        attempted: &HashSet<ModelRoutingCandidate>,
+        settings: &ResolvedStepSettings,
+    ) -> Option<ModelRoutingSelection> {
         let custom_model = base.config.custom_models.get(profile_name)?;
         let profile = custom_model.routing_profile.as_ref()?;
         let trust_candidate_constraints = custom_model.trust_candidate_constraints;
@@ -137,6 +151,7 @@ impl Session {
                             profile_name,
                             &candidate,
                             &self.services.models_manager,
+                            settings,
                         )
                         .await;
                     return Some(ModelRoutingSelection {
@@ -153,12 +168,18 @@ impl Session {
                         profile_name,
                         &candidate,
                         &self.services.models_manager,
+                        settings,
                     )
                     .await,
                 )
             } else {
-                base.with_routing_candidate(profile_name, &candidate, &self.services.models_manager)
-                    .await
+                base.with_routing_candidate(
+                    profile_name,
+                    &candidate,
+                    &self.services.models_manager,
+                    settings,
+                )
+                .await
             };
             if let Some(context) = context {
                 return Some(ModelRoutingSelection {
@@ -175,10 +196,10 @@ impl Session {
 
     pub(super) async fn record_model_routing_failure(
         &self,
-        turn_context: &TurnContext,
+        step: &StepContext,
         failure: &ModelRoutingFailure,
     ) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
         let now = self.model_routing_now().await;
@@ -190,8 +211,8 @@ impl Session {
         );
     }
 
-    pub(super) async fn record_model_routing_success(&self, turn_context: &TurnContext) {
-        let Some(candidate) = turn_context.model_routing_candidate.as_ref() else {
+    pub(super) async fn record_model_routing_success(&self, step: &StepContext) {
+        let Some(candidate) = executed_routing_candidate(step) else {
             return;
         };
         self.state
@@ -209,10 +230,10 @@ impl Session {
     ) {
         info!(
             profile = to.model_profile.as_deref(),
-            from_model = from.model_info.slug,
-            to_model = to.model_info.slug,
-            from_reasoning_effort = ?from.reasoning_effort,
-            to_reasoning_effort = ?to.reasoning_effort,
+            from_model = from.model_info().slug,
+            to_model = to.model_info().slug,
+            from_reasoning_effort = ?from.reasoning_effort(),
+            to_reasoning_effort = ?to.reasoning_effort(),
             from_service_tier = ?from.config.service_tier,
             to_service_tier = ?to.config.service_tier,
             ?reason,
@@ -239,9 +260,9 @@ impl Session {
         info!(
             profile = to.model_profile.as_deref(),
             from_model = from.model,
-            to_model = to.model_info.slug,
+            to_model = to.model_info().slug,
             from_reasoning_effort = ?from.reasoning_effort,
-            to_reasoning_effort = ?to.reasoning_effort,
+            to_reasoning_effort = ?to.reasoning_effort(),
             from_service_tier = ?from.service_tier,
             to_service_tier = ?to.config.service_tier,
             ?reason,
@@ -258,6 +279,17 @@ impl Session {
         )
         .await;
     }
+}
+
+// Sparse active settings updates can override a routed model without changing its TurnContext.
+// Attribute health only when the request still executed the resolved routing tuple.
+fn executed_routing_candidate(step: &StepContext) -> Option<&ModelRoutingCandidate> {
+    let initial = &step.turn.initial_settings;
+    (step.settings.model_info.slug == initial.model_info.slug
+        && step.settings.effective_reasoning_effort() == initial.effective_reasoning_effort()
+        && step.settings.service_tier == initial.service_tier)
+        .then_some(step.turn.model_routing_candidate.as_ref())
+        .flatten()
 }
 
 pub(super) fn classify_model_routing_failure(
