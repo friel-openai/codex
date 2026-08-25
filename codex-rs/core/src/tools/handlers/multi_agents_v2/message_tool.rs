@@ -148,8 +148,12 @@ pub(super) async fn handle_message_string_tool(
                     communication,
                     context,
                     AgentInputDelivery::Queue,
-                    parent_turn_id.clone(),
-                    root_turn_id.clone(),
+                    crate::TurnStartOptions {
+                        parent_turn_id: parent_turn_id.clone(),
+                        root_turn_id: root_turn_id.clone(),
+                        cyber_access_program: turn.cyber_access_program,
+                        ..Default::default()
+                    },
                 )
                 .await
         }

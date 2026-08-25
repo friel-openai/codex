@@ -22,7 +22,7 @@
       "unexpected": true
     },
     "call_id": "spawn-error",
-    "output": "failed to parse function arguments: unknown field `unexpected`, expected one of `message`, `task_name`, `agent_type`, `model`, `reasoning_effort`, `service_tier`, `fork_turns`, `fork_context` at line 1 column 43",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected one of `message`, `task_name`, `agent_type`, `model`, `reasoning_effort`, `fork_turns`, `fork_context` at line 1 column 43",
     "success": null,
     "tool": "spawn_agent"
   },

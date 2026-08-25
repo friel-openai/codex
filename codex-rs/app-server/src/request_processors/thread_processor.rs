@@ -2,14 +2,14 @@ use super::persisted_resume_settings::PersistedResumeSettings;
 use super::persisted_resume_settings::latest_persisted_resume_settings;
 use super::thread_enrichment::enrich_loaded_threads;
 use super::thread_fork_goal::inherit_thread_goal_snapshot;
+use super::thread_fork_handoff::ForkHandoff;
 use super::thread_input::can_accept_direct_input;
 use super::thread_input::ensure_direct_input_allowed;
-use super::thread_fork_handoff::ForkHandoff;
 use super::*;
 use crate::error_code::method_not_found;
 use codex_app_server_protocol::SelectedCapabilityRoot;
-use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::SessionSource;
+use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
 use codex_app_server_protocol::ThreadRevertParams;
 use codex_app_server_protocol::ThreadRevertResponse;
 use codex_app_server_protocol::ThreadRevertedNotification;
@@ -2081,8 +2081,8 @@ impl ThreadRequestProcessor {
             archive_thread_ids.reverse();
         }
         // Collaboration may resume an archived descendant without unarchiving it.
-        for thread_id_to_archive in std::iter::once(thread_id)
-            .chain(subtree_thread_ids.iter().copied().skip(1).rev())
+        for thread_id_to_archive in
+            std::iter::once(thread_id).chain(subtree_thread_ids.iter().copied().skip(1).rev())
         {
             let identity_preserved = current_agent_membership
                 .unload_candidate_runtime_preserving_identity(thread_id_to_archive)
@@ -3370,6 +3370,16 @@ impl ThreadRequestProcessor {
             )));
         };
 
+        if loaded_thread.is_none()
+            && matches!(&thread.source, SessionSource::SubAgent(_))
+            && let Some(root_thread_id) = self
+                .thread_manager
+                .agent_session_root_thread_id(thread_id)
+                .await
+        {
+            thread.session_id = root_thread_id.to_string();
+        }
+
         let has_live_in_progress_turn = if let Some(loaded_thread) = loaded_thread.as_ref() {
             matches!(loaded_thread.agent_status().await, AgentStatus::Running)
         } else {
@@ -3481,6 +3491,10 @@ impl ThreadRequestProcessor {
                 thread.path = fallback_thread.path.clone();
             }
             thread.session_id.clone_from(&fallback_thread.session_id);
+            // Adoption changes the current parent without rewriting the original rollout head.
+            thread
+                .parent_thread_id
+                .clone_from(&fallback_thread.parent_thread_id);
             thread.ephemeral = fallback_thread.ephemeral;
             thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
             thread
@@ -5216,13 +5230,40 @@ impl ThreadRequestProcessor {
                 Err(error) => Err(error),
             }
         };
-        let (thread_history, resume_source_thread) = match resume_result {
+        let (mut thread_history, resume_source_thread) = match resume_result {
             Ok(value) => value,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
                 return Ok(());
             }
         };
+        // Promotion updates indexed ownership, not the immutable subagent rollout head.
+        // Only normalize this task's own metadata, never an inherited ancestor's head.
+        if let Some(stored) = resume_source_thread.as_ref()
+            && !stored.source.is_non_root_agent()
+            && !matches!(
+                stored.source,
+                codex_protocol::protocol::SessionSource::Unknown
+            )
+            && let InitialHistory::Resumed(resumed) = &mut thread_history
+            && let Some(meta) = Arc::make_mut(&mut resumed.history)
+                .iter_mut()
+                .find_map(|item| match item {
+                    RolloutItem::SessionMeta(line) if line.meta.id == stored.thread_id => {
+                        Some(&mut line.meta)
+                    }
+                    _ => None,
+                })
+            && meta.source.is_non_root_agent()
+        {
+            meta.source = stored.source.clone();
+            meta.session_id = stored.thread_id.into();
+            meta.parent_thread_id = None;
+            meta.thread_source = stored.thread_source.clone();
+            meta.agent_path = None;
+            meta.agent_nickname = None;
+            meta.agent_role = None;
+        }
         let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
             matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
         });
@@ -6357,6 +6398,28 @@ impl ThreadRequestProcessor {
         &self,
         stored_thread: &StoredThread,
     ) -> Result<(), JSONRPCErrorError> {
+        if stored_thread.history_mode == ThreadHistoryMode::Legacy
+            && stored_thread
+                .rollout_path
+                .as_ref()
+                .is_some_and(|path| !path.starts_with(self.config.codex_home.as_path()))
+        {
+            let indexed = match self.state_db.as_ref() {
+                Some(state_db) => state_db
+                    .get_thread(stored_thread.thread_id)
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to check selected rollout: {error}"))
+                    })?
+                    .is_some(),
+                None => false,
+            };
+            // An explicitly supplied external Legacy file has no home-selected rollout until
+            // its first resume. Existing indexed selections still require the check below.
+            if !indexed {
+                return Ok(());
+            }
+        }
         let selected = self
             .thread_store
             .read_thread(StoreReadThreadParams {
@@ -8279,7 +8342,14 @@ pub(crate) fn thread_from_stored_thread(
         extra: None,
         session_id: thread_id,
         forked_from_id: thread.forked_from_id.map(|id| id.to_string()),
-        parent_thread_id: thread.parent_thread_id.map(|id| id.to_string()),
+        parent_thread_id: if source.is_non_root_agent() {
+            source.parent_thread_id().or(thread.parent_thread_id)
+        } else if matches!(source, codex_protocol::protocol::SessionSource::Unknown) {
+            thread.parent_thread_id
+        } else {
+            None
+        }
+        .map(|id| id.to_string()),
         preview: bounded_thread_preview(thread.preview),
         ephemeral: false,
         section: thread.section.map(|section| ThreadSection {

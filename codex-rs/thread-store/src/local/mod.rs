@@ -124,8 +124,8 @@ use crate::UpdatedProject;
 use crate::local::writer_lock::WriterLockCoordinator;
 use crate::local::writer_lock::WriterLockGuard;
 
-pub use rollout_migration::RolloutMigrationFailureReason;
 pub use rollout_migration::RolloutMigrationAdditionalFreeSpace;
+pub use rollout_migration::RolloutMigrationFailureReason;
 pub use rollout_migration::RolloutMigrationHistoryBaseDependency;
 pub use rollout_migration::RolloutMigrationLineagePredecessor;
 pub use rollout_migration::RolloutMigrationLineageSource;
@@ -1004,6 +1004,37 @@ impl LocalThreadStore {
         &self,
         params: ReadThreadByRolloutPathParams,
     ) -> ThreadStoreResult<StoredThread> {
+        if params.include_history {
+            let metadata = read_thread::read_thread_by_rollout_path(
+                self,
+                params.rollout_path.clone(),
+                params.include_archived,
+                false,
+            )
+            .await?;
+            if let Some(selected) = thread_rollout_resolver::resolve_current_including_archived(
+                self,
+                metadata.thread_id,
+            )
+            .await?
+                && let Some(requested_path) = metadata.rollout_path.as_deref()
+                && codex_rollout::rollout_paths_match(requested_path, &selected.path).await
+            {
+                // Migration can change both the selected filename and its history format. Read
+                // the resume snapshot after conversion, not before opening the migrated writer.
+                self.await_automatic_rollout_migration(metadata.thread_id)
+                    .await?;
+                return read_thread::read_thread(
+                    self,
+                    ReadThreadParams {
+                        thread_id: metadata.thread_id,
+                        include_archived: params.include_archived,
+                        include_history: true,
+                    },
+                )
+                .await;
+            }
+        }
         read_thread::read_thread_by_rollout_path(
             self,
             params.rollout_path,
@@ -2356,7 +2387,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resume_thread_uses_supplied_history_mode_before_rollout_metadata() {
+    async fn resume_thread_rejects_supplied_history_mode_that_disagrees_with_rollout() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = uuid::Uuid::from_u128(410);
@@ -2382,7 +2413,8 @@ mod tests {
                 .0,
         );
 
-        store
+        let original = std::fs::read(&paginated_path).expect("original native file");
+        let error = store
             .resume_thread(ResumeThreadParams {
                 thread_id,
                 rollout_path: Some(paginated_path.clone()),
@@ -2391,18 +2423,13 @@ mod tests {
                 metadata: thread_metadata(),
             })
             .await
-            .expect("resume from supplied legacy history");
-        store
-            .append_items(AppendThreadItemsParams {
-                thread_id,
-                items: vec![user_message_item("supplied legacy history mode")],
-            })
-            .await
-            .expect("append legacy item");
-        store.flush_thread(thread_id).await.expect("flush thread");
-
-        assert_rollout_contains_message(paginated_path.as_path(), "supplied legacy history mode")
-            .await;
+            .expect_err("supplied legacy history must not configure a native writer");
+        assert!(matches!(error, ThreadStoreError::InvalidRequest { message }
+            if message.contains("history format changed before resume")));
+        assert_eq!(
+            std::fs::read(paginated_path).expect("unchanged native file"),
+            original
+        );
     }
 
     #[tokio::test]

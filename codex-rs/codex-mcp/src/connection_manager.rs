@@ -133,6 +133,18 @@ pub(crate) struct McpConnectionSet {
     connection_pool: McpConnectionPool,
 }
 
+impl Drop for McpConnectionSet {
+    fn drop(&mut self) {
+        // Startup tasks retain leases. Cancel this view's tasks so dropping the last view
+        // cannot leave a pending startup holding its own connection alive indefinitely.
+        self.startup_cancellation_token.cancel();
+        self.session_route.close();
+        for view in self.servers.values() {
+            view.connection.unregister_route(&self.session_route);
+        }
+    }
+}
+
 impl McpConnectionSet {
     /// Creates an MCP connection manager. Threadless callers can pass no `tx_event`; startup
     /// notifications are then skipped and interactive elicitations are declined.
@@ -985,7 +997,8 @@ impl McpConnectionSet {
                 let managed = if wait_for_server {
                     client.client().await.context("failed to get client")?
                 } else {
-                    let managed = client.ready_client()
+                    let managed = client
+                        .ready_client()
                         .ok_or_else(|| anyhow!("MCP server '{server}' is not connected"))?;
                     if managed.client.is_closed().await {
                         bail!("MCP server '{server}' is not connected");

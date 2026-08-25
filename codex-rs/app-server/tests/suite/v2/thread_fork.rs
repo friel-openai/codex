@@ -215,7 +215,9 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
 async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let preview = "Saved user message";
     let conversation_id = create_fake_rollout(
@@ -1137,12 +1139,10 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     assert_eq!(forked_goal.goal_id, source_goal.goal_id);
     assert_eq!(forked_goal.objective, source_goal.objective);
     assert_eq!(forked_goal.token_budget, Some(150));
-    assert_eq!(forked_goal.tokens_used, 157);
+    // The explicit turn is charged to the fork. Frodex's supervisor check is a separate task.
+    assert_eq!(forked_goal.tokens_used, 57);
     assert!(forked_goal.time_used_seconds >= source_goal.time_used_seconds);
-    assert_eq!(
-        forked_goal.status,
-        codex_state::ThreadGoalStatus::BudgetLimited
-    );
+    assert_eq!(forked_goal.status, codex_state::ThreadGoalStatus::Active);
     assert_eq!(
         state_db
             .thread_goals()
@@ -1741,7 +1741,7 @@ async fn thread_fork_preserves_reference_backed_paginated_history() -> Result<()
     let forked_thread_id = forked_thread.id.clone();
     let forked_path = forked_thread.path.expect("forked rollout path");
     let meta = read_session_meta_line(forked_path.as_path()).await?;
-    assert!(meta.meta.history_base.is_some());
+    let history_base = meta.meta.history_base.expect("forked history base");
     let forked_physical_items = RolloutRecorder::load_rollout_items(forked_path.as_path())
         .await?
         .0;
@@ -1891,19 +1891,23 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             }],
         });
         let draft_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("draft answer {index}"),
             }],
             phase: Some(MessagePhase::Commentary),
+            delivery: None,
             memory_citation: None,
         });
         let final_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("final answer {index}"),
             }],
             phase: Some(MessagePhase::FinalAnswer),
+            delivery: None,
             memory_citation: None,
         });
         let reasoning_item = CoreTurnItem::Reasoning(ReasoningItem {
@@ -2100,6 +2104,9 @@ fn certified_indexed_fork_checkpoint(
     let cwd = codex_home.abs();
     CertifiedSegmentStateCheckpoint::new(
         CompactedItem {
+            compaction_response_id: None,
+            guardian_history: None,
+            latest_token_usage_record: None,
             message: "latest indexed parent checkpoint".to_string(),
             replacement_history: Some(vec![
                 ResponseItem::Message {
@@ -2128,6 +2135,7 @@ fn certified_indexed_fork_checkpoint(
         /*world_state*/ None,
         /*reference_context*/ None,
         ThreadSettingsAppliedEvent {
+            thread_id: None,
             thread_settings: ThreadSettingsSnapshot {
                 model: "mock-model".to_string(),
                 model_provider_id: "mock_provider".to_string(),
@@ -2184,30 +2192,32 @@ async fn native_active_turn_fork_rollout_file_opens_are_bounded() -> Result<()> 
     .await
 }
 
+#[test_case::test_case(32, IndexedForkPresentation::Durable; "durable_32")]
+#[test_case::test_case(128, IndexedForkPresentation::Durable; "durable_128")]
+#[test_case::test_case(1_000, IndexedForkPresentation::Durable; "durable_1000")]
+#[test_case::test_case(32, IndexedForkPresentation::Ephemeral; "ephemeral_32")]
+#[test_case::test_case(128, IndexedForkPresentation::Ephemeral; "ephemeral_128")]
+#[test_case::test_case(1_000, IndexedForkPresentation::Ephemeral; "ephemeral_1000")]
 #[tokio::test]
-async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded() -> Result<()> {
-    for segment_count in [32, 128, 1_000] {
-        for presentation in [
-            IndexedForkPresentation::Durable,
-            IndexedForkPresentation::Ephemeral,
-        ] {
-            let file_open_count = paginated_fork_rollout_file_open_count_with_boundary(
-                segment_count,
-                IndexedForkSource::ColdCompacted,
-                presentation,
-                Some(5),
-                /*production_checkpoints*/ true,
-            )
-            .await?;
-            assert!(
-                file_open_count <= MAX_INDEXED_FORK_ROLLOUT_READER_OPENS,
-                "{presentation:?} explicit fork five turns from the tip with {segment_count} \
+async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded(
+    segment_count: usize,
+    presentation: IndexedForkPresentation,
+) -> Result<()> {
+    let file_open_count = paginated_fork_rollout_file_open_count_with_boundary(
+        segment_count,
+        IndexedForkSource::ColdCompacted,
+        presentation,
+        Some(5),
+        /*production_checkpoints*/ true,
+    )
+    .await?;
+    assert!(
+        file_open_count <= MAX_INDEXED_FORK_ROLLOUT_READER_OPENS,
+        "{presentation:?} explicit fork five turns from the tip with {segment_count} \
                  physical segments opened {file_open_count} rollout files; bounded explicit \
                  fork preparation must require at most \
                  {MAX_INDEXED_FORK_ROLLOUT_READER_OPENS} opens regardless of total lineage depth"
-            );
-        }
-    }
+    );
     Ok(())
 }
 
@@ -2276,14 +2286,16 @@ async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
     source: IndexedForkSource,
 ) -> Result<()> {
     let mut violations = Vec::new();
-    for segment_count in [8, 32] {
+    for segment_count in [8, 32, 128] {
         for presentation in [
             IndexedForkPresentation::Durable,
             IndexedForkPresentation::Ephemeral,
         ] {
             let file_open_count =
                 paginated_fork_rollout_file_open_count(segment_count, source, presentation).await?;
-            let limit = 2 * segment_count + 48;
+            // An uncompacted durable fork resolves the source, resolves the frozen snapshot,
+            // then materializes that snapshot's projection. Each may visit every segment once.
+            let limit = 3 * segment_count + 48;
             if file_open_count > limit {
                 violations.push(format!(
                     "{source:?} {presentation:?} fork with {segment_count} physical segments \
@@ -2379,11 +2391,13 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             }],
         });
         let agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("answer {index}"),
             }],
             phase: Some(MessagePhase::FinalAnswer),
+            delivery: None,
             memory_citation: None,
         });
         let mut items = vec![RolloutItem::EventMsg(EventMsg::TurnStarted(
@@ -3380,7 +3394,9 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let preview = "Saved user message";
     let create_rollout = match history_mode {
@@ -3395,6 +3411,11 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+    if history_mode == ThreadHistoryMode::Paginated {
+        let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
+        app_test_support::append_fake_paginated_user_message(&path, &conversation_id, preview)
+            .await?;
+    }
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -3573,7 +3594,9 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materialization() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let source_thread_id = create_fake_rollout(
         codex_home.path(),
@@ -3722,7 +3745,9 @@ async fn thread_fork_rejects_incompatible_boundaries_and_ephemeral_goal_deferral
 async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let parent_thread_id = create_fake_rollout(
         codex_home.path(),

@@ -28,6 +28,9 @@ use super::validated_segment_state_checkpoint;
 
 fn compacted() -> CompactedItem {
     CompactedItem {
+        compaction_response_id: None,
+        guardian_history: None,
+        latest_token_usage_record: None,
         message: "checkpoint".to_string(),
         replacement_history: Some(vec![ResponseItemEnvelope::new(ResponseItem::Message {
             id: None,
@@ -50,6 +53,7 @@ fn compacted() -> CompactedItem {
 fn thread_settings() -> ThreadSettingsAppliedEvent {
     let cwd: AbsolutePathBuf = serde_json::from_value(json!("/tmp")).expect("absolute test cwd");
     ThreadSettingsAppliedEvent {
+        thread_id: None,
         thread_settings: ThreadSettingsSnapshot {
             model: "gpt-test".to_string(),
             model_provider_id: "test-provider".to_string(),

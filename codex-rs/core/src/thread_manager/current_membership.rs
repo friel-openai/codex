@@ -1,5 +1,9 @@
 use super::*;
 
+#[cfg(test)]
+#[path = "current_membership_tests.rs"]
+mod tests;
+
 /// Retains one current agent registry across archive or delete runtime teardown.
 pub struct CurrentAgentMembershipHandle {
     /// Registry selected while the requested current subtree was fenced.
@@ -145,6 +149,37 @@ impl ThreadManager {
             .members)
     }
 
+    /// Resolve session ownership from runtime registries or indexed open edges, never rollout files.
+    pub async fn agent_session_root_thread_id(&self, thread_id: ThreadId) -> Option<ThreadId> {
+        let _lifecycle_mutation = self.state.lock_lifecycle_mutation().await;
+        let graph = self.state.agent_graph_store();
+        let mut current = thread_id;
+        let mut visited = HashSet::new();
+        while visited.insert(current) {
+            if let Some((root_thread_id, _)) = self.agent_control_containing(current).await {
+                return Some(root_thread_id);
+            }
+            let graph = graph.as_ref()?;
+            let edges = graph
+                .list_thread_spawn_edges_by_child_ids(&[current])
+                .await
+                .ok()?;
+            let Some(edge) = edges
+                .into_iter()
+                .find(|edge| edge.child_thread_id == current)
+            else {
+                return Some(current);
+            };
+            // Promotion closes the incoming edge; its old parent no longer owns this session.
+            if edge.status != codex_agent_graph_store::ThreadSpawnEdgeStatus::Open {
+                return Some(current);
+            }
+            current = edge.parent_thread_id;
+        }
+        tracing::warn!(%thread_id, "cannot resolve session root through cyclic ownership edges");
+        None
+    }
+
     /// Return the canonical root registry and its current member projection for one identity.
     pub async fn current_agent_membership_snapshot(
         &self,
@@ -260,7 +295,11 @@ impl ThreadManager {
             .filter_map(|thread| {
                 let control = thread.session.services.agent_control.clone();
                 let registry_root_thread_id = control.current_membership_root_thread_id();
-                let requested_is_root = registry_root_thread_id == thread_id;
+                // A resumed legacy child can carry the root's session ID without
+                // registering that root or sharing its current agents.
+                let requested_is_root = registry_root_thread_id == thread_id
+                    && (thread.session.thread_id() == thread_id
+                        || control.get_agent_metadata(thread_id).is_some());
                 let requested_owns_current_descendant = control
                     .current_membership_subtree_thread_ids(thread_id)
                     .into_iter()
@@ -273,7 +312,9 @@ impl ThreadManager {
                 }
                 Some((
                     requested_is_root,
-                    true,
+                    // Independently resumed legacy children can share this session ID
+                    // without sharing the root's registry. Prefer the loaded root itself.
+                    thread.session.thread_id() == registry_root_thread_id,
                     registry_root_thread_id,
                     thread.session.thread_id(),
                     control,

@@ -39,7 +39,7 @@ async fn standalone_side_config_is_ephemeral_and_preserves_policy() {
 
 #[test]
 fn standalone_side_starts_real_fork_and_returns_blank_replay() -> color_eyre::Result<()> {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(TEST_STACK_SIZE_BYTES)
         .enable_all()
@@ -53,7 +53,7 @@ fn standalone_side_starts_real_fork_and_returns_blank_replay() -> color_eyre::Re
 
 #[test]
 fn standalone_side_starts_real_legacy_fork_and_returns_blank_replay() -> color_eyre::Result<()> {
-    const TEST_STACK_SIZE_BYTES: usize = 8 * 1024 * 1024;
+    const TEST_STACK_SIZE_BYTES: usize = 32 * 1024 * 1024;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .thread_stack_size(TEST_STACK_SIZE_BYTES)
         .enable_all()

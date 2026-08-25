@@ -22,8 +22,8 @@ use codex_protocol::config_types::ShellEnvironmentPolicy;
 use codex_protocol::models::AdditionalPermissionProfile;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
 use codex_protocol::openai_models::ModelInfo;
-use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ModelServiceTier;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::permissions::RawFileSystemSandboxPolicy;
 use codex_protocol::protocol::EnvironmentConfig;
 use codex_protocol::protocol::EnvironmentConfigState;
@@ -482,8 +482,19 @@ impl TurnContext {
         model: String,
         models_manager: &SharedModelsManager,
     ) -> Self {
+        self.with_model_settings(model, models_manager, &self.initial_settings)
+            .await
+    }
+
+    async fn with_model_settings(
+        &self,
+        model: String,
+        models_manager: &SharedModelsManager,
+        settings: &ResolvedStepSettings,
+    ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
+        config.personality = settings.personality();
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
@@ -492,7 +503,7 @@ impl TurnContext {
             .iter()
             .map(|preset| preset.effort.clone())
             .collect::<Vec<_>>();
-        let reasoning_effort = if let Some(current_reasoning_effort) = self.reasoning_effort() {
+        let reasoning_effort = if let Some(current_reasoning_effort) = settings.reasoning_effort() {
             if supported_reasoning_levels.contains(current_reasoning_effort) {
                 Some(current_reasoning_effort.clone())
             } else {
@@ -516,7 +527,7 @@ impl TurnContext {
             )
             .await;
         let model_info = Arc::new(model_info);
-        let mut selected = self.initial_settings.selected().clone();
+        let mut selected = settings.selected().clone();
         selected.collaboration_mode = selected.collaboration_mode.with_updates(
             Some(model),
             Some(reasoning_effort),
@@ -589,11 +600,13 @@ impl TurnContext {
         model_profile: &str,
         candidate: &ModelRoutingCandidate,
         models_manager: &SharedModelsManager,
+        settings: &ResolvedStepSettings,
     ) -> Option<Self> {
         self.with_routing_candidate_validation(
             model_profile,
             candidate,
             models_manager,
+            settings,
             RoutingCandidateValidation::RequireCatalogSupport,
         )
         .await
@@ -609,12 +622,14 @@ impl TurnContext {
         model_profile: &str,
         candidate: &ModelRoutingCandidate,
         models_manager: &SharedModelsManager,
+        settings: &ResolvedStepSettings,
     ) -> Self {
         match self
             .with_routing_candidate_validation(
                 model_profile,
                 candidate,
                 models_manager,
+                settings,
                 RoutingCandidateValidation::TrustConfiguration,
             )
             .await
@@ -629,10 +644,11 @@ impl TurnContext {
         model_profile: &str,
         candidate: &ModelRoutingCandidate,
         models_manager: &SharedModelsManager,
+        settings: &ResolvedStepSettings,
         validation: RoutingCandidateValidation,
     ) -> Option<Self> {
         let mut routed = self
-            .with_model(candidate.model.clone(), models_manager)
+            .with_model_settings(candidate.model.clone(), models_manager, settings)
             .await;
         let mut model_info = Arc::clone(&routed.initial_settings.model_info);
         if let Some(custom_model) = self.config.custom_models.get(model_profile) {
@@ -643,12 +659,10 @@ impl TurnContext {
             models_manager_config.model_auto_compact_token_limit = custom_model
                 .model_auto_compact_token_limit
                 .or(models_manager_config.model_auto_compact_token_limit);
-            model_info = Arc::new(
-                codex_models_manager::model_info::with_config_overrides(
-                    (*model_info).clone(),
-                    &models_manager_config,
-                ),
-            );
+            model_info = Arc::new(codex_models_manager::model_info::with_config_overrides(
+                (*model_info).clone(),
+                &models_manager_config,
+            ));
         }
         let has_authoritative_metadata = !model_info.used_fallback_model_metadata;
 
@@ -1208,7 +1222,10 @@ impl Session {
             turn_context.cyber_access_program = options.cyber_access_program;
         }
         if resolve_model_routing {
-            let profile_name = session_configuration.collaboration_mode.model();
+            let profile_name = session_configuration
+                .step_settings
+                .collaboration_mode
+                .model();
             if let Some(selection) = self
                 .select_model_routing_context(&turn_context, profile_name, &HashSet::new())
                 .await
@@ -1230,9 +1247,11 @@ impl Session {
                 turn_context = routed;
             }
         }
-        self.services
-            .thread_extension_data
-            .insert(turn_context.model_info.clone());
+        if matches!(multi_agent_runtime, TurnMultiAgentRuntime::ResolveAndStore) {
+            self.services
+                .thread_extension_data
+                .insert(turn_context.model_info().as_ref().clone());
+        }
         let turn_context = Arc::new(turn_context);
         if git_enrichment_policy == GitEnrichmentPolicy::Fresh
             && turn_context
@@ -1311,8 +1330,12 @@ impl Session {
     pub(crate) async fn refresh_active_turn_context(
         &self,
         current: &TurnContext,
+        settings: &ResolvedStepSettings,
     ) -> Arc<TurnContext> {
-        let session_configuration = self.default_turn_configuration().await;
+        let mut session_configuration = self.default_turn_configuration().await;
+        // Workspace changes rebuild environments, not the active turn's model preferences.
+        // Future thread settings may already differ from this request's settings.
+        session_configuration.step_settings = Arc::new(settings.selected().clone());
         let refreshed = self
             .new_turn_context_from_configuration(
                 current.sub_id.clone(),
@@ -1321,7 +1344,7 @@ impl Session {
                     final_output_json_schema: current.final_output_json_schema.clone(),
                     cyber_access_program: current.cyber_access_program,
                 },
-                TurnMultiAgentRuntime::ResolveAndStore,
+                TurnMultiAgentRuntime::Preview,
                 self.git_enrichment_policy,
                 /*resolve_model_routing*/ false,
             )
@@ -1341,21 +1364,8 @@ impl Session {
             AtomicBool::new(current.server_model_warning_emitted.load(Ordering::Relaxed));
         refreshed.model_verification_emitted =
             AtomicBool::new(current.model_verification_emitted.load(Ordering::Relaxed));
-        if let (Some(profile_name), Some(candidate)) = (
-            current.model_profile.as_deref(),
-            current.model_routing_candidate.as_ref(),
-        ) {
-            refreshed = refreshed
-                .with_unchecked_routing_candidate(
-                    profile_name,
-                    candidate,
-                    &self.services.models_manager,
-                )
-                .await;
-        }
-        self.services
-            .thread_extension_data
-            .insert(refreshed.model_info.clone());
+        refreshed.model_profile = current.model_profile.clone();
+        refreshed.model_routing_candidate = current.model_routing_candidate.clone();
         Arc::new(refreshed)
     }
 

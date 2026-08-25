@@ -37,6 +37,28 @@ impl SessionTask for RegularTask {
         "session_task.turn"
     }
 
+    fn supports_pending_input_continuation(&self) -> bool {
+        true
+    }
+
+    async fn run_pending_input_continuation(
+        self: Arc<Self>,
+        session: Arc<Session>,
+        ctx: Arc<TurnContext>,
+        cancellation_token: CancellationToken,
+    ) -> SessionTaskResult {
+        // Startup and TurnStarted already ran. run_turn consumes accepted input through
+        // the normal hooks with the retained task's current workspace and settings.
+        run_turn(
+            session,
+            ctx,
+            Vec::new(),
+            RunTurnProviderStartup::Ready(None),
+            cancellation_token,
+        )
+        .await
+    }
+
     async fn run(
         self: Arc<Self>,
         sess: Arc<Session>,
@@ -79,29 +101,10 @@ impl SessionTask for RegularTask {
             run_hooks_and_record_inputs(&sess, &ctx, &input, PersistContext::Standard).await;
             return Ok(None);
         };
-        let mut next_input = input;
-        let mut provider_startup = Some(provider_startup);
-        loop {
-            let last_agent_message = run_turn(
-                Arc::clone(&sess),
-                Arc::clone(&ctx),
-                next_input,
-                provider_startup
-                    .take()
-                    .unwrap_or(RunTurnProviderStartup::Ready(None)),
-                cancellation_token.child_token(),
-            )
-            .instrument(run_turn_span.clone())
-            .await?;
-            // Terminal errors are already reported. Let task completion preserve pending
-            // input instead of restarting the failed turn for that same input.
-            if ctx.terminal_error.lock().await.is_some() {
-                return Ok(last_agent_message);
-            }
-            if !sess.input_queue.has_pending_input(&sess.active_turn).await {
-                return Ok(last_agent_message);
-            }
-            next_input = Vec::new();
-        }
+        // Finalization owns the atomic pending-input check and selects the active task's
+        // latest context for continuation after workspace or model-routing replacements.
+        run_turn(sess, ctx, input, provider_startup, cancellation_token)
+            .instrument(run_turn_span)
+            .await
     }
 }

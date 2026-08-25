@@ -60,6 +60,35 @@ fn current_agent_relation_filters_direct_children_from_scoped_membership() {
 }
 
 #[tokio::test]
+async fn current_agent_live_model_settings_override_stale_metadata() {
+    let codex_home = TempDir::new().expect("temp codex home");
+    let config = ConfigBuilder::default()
+        .codex_home(codex_home.path().to_path_buf())
+        .build()
+        .await
+        .expect("test config");
+    let member = member(ThreadId::new(), ThreadId::new(), "/root/explorer");
+    let (mut persisted, ..) = minimal_current_agent_thread(&config, &member);
+    assert_eq!(persisted.model, None);
+    assert_eq!(persisted.reasoning_effort, None);
+    persisted.model = Some("stale-model".to_string());
+    persisted.reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::Low);
+    persisted.name = Some("retained name".to_string());
+    let mut live = persisted.clone();
+    live.model = Some("current-model".to_string());
+    live.reasoning_effort = Some(codex_protocol::openai_models::ReasoningEffort::High);
+    live.name = None;
+
+    let merged = merge_current_agent_live_thread(Some(persisted), live);
+    assert_eq!(merged.model.as_deref(), Some("current-model"));
+    assert_eq!(
+        merged.reasoning_effort,
+        Some(codex_protocol::openai_models::ReasoningEffort::High)
+    );
+    assert_eq!(merged.name.as_deref(), Some("retained name"));
+}
+
+#[tokio::test]
 async fn current_agent_registry_identity_overrides_every_hydration_source() {
     let codex_home = TempDir::new().expect("temp codex home");
     let config = ConfigBuilder::default()

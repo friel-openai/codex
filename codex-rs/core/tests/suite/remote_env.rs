@@ -2206,6 +2206,121 @@ async fn deferred_executor_stays_pending_after_materialization() -> Result<()> {
 #[test_case(false, "multi_agent_v1"; "v1")]
 #[test_case(true, "collaboration"; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn spawn_agent_rejects_failed_owner_environment(
+    multi_agent_v2: bool,
+    namespace: &str,
+) -> Result<()> {
+    const CALL_ID: &str = "spawn-with-failed-environment";
+    let server = start_mock_server().await;
+    let mut builder = test_codex().with_config(move |config| {
+        assert!(config.features.enable(Feature::DeferredExecutor).is_ok());
+        assert!(config.features.enable(Feature::Collab).is_ok());
+        if multi_agent_v2 {
+            assert!(config.features.enable(Feature::MultiAgentV2).is_ok());
+        } else {
+            assert!(config.features.disable(Feature::MultiAgentV2).is_ok());
+        }
+    });
+    let test = builder.build_with_auto_env(&server).await?;
+    let selection = TurnEnvironmentSelection {
+        config: EnvironmentConfigState::Pending,
+        ..test
+            .codex
+            .environment_selections()
+            .await
+            .into_iter()
+            .next()
+            .context("test executor selection")?
+    };
+    let parent = test
+        .thread_manager
+        .start_thread(StartThreadOptions {
+            environments: Some(vec![selection.clone()]),
+            ..StartThreadOptions::new(test.config.clone())
+        })
+        .await?;
+    parent
+        .thread
+        .environment_failed(&selection, "owner configuration unavailable".to_string())
+        .await?;
+    let mut original_ids = test.thread_manager.list_thread_ids().await;
+    original_ids.sort_by_key(ToString::to_string);
+    let arguments = if multi_agent_v2 {
+        json!({"task_name": "worker", "message": "inspect", "fork_turns": "none"})
+    } else {
+        json!({"message": "inspect"})
+    };
+    let mock = mount_sse_sequence(
+        &server,
+        vec![
+            sse(vec![
+                ev_response_created("failed-environment-spawn"),
+                ev_function_call_with_namespace(
+                    CALL_ID,
+                    namespace,
+                    "spawn_agent",
+                    &arguments.to_string(),
+                ),
+                ev_completed("failed-environment-spawn"),
+            ]),
+            sse(vec![
+                ev_response_created("failed-environment-done"),
+                ev_assistant_message("failed-environment-answer", "cannot spawn"),
+                ev_completed("failed-environment-done"),
+            ]),
+        ],
+    )
+    .await;
+    parent
+        .thread
+        .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+            text: "try to spawn a child".to_string(),
+            text_elements: Vec::new(),
+        }]))
+        .await?;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            if matches!(
+                parent.thread.next_event().await?.msg,
+                EventMsg::TurnComplete(_)
+            ) {
+                break;
+            }
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await
+    .context("failed-environment turn should finish")??;
+    let requests = mock.requests();
+    assert_eq!(requests.len(), 2);
+    let (output, success) = requests[1]
+        .function_call_output_content_and_success(CALL_ID)
+        .context("spawn error must reach the model")?;
+    assert_ne!(success, Some(true));
+    assert!(
+        output
+            .context("spawn error text")?
+            .contains("cannot inherit a failed environment")
+    );
+    let mut final_ids = test.thread_manager.list_thread_ids().await;
+    final_ids.sort_by_key(ToString::to_string);
+    assert_eq!(
+        final_ids, original_ids,
+        "rejected spawn must not create a child runtime"
+    );
+    assert_eq!(
+        parent.thread.environment_selections().await,
+        vec![TurnEnvironmentSelection {
+            config: EnvironmentConfigState::Failed("owner configuration unavailable".to_string()),
+            ..selection
+        }]
+    );
+    Ok(())
+}
+
+#[test_case(false, "multi_agent_v1"; "v1")]
+#[test_case(true, "collaboration"; "v2")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn deferred_executor_spawn_agent_inherits_ready_step_environments(
     multi_agent_v2: bool,
     namespace: &str,

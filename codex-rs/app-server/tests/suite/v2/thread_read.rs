@@ -148,6 +148,9 @@ fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentSta
     let cwd = codex_home.abs();
     CertifiedSegmentStateCheckpoint::new(
         CompactedItem {
+            compaction_response_id: None,
+            guardian_history: None,
+            latest_token_usage_record: None,
             message: "latest certified history checkpoint".to_string(),
             replacement_history: Some(vec![
                 ResponseItem::Message {
@@ -176,6 +179,7 @@ fn certified_recent_history_checkpoint(codex_home: &Path) -> CertifiedSegmentSta
         /*world_state*/ None,
         /*reference_context*/ None,
         ThreadSettingsAppliedEvent {
+            thread_id: None,
             thread_settings: ThreadSettingsSnapshot {
                 model: "mock-model".to_string(),
                 model_provider_id: "mock_provider".to_string(),
@@ -337,8 +341,9 @@ async fn thread_read_can_include_turns() -> Result<()> {
         other => panic!("expected user message item, got {other:?}"),
     }
     assert_eq!(thread.status, ThreadStatus::NotLoaded);
+    assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
     assert!(
-        !mcp.pending_notification_methods()
+        mcp.pending_notification_methods()
             .contains(&"deprecationNotice".to_string())
     );
 
@@ -359,6 +364,13 @@ async fn paginated_stored_thread_reads_unprojected_turns_through_read_apis() -> 
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+
+    app_test_support::append_fake_paginated_user_message(
+        &rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id),
+        &conversation_id,
+        "Saved user message",
+    )
+    .await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -534,11 +546,13 @@ async fn paginated_segmented_history_without_index_returns_latest_five_turns() -
                         thread_id,
                         &turn_id,
                         CoreTurnItem::AgentMessage(AgentMessageItem {
+                            questions: None,
                             id: format!("agent-{index}"),
                             content: vec![AgentMessageContent::Text {
                                 text: format!("answer {index}"),
                             }],
                             phase: None,
+                            delivery: None,
                             memory_citation: None,
                         }),
                     ),
@@ -913,8 +927,10 @@ async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> 
                 thread_id,
                 items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                     AgentMessageEvent {
+                        questions: None,
                         message: format!("obsolete {index}"),
                         phase: None,
+                        delivery: None,
                         memory_citation: None,
                     },
                 ))],
@@ -944,11 +960,13 @@ async fn paginated_resume_without_index_does_not_open_obsolete_predecessor() -> 
             thread_id,
             "latest-turn",
             CoreTurnItem::AgentMessage(AgentMessageItem {
+                questions: None,
                 id: "latest-agent".to_string(),
                 content: vec![AgentMessageContent::Text {
                     text: "latest answer".to_string(),
                 }],
                 phase: None,
+                delivery: None,
                 memory_citation: None,
             }),
         ),
@@ -1146,8 +1164,10 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             thread_id,
             items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                 AgentMessageEvent {
+                    questions: None,
                     message: "must not be read".to_string(),
                     phase: None,
+                    delivery: None,
                     memory_citation: None,
                 },
             ))],
@@ -1171,8 +1191,10 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             ..Default::default()
         })),
         RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+            questions: None,
             message: "previous answer".to_string(),
             phase: None,
+            delivery: None,
             memory_citation: None,
         })),
         paginated_turn_completed("previous-turn"),
@@ -1200,8 +1222,10 @@ async fn thread_turns_list_pages_complete_turns_across_rollout_segments() -> Res
             thread_id,
             items: vec![
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    questions: None,
                     message: "latest answer".to_string(),
                     phase: None,
+                    delivery: None,
                     memory_citation: None,
                 })),
                 paginated_turn_completed("latest-turn"),
@@ -1392,8 +1416,10 @@ async fn rotated_legacy_fork_turns_list_preserves_inherited_parent_turns() -> Re
                     ..Default::default()
                 })),
                 RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                    questions: None,
                     message: "inherited parent answer".to_string(),
                     phase: None,
+                    delivery: None,
                     memory_citation: None,
                 })),
                 paginated_turn_completed("inherited-parent-turn"),
@@ -1508,8 +1534,10 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
             thread_id,
             items: vec![RolloutItem::EventMsg(EventMsg::AgentMessage(
                 AgentMessageEvent {
+                    questions: None,
                     message: "must not be read".to_string(),
                     phase: None,
+                    delivery: None,
                     memory_citation: None,
                 },
             ))],
@@ -1533,8 +1561,10 @@ async fn frodex_running_legacy_resume_returns_newest_five_segments_only() -> Res
                         ..Default::default()
                     })),
                     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                        questions: None,
                         message: format!("answer {index}"),
                         phase: None,
+                        delivery: None,
                         memory_citation: None,
                     })),
                     paginated_turn_completed(&turn_id),
@@ -1812,8 +1842,10 @@ async fn assert_thread_turns_list_same_thread_segment_limit(
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                questions: None,
                 message: format!("answer {index}"),
                 phase: None,
+                delivery: None,
                 memory_citation: None,
             })),
             paginated_turn_completed(turn_id.as_str()),
@@ -1953,8 +1985,10 @@ async fn frodex_history_apis_ignore_deleted_sixth_segment() -> Result<()> {
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                questions: None,
                 message: format!("answer {index}"),
                 phase: None,
+                delivery: None,
                 memory_citation: None,
             })),
             paginated_turn_completed(turn_id.as_str()),
@@ -2121,6 +2155,9 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
         }
         if *text == "third" {
             items.push(RolloutItem::Compacted(CompactedItem {
+                compaction_response_id: None,
+                guardian_history: None,
+                latest_token_usage_record: None,
                 message: "indexed Legacy resume checkpoint".to_string(),
                 replacement_history: Some(Vec::new()),
                 mcp_resource_origins: None,
@@ -2131,6 +2168,8 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                 segment_state_checkpoint: None,
             }));
             items.push(RolloutItem::TurnContext(TurnContextItem {
+                root_turn_id: None,
+                cyber_access_program: None,
                 turn_id: Some(turn_id.clone()),
                 cwd: codex_home.path().abs(),
                 workspace_roots: None,
@@ -2162,8 +2201,10 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
                 ..Default::default()
             })),
             RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                questions: None,
                 message: format!("{text} answer"),
                 phase: None,
+                delivery: None,
                 memory_citation: None,
             })),
         ]);
@@ -2559,8 +2600,10 @@ async fn thread_turns_list_reuses_legacy_reference_depths_without_changing_histo
                         ..Default::default()
                     })),
                     RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                        questions: None,
                         message: "x".repeat(1024),
                         phase: None,
+                        delivery: None,
                         memory_citation: None,
                     })),
                     paginated_turn_completed(turn_id.as_str()),
@@ -3673,6 +3716,13 @@ async fn paginated_thread_name_set_is_reflected_in_read_list_and_metadata_resume
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+
+    app_test_support::append_fake_paginated_user_message(
+        &rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id),
+        &conversation_id,
+        "Saved user message",
+    )
+    .await?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

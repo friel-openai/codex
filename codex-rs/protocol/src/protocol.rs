@@ -16,8 +16,8 @@ use strum_macros::EnumIter;
 
 use crate::AgentPath;
 use crate::ResponseItemId;
-use crate::SanitizedGitUrl;
 use crate::RolloutId;
+use crate::SanitizedGitUrl;
 use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;

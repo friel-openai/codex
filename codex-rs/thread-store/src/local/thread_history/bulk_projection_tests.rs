@@ -102,6 +102,7 @@ async fn bulk_projection_matches_ordered_sql_for_late_and_duplicate_events() {
         .into_iter()
         .enumerate()
         .map(|(index, changes)| ProjectedRolloutLine {
+            realtime_item: None,
             ordinal: index as u64,
             start_byte_offset: index as u64 * 100,
             end_byte_offset: (index as u64 + 1) * 100,
@@ -128,7 +129,7 @@ async fn bulk_projection_matches_ordered_sql_for_late_and_duplicate_events() {
             lines
                 .iter()
                 .cloned()
-                .map(RolloutProjectionStep::Line)
+                .map(|line| RolloutProjectionStep::Line(Box::new(line)))
                 .collect(),
         )
         .await

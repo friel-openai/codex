@@ -163,7 +163,7 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
 
     assert_eq!(
         error.to_string(),
-        "failed to deliver MCP elicitation request"
+        "failed to deliver MCP elicitation request: sending into a closed channel"
     );
     assert!(
         manager

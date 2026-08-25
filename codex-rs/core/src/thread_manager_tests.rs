@@ -75,6 +75,7 @@ fn checkpoint_settings_item(
 ) -> RolloutItem {
     RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(
         ThreadSettingsAppliedEvent {
+            thread_id: None,
             thread_settings: ThreadSettingsSnapshot {
                 model: "test-model".to_string(),
                 model_provider_id: config.model_provider_id.clone(),
@@ -318,8 +319,14 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
     assert_eq!(report.completed.len(), 3);
 }
 
+#[test_case::test_case(false, false; "saved_thread_roots")]
+#[test_case::test_case(true, false; "explicit_thread_roots")]
+#[test_case::test_case(true, true; "executor_owned_roots")]
 #[tokio::test]
-async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime() {
+async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime(
+    explicit_roots: bool,
+    executor_owned: bool,
+) {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -335,12 +342,40 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
         workspace_roots: vec![PathUri::from_abs_path(&boundary_cwd)],
         config: EnvironmentConfigState::FromThread,
     };
-    let latest_environment = TurnEnvironmentSelection {
+    let mut latest_environment = TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&latest_cwd),
         workspace_roots: vec![PathUri::from_abs_path(&latest_cwd)],
         config: EnvironmentConfigState::FromThread,
     };
+    if executor_owned {
+        latest_environment.config =
+            EnvironmentConfigState::Ready(codex_protocol::protocol::EnvironmentConfig {
+                allow_login_shell: true,
+                workspace_roots: latest_environment.workspace_roots.clone(),
+                permission_profile: config.permissions.permission_profile_state().snapshot(),
+                shell_environment_policy: Default::default(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+                windows_sandbox_private_desktop: config.permissions.windows_sandbox_private_desktop,
+                use_legacy_landlock: config.features.use_legacy_landlock(),
+                exec_policy: None,
+                mcp_policy: None,
+                network_policy: None,
+                selected_capability_roots: Vec::new(),
+            });
+    }
+    let mut expected_environment = latest_environment.clone();
+    config.workspace_roots_explicit = explicit_roots;
+    if explicit_roots {
+        config.workspace_roots = vec![config.cwd.clone()];
+        config
+            .permissions
+            .set_workspace_roots(config.workspace_roots.clone());
+        if !executor_owned {
+            expected_environment.cwd = PathUri::from_abs_path(&config.cwd);
+            expected_environment.workspace_roots = vec![PathUri::from_abs_path(&config.cwd)];
+        }
+    }
     let boundary_context = vec![
         RolloutItem::ResponseItem(user_msg("boundary response").into()),
         checkpoint_settings_item(&config, boundary_cwd, boundary_environment),
@@ -433,7 +468,17 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
 
     assert_eq!(
         forked.thread.environment_selections().await,
-        vec![latest_environment]
+        vec![expected_environment.clone()]
+    );
+    let next_turn = forked.thread.session.new_default_turn().await;
+    let effective = next_turn
+        .environments
+        .primary()
+        .expect("next-turn environment");
+    assert_eq!(effective.cwd(), &expected_environment.cwd);
+    assert_eq!(
+        effective.workspace_roots(),
+        expected_environment.workspace_roots.as_slice()
     );
     forked
         .thread
@@ -492,7 +537,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             serde_json::to_string(&codex_rollout::RolloutLine {
                 timestamp: "2026-08-13T00:00:00Z".to_string(),
                 ordinal: Some(0),
-                item: RolloutItem::SessionMeta(session_meta),
+                item: RolloutItem::SessionMeta(session_meta.clone()),
             })
             .expect("serialize resumed metadata")
         ),
@@ -504,11 +549,10 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: thread_id,
-                history: Arc::new(vec![checkpoint_settings_item(
-                    &config,
-                    restored_cwd,
-                    restored_environment.clone(),
-                )]),
+                history: Arc::new(vec![
+                    RolloutItem::SessionMeta(session_meta),
+                    checkpoint_settings_item(&config, restored_cwd, restored_environment.clone()),
+                ]),
                 rollout_path: Some(rollout_path),
             }),
             auth_manager,
@@ -527,6 +571,43 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
         .shutdown_and_wait()
         .await
         .expect("shutdown resumed thread");
+}
+
+#[tokio::test]
+async fn cold_resume_named_profile_uses_current_roots_without_rewriting_environment_cwd() {
+    let mut config = test_config().await;
+    let old_root = config.codex_home.join("old-workspace");
+    let current_root = config.codex_home.join("current-workspace");
+    config
+        .permissions
+        .set_workspace_roots(vec![current_root.clone()]);
+    let selected = TurnEnvironmentSelection {
+        environment_id: "selected-environment".to_string(),
+        cwd: PathUri::from_abs_path(&old_root),
+        workspace_roots: vec![PathUri::from_abs_path(&old_root)],
+        config: EnvironmentConfigState::FromThread,
+    };
+    let mut item = checkpoint_settings_item(&config, old_root, selected.clone());
+    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+        panic!("checkpoint settings");
+    };
+    event.thread_settings.active_permission_profile =
+        Some(codex_protocol::models::ActivePermissionProfile {
+            id: "removed-profile".to_string(),
+            extends: None,
+        });
+    let mut expected = selected;
+    expected.workspace_roots = vec![PathUri::from_abs_path(&current_root)];
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, std::slice::from_ref(&item)),
+        Some(vec![expected.clone()]),
+    );
+    config.permissions.set_workspace_roots(Vec::new());
+    expected.workspace_roots.clear();
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, &[item]),
+        Some(vec![expected]),
+    );
 }
 
 /// Resuming a thread preserves its stored ID instead of invoking the new manager's factory.
@@ -2750,34 +2831,43 @@ fn multi_agent_v2_interrupted_marker_uses_developer_input_message() {
 }
 
 #[test]
-fn completed_legacy_event_history_is_not_mid_turn() {
-    let completed_history = InitialHistory::Forked(vec![
-        RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
-            client_id: None,
-            message: "hello".to_string(),
-            images: None,
-            text_elements: Vec::new(),
-            local_images: Vec::new(),
-            ..Default::default()
-        })),
-        RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
-            message: "done".to_string(),
-            phase: None,
-            memory_citation: None,
-            delivery: None,
-            questions: None,
-        })),
-    ]);
+fn legacy_agent_message_phase_determines_turn_completion() {
+    for (phase, ends_mid_turn) in [
+        (None, false),
+        (
+            Some(codex_protocol::models::MessagePhase::FinalAnswer),
+            false,
+        ),
+        (Some(codex_protocol::models::MessagePhase::Commentary), true),
+    ] {
+        let completed_history = InitialHistory::Forked(vec![
+            RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+                client_id: None,
+                message: "hello".to_string(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+                ..Default::default()
+            })),
+            RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+                message: "done".to_string(),
+                phase,
+                memory_citation: None,
+                delivery: None,
+                questions: None,
+            })),
+        ]);
 
-    assert_eq!(
-        snapshot_turn_state(&completed_history),
-        SnapshotTurnState {
-            ends_mid_turn: false,
-            active_turn_id: None,
-            active_turn_started_at: None,
-            active_turn_start_index: None,
-        },
-    );
+        assert_eq!(
+            snapshot_turn_state(&completed_history),
+            SnapshotTurnState {
+                ends_mid_turn,
+                active_turn_id: None,
+                active_turn_started_at: None,
+                active_turn_start_index: None,
+            },
+        );
+    }
 }
 
 #[test]
@@ -3092,12 +3182,13 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
         .await
         .expect("read source before append");
     let appended_item = assistant_msg("append before freeze");
-    let turn = source
+    let (turn, _) = source
         .thread
         .session
         .new_turn_with_sub_id(
             "source-append".to_string(),
             SessionSettingsUpdate::default(),
+            Default::default(),
         )
         .await
         .expect("create append turn");

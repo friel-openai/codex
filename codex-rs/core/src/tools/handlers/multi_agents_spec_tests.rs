@@ -539,7 +539,7 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
 }
 
 #[test]
-fn list_agents_tool_includes_path_prefix_and_agent_fields() {
+fn list_agents_tool_preserves_upstream_path_filter_and_canonical_agent_fields() {
     let ToolSpec::Function(ResponsesApiTool {
         parameters,
         output_schema,
@@ -556,26 +556,19 @@ fn list_agents_tool_includes_path_prefix_and_agent_fields() {
         .properties
         .as_ref()
         .expect("list_agents should use object params");
-    assert!(properties.contains_key("path_prefix"));
-    assert!(properties.contains_key("cursor"));
-    assert!(properties.contains_key("limit"));
+    assert_eq!(
+        properties.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["path_prefix"]
+    );
     assert_eq!(
         properties
             .get("path_prefix")
             .and_then(|schema| schema.description.as_deref()),
-        Some(
-            "Task-path prefix filter without a trailing slash. Omit to list all current subagents."
-        )
+        Some("Task-path prefix filter without a trailing slash. Omit to list all live agents.")
     );
     assert_eq!(
         output_schema.expect("list_agents output schema")["properties"]["agents"]["items"]["required"],
-        json!([
-            "agent_id",
-            "parent_agent_id",
-            "agent_name",
-            "agent_status",
-            "last_task_message"
-        ])
+        json!(["agent_name", "agent_status"])
     );
 }
 

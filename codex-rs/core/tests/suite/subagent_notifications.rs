@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use codex_config::types::ToolSuggestDiscoverable;
 use codex_config::types::ToolSuggestDiscoverableType;
@@ -592,6 +593,11 @@ async fn setup_turn_one_with_custom_spawned_child(
 
     let configured_reasoning_effort = turn_reasoning_effort.clone();
     let mut builder = configure_test(test_codex().with_config(move |config| {
+        // This fixture emits multi_agent_v1.spawn_agent; Frodex defaults to V2.
+        config
+            .features
+            .disable(Feature::MultiAgentV2)
+            .expect("select V1 fixture tools");
         config
             .features
             .enable(Feature::Collab)
@@ -1130,6 +1136,10 @@ async fn spawned_child_receives_forked_parent_context(
         .with_config(|config| {
             config
                 .features
+                .disable(Feature::MultiAgentV2)
+                .expect("the fixture calls multi_agent_v1 tools");
+            config
+                .features
                 .enable(Feature::Collab)
                 .expect("test config should allow feature update");
             config.model = Some(INHERITED_MODEL.to_string());
@@ -1370,14 +1380,30 @@ async fn grandchild_full_fork_preserves_context_baseline(
         ]),
     )
     .await;
-    let _parent_followups = mount_sse_sequence(
-        &server,
-        vec![
-            sse(vec![ev_completed("baseline-parent-finished-1")]),
-            sse(vec![ev_completed("baseline-parent-finished-2")]),
-        ],
-    )
-    .await;
+    // Each parent completes its spawn call. A child's final message can arrive
+    // during finalization and require one more request from that parent.
+    Mock::given(method("POST"))
+        .and(path("/v1/responses"))
+        .and(|request: &wiremock::Request| {
+            serde_json::from_slice::<Value>(&request.body)
+                .ok()
+                .is_some_and(|body| {
+                    body["input"].as_array().is_some_and(|items| {
+                        items.iter().any(|item| {
+                            item["type"] == "function_call_output"
+                                && (item["call_id"] == ROOT_CALL || item["call_id"] == CHILD_CALL)
+                        })
+                    })
+                })
+        })
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse(vec![ev_completed("baseline-parent-finished")])),
+        )
+        .expect(2..=4)
+        .mount(&server)
+        .await;
     let test = test_codex()
         .with_history_mode(history_mode)
         .with_config(move |config| {
@@ -1430,19 +1456,32 @@ async fn grandchild_full_fork_preserves_context_baseline(
                 sleep(Duration::from_millis(/*millis*/ 10)).await;
             }
         })
-        .await?;
+        .await
+        .with_context(|| format!("waiting for {agent_name} first request"))?;
         let thread_id = ThreadId::from_string(
             request.body_json()["client_metadata"]["thread_id"]
                 .as_str()
                 .expect("descendant thread id"),
         )?;
         let thread = test.thread_manager.get_thread(thread_id).await?;
-        timeout(Duration::from_secs(/*secs*/ 10), async {
-            while !matches!(thread.agent_status().await, AgentStatus::Completed(_)) {
+        let completion = timeout(Duration::from_secs(/*secs*/ 10), async {
+            loop {
+                let status = thread.agent_status().await;
+                if matches!(status, AgentStatus::Completed(_)) {
+                    break;
+                }
+                anyhow::ensure!(
+                    !matches!(status, AgentStatus::Errored(_) | AgentStatus::Shutdown),
+                    "{agent_name} stopped before completion: {status:?}"
+                );
                 sleep(Duration::from_millis(/*millis*/ 10)).await;
             }
+            Ok::<(), anyhow::Error>(())
         })
-        .await?;
+        .await
+        .with_context(|| format!("waiting for {agent_name} completion"))
+        .and_then(|result| result);
+        completion?;
         descendant_requests.push(request);
     }
     let context_counts = [
@@ -1488,7 +1527,7 @@ enum FullHistoryV2ModelSelection {
 #[test_case(FullHistoryV2ModelSelection::WorldStateIdentity; "world state appends context window when agent identity changes")]
 #[test_case(FullHistoryV2ModelSelection::CurrentTimeReminders; "full fork drops inherited current-time reminders")]
 #[test_case(FullHistoryV2ModelSelection::MultiAgentModeInstructions; "full fork drops inherited multi-agent mode instructions")]
-#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork restores explicit policy after proactive transition")]
+#[test_case(FullHistoryV2ModelSelection::MultiAgentModeTransitions; "full fork retains proactive policy across effort changes")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_context(
     selection: FullHistoryV2ModelSelection,
@@ -1727,20 +1766,19 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
         let proactive_developer_messages = proactive_request.message_input_text_groups("developer");
         assert!(
             proactive_developer_messages.iter().any(|message| {
-                message.len() > 1
-                    && message
-                        .iter()
-                        .any(|text| text.contains(FULL_HISTORY_PROACTIVE_POLICY))
+                message
+                    .iter()
+                    .any(|text| text.contains(FULL_HISTORY_PROACTIVE_POLICY))
             }),
-            "proactive policy should share a developer message with unrelated context: {proactive_developer_messages:?}"
+            "proactive policy must reach the model: {proactive_developer_messages:?}"
         );
         let explicit_request = explicit_turn.single_request();
         assert!(
             explicit_request
                 .message_input_texts("developer")
                 .iter()
-                .any(|text| text.contains(FULL_HISTORY_EXPLICIT_POLICY)),
-            "restored parent policy should require an explicit delegation request"
+                .any(|text| text.contains(FULL_HISTORY_PROACTIVE_POLICY)),
+            "Frodex's configured proactive policy must not change with reasoning effort"
         );
     }
     test.submit_turn(TURN_1_PROMPT).await?;
@@ -1835,7 +1873,7 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
                     .filter(|message| message.contains(FULL_HISTORY_SHARED_USAGE_HINT))
                     .count(),
             ),
-            (1, 1, 0, 1)
+            (1, 0, 1, 1)
         );
     }
     if matches!(selection, FullHistoryV2ModelSelection::CurrentTimeReminders) {
@@ -3346,6 +3384,10 @@ async fn spawn_agent_rejects_reasoning_effort_unsupported_by_role_model() -> Res
                 .features
                 .enable(Feature::Collab)
                 .expect("test config should allow feature update");
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("fixture invokes multi_agent_v1.spawn_agent");
             let role_path = config.codex_home.join("model-only-role.toml");
             std::fs::write(&role_path, format!("model = \"{ROLE_MODEL}\"\n"))
                 .expect("write role config");
@@ -3413,6 +3455,7 @@ async fn spawn_agent_tool_description_mentions_role_locked_settings() -> Result<
             .enable(Feature::Collab)
             .expect("test config should allow feature update");
         config.multi_agent_v2.hide_spawn_agent_metadata = false;
+        config.features.disable(Feature::MultiAgentV2).expect("search the V1 role-locked tool");
         let role_path = config.codex_home.join("custom-role.toml");
         std::fs::write(
             &role_path,

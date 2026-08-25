@@ -105,7 +105,10 @@ impl ToolExecutor<ToolInvocation> for SetWorkspaceCwdHandler {
         })
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let ToolInvocation {
                 session,
@@ -210,7 +213,12 @@ impl ToolExecutor<ToolInvocation> for SetWorkspaceCwdHandler {
                     .services
                     .agents_md_manager
                     .refresh(config.as_ref(), &environments)
-                    .await;
+                    .await
+                    .map_err(|err| {
+                        FunctionCallError::RespondToModel(format!(
+                            "workspace.set_cwd could not refresh AGENTS.md instructions: {err}"
+                        ))
+                    })?;
 
                 metadata_persisted = if let Some(live_thread) = session.live_thread() {
                     let git_info = GitInfoPatch {
@@ -535,6 +543,11 @@ mod tests {
         let mut selection = current_environment.selection.clone();
         selection.cwd = PathUri::from_abs_path(&fixture.primary);
         selection.workspace_roots = vec![PathUri::from_abs_path(&fixture.primary)];
+        let codex_protocol::protocol::EnvironmentConfigState::Ready(config) = &mut selection.config
+        else {
+            panic!("fixture environment must be ready");
+        };
+        config.workspace_roots = selection.workspace_roots.clone();
         let config_origin = current_environment.config_origin;
         let environment = Arc::clone(&current_environment.environment);
         let shell = current_environment.shell.clone();

@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use chrono::Utc;
 use codex_app_server_protocol::CodexErrorInfo;
-use codex_app_server_protocol::ThreadTimelineEntry;
 use codex_app_server_protocol::ThreadHistoryBuilder;
+use codex_app_server_protocol::ThreadTimelineEntry;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::EventMsg;
@@ -15,14 +15,14 @@ use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnStartedEvent;
+use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::realtime::BemItemPresentation;
 use codex_protocol::realtime::RealtimeItem;
 use codex_protocol::realtime::RealtimeItemContent;
 use codex_protocol::realtime::RealtimeSessionOutcome;
 use codex_protocol::realtime::RealtimeTranscriptRole;
-use codex_protocol::protocol::TurnCompleteEvent;
-use codex_protocol::protocol::TurnStartedEvent;
-use codex_protocol::protocol::UserMessageEvent;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
@@ -2172,6 +2172,9 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
         .await
         .expect("read canonical legacy session metadata");
     let compacted = RolloutItem::Compacted(CompactedItem {
+        compaction_response_id: None,
+        guardian_history: None,
+        latest_token_usage_record: None,
         message: String::new(),
         replacement_history: None,
         mcp_resource_origins: None,

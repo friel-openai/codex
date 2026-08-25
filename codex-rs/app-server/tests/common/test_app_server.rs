@@ -254,6 +254,9 @@ impl TestAppServer {
             codex_home.join("managed_config.toml"),
         );
         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
+        // Auth tests explicitly supply synthetic credentials below; never inherit the developer's.
+        cmd.env_remove(codex_login::CODEX_ACCESS_TOKEN_ENV_VAR);
+        cmd.env_remove("OPENAI_API_KEY");
         cmd.args(args);
 
         for (k, v) in env_overrides {
@@ -2017,6 +2020,8 @@ impl TestAppServerBuilder {
                 None
             } else {
                 let settings_server = MockServer::start().await;
+                core_test_support::responses::mount_empty_cloud_config_bundle(&settings_server)
+                    .await;
                 Mock::given(method("GET"))
                     .and(path("/backend-api/wham/settings/user"))
                     .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({

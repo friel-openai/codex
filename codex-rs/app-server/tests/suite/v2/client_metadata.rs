@@ -198,7 +198,18 @@ async fn turn_start_sends_fork_lineage_in_turn_metadata_for_thread_fork_v2() -> 
         metadata["forked_from_thread_id"].as_str(),
         Some(source_thread_id.as_str())
     );
-    assert!(metadata.get("forked_from_ordinal_exclusive").is_none());
+    let fork_meta =
+        codex_rollout::read_session_meta_line(thread.path.as_ref().expect("fork rollout")).await?;
+    assert_eq!(
+        metadata["forked_from_ordinal_exclusive"].as_u64(),
+        Some(
+            fork_meta
+                .meta
+                .history_base
+                .expect("fork history base")
+                .end_ordinal_exclusive
+        ),
+    );
     assert_eq!(metadata["thread_id"].as_str(), Some(thread.id.as_str()));
     assert_eq!(metadata["turn_id"].as_str(), Some(turn.id.as_str()));
 

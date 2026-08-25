@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fmt::Debug;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
@@ -457,7 +458,6 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::Settings;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::mcp::ClientMcpExtensions;
-use codex_protocol::models::ContentItem;
 use codex_protocol::models::LocalImagePreparation;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
@@ -974,13 +974,20 @@ impl Session {
         token_budget::apply_model_defaults(Arc::make_mut(&mut config), &model_info);
         let configured_config = Arc::clone(&config);
         let configured_multi_agent_version = config.multi_agent_version_override();
-        let multi_agent_version = configured_or_persisted_multi_agent_version(
-            &conversation_history,
-            configured_multi_agent_version,
-        )
-        .or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        // Internal sessions must not gain agent tools from Frodex's default v2 setting.
+        let multi_agent_version = if inherited_multi_agent_version
+            == Some(MultiAgentVersion::Disabled)
+        {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            configured_or_persisted_multi_agent_version(
+                &conversation_history,
+                configured_multi_agent_version,
+            )
+            .or_else(|| {
+                resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+            })
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -1907,7 +1914,7 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.record_items(
                         startup_response_items.iter(),
-                        turn_context.model_info.truncation_policy.into(),
+                        turn_context.model_info().truncation_policy.into(),
                     );
                 }
                 let mut startup_rollout_items = startup_response_items
@@ -1972,10 +1979,13 @@ impl Session {
         rollout_items: &[RolloutItem],
         materialization: ForkedHistoryMaterialization,
     ) -> CodexResult<Vec<RolloutItem>> {
-        if !rollout_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
-        {
+        // Native full-history forks carry a history_base pointer, but resumed native history
+        // has already been reconstructed by the store. Only forks need native expansion here.
+        if !rollout_items.iter().any(|item| {
+            matches!(item, RolloutItem::RolloutReference(_))
+                || matches!(materialization, ForkedHistoryMaterialization::ModelContext)
+                    && matches!(item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some())
+        }) {
             return Ok(rollout_items.to_vec());
         }
         let (codex_home, history_mode) = {
@@ -2163,7 +2173,11 @@ impl Session {
             if let Some(shared_model_response_items) = shared_model_response_items {
                 state.replace_shared_history(shared_model_response_items, reference_context_item);
             } else {
-                state.replace_annotated_history(history, reference_context_item, HistoryReplacement::Reset);
+                state.replace_annotated_history(
+                    history,
+                    reference_context_item,
+                    HistoryReplacement::Reset,
+                );
             }
             state
                 .history
@@ -2214,6 +2228,7 @@ impl Session {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
                 msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
@@ -2230,6 +2245,7 @@ impl Session {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
                 msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
@@ -2292,6 +2308,7 @@ impl Session {
                 self.deliver_event_raw(Event {
                     id: turn_context.sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                         message: format!(
                             "The rollback was not applied because its current-state checkpoint could not be persisted. The original thread state was restored: {error}"
                         ),
@@ -2307,6 +2324,7 @@ impl Session {
                 self.deliver_event_raw(Event {
                     id: turn_context.sub_id.clone(),
                     msg: EventMsg::Error(ErrorEvent {
+misalignment: None,
                         message: format!(
                             "The rollback checkpoint may have committed, but Codex could not verify it. Restart this thread before continuing: {error}"
                         ),
@@ -2393,7 +2411,7 @@ impl Session {
                 .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
             state.reference_context_item(),
             ThreadSettingsAppliedEvent {
-                thread_id: self.conversation_id,
+                thread_id: Some(self.thread_id()),
                 thread_settings: state
                     .session_configuration
                     .thread_settings_snapshot(&self.services.turn_environments.selections()),
@@ -2657,6 +2675,7 @@ impl Session {
             config.active_project = next_config.active_project.clone();
             let selected_model = state
                 .session_configuration
+                .step_settings
                 .collaboration_mode
                 .model()
                 .to_string();
@@ -2700,12 +2719,12 @@ impl Session {
                         "updated the selected custom-model alias after a config rename"
                     );
                     state.model_routing.rename_profile(&selected_model, &alias);
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(alias),
-                            /*effort*/ None,
-                            /*developer_instructions*/ None,
-                        );
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(alias),
+                        /*effort*/ None,
+                        /*developer_instructions*/ None,
+                    );
                 }
                 model_alias_refresh::SelectedAliasUpdate::DetachedProfile { candidate } => {
                     warn!(
@@ -2713,13 +2732,13 @@ impl Session {
                         concrete_model = candidate.model,
                         "detached the thread from a removed custom-model alias"
                     );
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(candidate.model),
-                            Some(candidate.reasoning_effort),
-                            /*developer_instructions*/ None,
-                        );
-                    state.session_configuration.service_tier = candidate.service_tier;
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(candidate.model),
+                        Some(candidate.reasoning_effort),
+                        /*developer_instructions*/ None,
+                    );
+                    settings.service_tier = candidate.service_tier;
                     state.model_routing = Default::default();
                 }
                 model_alias_refresh::SelectedAliasUpdate::DetachedAlias { model } => {
@@ -2728,15 +2747,19 @@ impl Session {
                         concrete_model = model,
                         "detached the thread from a removed custom-model alias"
                     );
-                    state.session_configuration.collaboration_mode =
-                        state.session_configuration.collaboration_mode.with_updates(
-                            Some(model),
-                            /*effort*/ None,
-                            /*developer_instructions*/ None,
-                        );
+                    let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+                    settings.collaboration_mode = settings.collaboration_mode.with_updates(
+                        Some(model),
+                        /*effort*/ None,
+                        /*developer_instructions*/ None,
+                    );
                     state.model_routing = Default::default();
                 }
             }
+            state
+                .session_configuration
+                .model_info_overrides
+                .custom_models = config.custom_models.clone();
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
             self.mark_mcp_runtime_dirty();
             let new_config = notify_config_contributors
@@ -4692,7 +4715,11 @@ impl Session {
             segment_state_checkpoint: None,
         };
 
-        state.replace_annotated_history(items, reference_context_item.clone(), HistoryReplacement::Compaction);
+        state.replace_annotated_history(
+            items,
+            reference_context_item.clone(),
+            HistoryReplacement::Compaction,
+        );
         // The state mutex hides the candidate until commit classification; a non-commit restores
         // prior_state, including its Guardian history. Persist the candidate's review checkpoint.
         compacted_item.guardian_history = state.history.guardian_history_checkpoint();
@@ -4714,7 +4741,7 @@ impl Session {
                     realtime_active: settings.realtime_active,
                 });
         let thread_settings = ThreadSettingsAppliedEvent {
-            thread_id: self.conversation_id,
+            thread_id: Some(self.thread_id()),
             thread_settings: state
                 .session_configuration
                 .thread_settings_snapshot(&self.services.turn_environments.selections()),
@@ -4944,6 +4971,10 @@ impl Session {
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
         let mut separate_developer_sections = Vec::<RenderedFragment>::new();
         let mut context_window_hints = Vec::new();
+        let replaces_history = matches!(
+            &auto_compact_window,
+            InitialContextAutoCompactWindow::Prepared(_)
+        );
         let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
             let auto_compact_window_ids = match auto_compact_window {
@@ -4958,7 +4989,10 @@ impl Session {
         };
         if let Some(role_prompt) =
             load_agent_role_prompt(&turn_context.config, &session_source).await
-            && !history_contains_developer_text(&history, &role_prompt)
+            // A prepared checkpoint replaces the old history only after durable
+            // publication. Its instructions must not be deduplicated against
+            // the old history that remains visible during preparation.
+            && (replaces_history || !history_contains_developer_text(&history, &role_prompt))
         {
             developer_sections.push(DeveloperInstructions::new(&role_prompt).render_fragment());
         }

@@ -1294,7 +1294,24 @@ pub async fn start_mock_server() -> MockServer {
     // Provide a default `/models` response so tests remain hermetic when the client queries it.
     let _ = mount_models_once(&server, ModelsResponse { models: Vec::new() }).await;
 
+    mount_empty_cloud_config_bundle(&server).await;
+
     server
+}
+
+/// Keep authenticated tests local while allowing explicit policy and failure mocks to override.
+pub async fn mount_empty_cloud_config_bundle(server: &MockServer) {
+    for route in [
+        "/api/codex/config/bundle",
+        "/backend-api/wham/config/bundle",
+    ] {
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .with_priority(255)
+            .mount(server)
+            .await;
+    }
 }
 
 /// Starts a lightweight WebSocket server for `/v1/responses` tests.

@@ -164,6 +164,7 @@ fn find_agent_message<'a>(lines: &'a [RolloutLine], message_id: &str) -> &'a Res
             }
             RolloutItem::SessionMeta(_)
             | RolloutItem::ResponseItem(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::InterAgentCommunication(_)
             | RolloutItem::Compacted(_)
             | RolloutItem::TurnContext(_)
@@ -171,7 +172,8 @@ fn find_agent_message<'a>(lines: &'a [RolloutLine], message_id: &str) -> &'a Res
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
-            | RolloutItem::RolloutReference(_) => None,
+            | RolloutItem::RolloutReference(_)
+            | RolloutItem::TokenUsageRecord(_) => None,
         })
         .expect("agent message must remain in repaired rollout")
 }

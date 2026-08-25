@@ -65,6 +65,10 @@ static PUBLISHED_REPLACEMENTS: LazyLock<Mutex<std::collections::HashMap<PathBuf,
 #[cfg(all(test, unix))]
 static CODEX_HOME_RETARGETS: LazyLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
     LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
+// Retarget only after the read-only check has bound its managed directory.
+#[cfg(all(test, unix))]
+static MANAGED_ROOT_RETARGETS: LazyLock<Mutex<std::collections::HashMap<PathBuf, PathBuf>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashMap::new()));
 
 /// Durability result after an active rollout replacement becomes visible.
 #[derive(Debug)]
@@ -880,33 +884,72 @@ pub(crate) async fn history_repair_publication_needs_exclusive(
     selected_path: &Path,
 ) -> ThreadStoreResult<bool> {
     let authority = ConfinedRepairAuthority::bind(codex_home).await?;
-    let selected_path = authority.bind_path(selected_path)?;
-    let selected_path =
-        validate_mutable_repair_source(authority.canonical_home.as_path(), selected_path.as_path())
-            .await?;
+    // Reading a managed sessions symlink is supported even when its target is
+    // outside CODEX_HOME. Bind that directory, not an arbitrary source parent;
+    // descriptor traversal still rejects symlinks below the bound root. This
+    // read-only binding grants no permission to publish a repair there.
+    let mut managed_path = None;
+    for directory in [
+        codex_rollout::SESSIONS_SUBDIR,
+        codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
+    ] {
+        let lexical_root = authority.lexical_home.join(directory);
+        let physical_root = match fs::canonicalize(authority.canonical_home.join(directory)).await {
+            Ok(root) => root,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(thread_store_io_error(error)),
+        };
+        if let Ok(relative) = selected_path
+            .strip_prefix(&lexical_root)
+            .or_else(|_| selected_path.strip_prefix(&physical_root))
+        {
+            let identity = confined_root_identity(&physical_root)
+                .await
+                .map_err(thread_store_io_error)?;
+            #[cfg(all(test, unix))]
+            if let Some(target) = MANAGED_ROOT_RETARGETS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&lexical_root)
+            {
+                std::fs::remove_file(&lexical_root).map_err(thread_store_io_error)?;
+                std::os::unix::fs::symlink(target, &lexical_root).map_err(thread_store_io_error)?;
+            }
+            managed_path = Some((physical_root.join(relative), physical_root, identity));
+            break;
+        }
+    }
+    let (selected_path, read_root, read_identity) = match managed_path {
+        Some(binding) => binding,
+        None => (
+            authority.bind_path(selected_path)?,
+            authority.canonical_home.clone(),
+            authority.root_identity,
+        ),
+    };
+    reject_immutable_publication_target(&authority.canonical_home, &selected_path).await?;
+    let parent = selected_path
+        .parent()
+        .ok_or_else(|| ThreadStoreError::Conflict {
+            message: "history repair source has no parent".to_string(),
+        })?;
+    validate_real_directory_tree(&read_root, parent).await?;
+    validate_regular_file_in_parent(&selected_path, parent).await?;
     let plain_path = codex_rollout::plain_rollout_path(&selected_path);
     let sibling = if plain_path == selected_path {
         compressed_sibling(&plain_path)
     } else {
         plain_path
     };
-    if confined_entry_exists_under_root(
-        &authority.canonical_home,
-        &sibling,
-        &authority.root_identity,
-    )
-    .await
-    .map_err(thread_store_io_error)?
+    if confined_entry_exists_under_root(&read_root, &sibling, &read_identity)
+        .await
+        .map_err(thread_store_io_error)?
     {
         return Ok(true);
     }
-    confined_staged_entries_exist_under_root(
-        &authority.canonical_home,
-        &selected_path,
-        &authority.root_identity,
-    )
-    .await
-    .map_err(thread_store_io_error)
+    confined_staged_entries_exist_under_root(&read_root, &selected_path, &read_identity)
+        .await
+        .map_err(thread_store_io_error)
 }
 
 async fn recover_history_repair_publication_authorized(
@@ -1144,8 +1187,16 @@ async fn reject_immutable_publication_target(
         .await
         .map_err(thread_store_io_error)?;
     let rotated = canonical_home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR);
+    let canonical_rotated = match fs::canonicalize(&rotated).await {
+        Ok(root) => Some(root),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+        Err(error) => return Err(thread_store_io_error(error)),
+    };
     if stable_path.starts_with(codex_home.join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR))
         || canonical_stable.starts_with(rotated.as_path())
+        || canonical_rotated
+            .as_ref()
+            .is_some_and(|root| canonical_stable.starts_with(root))
     {
         return Err(ThreadStoreError::Conflict {
             message: format!(

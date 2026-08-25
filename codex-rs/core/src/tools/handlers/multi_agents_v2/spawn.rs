@@ -113,7 +113,10 @@ impl ToolExecutor<ToolInvocation> for AdoptHandler {
         create_adopt_agent_tool(self.hide_agent_metadata)
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             handle_agent_start(invocation, AgentStartOperation::Adopt)
                 .await
@@ -192,10 +195,7 @@ async fn handle_agent_start(
     let mut config = if is_adoption {
         build_agent_resume_config(turn.as_ref())?
     } else {
-        build_agent_spawn_config(
-            &session.get_base_instructions().await,
-            turn.as_ref(),
-        )?
+        build_agent_spawn_config(&session.get_base_instructions().await, turn.as_ref())?
     };
     let is_full_history_fork = matches!(fork_mode, Some(SpawnAgentForkMode::FullHistory));
     if !is_adoption {
@@ -311,7 +311,12 @@ async fn handle_agent_start(
                         parent_thread_id: Some(session.thread_id),
                         parent_turn_id: Some(turn.sub_id.clone()),
                         root_turn_id: turn.turn_metadata_state.root_turn_id(),
-                        environments: Some(step_context.environments.to_spawn_selections()),
+                        environments: Some(
+                            step_context
+                                .environments
+                                .to_spawn_selections()
+                                .map_err(collab_spawn_error)?,
+                        ),
                         multi_agent_v2_usage_hints,
                         cyber_access_program: turn.cyber_access_program,
                         initial_task_message: None,
@@ -440,7 +445,6 @@ struct AgentStartArgs {
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
-    service_tier: Option<String>,
 }
 
 impl From<SpawnAgentArgs> for AgentStartArgs {
@@ -452,7 +456,6 @@ impl From<SpawnAgentArgs> for AgentStartArgs {
             agent_type: args.agent_type,
             model: args.model,
             reasoning_effort: args.reasoning_effort,
-            service_tier: args.service_tier,
         }
     }
 }
@@ -466,7 +469,6 @@ impl From<AdoptAgentArgs> for AgentStartArgs {
             agent_type: None,
             model: None,
             reasoning_effort: None,
-            service_tier: None,
         }
     }
 }

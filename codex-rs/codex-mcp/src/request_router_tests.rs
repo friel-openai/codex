@@ -24,8 +24,11 @@ fn route() -> (
     async_channel::Receiver<Event>,
 ) {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::OnRequest,
-        PermissionProfile::default(),
+        crate::mcp::tests::test_elicitation_config(
+            "test",
+            AskForApproval::OnRequest,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
@@ -45,8 +48,11 @@ fn route() -> (
 #[tokio::test]
 async fn threadless_route_declines_interactive_elicitation() -> anyhow::Result<()> {
     let manager = ElicitationRequestManager::new(
-        AskForApproval::OnRequest,
-        PermissionProfile::default(),
+        crate::mcp::tests::test_elicitation_config(
+            "test",
+            AskForApproval::OnRequest,
+            PermissionProfile::default(),
+        ),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),
@@ -397,8 +403,11 @@ async fn elicitation_is_delivered_only_to_the_active_session() -> anyhow::Result
 async fn shared_connection_preserves_route_specific_elicitation_policy() -> anyhow::Result<()> {
     let router = McpConnectionRequestRouter::default();
     let never_manager = ElicitationRequestManager::new(
-        AskForApproval::Never,
-        PermissionProfile::Disabled,
+        crate::mcp::tests::test_elicitation_config(
+            "test",
+            AskForApproval::Never,
+            PermissionProfile::Disabled,
+        ),
         /*reviewer*/ None,
         /*lifecycle*/ None,
         ElicitationRequestRouter::default(),

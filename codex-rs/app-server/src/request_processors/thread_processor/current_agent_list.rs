@@ -366,6 +366,8 @@ fn merge_current_agent_live_thread(
     thread.session_id.clone_from(&fallback_thread.session_id);
     thread.ephemeral = fallback_thread.ephemeral;
     thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
+    thread.model = fallback_thread.model;
+    thread.reasoning_effort = fallback_thread.reasoning_effort;
     thread
 }
 
@@ -408,6 +410,8 @@ fn minimal_current_agent_thread(
             project_id: None,
             history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
             model_provider: config.model_provider_id.clone(),
+            model: None,
+            reasoning_effort: None,
             created_at: 0,
             updated_at: 0,
             recency_at: Some(0),

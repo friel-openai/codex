@@ -103,8 +103,14 @@ async fn start_recording_app_server_with_history(
     failed_thread_name: Option<&'static str>,
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
 ) -> Result<RecordingAppServer> {
+    let mut config = config.clone();
+    if matches!(history_capabilities, HistoryCapabilities::LegacyOnly) {
+        config
+            .features
+            .disable(Feature::BackgroundPaginatedRolloutMigration)?;
+    }
     let state_db =
-        crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
+        crate::init_state_db_for_app_server_target(&config, &crate::AppServerTarget::Embedded)
             .await?;
     let embedded = crate::start_embedded_app_server(
         codex_arg0::Arg0DispatchPaths::default(),
@@ -340,7 +346,7 @@ async fn start_recording_app_server_with_history(
     .await?;
 
     Ok((
-        AppServerSession::new(app_server, thread_params_mode).with_startup_config(config),
+        AppServerSession::new(app_server, thread_params_mode).with_startup_config(&config),
         requests,
         proxy,
     ))
@@ -364,6 +370,49 @@ fn create_history_rollout(
         /*git_info*/ None,
     )
     .map_err(|err| color_eyre::eyre::eyre!("failed to create history rollout: {err}"))?;
+    if history_mode == ThreadHistoryMode::Paginated {
+        let path = rollout_path(
+            config.codex_home.as_path(),
+            "2026-01-02T00-00-00",
+            &thread_id,
+        );
+        let mut records = std::fs::read_to_string(&path)?
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let start = EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "fixture-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        });
+        records.push(serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "ordinal": records.len(), "type": "event_msg", "payload": start}));
+        let event = EventMsg::ItemCompleted(codex_protocol::protocol::ItemCompletedEvent {
+            thread_id: ThreadId::from_string(&thread_id)?,
+            turn_id: "fixture-turn".to_string(),
+            item: TurnItem::UserMessage(UserMessageItem {
+                id: "fixture-user".to_string(),
+                client_id: None,
+                content: vec![CoreUserInput::Text {
+                    text: preview.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            }),
+            started_at_ms: None,
+            completed_at_ms: 0,
+        });
+        records.push(serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "ordinal": records.len(), "type": "event_msg", "payload": event}));
+        std::fs::write(
+            path,
+            records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )?;
+    }
     Ok(ThreadId::from_string(&thread_id)?)
 }
 
@@ -2336,7 +2385,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         .iter()
         .map(|params| params["includeTurns"].as_bool().unwrap_or(false))
         .collect::<Vec<_>>();
-    assert_eq!(legacy_include_turns, vec![false, true]);
+    assert_eq!(legacy_include_turns, vec![false]);
 
     app_server.shutdown().await?;
     proxy.await??;
@@ -2359,8 +2408,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> 
                 ThreadHistoryMode::Legacy,
                 "legacy background task",
             )?,
-            vec![false, true],
-            0,
+            vec![false],
+            1,
         ),
     ];
     let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
@@ -2995,7 +3044,12 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     requests.lock().expect("request recorder lock").clear();
     app.change_working_directory(&mut tui, &mut server, untrusted.clone().abs())
         .await;
-    assert_eq!(app.config.active_project.trust_level, Some(T::Untrusted));
+    assert_eq!(
+        app.config.active_project.trust_level,
+        Some(T::Untrusted),
+        "{}",
+        history().join("")
+    );
     let approval = app.config.permissions.approval_policy.value();
     assert_eq!(approval, AskForApproval::UnlessTrusted.to_core());
     assert_eq!(rec(req, "thread/fork")[0]["approvalPolicy"], "untrusted");

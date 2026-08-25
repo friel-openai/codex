@@ -121,8 +121,14 @@ fn finalize_active_segment<'a>(
 
     // Restore settings from the newest surviving context baseline or certified checkpoint.
     if !*previous_turn_settings_resolved {
-        if has_context_baseline
-            && let Some(settings) = active_segment.previous_turn_settings
+        // The checkpoint's comparison baseline can differ from its reference TurnContext.
+        // Only a newer user turn supersedes the certified previous-turn settings.
+        if !active_segment.counts_as_user_turn
+            && let Some(settings) = active_segment.checkpoint_previous_turn_settings
+        {
+            *previous_turn_settings = settings;
+            *previous_turn_settings_resolved = true;
+        } else if has_context_baseline && let Some(settings) = active_segment.previous_turn_settings
         {
             *previous_turn_settings = Some(settings);
             *previous_turn_settings_resolved = true;
@@ -380,6 +386,29 @@ impl Session {
                 &mut pending_rollback_turns,
             );
         }
+
+        // Bounded input can start at a checkpoint containing the user turns a later rollback
+        // removes. If reverse replay discarded that checkpoint, seed forward replay from it
+        // rather than losing the retained turns. Never prefer it over available original items
+        // or a surviving checkpoint; those preserve upstream rollback semantics.
+        let base_compaction = base_compaction.or_else(|| {
+            let (index, item) = rollout_items.iter().enumerate().find(|(_, item)| {
+                matches!(
+                    item,
+                    RolloutItem::ResponseItem(_)
+                        | RolloutItem::InterAgentCommunication(_)
+                        | RolloutItem::Compacted(_)
+                )
+            })?;
+            let RolloutItem::Compacted(compacted) = item else {
+                return None;
+            };
+            compacted.replacement_history.as_ref()?;
+            Some(ReplayCheckpoint {
+                compacted,
+                suffix: &rollout_items[index + 1..],
+            })
+        });
 
         let fallback_window_number = u64::try_from(
             rollout_items

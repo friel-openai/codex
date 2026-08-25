@@ -93,6 +93,12 @@ async fn complete_native_projection_reads_and_resumes_without_opening_ancestors(
     assert!(store.has_history_projection(thread_id).await?);
     drop(store);
 
+    // Tracing cannot observe every filesystem reader. A complete projection and certified
+    // active checkpoint must also work when historical segments cannot be reopened.
+    for ancestor in &ancestors {
+        std::fs::rename(ancestor, ancestor.with_extension("jsonl.unavailable"))?;
+    }
+
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
         .without_auto_env()

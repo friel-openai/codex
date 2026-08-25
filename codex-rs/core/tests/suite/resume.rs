@@ -1,7 +1,9 @@
 use anyhow::Result;
 use codex_core::TurnInputRequest;
 use codex_protocol::config_types::WindowsSandboxLevel;
+use codex_protocol::items::TurnItem;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSettingsOverrides;
 use codex_protocol::user_input::ByteRange;
 use codex_protocol::user_input::TextElement;
@@ -52,12 +54,25 @@ async fn resume_restores_windows_sandbox_override() -> Result<()> {
     Ok(())
 }
 
+#[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
+#[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
+async fn resume_includes_initial_messages_from_rollout_events(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
-    let mut builder = test_codex();
+    let mut builder = test_codex()
+        .with_history_mode(history_mode)
+        .with_config(move |config| {
+            if history_mode == ThreadHistoryMode::Legacy {
+                config
+                    .features
+                    .disable(codex_features::Feature::BackgroundPaginatedRolloutMigration)
+                    .expect("exercise the legacy event reader without converting the fixture");
+            }
+        });
     let initial = builder.build(&server).await?;
     let codex = Arc::clone(&initial.codex);
 
@@ -94,10 +109,51 @@ async fn resume_includes_initial_messages_from_rollout_events() -> Result<()> {
             EventMsg::TokenCount(_),
             EventMsg::TurnComplete(completed),
         ] => {
+            assert_eq!(history_mode, ThreadHistoryMode::Legacy);
             assert_eq!(first_user.message, "Record some messages");
             assert_eq!(first_user.text_elements, text_elements);
             assert_eq!(assistant_message.message, "Completed first turn");
             assert_eq!(completed.turn_id, started.turn_id);
+            assert_eq!(
+                completed.last_agent_message.as_deref(),
+                Some("Completed first turn")
+            );
+        }
+        [
+            EventMsg::TurnStarted(started),
+            EventMsg::ItemCompleted(first_user),
+            EventMsg::ItemCompleted(assistant_message),
+            EventMsg::TokenCount(_),
+            EventMsg::TurnComplete(completed),
+        ] => {
+            // Resume converts legacy storage on demand; both inputs preserve these items.
+            let TurnItem::UserMessage(first_user_item) = &first_user.item else {
+                panic!("expected user message item");
+            };
+            let TurnItem::AgentMessage(assistant_item) = &assistant_message.item else {
+                panic!("expected assistant message item");
+            };
+            assert_eq!(
+                first_user_item.content,
+                vec![UserInput::Text {
+                    text: "Record some messages".to_string(),
+                    text_elements,
+                }]
+            );
+            assert_eq!(
+                serde_json::to_value(&assistant_item.content)?,
+                serde_json::json!([{
+                    "type": "Text", "text": "Completed first turn",
+                }])
+            );
+            assert_eq!(
+                (
+                    &first_user.turn_id,
+                    &assistant_message.turn_id,
+                    &completed.turn_id
+                ),
+                (&started.turn_id, &started.turn_id, &started.turn_id)
+            );
             assert_eq!(
                 completed.last_agent_message.as_deref(),
                 Some("Completed first turn")

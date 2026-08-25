@@ -1006,7 +1006,6 @@ async fn manual_compact_records_durable_and_local_token_usage() {
         set_test_compact_prompt(config);
     });
     let test = builder.build(&server).await.unwrap();
-    let rollout_path = test.codex.rollout_path().expect("rollout path");
     let codex = test.codex;
 
     // Trigger manual compact and collect TokenCount events for the compact turn.
@@ -1043,12 +1042,13 @@ async fn manual_compact_records_durable_and_local_token_usage() {
         last > 0,
         "second TokenCount should reflect a non-zero estimated context size after compaction"
     );
-    let rollout_items = fs::read_to_string(rollout_path)
-        .expect("read rollout")
-        .lines()
-        .filter_map(|line| serde_json::from_str::<RolloutLine>(line).ok())
-        .map(|line| line.item)
-        .collect::<Vec<_>>();
+    // Compaction can rotate earlier records into immutable segments. Read the
+    // persisted logical history rather than only the active JSONL suffix.
+    let rollout_items = codex
+        .load_history(/*include_archived*/ false)
+        .await
+        .expect("read persisted rollout history")
+        .items;
     let records = rollout_items
         .iter()
         .filter_map(|item| match item {
@@ -1321,9 +1321,11 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                 // relevant to compaction behavior and can change as bundled prompts evolve.
                 let role = value.get("role").and_then(|role| role.as_str());
                 if role == Some("developer")
-                    && texts
-                        .into_iter()
-                        .any(|text| text.contains("`sandbox_mode`"))
+                    && texts.into_iter().any(|text| {
+                        text.contains("`sandbox_mode`")
+                            || text.starts_with("You are `/root`, the primary agent")
+                            || text.starts_with("<multi_agent_mode>")
+                    })
                 {
                     return None;
                 }
@@ -1350,10 +1352,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
         let input = normalize_inputs(input);
         assert_eq!(input.len(), 3);
-        let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+        let actual_environment_message = input[0]["content"][0]["text"].as_str().unwrap();
         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
-        assert_eq!(environment_message, environment_message);
+        assert_eq!(actual_environment_message, environment_message);
         assert_eq!(user_message_received, user_message);
         assert_eq!(
             summary_message, expected_summary,
@@ -5076,17 +5078,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
         ev_assistant_message("m1", FIRST_REPLY),
         ev_completed_with_tokens("r1", /*total_tokens*/ 500),
     ]);
-    let mut responses = vec![first_turn];
-    responses.extend(
-        (0..5).map(|_| {
-            sse_failed(
-                "compact-failed",
-                "context_length_exceeded",
-                "Your input exceeds the context window of this model. Please adjust your input and try again.",
-            )
-        }),
+    let first_turn_log = mount_sse_once(&server, first_turn).await;
+    let failure = sse_failed(
+        "compact-failed",
+        "context_length_exceeded",
+        CONTEXT_LIMIT_MESSAGE,
     );
-    let request_log = mount_sse_sequence(&server, responses).await;
+    let request_log = mount_sse_once(&server, failure.clone()).await;
+    // Compaction drops one historical item per retry. Keep failing regardless
+    // of how many bundled instruction messages precede the user's history.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/responses"))
+        .respond_with(sse_response(failure))
+        .with_priority(6)
+        .mount(&server)
+        .await;
 
     let mut model_provider = non_openai_model_provider(&server);
     model_provider.stream_max_retries = Some(0);
@@ -5126,10 +5132,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
     let requests = request_log.requests();
-    assert!(
-        requests.len() >= 2,
-        "expected first turn and at least one compaction request"
-    );
+    first_turn_log.single_request();
+    assert_eq!(requests.len(), 1, "expected the first compaction request");
 
     insta::assert_snapshot!(
         "pre_turn_compaction_context_window_exceeded_shapes",
@@ -5137,7 +5141,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
             "Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
             &[(
                 "Local Compaction Request (Incoming User Excluded)",
-                &requests[1]
+                &requests[0]
             ),]
         )
     );
@@ -5323,6 +5327,10 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
             config.model_provider = provider;
             config.model_context_window = Some(100);
             config.model_auto_compact_token_limit = Some(90);
+            config
+                .features
+                .enable(Feature::AgentPromptInjection)
+                .expect("retain the root role during compaction");
         });
     let test = builder.build(&server).await?;
 
@@ -5349,6 +5357,17 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
     assert_single_instruction_fragment(&requests[0], &expected_fragment);
     assert_single_instruction_fragment(&requests[1], &expected_fragment);
     assert_single_instruction_fragment(&requests[2], &expected_fragment);
+    for request in &requests {
+        assert_eq!(
+            request
+                .message_input_texts("developer")
+                .iter()
+                .filter(|text| text.contains("# You are the Root Agent"))
+                .count(),
+            1,
+            "initial, compact, and replacement requests each retain exactly one role prompt",
+        );
+    }
     assert_eq!(
         test.codex.instruction_sources().await,
         vec![PathUri::from_abs_path(&source)],

@@ -110,11 +110,15 @@ impl BulkProjection {
         let byte_offset = sqlite_integer(line.start_byte_offset, "rollout byte offset")?;
         let end_byte_offset = sqlite_integer(line.end_byte_offset, "rollout byte offset")?;
         if let Some(item) = &line.realtime_item {
-            self.realtime_items.entry(item.id.clone()).or_insert(RealtimeRow {
-                ordinal,
-                created_at_ms: line.fallback_created_at_ms.ok_or_else(|| invalid("realtime rollout item is missing its timestamp"))?,
-                json: serde_json::to_string(item).map_err(thread_history_error)?,
-            });
+            self.realtime_items
+                .entry(item.id.clone())
+                .or_insert(RealtimeRow {
+                    ordinal,
+                    created_at_ms: line
+                        .fallback_created_at_ms
+                        .ok_or_else(|| invalid("realtime rollout item is missing its timestamp"))?,
+                    json: serde_json::to_string(item).map_err(thread_history_error)?,
+                });
         }
         for turn_id in &line.changes.removed_turn_ids {
             self.groups.remove(turn_id);

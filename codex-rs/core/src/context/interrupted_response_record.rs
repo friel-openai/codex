@@ -1,10 +1,15 @@
 use super::ContextualUserFragment;
+use codex_protocol::models::ContentItemKind;
 
 /// Bounded factual record appended after a provider response is interrupted and made recoverable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct InterruptedResponseRecord;
 
 impl ContextualUserFragment for InterruptedResponseRecord {
+    fn content_kind(&self) -> ContentItemKind {
+        ContentItemKind("interrupted_response".to_string())
+    }
+
     fn role(&self) -> &'static str {
         "developer"
     }

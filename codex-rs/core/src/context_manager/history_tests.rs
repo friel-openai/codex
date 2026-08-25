@@ -535,6 +535,7 @@ fn fork_copy_on_write_preserves_harness_metadata() {
     let inherited = ResponseItemEnvelope {
         item: assistant_msg("inherited"),
         metadata: Some(CodexHarnessMetadata {
+            fallback_token_limit_override: None,
             client_authored: true,
         }),
     };

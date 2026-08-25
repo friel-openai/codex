@@ -59,6 +59,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
@@ -100,6 +101,7 @@ use codex_thread_store::ThreadStoreError;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
+use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
@@ -139,6 +141,38 @@ fn persisted_thread_environment_selections(
         .map(|selections| selections.environments)
 }
 
+fn persisted_root_environment_selections(
+    config: &Config,
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    let mut environments = persisted_thread_environment_selections(history)?;
+    let had_named_profile = history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(event.thread_settings.active_permission_profile.is_some())
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+    if had_named_profile {
+        // The app-server has resolved the saved profile ID against current config. Old roots
+        // must not restore authority removed by that profile or by its configured replacement.
+        for environment in &mut environments {
+            if matches!(environment.config, EnvironmentConfigState::FromThread) {
+                environment.workspace_roots = config
+                    .permissions
+                    .workspace_roots()
+                    .iter()
+                    .map(PathUri::from_abs_path)
+                    .collect();
+            }
+        }
+    }
+    Some(environments)
+}
+
 /// Test-only override for enabling thread-manager behaviors used by integration
 /// tests.
 ///
@@ -155,6 +189,7 @@ pub(crate) type ThreadIdGenerator = Arc<dyn Fn() -> ThreadId + Send + Sync>;
 fn capture_test_op(op: &Op) -> Option<Op> {
     match op {
         Op::Interrupt => Some(Op::Interrupt),
+        Op::Compact => Some(Op::Compact),
         Op::InterAgentCommunication {
             communication,
             start_options,
@@ -1311,6 +1346,15 @@ impl ThreadManager {
         })?;
         let config = parent.session.get_config().await.as_ref().clone();
         let agent_control = parent.session.services.agent_control.clone();
+        // Frodex restores descendant identities lazily. Resolve this child through the loaded
+        // parent's indexed ownership graph before the reload checks its in-memory lifecycle.
+        agent_control.register_session_root(
+            parent_thread_id,
+            parent.session.session_source().await.parent_thread_id(),
+        );
+        agent_control
+            .ensure_open_agent_known_by_id_for_explicit_resume(parent_thread_id, child_thread_id)
+            .await?;
         agent_control
             .ensure_v2_agent_loaded(config, child_thread_id, Some(parent))
             .await
@@ -1326,7 +1370,7 @@ impl ThreadManager {
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
         let environments =
-            persisted_thread_environment_selections(initial_history.get_rollout_items());
+            persisted_root_environment_selections(&config, initial_history.get_rollout_items());
         let (agent_control, _lifecycle_mutation) = self
             .agent_control_for_initial_history(&config, &initial_history)
             .await?;
@@ -1505,7 +1549,6 @@ impl ThreadManager {
         &self,
         rollout_path: PathBuf,
     ) -> CodexResult<InitialHistory> {
-        let requested_rollout_path = rollout_path.clone();
         let stored_thread = self
             .state
             .thread_store
@@ -1516,7 +1559,7 @@ impl ThreadManager {
             })
             .await
             .map_err(thread_store_rollout_read_error)?;
-        stored_thread_to_initial_history(stored_thread, Some(requested_rollout_path))
+        stored_thread_to_initial_history(stored_thread, None)
     }
 
     /// Fork an existing thread from already-loaded store history.
@@ -1815,13 +1858,36 @@ impl ThreadManager {
             let response_history = Arc::new(history.get_rollout_items().to_vec());
             (history, response_history, None)
         };
-        let environments = settings_history_override
+        let mut environments = settings_history_override
             .as_deref()
             .map(|history| persisted_thread_environment_selections(history))
             .unwrap_or_else(|| match model_history_override.as_deref() {
                 Some(model_history) => persisted_thread_environment_selections(model_history),
                 None => persisted_thread_environment_selections(response_history.as_ref()),
             });
+        if config.workspace_roots_explicit
+            && let Some(environments) = environments.as_mut()
+        {
+            // User forks such as /cd pass explicit local workspace roots. Saved
+            // thread-derived selections must not restore the parent's old cwd
+            // and roots over that request. Executor-owned and remote selections
+            // retain their own configuration authority.
+            for environment in environments {
+                if matches!(environment.config, EnvironmentConfigState::FromThread)
+                    && self
+                        .environment_manager()
+                        .get_environment(&environment.environment_id)
+                        .is_some_and(|executor| !executor.is_remote())
+                {
+                    environment.cwd = PathUri::from_abs_path(&config.cwd);
+                    environment.workspace_roots = config
+                        .workspace_roots
+                        .iter()
+                        .map(PathUri::from_abs_path)
+                        .collect();
+                }
+            }
+        }
         let agent_control = self.agent_control_for_config(&config);
         let options = StartThreadOptions {
             initial_history: history,
@@ -2289,14 +2355,26 @@ impl ThreadManagerState {
                             "failed to prepare paginated fork source {source_thread_id}: {err}"
                         ))
                     })?;
+                    let frozen = prepared.frozen_segment.clone().ok_or_else(|| {
+                        CodexErr::Fatal(
+                            "prepared paginated fork source is missing its frozen segment"
+                                .to_string(),
+                        )
+                    })?;
+                    // Explicit rollback boundaries were counted in the complete history. An
+                    // indexed fork response can contain only model context plus projected turns.
+                    let source_items = if expected_source_items.is_some() {
+                        codex_rollout::materialize_rollout_items(
+                            codex_home,
+                            &frozen.reference.rollout_path,
+                        )
+                        .await?
+                    } else {
+                        prepared.response_history.as_ref().clone()
+                    };
                     (
-                        prepared.frozen_segment.clone().ok_or_else(|| {
-                            CodexErr::Fatal(
-                                "prepared paginated fork source is missing its frozen segment"
-                                    .to_string(),
-                            )
-                        })?,
-                        prepared.response_history.as_ref().clone(),
+                        frozen,
+                        source_items,
                         FullHistorySourceReservation::Prepared {
                             _prepared: Box::new(prepared),
                         },
@@ -2703,11 +2781,15 @@ impl ThreadManagerState {
             None => self.client_mcp_extensions_for_child(parent_thread_id).await,
         };
         let thread_source = initial_history.get_resumed_thread_source();
-        let environments = environment_selections.or_else(|| {
-            inherited_environments
-                .as_ref()
-                .map(TurnEnvironmentSnapshot::to_selections)
-        }).or_else(|| persisted_thread_environment_selections(initial_history.get_rollout_items()));
+        let environments = environment_selections
+            .or_else(|| {
+                persisted_thread_environment_selections(initial_history.get_rollout_items())
+            })
+            .or_else(|| {
+                inherited_environments
+                    .as_ref()
+                    .map(TurnEnvironmentSnapshot::to_selections)
+            });
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),
@@ -3189,13 +3271,18 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
     // Synthetic fork/resume histories can contain user/assistant response items
     // without explicit turn lifecycle events. If the persisted snapshot has no
     // terminating boundary after its last user message, treat it as mid-turn.
+    // Old event-only rollouts used the final AgentMessage instead of TurnComplete.
     SnapshotTurnState {
-        ends_mid_turn: !rollout_items[last_user_position + 1..].iter().any(|item| {
-            matches!(
-                item,
-                RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_))
-            )
-        }),
+        ends_mid_turn: !rollout_items[last_user_position + 1..]
+            .iter()
+            .any(|item| match item {
+                RolloutItem::EventMsg(EventMsg::TurnComplete(_) | EventMsg::TurnAborted(_)) => true,
+                RolloutItem::EventMsg(EventMsg::AgentMessage(message)) => {
+                    !message.message.is_empty()
+                        && message.phase != Some(codex_protocol::models::MessagePhase::Commentary)
+                }
+                _ => false,
+            }),
         active_turn_id: None,
         active_turn_started_at: None,
         active_turn_start_index: None,

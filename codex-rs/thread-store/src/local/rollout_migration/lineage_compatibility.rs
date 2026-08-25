@@ -74,7 +74,8 @@ pub(super) async fn stage_compatible_lineage(
         .last()
         .ok_or_else(|| migration_error("lineage migration has no selected source"))?;
     let mut materializer =
-        codex_rollout::BoundedRolloutMaterializer::new(codex_home, selected.path.as_path());
+        codex_rollout::BoundedRolloutMaterializer::new(codex_home, selected.path.as_path())
+            .retaining_source_metadata();
     let reference_limit = DEFAULT_ROLLOUT_REFERENCE_DEPTH;
     let initial = materializer
         .materialize(reference_limit)
@@ -105,12 +106,18 @@ pub(super) async fn stage_compatible_lineage(
             "mixed-format rollback retained a removed turn; source files were not changed",
         ));
     }
+    let generated_items = staged
+        .iter()
+        .flat_map(|target| target.generated_item_edits.iter())
+        .map(|edit| (edit.turn_id.as_str(), edit.item_id.as_str()))
+        .collect::<HashSet<_>>();
     plan.synthetic_item_id_remap = derive_initial_synthetic_item_id_remap(
         reference_limit,
         initial_turns.as_slice(),
         canonical.turns.as_slice(),
         &canonical.retained_item_ids,
         canonical.max_synthetic_item_index,
+        &generated_items,
     )?;
     if !plan.synthetic_item_id_remap.is_empty() {
         tracing::info!(thread_id = %plan.selected_thread_id, remapped_ids = plan.synthetic_item_id_remap.len(), "rewriting generated IDs to preserve initial Desktop item IDs");
@@ -337,13 +344,35 @@ fn turns_from_items<'a>(
     items: impl IntoIterator<Item = &'a RolloutItem>,
     history_mode: ThreadHistoryMode,
 ) -> Vec<Turn> {
+    replay_materialized_history(items, history_mode).finish()
+}
+
+/// Replays source-format transitions without counting them as additional physical records.
+pub(super) fn replay_materialized_history<'a>(
+    items: impl IntoIterator<Item = &'a RolloutItem>,
+    mut history_mode: ThreadHistoryMode,
+) -> ThreadHistoryBuilder {
     let mut builder = ThreadHistoryBuilder::new();
+    let mut saw_metadata = false;
     for item in items {
-        if codex_rollout::is_persisted_rollout_item(item, history_mode) {
+        if let RolloutItem::SessionMeta(metadata) = item {
+            history_mode = metadata.meta.history_mode;
+            if !saw_metadata {
+                builder.handle_rollout_item(item);
+                saw_metadata = true;
+            }
+            continue;
+        }
+        if !codex_rollout::is_persisted_rollout_item(item, history_mode) {
+            continue;
+        }
+        if history_mode == ThreadHistoryMode::Paginated {
+            builder.handle_paginated_rollout_item(item);
+        } else {
             builder.handle_rollout_item(item);
         }
     }
-    builder.finish()
+    builder
 }
 
 fn derive_initial_synthetic_item_id_remap(
@@ -352,6 +381,7 @@ fn derive_initial_synthetic_item_id_remap(
     canonical: &[Turn],
     canonical_retained_item_ids: &HashSet<String>,
     canonical_max_synthetic_item_index: u64,
+    generated_items: &HashSet<(&str, &str)>,
 ) -> ThreadStoreResult<HashMap<String, String>> {
     let canonical_by_id = canonical
         .iter()
@@ -394,12 +424,22 @@ fn derive_initial_synthetic_item_id_remap(
         for (bounded_item, canonical_item) in turn.items.iter().zip(&canonical_turn.items) {
             let canonical_id = canonical_item.id().to_string();
             let desired_id = bounded_item.id().to_string();
-            if let Some(previous) = visible_ids.insert(canonical_id.clone(), desired_id.clone())
-                && previous != desired_id
-            {
-                return Err(migration_error(format!(
-                    "Legacy item {canonical_id} has two initial Desktop IDs: {previous} and {desired_id}"
-                )));
+            // Native ancestors may already use an explicit `item-N`. Only IDs allocated by
+            // this migration participate in the generated-ID rewrite.
+            if generated_items.contains(&(turn.id.as_str(), canonical_id.as_str())) {
+                if let Some(previous) = visible_ids.insert(canonical_id.clone(), desired_id.clone())
+                    && previous != desired_id
+                {
+                    return Err(migration_error(format!(
+                        "Legacy item {canonical_id} has two initial Desktop IDs: {previous} and {desired_id}"
+                    )));
+                }
+            } else if canonical_id != desired_id {
+                return Err(incompatible(
+                    reference_limit,
+                    &turn.id,
+                    "explicit native item ID changed",
+                ));
             }
             if let Some(previous_owner) =
                 desired_owners.insert(desired_id.clone(), canonical_id.clone())

@@ -255,7 +255,9 @@ async fn thread_list_relation_paginates_app_members_and_matches_list_agents() ->
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.4")
-        .with_extra_config("[features.multi_agent_v2]\nenabled = true")
+        .with_extra_config(
+            "[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 13",
+        )
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
     let mut mcp = TestAppServer::builder()
