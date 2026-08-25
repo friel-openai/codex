@@ -7,9 +7,9 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ThreadDecrementElicitationParams;
 use codex_app_server_protocol::ThreadDecrementElicitationResponse;
+use codex_app_server_protocol::ThreadGoalGetResponse;
 use codex_app_server_protocol::ThreadGoalSetResponse;
 use codex_app_server_protocol::ThreadGoalStatus;
-use codex_app_server_protocol::ThreadGoalUpdatedNotification;
 use codex_app_server_protocol::ThreadIncrementElicitationParams;
 use codex_app_server_protocol::ThreadIncrementElicitationResponse;
 use codex_app_server_protocol::ThreadStartParams;
@@ -322,10 +322,10 @@ async fn app_server_prewarms_flag_selected_grpc_code_mode_host_before_first_turn
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn app_server_blocks_goal_after_repeated_code_mode_host_failures() -> Result<()> {
+async fn app_server_retries_supervisor_host_failure_without_blocking_the_goal() -> Result<()> {
     let model_server = responses::start_mock_server().await;
     let mut model_responses = Vec::new();
-    for turn in 1..=3 {
+    for turn in 1..=1 {
         model_responses.push(responses::sse(vec![
             responses::ev_response_created(&format!("resp-{turn}-exec")),
             responses::ev_custom_tool_call(
@@ -376,18 +376,31 @@ async fn app_server_blocks_goal_after_repeated_code_mode_host_failures() -> Resu
     let _: ThreadGoalSetResponse =
         timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(goal_request)).await??;
 
-    let goal = timeout(DEFAULT_READ_TIMEOUT, async {
+    timeout(DEFAULT_READ_TIMEOUT, async {
         loop {
-            let notification: ThreadGoalUpdatedNotification =
-                app_server.read_notification("thread/goal/updated").await?;
-            if notification.goal.status == ThreadGoalStatus::Blocked {
-                return Ok::<_, anyhow::Error>(notification.goal);
+            let notification: serde_json::Value = app_server.read_notification("warning").await?;
+            if notification["message"].as_str().is_some_and(|message| {
+                message.starts_with("Goal supervisor check-in failed:")
+                    && message.contains("Retrying in")
+            }) {
+                return Ok::<_, anyhow::Error>(());
             }
         }
     })
     .await??;
 
-    assert_eq!(goal.status, ThreadGoalStatus::Blocked);
-    assert_eq!(response_mock.requests().len(), 6);
+    let get = app_server
+        .send_raw_request(
+            "thread/goal/get",
+            Some(json!({"threadId": thread.thread.id})),
+        )
+        .await?;
+    let response: ThreadGoalGetResponse =
+        timeout(DEFAULT_READ_TIMEOUT, app_server.read_response(get)).await??;
+    assert_eq!(
+        response.goal.expect("goal remains present").status,
+        ThreadGoalStatus::Active
+    );
+    assert_eq!(response_mock.requests().len(), 2);
     Ok(())
 }

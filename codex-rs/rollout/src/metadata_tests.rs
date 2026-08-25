@@ -377,6 +377,9 @@ async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
     let mut ordinal = 0_u64;
     for item in std::iter::once(RolloutItem::SessionMeta(session_meta)).chain((0..32).map(|_| {
         RolloutItem::Compacted(CompactedItem {
+            compaction_response_id: None,
+            guardian_history: None,
+            latest_token_usage_record: None,
             message: "x".repeat(256 * 1024),
             replacement_history: None,
             mcp_resource_origins: None,
@@ -433,6 +436,9 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
             timestamp: "2026-01-27T12:34:55Z".to_string(),
             ordinal: Some(0),
             item: RolloutItem::Compacted(CompactedItem {
+                compaction_response_id: None,
+                guardian_history: None,
+                latest_token_usage_record: None,
                 message: "prefix".to_string(),
                 replacement_history: None,
                 mcp_resource_origins: None,

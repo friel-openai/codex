@@ -1,6 +1,7 @@
 //! A worktree switch must preserve ordinary client turns, not only model continuation.
 
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -13,12 +14,18 @@ use codex_app_server_protocol::ThreadReadParams;
 use codex_app_server_protocol::ThreadReadResponse;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
+use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnEnvironmentParams;
 use codex_app_server_protocol::TurnStartParams;
+use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
+use codex_app_server_protocol::TurnSteerParams;
+use codex_app_server_protocol::TurnSteerResponse;
 use codex_app_server_protocol::UserInput;
 use codex_utils_path_uri::LegacyAppPathString;
 use core_test_support::responses;
+use core_test_support::streaming_sse::StreamingSseChunk;
+use core_test_support::streaming_sse::start_streaming_sse_server;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
@@ -28,41 +35,7 @@ use tokio::time::timeout;
 #[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
 #[tokio::test]
 async fn workspace_cwd_allows_next_client_turn(history_mode: ThreadHistoryMode) -> Result<()> {
-    let fixture = TempDir::new()?;
-    let primary = fixture.path().join("primary");
-    let linked = fixture.path().join("linked");
-    std::fs::create_dir(&primary)?;
-    run_git(&primary, &["init", "-q"])?;
-    run_git(
-        &primary,
-        &[
-            "-c",
-            "user.name=Test",
-            "-c",
-            "user.email=test@example.com",
-            "commit",
-            "--allow-empty",
-            "-qm",
-            "fixture",
-        ],
-    )?;
-    run_git(
-        &primary,
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            "linked",
-            linked.to_str().expect("temporary worktree path is UTF-8"),
-        ],
-    )?;
-    let primary = std::fs::canonicalize(primary)?;
-    let linked = std::fs::canonicalize(linked)?;
-    std::fs::write(
-        linked.join("AGENTS.md"),
-        "Follow the linked worktree instructions.\n",
-    )?;
+    let (_fixture, primary, linked) = workspace_fixture()?;
     let server = responses::start_mock_server().await;
     let model = responses::mount_sse_sequence(
         &server,
@@ -157,6 +130,183 @@ async fn workspace_cwd_allows_next_client_turn(history_mode: ThreadHistoryMode) 
     assert_eq!(read.thread.cwd.as_path(), linked.as_path());
     assert_eq!(read.thread.turns.len(), 2);
     timeout(Duration::from_secs(20), client.shutdown_gracefully()).await??;
+    Ok(())
+}
+
+fn workspace_fixture() -> Result<(TempDir, PathBuf, PathBuf)> {
+    let fixture = TempDir::new()?;
+    let primary = fixture.path().join("primary");
+    let linked = fixture.path().join("linked");
+    std::fs::create_dir(&primary)?;
+    run_git(&primary, &["init", "-q"])?;
+    run_git(
+        &primary,
+        &[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "fixture",
+        ],
+    )?;
+    run_git(
+        &primary,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "linked",
+            linked.to_str().expect("temporary worktree path is UTF-8"),
+        ],
+    )?;
+    let primary = std::fs::canonicalize(primary)?;
+    let linked = std::fs::canonicalize(linked)?;
+    std::fs::write(
+        linked.join("AGENTS.md"),
+        "Follow the linked worktree instructions.\n",
+    )?;
+    Ok((fixture, primary, linked))
+}
+
+#[test_case::test_case(ThreadHistoryMode::Legacy; "legacy")]
+#[test_case::test_case(ThreadHistoryMode::Paginated; "paginated")]
+#[tokio::test]
+async fn workspace_cwd_preserves_refreshed_context_during_steering(
+    history_mode: ThreadHistoryMode,
+) -> Result<()> {
+    let (_fixture, primary, linked) = workspace_fixture()?;
+    let (release, held) = tokio::sync::oneshot::channel();
+    let (server, _) = start_streaming_sse_server(vec![
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                responses::ev_response_created("switch"),
+                responses::ev_function_call_with_namespace(
+                    "switch-cwd",
+                    "workspace",
+                    "set_cwd",
+                    &json!({ "path": linked }).to_string(),
+                ),
+                responses::ev_completed("switch"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: Some(held),
+            body: responses::sse(vec![
+                responses::ev_response_created("switched"),
+                responses::ev_assistant_message("switched-message", "switched"),
+                responses::ev_completed("switched"),
+            ]),
+        }],
+        vec![StreamingSseChunk {
+            gate: None,
+            body: responses::sse(vec![
+                responses::ev_response_created("continued"),
+                responses::ev_assistant_message("continued-message", "continued"),
+                responses::ev_completed("continued"),
+            ]),
+        }],
+    ])
+    .await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(server.uri())
+        .with_root_config("features.workspace_cwd_tool = true")
+        .write(home.path())?;
+    let mut client = TestAppServer::builder()
+        .with_codex_home(home.path())
+        // This regression needs the TUI's thread-owned local environment, not a test attachment.
+        .without_auto_env()
+        .build_initialized()
+        .await?;
+    let request = client
+        .send_thread_start_request(ThreadStartParams {
+            cwd: Some(primary.to_string_lossy().into_owned()),
+            history_mode: Some(history_mode),
+            ..Default::default()
+        })
+        .await?;
+    let started: ThreadStartResponse = client.read_response(request).await?;
+    let turn: TurnStartResponse = client
+        .request(|request_id| ClientRequest::TurnStart {
+            request_id,
+            params: TurnStartParams {
+                thread_id: started.thread.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "switch to the linked worktree".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            },
+        })
+        .await?;
+    // Request two can start only after workspace.set_cwd has published its replacement context.
+    timeout(Duration::from_secs(20), server.wait_for_request_count(2)).await?;
+    let steer: TurnSteerResponse = client
+        .request(|request_id| ClientRequest::TurnSteer {
+            request_id,
+            params: TurnSteerParams {
+                thread_id: started.thread.id.clone(),
+                expected_turn_id: turn.turn.id.clone(),
+                input: vec![UserInput::Text {
+                    text: "continue after switching worktrees".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                client_user_message_id: None,
+                responsesapi_client_metadata: None,
+                additional_context: None,
+            },
+        })
+        .await?;
+    assert_eq!(steer.turn_id, turn.turn.id);
+    release.send(()).expect("release switched response");
+    let notification = timeout(
+        Duration::from_secs(20),
+        client.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+    let completed: TurnCompletedNotification =
+        serde_json::from_value(notification.params.expect("completion params"))?;
+    assert_eq!(completed.turn.id, turn.turn.id);
+    assert_eq!(completed.turn.status, TurnStatus::Completed);
+    let requests = server.requests().await;
+    assert_eq!(requests.len(), 3);
+    let request: serde_json::Value = serde_json::from_slice(&requests[2])?;
+    assert_eq!(request["client_metadata"]["turn_id"], turn.turn.id);
+    let inputs = request["input"].as_array().expect("request inputs");
+    let texts = inputs
+        .iter()
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .filter_map(|item| item["text"].as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Follow the linked worktree instructions."))
+    );
+    assert_eq!(
+        texts
+            .iter()
+            .filter(|text| **text == "continue after switching worktrees")
+            .count(),
+        1
+    );
+    let read: ThreadReadResponse = client
+        .request(|request_id| ClientRequest::ThreadRead {
+            request_id,
+            params: ThreadReadParams {
+                thread_id: started.thread.id.clone(),
+                include_turns: true,
+            },
+        })
+        .await?;
+    assert_eq!(read.thread.cwd.as_path(), linked.as_path());
+    assert_eq!(read.thread.turns.len(), 1);
+    timeout(Duration::from_secs(20), client.shutdown_gracefully()).await??;
+    server.shutdown().await;
     Ok(())
 }
 

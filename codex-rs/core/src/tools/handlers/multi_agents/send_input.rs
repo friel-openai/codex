@@ -123,6 +123,12 @@ impl Handler {
             AgentInputDelivery::Queue
         };
         let root_turn_id = turn.turn_metadata_state.root_turn_id();
+        let start_options = crate::TurnStartOptions {
+            parent_turn_id: Some(turn.sub_id.clone()),
+            root_turn_id,
+            cyber_access_program: turn.cyber_access_program,
+            ..Default::default()
+        };
         let result = match (resume_config, communication) {
             (Some(resume_config), Some(communication)) => {
                 agent_control
@@ -132,8 +138,7 @@ impl Handler {
                         communication,
                         context,
                         delivery,
-                        Some(turn.sub_id.clone()),
-                        root_turn_id.clone(),
+                        start_options,
                     )
                     .await
             }
@@ -144,8 +149,7 @@ impl Handler {
                         receiver_thread_id,
                         input_items,
                         delivery,
-                        Some(turn.sub_id.clone()),
-                        root_turn_id.clone(),
+                        start_options,
                     )
                     .await
             }
@@ -155,23 +159,13 @@ impl Handler {
                         receiver_thread_id,
                         communication,
                         context,
-                        Some(turn.sub_id.clone()),
-                        root_turn_id.clone(),
+                        start_options,
                     )
                     .await
             }
             (None, None) => {
                 agent_control
-                    .send_input(
-                        receiver_thread_id,
-                        input_items,
-                        crate::TurnStartOptions {
-                            parent_turn_id: Some(turn.sub_id.clone()),
-                            root_turn_id,
-                            cyber_access_program: turn.cyber_access_program,
-                            ..Default::default()
-                        },
-                    )
+                    .send_input(receiver_thread_id, input_items, start_options)
                     .await
             }
         }

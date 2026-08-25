@@ -4,6 +4,7 @@ use crate::config::Constrained;
 use crate::config::ConstraintError;
 use crate::config::ConstraintResult;
 use codex_config::ConfigRequirements;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::manager::ModelsManager;
 use codex_otel::SessionTelemetry;
@@ -16,6 +17,7 @@ use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Model and execution settings selected for an individual model step within
@@ -174,7 +176,7 @@ impl ResolvedStepSettings {
     }
 }
 
-/// Explicit startup overrides applied to catalog-derived model metadata.
+/// Per-thread overrides applied to catalog-derived model metadata.
 /// Construct from `Config::to_models_manager_config()` so model-derived base
 /// instructions are not mistaken for explicit overrides.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -183,6 +185,8 @@ pub(crate) struct ModelInfoOverrides {
     pub(crate) auto_compact_token_limit: Option<i64>,
     pub(crate) tool_output_token_limit: Option<usize>,
     pub(crate) base_instructions: Option<String>,
+    /// Thread-local alias definitions must take precedence over the shared picker catalog.
+    pub(crate) custom_models: HashMap<String, CustomModelConfig>,
 }
 
 impl From<ModelsManagerConfig> for ModelInfoOverrides {
@@ -192,6 +196,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
             auto_compact_token_limit: config.model_auto_compact_token_limit,
             tool_output_token_limit: config.tool_output_token_limit,
             base_instructions: config.base_instructions,
+            custom_models: config.custom_models,
         }
     }
 }
@@ -211,6 +216,7 @@ impl ModelInfoOverrides {
             personality_enabled,
             // The models manager already owns its catalog.
             model_catalog: None,
+            custom_models: self.custom_models.clone(),
         }
     }
 }

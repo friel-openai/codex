@@ -266,8 +266,11 @@ impl AgentControl {
                 &state,
                 communication,
                 context,
-                parent_turn_id,
-                root_turn_id,
+                TurnStartOptions {
+                    parent_turn_id,
+                    root_turn_id,
+                    ..Default::default()
+                },
             )
             .await
         {
@@ -391,6 +394,8 @@ impl AgentControl {
                     | RolloutItem::TurnContext(_)
                     | RolloutItem::WorldState(_)
                     | RolloutItem::SecurityRiskScore(_)
+                    | RolloutItem::RealtimeItem(_)
+                    | RolloutItem::TokenUsageRecord(_)
                     | RolloutItem::EventMsg(_) => None,
                 })
                 .unwrap_or(SessionSource::Cli);
@@ -758,6 +763,8 @@ pub(super) async fn persisted_thread_workspace_roots(
                 | RolloutItem::Compacted(_)
                 | RolloutItem::WorldState(_)
                 | RolloutItem::SecurityRiskScore(_)
+                | RolloutItem::RealtimeItem(_)
+                | RolloutItem::TokenUsageRecord(_)
                 | RolloutItem::EventMsg(_) => None,
             }),
     )

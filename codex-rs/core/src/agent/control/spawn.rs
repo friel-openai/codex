@@ -463,6 +463,8 @@ impl AgentControl {
                     selection.config = EnvironmentConfigState::Ready(bounded_config);
                 }
             }
+            // The validated owner must override stale persisted child environments.
+            environment_selections.get_or_insert_with(|| parent_environments.to_selections());
             (
                 Some(parent_environments.clone()),
                 Some(Arc::clone(&parent.session.services.exec_policy)),
@@ -601,7 +603,8 @@ impl AgentControl {
             options.environments = inheritance
                 .environments
                 .as_ref()
-                .map(TurnEnvironmentSnapshot::to_spawn_selections);
+                .map(TurnEnvironmentSnapshot::to_spawn_selections)
+                .transpose()?;
         }
         let (session_source, mut agent_metadata) = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -1067,9 +1070,21 @@ impl AgentControl {
             });
             if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
                 (reference_rollout_items, unsanitized_parent_history)
-                && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
             {
-                forked_rollout_items = reference_rollout_items;
+                if serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history {
+                    forked_rollout_items = reference_rollout_items;
+                } else {
+                    // Sanitized history is a self-contained copy. Keeping its source history_base
+                    // would restore the unsanitized ancestor and duplicate the copied model input.
+                    forked_rollout_items.retain_mut(|item| match item {
+                        RolloutItem::SessionMeta(meta) => {
+                            meta.meta.history_base = None;
+                            true
+                        }
+                        RolloutItem::RolloutReference(_) => false,
+                        _ => true,
+                    });
+                }
             }
         }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that

@@ -913,15 +913,21 @@ impl TurnEnvironmentSnapshot {
             .collect()
     }
 
-    /// Returns Ready and Starting selections so a child keeps each Starting environment.
-    pub(crate) fn to_spawn_selections(&self) -> Vec<TurnEnvironmentSelection> {
+    /// Retains Starting environments and rejects Failed environments rather than silently
+    /// dropping a selected environment that still constrains the parent's permissions.
+    pub(crate) fn to_spawn_selections(
+        &self,
+    ) -> codex_protocol::error::Result<Vec<TurnEnvironmentSelection>> {
         self.environments
             .iter()
             .map(|environment| match environment {
-                TurnEnvironmentState::Ready(environment) => environment.selection(),
-                TurnEnvironmentState::Starting(environment) => environment
+                TurnEnvironmentState::Ready(environment) => Ok(environment.selection()),
+                TurnEnvironmentState::Starting(environment) => Ok(environment
                     .config_origin
-                    .into_input_selection(environment.selection.clone()),
+                    .into_input_selection(environment.selection.clone())),
+                TurnEnvironmentState::Failed => Err(codex_protocol::error::CodexErr::Fatal(
+                    "cannot inherit a failed environment when spawning an agent; reconnect the environment before retrying".to_string(),
+                )),
             })
             .collect()
     }
@@ -953,6 +959,21 @@ impl TurnEnvironmentSnapshot {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_environment_cannot_be_inherited_by_spawn_agent() {
+        let snapshot = super::TurnEnvironmentSnapshot {
+            environments: vec![super::TurnEnvironmentState::Failed],
+        };
+        let error = snapshot
+            .to_spawn_selections()
+            .expect_err("failed environment must not be omitted");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot inherit a failed environment")
+        );
+    }
+
     use std::time::Duration;
 
     use crate::config::PermissionProfileSnapshot;
@@ -1496,7 +1517,7 @@ url = "ws://127.0.0.1:8765"
         );
         assert_eq!(starting.to_selections(), vec![local.clone()]);
         assert_eq!(
-            starting.to_spawn_selections(),
+            starting.to_spawn_selections().expect("starting selections"),
             vec![remote.clone(), local.clone()]
         );
         assert!(starting.single_local_environment().is_none());
@@ -1567,7 +1588,10 @@ url = "ws://127.0.0.1:8765"
                 temporary_directories: Some(expected_temporary_directories.as_slice()),
             }
         );
-        assert_eq!(attached.to_spawn_selections(), attached.to_selections());
+        assert_eq!(
+            attached.to_spawn_selections().expect("ready selections"),
+            attached.to_selections()
+        );
         assert_eq!(
             next_starting
                 .refresh_readiness()

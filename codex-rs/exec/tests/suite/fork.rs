@@ -4,6 +4,7 @@ use anyhow::Context;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
 use core_test_support::test_codex_exec::test_codex_exec;
+use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::string::ToString;
 use uuid::Uuid;
@@ -80,17 +81,6 @@ fn extract_forked_from_id(path: &std::path::Path) -> Option<String> {
         .map(ToString::to_string)
 }
 
-fn rollout_contains_reference(path: &std::path::Path) -> anyhow::Result<bool> {
-    let content = std::fs::read_to_string(path)?;
-    Ok(content.lines().skip(1).any(|line| {
-        serde_json::from_str::<Value>(line)
-            .ok()
-            .is_some_and(|item| {
-                item.get("type").and_then(Value::as_str) == Some("rollout_reference")
-            })
-    }))
-}
-
 fn exec_sse_response(index: usize) -> String {
     responses::sse(vec![
         responses::ev_response_created(&format!("resp-fork-{index}")),
@@ -100,7 +90,7 @@ fn exec_sse_response(index: usize) -> String {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn exec_fork_by_id_creates_new_session_with_reference_backed_history() -> anyhow::Result<()> {
+async fn exec_fork_by_id_creates_new_session_with_frozen_history_base() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
 
     let test = test_codex_exec();
@@ -150,7 +140,20 @@ async fn exec_fork_by_id_creates_new_session_with_reference_backed_history() -> 
         &forked_path,
         &marker
     )?);
-    assert!(rollout_contains_reference(&forked_path)?);
+    let fork_meta: Value =
+        serde_json::from_str(forked_content.lines().next().context("fork metadata")?)?;
+    let history_base = &fork_meta["payload"]["history_base"];
+    let snapshot_id = history_base["thread_id"].as_str().context("snapshot id")?;
+    Uuid::parse_str(snapshot_id)?;
+    assert_ne!(snapshot_id, session_id);
+    let end_ordinal = history_base["end_ordinal_exclusive"]
+        .as_u64()
+        .context("frozen ordinal")?;
+    assert!(end_ordinal > 0);
+    assert_eq!(
+        fork_meta["payload"]["forked_from_ordinal_exclusive"],
+        end_ordinal
+    );
     assert!(forked_content.contains(&marker2));
 
     let requests = response_mock.requests();

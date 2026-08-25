@@ -1699,6 +1699,116 @@ async fn active_publication_supports_a_symlinked_codex_home() {
 
 #[cfg(unix)]
 #[tokio::test]
+async fn read_only_publication_check_supports_managed_root_but_rejects_descendant_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let home = TempDir::new().unwrap();
+    let external = TempDir::new().unwrap();
+    let physical_root = external.path().join("sessions");
+    std::fs::create_dir(&physical_root).unwrap();
+    let managed_root = home.path().join(codex_rollout::SESSIONS_SUBDIR);
+    symlink(&physical_root, &managed_root).unwrap();
+    let source = physical_root.join("rollout.jsonl");
+    let original = b"unchanged source bytes\n";
+    std::fs::write(&source, original).unwrap();
+    for selected in [source.clone(), managed_root.join("rollout.jsonl")] {
+        assert!(
+            !super::history_repair_publication_needs_exclusive(home.path(), &selected)
+                .await
+                .unwrap()
+        );
+    }
+    assert_eq!(std::fs::read(&source).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&physical_root).unwrap().count(), 1);
+
+    let sibling = super::compressed_sibling(&source);
+    std::fs::write(&sibling, b"ambiguous compressed sibling").unwrap();
+    assert!(
+        super::history_repair_publication_needs_exclusive(home.path(), &source)
+            .await
+            .unwrap()
+    );
+    std::fs::remove_file(sibling).unwrap();
+    symlink(&source, physical_root.join("linked.jsonl")).unwrap();
+    assert!(
+        super::history_repair_publication_needs_exclusive(
+            home.path(),
+            &managed_root.join("linked.jsonl")
+        )
+        .await
+        .is_err()
+    );
+    symlink(external.path(), physical_root.join("escape")).unwrap();
+    std::fs::write(external.path().join("outside.jsonl"), original).unwrap();
+    assert!(
+        super::history_repair_publication_needs_exclusive(
+            home.path(),
+            &managed_root.join("escape/outside.jsonl")
+        )
+        .await
+        .is_err()
+    );
+
+    symlink(
+        &physical_root,
+        home.path()
+            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR),
+    )
+    .unwrap();
+    assert!(
+        super::history_repair_publication_needs_exclusive(home.path(), &source)
+            .await
+            .is_err()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn read_only_publication_check_binds_one_managed_root_target() {
+    let home = TempDir::new().unwrap();
+    let first = TempDir::new().unwrap();
+    let second = TempDir::new().unwrap();
+    let managed = home.path().join(codex_rollout::SESSIONS_SUBDIR);
+    std::os::unix::fs::symlink(first.path(), &managed).unwrap();
+    let name = "rollout.jsonl";
+    std::fs::write(first.path().join(name), b"first source\n").unwrap();
+    std::fs::write(second.path().join(name), b"second source\n").unwrap();
+    std::fs::write(
+        super::compressed_sibling(&second.path().join(name)),
+        b"ambiguous sibling",
+    )
+    .unwrap();
+    super::MANAGED_ROOT_RETARGETS
+        .lock()
+        .unwrap()
+        .insert(managed.clone(), second.path().to_path_buf());
+
+    assert!(
+        !super::history_repair_publication_needs_exclusive(home.path(), &managed.join(name))
+            .await
+            .unwrap(),
+        "an in-progress check must not switch to the replacement directory"
+    );
+    assert!(
+        super::history_repair_publication_needs_exclusive(home.path(), &managed.join(name))
+            .await
+            .unwrap(),
+        "a new check must see the new target's ambiguous sibling"
+    );
+    assert_eq!(
+        std::fs::read(first.path().join(name)).unwrap(),
+        b"first source\n"
+    );
+    assert_eq!(
+        std::fs::read(second.path().join(name)).unwrap(),
+        b"second source\n"
+    );
+    assert_eq!(std::fs::read_dir(first.path()).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(second.path()).unwrap().count(), 2);
+}
+
+#[cfg(unix)]
+#[tokio::test]
 async fn active_publication_binds_one_symlinked_codex_home_target() {
     use std::os::unix::fs::symlink;
 

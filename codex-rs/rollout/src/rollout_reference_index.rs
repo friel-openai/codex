@@ -39,10 +39,13 @@ struct IndexedRollout {
 impl RolloutReferenceIndex {
     /// Scans active and archived local rollout metadata.
     pub async fn scan(codex_home: &Path) -> io::Result<Self> {
-        Self::scan_paths(codex_home, vec![
-            codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
-            codex_home.join(SESSIONS_SUBDIR),
-        ])
+        Self::scan_paths(
+            codex_home,
+            vec![
+                codex_home.join(ARCHIVED_SESSIONS_SUBDIR),
+                codex_home.join(SESSIONS_SUBDIR),
+            ],
+        )
         .await
     }
 

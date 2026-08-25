@@ -409,7 +409,7 @@ impl ModelProviderInfo {
             http_headers: Some(
                 [(
                     "version".to_string(),
-                    openai_client_version_header(env!("CARGO_PKG_VERSION")).to_string(),
+                    openai_client_version_header(env!("CARGO_PKG_VERSION")).into(),
                 )]
                 .into_iter()
                 .collect(),

@@ -91,7 +91,7 @@ fn poison_legacy_rollout_for_goal_supervisor_repair(
 }
 
 #[tokio::test]
-async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() -> Result<()> {
+async fn migrated_resume_preserves_history_mode_after_picker_server_replacement() -> Result<()> {
     let codex_home = tempfile::tempdir().expect("tempdir");
     let config = build_config(&codex_home).await;
     let thread_id = ThreadId::from_string(
@@ -110,6 +110,7 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
         .thread_read(thread_id, /*include_turns*/ false)
         .await?
         .history_mode;
+    assert_eq!(history_mode, ThreadHistoryMode::Paginated);
     picker_app_server.shutdown().await?;
 
     let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
@@ -119,7 +120,7 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
         .resume_thread(config, thread_id, ResumeModelSettings::RestoreFromThread)
         .await?;
 
-    assert_eq!(app_server.next_request_id, next_request_id + 2);
+    assert_eq!(app_server.next_request_id, next_request_id + 3);
     assert!(!resumed.turns.is_empty());
     app_server.shutdown().await?;
     Ok(())
@@ -205,7 +206,7 @@ async fn background_migration_disables_cached_legacy_resume_shortcut() -> Result
                 ResumeModelSettings::RestoreFromThread,
             )
             .await?;
-        assert_eq!(app_server.next_request_id, next_request_id + 2);
+        assert_eq!(app_server.next_request_id, next_request_id + 3);
         assert!(!legacy.turns.is_empty());
 
         app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);
@@ -281,7 +282,10 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
 #[tokio::test]
 async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let config = build_config(&codex_home).await;
+    let mut config = build_config(&codex_home).await;
+    config
+        .features
+        .disable(Feature::BackgroundPaginatedRolloutMigration)?;
     let thread_id = ThreadId::from_string(
         &create_fake_paginated_rollout(
             codex_home.path(),

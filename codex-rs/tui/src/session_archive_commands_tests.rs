@@ -460,8 +460,16 @@ async fn queues_non_interactive_and_custom_sessions_without_scanning_rollouts()
         /*archived*/ false,
     );
     custom_metadata.source = serde_json::to_string(&custom_source)?;
-    custom_metadata.recency_at += chrono::Duration::hours(/*hours*/ 1);
-    custom_metadata.updated_at += chrono::Duration::hours(/*hours*/ 1);
+    // Queueing advances the first thread's recency beyond its fixture date.
+    // Keep the duplicate-name winner explicitly newer than that persisted value.
+    let queued_metadata = runtime
+        .get_thread(thread_id)
+        .await
+        .map_err(std::io::Error::other)?
+        .expect("queued thread remains indexed");
+    custom_metadata.recency_at =
+        queued_metadata.recency_at + chrono::Duration::hours(/*hours*/ 1);
+    custom_metadata.updated_at = custom_metadata.recency_at;
     runtime
         .upsert_thread(&custom_metadata)
         .await
@@ -499,10 +507,11 @@ async fn queues_non_interactive_and_custom_sessions_without_scanning_rollouts()
         ),
         (custom_thread_id, None),
     );
-    runtime
-        .update_thread_title(custom_thread_id, "saved-session")
-        .await
-        .map_err(std::io::Error::other)?;
+    // Queueing may migrate the rollout; rename through the API so the correct
+    // legacy title or paginated name column is updated.
+    app_server
+        .thread_set_name(custom_thread_id, "saved-session".to_string())
+        .await?;
 
     let (resolved_duplicate_id, _) = run_session_queue_action_with_app_server(
         &mut app_server,

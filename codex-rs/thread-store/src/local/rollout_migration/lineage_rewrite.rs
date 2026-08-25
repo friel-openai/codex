@@ -30,7 +30,9 @@ use crate::ThreadStoreResult;
 pub(super) struct GeneratedItemEdit {
     start: u64,
     end: u64,
-    item_id: String,
+    /// Distinguishes generated IDs from explicit lookalike IDs inherited by another turn.
+    pub(super) turn_id: String,
+    pub(super) item_id: String,
 }
 
 /// Borrows the generated completion's item without materializing its other fields.
@@ -43,6 +45,7 @@ struct CompletedRecord<'a> {
 /// The `item_completed` event fields needed to locate its item.
 #[derive(Deserialize)]
 struct CompletedPayload<'a> {
+    turn_id: String,
     #[serde(borrow)]
     item: CompletedItem<'a>,
 }
@@ -76,6 +79,7 @@ impl GeneratedItemEdit {
         Ok(Self {
             start,
             end,
+            turn_id: record.payload.turn_id,
             item_id,
         })
     }

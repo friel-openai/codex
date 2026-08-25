@@ -47,9 +47,10 @@ async fn rejects_reference_lineage_escaping_symlinked_sessions_root() {
     );
 
     let error = store
-        .resolve_rollout_lineage_for_reference(thread_id)
+        .resolve_rollout_lineage_for_reference(thread_id, /*expected_rollout_id*/ None)
         .await
-        .expect_err("escaping reference lineage should be rejected");
+        .err()
+        .expect("escaping reference lineage should be rejected");
 
     assert!(error.to_string().contains("must be in Codex home"));
 }

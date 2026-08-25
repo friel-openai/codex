@@ -863,7 +863,7 @@ features.shell_tool = false
     assert!(loaded.data.contains(&thread_id));
     assert!(!loaded.data.contains(&child_thread_id));
 
-    let mut expected = baseline;
+    let expected = baseline;
     if history_mode == ThreadHistoryMode::Paginated {
         let state_db = StateRuntime::init(
             codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
@@ -885,7 +885,8 @@ features.shell_tool = false
         *parent_thread_id = ThreadId::new();
         metadata.source = serde_json::to_string(&source)?;
         state_db.upsert_thread(&metadata).await?;
-        expected.thread.source = source.into();
+        // Resume must repair the display source from canonical ownership, not
+        // propagate this stale parent into the response or the running child.
     }
 
     let is_child_usage = |notification: &JSONRPCNotification| {

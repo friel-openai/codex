@@ -258,52 +258,54 @@ impl McpConnectionSet {
             (server_name, view, None)
         }))
         .await;
-        let server_results = join_all(server_snapshots.into_iter().map(|(server_name, view, cached_tools)| async move {
-            if !view.connection.startup_complete() {
-                let server_tools = view.connection.prepared_cached_tools(
-                    cached_tools,
-                    self.tool_plugin_provenance.as_ref(),
-                )?;
+        let server_results = join_all(server_snapshots.into_iter().map(
+            |(server_name, view, cached_tools)| async move {
+                if !view.connection.startup_complete() {
+                    let server_tools = view.connection.prepared_cached_tools(
+                        cached_tools,
+                        self.tool_plugin_provenance.as_ref(),
+                    )?;
+                    let server_tools = filter_tools(server_tools, &view.tool_filter);
+                    let server_tools = server_tools
+                        .into_iter()
+                        .map(|mut tool| {
+                            if let Some(annotations) = tool.tool.annotations.as_mut() {
+                                annotations.read_only_hint = None;
+                            }
+                            Self::with_server_metadata(tool, &view.metadata)
+                        })
+                        .collect::<Vec<_>>();
+                    return Some((server_name.clone(), None, server_tools));
+                }
+                let catalog_override = if server_name == CODEX_APPS_MCP_SERVER_NAME {
+                    self.codex_apps_tools_override.read().await.clone()
+                } else {
+                    None
+                };
+                let Some((client, server_tools)) = view
+                    .connection
+                    .capture_ready_client_and_tools(
+                        Arc::clone(&self.session_route),
+                        catalog_override,
+                        Arc::clone(&self.tool_plugin_provenance),
+                        view.tool_timeout,
+                    )
+                    .await
+                else {
+                    trace!(
+                        server_name = %server_name,
+                        "omitting MCP server without an exact ready client"
+                    );
+                    return None;
+                };
                 let server_tools = filter_tools(server_tools, &view.tool_filter);
                 let server_tools = server_tools
                     .into_iter()
-                    .map(|mut tool| {
-                        if let Some(annotations) = tool.tool.annotations.as_mut() {
-                            annotations.read_only_hint = None;
-                        }
-                        Self::with_server_metadata(tool, &view.metadata)
-                    })
+                    .map(|tool| Self::with_server_metadata(tool, &view.metadata))
                     .collect::<Vec<_>>();
-                return Some((server_name.clone(), None, server_tools));
-            }
-            let catalog_override = if server_name == CODEX_APPS_MCP_SERVER_NAME {
-                self.codex_apps_tools_override.read().await.clone()
-            } else {
-                None
-            };
-            let Some((client, server_tools)) = view
-                .connection
-                .capture_ready_client_and_tools(
-                    Arc::clone(&self.session_route),
-                    catalog_override,
-                    Arc::clone(&self.tool_plugin_provenance),
-                    view.tool_timeout,
-                )
-                .await
-            else {
-                trace!(
-                    server_name = %server_name,
-                    "omitting MCP server without an exact ready client"
-                );
-                return None;
-            };
-            let server_tools = filter_tools(server_tools, &view.tool_filter);
-            let server_tools = server_tools
-                .into_iter()
-                .map(|tool| Self::with_server_metadata(tool, &view.metadata))
-                .collect::<Vec<_>>();
-            Some((server_name.clone(), Some(client), server_tools))
-        }))
+                Some((server_name.clone(), Some(client), server_tools))
+            },
+        ))
         .await;
         for (server_name, client, server_tools) in server_results.into_iter().flatten() {
             if let Some(client) = client {

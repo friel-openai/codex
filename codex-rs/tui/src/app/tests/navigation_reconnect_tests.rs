@@ -227,6 +227,7 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
         assert!(
             session
                 .thread_loaded_list(ThreadLoadedListParams {
+                    ancestor_thread_id: None,
                     cursor: None,
                     limit: Some(100)
                 })

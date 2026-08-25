@@ -26,6 +26,7 @@ codex_rust_crate(
         "config.schema.json",
     ] + glob([
         "src/**/snapshots/**",
+        "src/tools/fixtures/**",
         "tests/fixtures/**",
     ]) + [
         # This is a bit of a hack, but empirically, some of our integration tests

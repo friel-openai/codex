@@ -584,6 +584,32 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
 }
 
 #[tokio::test]
+async fn worker_compresses_all_segments_of_one_thread_in_one_run() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let thread_id = ThreadId::new();
+    let mut paths = Vec::new();
+    let transcript = "shared thread segment\n".repeat(16_384);
+    for _ in 0..16 {
+        let path = archived_rollout_path(home.path(), "2025-01-03T12-00-00", Uuid::new_v4());
+        write_rollout(&path, thread_id, &transcript)?;
+        set_old_mtime(&path)?;
+        paths.push(path);
+    }
+    worker::run(home.path().to_path_buf()).await?;
+    for path in paths {
+        assert!(
+            !path.exists(),
+            "compression must not skip its own writer reservation: {path:?}"
+        );
+        let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(loaded_id, Some(thread_id));
+        assert_eq!(errors, 0);
+        assert_eq!(items.len(), 2);
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let uuid = Uuid::from_u128(10);
@@ -814,7 +840,7 @@ async fn worker_preserves_rollout_owned_by_a_thread_writer() -> anyhow::Result<(
         .try_acquire(thread_id)?
         .expect("reserve thread writer");
 
-    worker::run(home.path().to_path_buf(), RolloutCompressionMode::Standalone).await?;
+    worker::run(home.path().to_path_buf()).await?;
 
     assert_eq!(fs::read(&path)?, original);
     assert!(!compressed_rollout_path(&path).exists());
@@ -833,7 +859,7 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
         set_old_mtime(&path)?;
         let original = fs::read(&path)?;
         let (started, resume) = worker::pause_encoding(&path);
-        let mut compression = Some(tokio::spawn(worker::run(home.path().to_path_buf(), RolloutCompressionMode::Standalone)));
+        let mut compression = Some(tokio::spawn(worker::run(home.path().to_path_buf())));
         tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(5))).await??;
         let reader_home = home.path().to_path_buf();
         let reader = tokio::spawn(async move {
@@ -878,7 +904,7 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
         drop(reader);
         drop(migration);
 
-        // A new run must rebuild the reference index after foreground work changed it.
+        // Shared rollout compression must preserve the append and the referenced byte offsets.
         let child_uuid = Uuid::from_u128(29);
         let child_id = ThreadId::from_string(&child_uuid.to_string())?;
         let child = archived_rollout_path(home.path(), "2025-01-03T12-00-01", child_uuid);
@@ -892,8 +918,9 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
             },
         )?;
         set_old_mtime(&path)?;
-        worker::run(home.path().to_path_buf(), RolloutCompressionMode::Standalone).await?;
-        assert!(path.exists());
+        worker::run(home.path().to_path_buf()).await?;
+        assert!(!path.exists());
+        assert!(compressed_rollout_path(&path).exists());
         let (items, loaded_id, parse_errors) = RolloutRecorder::load_rollout_items(&path).await?;
         assert_eq!(loaded_id, Some(thread_id));
         assert_eq!(parse_errors, 0);

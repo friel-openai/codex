@@ -608,7 +608,7 @@ async fn prepare_with_response_history(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -621,7 +621,7 @@ async fn prepare_with_response_history(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         })
     } else {
@@ -647,7 +647,7 @@ async fn prepare_with_response_history(
     let prefix_rollout_path = prefix_segment.rollout_path.clone();
     let end_byte_offset =
         prefix_segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .ok_or_else(|| ThreadStoreError::Internal {
                 message: "prepared fork prefix is missing its byte boundary".to_string(),
             })?;
@@ -713,9 +713,13 @@ async fn prepare_with_response_history(
     // only for compatibility lineages that apply filters; ordinary native history_base ancestry
     // remains zero-copy across both same-thread rotations and cross-thread forks.
     let copied_history = if lineage.requires_copied_history() {
-        Some(Arc::new(
-            model_context::load_full_for_fork(lineage.clone(), history_base).await?,
-        ))
+        let mut copied = model_context::load_full_for_fork(lineage.clone(), history_base).await?;
+        if let Some(RolloutItem::SessionMeta(meta)) = copied.first_mut() {
+            // The filtered copy is self-contained. Retaining its source pointer would
+            // prepend the unfiltered ancestor again when the child reconstructs history.
+            meta.meta.history_base = None;
+        }
+        Some(Arc::new(copied))
     } else {
         None
     };
@@ -842,10 +846,9 @@ async fn try_prepare_indexed_explicit_model_context_fork(
     {
         fallback!("thread_archived_or_active_not_plain_jsonl");
     }
-    if super::helpers::scoped_rollout_path(
-        store.config.codex_home.clone(),
+    if super::helpers::scoped_reference_rollout_path(
+        store.config.codex_home.as_path(),
         metadata.rollout_path.as_path(),
-        "CODEX_HOME",
     )
     .is_err()
     {
@@ -1161,10 +1164,9 @@ async fn resolve_fork_source(
                 .await?;
     }
     let mut source = source.ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-    source.path = super::helpers::scoped_rollout_path(
-        store.config.codex_home.clone(),
+    source.path = super::helpers::scoped_reference_rollout_path(
+        store.config.codex_home.as_path(),
         source.path.as_path(),
-        "Codex home",
     )?;
     Ok(source)
 }
@@ -1362,10 +1364,9 @@ async fn try_prepare_indexed_latest_fork(
     {
         fallback!("active_boundary_or_supplied_context_mismatch");
     }
-    if super::helpers::scoped_rollout_path(
-        store.config.codex_home.clone(),
+    if super::helpers::scoped_reference_rollout_path(
+        store.config.codex_home.as_path(),
         metadata.rollout_path.as_path(),
-        "CODEX_HOME",
     )
     .is_err()
     {
@@ -1457,10 +1458,9 @@ async fn try_prepare_indexed_latest_fork(
         {
             fallback!("referenced_rollout_unavailable");
         }
-        if super::helpers::scoped_rollout_path(
-            store.config.codex_home.clone(),
+        if super::helpers::scoped_reference_rollout_path(
+            store.config.codex_home.as_path(),
             reference.rollout_path.as_path(),
-            "CODEX_HOME",
         )
         .is_err()
         {
@@ -1640,10 +1640,9 @@ async fn try_prepare_certified_latest_model_context_fork(
         Ok(()) | Err(ThreadStoreError::ThreadNotFound { .. }) => {}
         Err(error) => return Err(error),
     }
-    let path = super::helpers::scoped_rollout_path(
-        store.config.codex_home.clone(),
+    let path = super::helpers::scoped_reference_rollout_path(
+        store.config.codex_home.as_path(),
         resolved.path.as_path(),
-        "CODEX_HOME",
     )?;
     if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
         fallback!("active_rollout_not_plain");
@@ -1973,7 +1972,7 @@ pub(super) async fn history_base_at_boundary(
         .end_ordinal()
         .is_some_and(|end| position.end_ordinal_exclusive > end)
         || segment
-            .end_byte_offset
+            .jsonl_end_byte_offset
             .is_some_and(|end| position.end_byte_offset > end)
     {
         return Err(ThreadStoreError::InvalidRequest {
@@ -1986,7 +1985,7 @@ pub(super) async fn history_base_at_boundary(
             Some(HistoryPosition {
                 thread_id: previous.rollout_id(),
                 end_ordinal_exclusive: previous.end_ordinal()?,
-                end_byte_offset: previous.end_byte_offset?,
+                end_byte_offset: previous.jsonl_end_byte_offset?,
             })
         }))
     } else {

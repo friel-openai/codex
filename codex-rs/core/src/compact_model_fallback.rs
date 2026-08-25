@@ -10,6 +10,7 @@ pub(crate) fn should_retry_with_current_model(error: &CodexErr) -> bool {
     matches!(
         error.details(),
         CodexErrorDetails::InvalidRequest(_)
+            | CodexErrorDetails::ModelUnavailable(_)
             | CodexErrorDetails::UnexpectedStatus(_)
             | CodexErrorDetails::ContextWindowExceeded
             | CodexErrorDetails::UsageLimitReached(_)

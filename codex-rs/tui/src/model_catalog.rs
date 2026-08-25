@@ -1,7 +1,9 @@
 use codex_protocol::openai_models::ModelPreset;
 use std::sync::RwLock;
 
-#[derive(Debug)]
+/// The model catalog cannot be read while another caller replaces its snapshot.
+#[derive(Debug, thiserror::Error)]
+#[error("model catalog is busy")]
 pub(crate) struct ModelCatalogBusy;
 
 /// Picker-ready model presets shared by the running TUI and its active `ChatWidget`.

@@ -2466,8 +2466,12 @@ async fn turn_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
+    // A configured policy must win over the deprecated per-request field,
+    // independently of Frodex's proactive default.
     MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::MultiAgentV2)
+        .with_extra_config(
+            "[features.multi_agent_v2]\nenabled = true\nmulti_agent_mode_hint_text = 'Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents'",
+        )
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -2533,8 +2537,12 @@ async fn thread_start_ignores_deprecated_multi_agent_mode() -> Result<()> {
     let response_mock = responses::mount_sse_once(&server, body).await;
 
     let codex_home = TempDir::new()?;
+    // A configured policy must win over the deprecated per-request field,
+    // independently of Frodex's proactive default.
     MockResponsesConfig::new(&server.uri())
-        .enable_feature(Feature::MultiAgentV2)
+        .with_extra_config(
+            "[features.multi_agent_v2]\nenabled = true\nmulti_agent_mode_hint_text = 'Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents'",
+        )
         .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
@@ -4084,6 +4092,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             "chatgpt_base_url = \"{}\"\ntools.update_plan.enabled = true",
             server.uri()
         ))
+        .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     mount_analytics_capture(&server, codex_home.path()).await?;
 
@@ -4728,6 +4737,7 @@ async fn turn_start_emits_spawn_agent_item_with_effective_role_model_metadata_v2
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .enable_feature(Feature::Collab)
+        .disable_feature(Feature::MultiAgentV2)
         .write(codex_home.path())?;
     std::fs::write(
         codex_home.path().join("custom-role.toml"),

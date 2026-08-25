@@ -1400,6 +1400,11 @@ async fn guardian_v2_routes_scoped_tool_approvals(
             })
             .await?;
         }
+        wait_for_matching_analytics_event(&analytics_server, TIMEOUT, |event| {
+            event["event_type"] == "codex_turn_event"
+                && event["event_params"]["thread_id"] == reviewed_thread_id
+        })
+        .await?;
         timeout(TIMEOUT, app_server.shutdown_gracefully()).await??;
         let events = captured_analytics_events(&analytics_server).await;
         let turn = &events

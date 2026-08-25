@@ -91,7 +91,11 @@ pub(super) async fn try_project_staged_targets(
                 .meta
                 .subagent_history_start_ordinal
                 .is_some_and(|start| record.ordinal < start);
-            let realtime_item = if is_inherited_subagent_history { None } else { record.realtime_item };
+            let realtime_item = if is_inherited_subagent_history {
+                None
+            } else {
+                record.realtime_item
+            };
             let changes = if is_inherited_subagent_history {
                 Default::default()
             } else {

@@ -18,8 +18,6 @@ const SPAWN_AGENT_INHERITED_MODEL_GUIDANCE: &str = "Spawned agents inherit your 
 const SPAWN_AGENT_TYPE_OVERRIDE_DESCRIPTION_V1: &str = "Agent type override for the new agent. Omit to inherit the parent agent type with a full-history fork; otherwise, `default` is used.";
 const SPAWN_AGENT_MODEL_OVERRIDE_DESCRIPTION: &str =
     "Model override for the new agent. Omit unless an explicit override is needed.";
-const SPAWN_AGENT_SERVICE_TIER_OVERRIDE_DESCRIPTION: &str =
-    "Service tier override for the new agent. Omit unless explicitly requested.";
 const ADOPT_AGENT_THREAD_DESCRIPTION: &str = "Existing independent thread ID to adopt as this agent. Preserve its original thread, history, configuration, and descendants; wait for any active turn to finish.";
 const MAX_REASONING_EFFORT_CHARS_IN_SPAWN_AGENT_DESCRIPTION: usize = 64;
 

@@ -1100,7 +1100,7 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             false,
         ),
     ] {
-        let thread_id = create_fake_parented_rollout_with_source(
+        let mut thread_id = create_fake_parented_rollout_with_source(
             codex_home.path(),
             filename_ts,
             timestamp,
@@ -1117,7 +1117,27 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             parent_thread_id.into(),
             parent_thread_id,
         )?;
-        let path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        let mut path = rollout_path(codex_home.path(), filename_ts, &thread_id);
+        if version == Some(MultiAgentVersion::V1) {
+            // This independently resumed child's empty registry shares the parent's
+            // session ID. Force it to sort before the loaded root and V2 child.
+            let first_id = "00000000-0000-0000-0000-000000000000";
+            let records = std::fs::read_to_string(&path)?;
+            let mut rewritten = String::new();
+            for line in records.lines() {
+                let mut record: serde_json::Value = serde_json::from_str(line)?;
+                if record["type"] == "session_meta" {
+                    record["payload"]["id"] = json!(first_id);
+                }
+                rewritten.push_str(&serde_json::to_string(&record)?);
+                rewritten.push('\n');
+            }
+            let new_path = rollout_path(codex_home.path(), filename_ts, first_id);
+            std::fs::write(&new_path, rewritten)?;
+            std::fs::remove_file(path)?;
+            path = new_path;
+            thread_id = first_id.to_string();
+        }
         let mut session_meta = read_session_meta_line(&path).await?;
         let source = SessionSource::from(session_meta.meta.source.clone());
         if let Some(version) = version {
@@ -1271,7 +1291,24 @@ async fn thread_list_reports_loaded_subagent_direct_input_capability() -> Result
             },
         })
         .await?;
-    assert_eq!(response.data, Vec::new());
+    // Only the explicitly resumed V2 child is current. Adding historical edges
+    // must not manufacture membership for the other persisted descendants.
+    let expected_current = expected_subagents
+        .into_iter()
+        .filter(|(_, capability, not_loaded)| *capability == Some(false) && !not_loaded)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        response
+            .data
+            .into_iter()
+            .map(|thread| (
+                thread.id,
+                thread.can_accept_direct_input,
+                matches!(thread.status, ThreadStatus::NotLoaded),
+            ))
+            .collect::<Vec<_>>(),
+        expected_current
+    );
     assert_eq!(response.next_cursor, None);
 
     Ok(())

@@ -223,6 +223,7 @@ async fn benchmark_supplied_lineage_bulk_projection() {
                 .expect("canonical record");
             let next_offset = offset + bytes.len() as u64;
             lines.push(ProjectedRolloutLine {
+                realtime_item: None,
                 ordinal: record.ordinal,
                 start_byte_offset: offset,
                 end_byte_offset: next_offset,
@@ -259,7 +260,7 @@ async fn benchmark_supplied_lineage_bulk_projection() {
         }
         let steps = lines
             .into_iter()
-            .map(RolloutProjectionStep::Line)
+            .map(|line| RolloutProjectionStep::Line(Box::new(line)))
             .collect::<Vec<_>>();
         thread_history::apply_projection(
             &store,

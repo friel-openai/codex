@@ -346,6 +346,7 @@ async fn auto_recap_opt_out_blocks_requests_and_cleans_up_pending_start() -> Res
     // Finish the unsubscribe round trip before shutting down the recording proxy.
     app_server
         .thread_loaded_list(codex_app_server_protocol::ThreadLoadedListParams {
+            ancestor_thread_id: None,
             cursor: None,
             limit: None,
         })

@@ -4,14 +4,14 @@
 mod advanced_reasoning_tests;
 #[path = "tests/agents_navigation_tests.rs"]
 mod agents_navigation_tests;
+#[path = "tests/approval_routing_tests.rs"]
+mod approval_routing;
 #[path = "tests/backend_banner_fallback_tests.rs"]
 mod backend_banner_fallback_tests;
 #[path = "tests/backend_banner_recovery_tests.rs"]
 mod backend_banner_recovery_tests;
 #[path = "tests/backend_banner_startup_tests.rs"]
 mod backend_banner_startup_tests;
-#[path = "tests/approval_routing_tests.rs"]
-mod approval_routing;
 #[path = "tests/background_exit_tests.rs"]
 mod background_exit_tests;
 #[path = "tests/connector_policy.rs"]
@@ -2023,6 +2023,8 @@ async fn relation_refresh_preserves_cold_ephemeral_agent_identity() -> Result<()
         Ok(vec![Thread {
             id: child_thread_id.to_string(),
             extra: None,
+            model: None,
+            reasoning_effort: None,
             session_id: child_thread_id.to_string(),
             forked_from_id: None,
             parent_thread_id: Some(root_thread_id.to_string()),

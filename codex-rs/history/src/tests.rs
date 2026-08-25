@@ -1,5 +1,6 @@
 use anyhow::Result;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 
 use super::*;
@@ -453,7 +454,7 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
 fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
     let variants = schema["oneOf"].as_array().expect("rollout variants");
-    assert_eq!(variants.len(), 11);
+    assert_eq!(variants.len(), 12);
 
     for variant in variants {
         let required = variant["required"].as_array().expect("required fields");
@@ -551,7 +552,10 @@ fn compacted_item_round_trips_segment_state_checkpoint() -> Result<()> {
     });
 
     let item = serde_json::from_value::<CompactedItem>(value.clone())?;
-    assert_eq!(serde_json::to_value(item)?, value);
+    let mut expected = value;
+    expected["compaction_response_id"] = Value::Null;
+    expected["latest_token_usage_record"] = Value::Null;
+    assert_eq!(serde_json::to_value(item)?, expected);
     Ok(())
 }
 

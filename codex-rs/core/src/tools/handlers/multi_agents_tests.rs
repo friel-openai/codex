@@ -28,7 +28,6 @@ use crate::tools::handlers::multi_agents_v2::WaitAgentHandler as WaitAgentHandle
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_extension_api::empty_extension_registry;
 use codex_features::Feature;
-use codex_history::InitialHistory;
 use codex_history::RolloutItem;
 use codex_login::AuthManager;
 use codex_login::CodexAuth;
@@ -425,7 +424,7 @@ async fn spawn_agent_service_tier_uses_root_preference_when_root_model_cannot_su
     let mut config = (*turn.config).clone();
     config.model = Some("gpt-5.4-mini".to_string());
     config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
-    let manager = thread_manager();
+    let manager = thread_manager(&turn);
     let root = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
@@ -1662,7 +1661,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
         *thread_id == named_parent_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.recipient == named_parent_path
             )
     }));
@@ -1846,7 +1845,7 @@ async fn multi_agent_v2_goal_supervisor_uses_separate_followup_contract_inner(
         *thread_id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == helper_path
                         && communication.recipient == AgentPath::root()
                         && communication.encrypted_content.is_none()
@@ -1886,7 +1885,7 @@ async fn multi_agent_v2_goal_supervisor_uses_separate_followup_contract_inner(
         *thread_id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == helper_path
                         && communication.recipient == AgentPath::root()
                         && communication.encrypted_content.is_some()
@@ -2214,8 +2213,19 @@ async fn multi_agent_v2_list_agents_keeps_interrupted_resident_agents() {
     let result: ListAgentsResult =
         serde_json::from_str(&content).expect("list_agents result should be json");
 
-    assert_eq!(result.agents.len(), 1);
-    assert_eq!(result.agents[0].agent_name, agent_path.as_str());
+    assert_eq!(result.agents.len(), 2);
+    assert!(
+        result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == "/root")
+    );
+    assert!(
+        result
+            .agents
+            .iter()
+            .any(|agent| agent.agent_name == agent_path.as_str())
+    );
 }
 
 #[tokio::test]
@@ -3216,7 +3226,7 @@ async fn send_input_from_subagent_message_uses_inter_agent_communication() {
         *id == parent_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication == &expected
             )
     }));
@@ -3307,33 +3317,32 @@ async fn resume_agent_noops_for_active_agent() {
 }
 
 #[tokio::test]
-async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
-    let (mut session, turn) = make_session_and_context().await;
+async fn resume_agent_restores_unloaded_owned_agent_and_accepts_send_input() {
+    let (_session, turn) = make_session_and_context().await;
     let manager = thread_manager(&turn);
-    session.services.agent_control = manager.agent_control();
-    let config = turn.config.as_ref().clone();
-    let thread = manager
-        .resume_thread_with_history(
-            config.clone(),
-            InitialHistory::Forked(vec![RolloutItem::ResponseItem(
-                ResponseItem::Message {
-                    id: None,
-                    role: "user".to_string(),
-                    content: vec![ContentItem::InputText {
-                        text: "materialized".to_string(),
-                    }],
-                    phase: None,
-                    internal_chat_message_metadata_passthrough: None,
-                }
-                .into(),
-            )]),
-            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
-            /*parent_trace*/ None,
-            ClientMcpExtensions::default(),
-        )
+    let mut config = turn.config.as_ref().clone();
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("V1 handler fixture");
+    let parent = manager
+        .start_thread(StartThreadOptions::new(config))
         .await
-        .expect("start thread");
-    let agent_id = thread.thread_id;
+        .expect("start owning parent");
+    let session = parent.thread.session.clone();
+    let turn = session.new_default_turn().await;
+    let output = SpawnAgentHandler::default()
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "materialized"})),
+        ))
+        .await
+        .expect("spawn owned child");
+    let (content, _) = expect_text_output(output);
+    let result: serde_json::Value = serde_json::from_str(&content).expect("spawn result");
+    let agent_id = parse_agent_id(result["agent_id"].as_str().expect("child ID"));
     let _ = manager
         .agent_control()
         .shutdown_live_agent(agent_id)
@@ -3343,9 +3352,6 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         manager.agent_control().get_status(agent_id).await,
         AgentStatus::NotFound
     );
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
     let resume_invocation = invocation(
         session.clone(),
         turn.clone(),
@@ -4788,6 +4794,10 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
 async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
     let (_session, turn) = make_session_and_context().await;
     let mut config = turn.config.as_ref().clone();
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("V1 handler fixture");
     config.agent_max_depth = 3;
     config
         .permissions
@@ -4885,20 +4895,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
     );
     assert_eq!(grandchild_success, Some(true));
 
-    let close_output = CloseAgentHandler
-        .handle(invocation(
-            parent_session.clone(),
-            parent_session.new_default_turn().await,
-            "close_agent",
-            function_payload(json!({"target": child_thread_id.to_string()})),
-        ))
+    // Unloading preserves an open ownership edge. Explicit close below must not.
+    manager
+        .agent_control()
+        .shutdown_agent_tree(child_thread_id)
         .await
-        .expect("close_agent should close the child subtree");
-    let (close_content, close_success) = expect_text_output(close_output);
-    let close_result: close_agent::CloseAgentResult =
-        serde_json::from_str(&close_content).expect("close_agent result should be json");
-    assert_ne!(close_result.previous_status, AgentStatus::NotFound);
-    assert_eq!(close_success, Some(true));
+        .expect("unload the open child subtree");
     assert_eq!(
         manager.agent_control().get_status(child_thread_id).await,
         AgentStatus::NotFound
@@ -4939,6 +4941,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             .permission_profile,
         owner_permission_profile
     );
+    // Descendants remain cold after parent resume instead of loading every runtime.
+    assert_eq!(
+        manager
+            .agent_control()
+            .get_status(grandchild_thread_id)
+            .await,
+        AgentStatus::NotFound
+    );
+    let child_session = manager
+        .get_thread(child_thread_id)
+        .await
+        .expect("resumed child")
+        .session
+        .clone();
+    ResumeAgentHandler
+        .handle(invocation(
+            child_session.clone(),
+            child_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": grandchild_thread_id.to_string()})),
+        ))
+        .await
+        .expect("open cold grandchild remains resumable");
     assert_ne!(
         manager
             .agent_control()
@@ -4974,6 +4999,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
         AgentStatus::NotFound
     );
 
+    let closed_resume = ResumeAgentHandler
+        .handle(invocation(
+            parent_session.clone(),
+            parent_session.new_default_turn().await,
+            "resume_agent",
+            function_payload(json!({"id": child_thread_id.to_string()})),
+        ))
+        .await;
+    assert!(
+        closed_resume.is_err(),
+        "explicitly closed children cannot be resumed"
+    );
+
     let operator = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
@@ -4996,13 +5034,23 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
             "resume_agent",
             function_payload(json!({"id": parent_thread_id.to_string()})),
         ))
+        .await;
+    assert!(
+        parent_resume_output.is_err(),
+        "an unrelated agent cannot resume the parent"
+    );
+    // User-driven resume is authorized separately from agent ownership. Closed
+    // descendants must remain closed after this parent runtime is restored.
+    manager
+        .resume_thread_from_rollout(
+            config,
+            parent.thread.rollout_path().expect("parent rollout"),
+            AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy")),
+            None,
+            ClientMcpExtensions::default(),
+        )
         .await
-        .expect("resume_agent should reopen the parent thread");
-    let (parent_resume_content, parent_resume_success) = expect_text_output(parent_resume_output);
-    let parent_resume_result: resume_agent::ResumeAgentResult =
-        serde_json::from_str(&parent_resume_content).expect("parent resume result should be json");
-    assert_ne!(parent_resume_result.status, AgentStatus::NotFound);
-    assert_eq!(parent_resume_success, Some(true));
+        .expect("user-driven parent resume");
     assert_ne!(
         manager.agent_control().get_status(parent_thread_id).await,
         AgentStatus::NotFound

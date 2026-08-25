@@ -5,8 +5,8 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetParams;
 use codex_app_server_protocol::ExperimentalFeatureEnablementSetResponse;
-use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::SortDirection;
+use codex_app_server_protocol::ThreadHistoryMode;
 use codex_app_server_protocol::ThreadItem;
 use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadListResponse;
@@ -48,9 +48,6 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
-use codex_thread_store::RolloutMigrationMode;
-use codex_thread_store::RolloutMigrationOptions;
-use codex_thread_store::RolloutMigrationStatus;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -853,6 +850,9 @@ async fn large_unmarked_paginated_history_uses_compatibility_reader_and_restarts
             RolloutItem::Compacted(CompactedItem {
                 message: "ordinary unmarked compaction".to_string(),
                 replacement_history: Some(Vec::new()),
+                guardian_history: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,
