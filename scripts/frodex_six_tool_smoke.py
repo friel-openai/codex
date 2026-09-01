@@ -42,36 +42,43 @@ def response_result(response: dict[str, object], method: str) -> dict[str, objec
     return result
 
 
-def rollout_calls(home: Path) -> tuple[list[str], bool]:
+def rollout_calls(rollout: Path, thread_id: str) -> tuple[list[str], bool]:
+    # A full-history child can persist copies of the parent's calls. Validate
+    # only the parent rollout selected by thread/resume, never the whole home.
+    records = [
+        json.loads(line) for line in rollout.read_text(encoding="utf-8").splitlines()
+    ]
+    if (
+        not records
+        or records[0].get("type") != "session_meta"
+        or records[0].get("payload", {}).get("id") != thread_id
+    ):
+        raise RuntimeError("resumed rollout does not belong to the smoke parent")
     calls: list[tuple[str, str]] = []
     outputs: set[str] = set()
-    for rollout in sorted((home / "sessions").rglob("*.jsonl")):
-        for line in rollout.read_text(encoding="utf-8").splitlines():
-            record = json.loads(line)
-            if record.get("type") != "response_item":
-                continue
-            payload = record.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            if payload.get("type") == "function_call":
-                name = payload.get("name")
-                call_id = payload.get("call_id")
-                arguments = payload.get("arguments")
-                if not isinstance(name, str) or not isinstance(call_id, str):
-                    raise RuntimeError("function call omitted name or call_id")
-                if not isinstance(arguments, str) or not isinstance(
-                    json.loads(arguments), dict
-                ):
-                    raise RuntimeError(f"{name} arguments were not canonical JSON")
-                calls.append((name.rsplit(".", 1)[-1], call_id))
-            elif payload.get("type") == "function_call_output":
-                call_id = payload.get("call_id")
-                output = payload.get("output")
-                if not isinstance(call_id, str) or not isinstance(output, str):
-                    raise RuntimeError(
-                        "function result omitted call_id or string output"
-                    )
-                outputs.add(call_id)
+    for record in records:
+        if record.get("type") != "response_item":
+            continue
+        payload = record.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("type") == "function_call":
+            name = payload.get("name")
+            call_id = payload.get("call_id")
+            arguments = payload.get("arguments")
+            if not isinstance(name, str) or not isinstance(call_id, str):
+                raise RuntimeError("function call omitted name or call_id")
+            if not isinstance(arguments, str) or not isinstance(
+                json.loads(arguments), dict
+            ):
+                raise RuntimeError(f"{name} arguments were not canonical JSON")
+            calls.append((name.rsplit(".", 1)[-1], call_id))
+        elif payload.get("type") == "function_call_output":
+            call_id = payload.get("call_id")
+            output = payload.get("output")
+            if not isinstance(call_id, str) or not isinstance(output, str):
+                raise RuntimeError("function result omitted call_id or string output")
+            outputs.add(call_id)
     return [name for name, _ in calls], all(call_id in outputs for _, call_id in calls)
 
 
@@ -83,7 +90,6 @@ def main() -> int:
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args()
 
-    home = Path(os.environ["CODEX_HOME"])
     work = Path.cwd()
     client_type = load_app_server_client(args.source)
     environment = dict(os.environ)
@@ -170,13 +176,16 @@ After the sixth result, reply only SMOKE_COMPLETE. Do not invoke a seventh tool.
     thread_resume = (
         isinstance(resumed_thread, dict) and resumed_thread.get("id") == thread_id
     )
-    tools, canonical_results = rollout_calls(home)
+    if not thread_resume:
+        raise RuntimeError("thread/resume did not initialize the persisted thread")
+    rollout_path = resumed_thread.get("path")
+    if not isinstance(rollout_path, str) or not rollout_path:
+        raise RuntimeError("thread/resume omitted the persisted rollout path")
+    tools, canonical_results = rollout_calls(Path(rollout_path), thread_id)
     if tuple(tools) != EXPECTED_TOOLS:
         raise RuntimeError(f"tool order {tools!r} != {list(EXPECTED_TOOLS)!r}")
     if not canonical_results:
         raise RuntimeError("one or more tool calls lacked a canonical JSON result")
-    if not thread_resume:
-        raise RuntimeError("thread/resume did not initialize the persisted thread")
 
     args.report.write_text(
         json.dumps(
