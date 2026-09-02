@@ -12004,9 +12004,11 @@ enabled = true
     assert_eq!(
         (
             config.agent_max_threads,
+            config.multi_agent_v2.max_concurrent_threads_per_session,
+            config.effective_agent_max_threads(MultiAgentVersion::V1),
             config.effective_agent_max_threads(MultiAgentVersion::V2)
         ),
-        (None, Some(3))
+        (None, 257, Some(256), Some(256))
     );
 
     Ok(())
