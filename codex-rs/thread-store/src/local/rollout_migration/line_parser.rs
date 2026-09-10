@@ -30,6 +30,26 @@ pub(super) fn parse_legacy_rollout_line(bytes: &[u8]) -> Result<Option<RolloutLi
     parse_legacy_rollout_value(value)
 }
 
+/// Parses every logical record stored in one physical legacy JSONL line.
+///
+/// Historical writer failures could append a complete record directly after an incomplete one.
+/// The source file remains unchanged; callers receive only complete ordinary suffix records.
+pub(super) fn parse_legacy_rollout_lines(bytes: &[u8]) -> Result<Vec<RolloutLine>, String> {
+    match parse_legacy_rollout_line(bytes) {
+        Ok(Some(line)) => Ok(vec![line]),
+        Ok(None) => Ok(Vec::new()),
+        Err(error) => {
+            let recovered = codex_rollout::recover_legacy_jsonl_suffix(bytes).ok_or(error)?;
+            recovered
+                .values
+                .into_iter()
+                .map(parse_legacy_rollout_value)
+                .collect::<Result<Vec<_>, _>>()
+                .map(|lines| lines.into_iter().flatten().collect())
+        }
+    }
+}
+
 /// Parse a Paginated rollout line without changing or skipping its contents.
 ///
 /// With `serde_json/arbitrary_precision`, direct deserialization of an internally tagged enum can

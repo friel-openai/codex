@@ -4684,6 +4684,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
 }
 
 #[tokio::test]
+async fn segmented_migration_recovers_records_concatenated_after_truncated_prefixes() {
+    let mut fixture = context_dependent_legacy_fixture().await;
+    for (source_index, question) in [(1, "question-1-0"), (2, "question-2-0")] {
+        let path = &fixture.source_paths[source_index];
+        let original = fs::read_to_string(path).expect("read Legacy source to corrupt");
+        let record = original
+            .lines()
+            .find(|line| line.contains(question))
+            .expect("find complete ordinary record");
+        let invalid_prefix = format!(
+            r#"{{"timestamp":"{TIMESTAMP}","type":"response_item","payload":{{"type":"reasoning","encrypted_content":"truncated-{source_index}"#
+        );
+        let concatenated = format!("{invalid_prefix}{record}");
+        assert!(serde_json::from_str::<serde_json::Value>(&concatenated).is_err());
+        let corrupted = original.replacen(record, &concatenated, 1);
+        fs::write(path, corrupted).expect("write concatenated Legacy record");
+    }
+    fixture.source_bytes = fixture
+        .source_paths
+        .iter()
+        .map(|path| fs::read(path).expect("capture corrupted Legacy source"))
+        .collect();
+    let store = indexed_store(fixture.home.path()).await;
+
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate recoverable segmented history");
+
+    assert_eq!(apply.outcomes.len(), 1);
+    assert_eq!(
+        apply.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        apply.outcomes[0].message
+    );
+    assert_context_dependent_migration_projection(&store, &fixture).await;
+    assert_legacy_sources_unchanged(&fixture);
+}
+
+#[tokio::test]
+async fn segmented_migration_recovers_frodo_697_source_lineage() {
+    const SOURCE_COUNT: usize = 697;
+    let home = TempDir::new().expect("create Codex home");
+    let thread_id = ThreadId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let mut predecessor = None;
+    let mut source_paths = Vec::with_capacity(SOURCE_COUNT);
+    for index in 0..SOURCE_COUNT {
+        let segment_id = SegmentId::new();
+        let path = if index + 1 == SOURCE_COUNT {
+            home.path().join("sessions/2025/01/03").join(&filename)
+        } else {
+            home.path()
+                .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+                .join(thread_id.to_string())
+                .join(segment_id.to_string())
+                .join(&filename)
+        };
+        let mut items = Vec::new();
+        if let Some((predecessor_path, predecessor_segment_id)) = predecessor.take() {
+            items.push(segment_reference(
+                predecessor_path,
+                thread_id,
+                predecessor_segment_id,
+            ));
+        }
+        let turn_id = format!("turn-{index}");
+        items.extend([
+            started(turn_id.as_str()),
+            user_message(format!("question-{index}").as_str()),
+            completed(turn_id.as_str()),
+        ]);
+        write_legacy_segment(path.as_path(), home.path(), thread_id, segment_id, items);
+        predecessor = Some((path.clone(), segment_id));
+        source_paths.push(path);
+    }
+    for (source_index, discarded_prefix_bytes) in [(27, 104), (29, 419)] {
+        let path = &source_paths[source_index];
+        let original = fs::read_to_string(path).expect("read source to corrupt");
+        let record = original
+            .lines()
+            .find(|line| line.contains(format!("question-{source_index}").as_str()))
+            .expect("find complete record after prefix");
+        let prefix_start = r#"{"timestamp":"broken","type":"response_item","payload":{"type":"reasoning","encrypted_content":""#;
+        let prefix = format!(
+            "{prefix_start}{}",
+            "x".repeat(discarded_prefix_bytes - prefix_start.len())
+        );
+        assert_eq!(prefix.len(), discarded_prefix_bytes);
+        let concatenated = format!("{prefix}{record}");
+        assert!(serde_json::from_str::<serde_json::Value>(&concatenated).is_err());
+        fs::write(path, original.replacen(record, &concatenated, 1))
+            .expect("write recoverable source damage");
+    }
+    let source_bytes = source_paths
+        .iter()
+        .map(|path| fs::read(path).expect("capture source bytes"))
+        .collect::<Vec<_>>();
+    let store = indexed_store(home.path()).await;
+
+    let apply = store
+        .migrate_rollouts(apply_options())
+        .await
+        .expect("migrate 697-source recoverable lineage");
+
+    assert_eq!(apply.outcomes.len(), 1);
+    assert_eq!(
+        apply.outcomes[0].status,
+        RolloutMigrationStatus::Migrated,
+        "{:?}",
+        apply.outcomes[0].message
+    );
+    let mut cursor = None;
+    let mut item_count = 0;
+    loop {
+        let page = store
+            .list_items(ListItemsParams {
+                thread_id,
+                turn_id: None,
+                include_archived: false,
+                cursor,
+                page_size: 100,
+                sort_direction: SortDirection::Asc,
+                sort_key: ItemSortKey::CreatedAtOrdinal,
+                after_updated_at_ordinal: None,
+            })
+            .await
+            .expect("list migrated 697-source lineage");
+        item_count += page.items.len();
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+    assert_eq!(item_count, SOURCE_COUNT);
+    assert_eq!(
+        source_paths
+            .iter()
+            .map(|path| fs::read(path).expect("reread source bytes"))
+            .collect::<Vec<_>>(),
+        source_bytes
+    );
+}
+
+#[tokio::test]
 async fn segmented_migration_preserves_low_suffix_legacy_item_ids() {
     let fixture = context_dependent_legacy_fixture_with_counts(
         [416, 3, 1, 417],
@@ -9215,7 +9361,7 @@ async fn migration_reports_invalid_session_metadata() {
 }
 
 #[tokio::test]
-async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
+async fn migration_skips_malformed_lines_recovers_concatenated_record_and_trailing_partial_tail() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
     let path = write_rollout(
@@ -9234,6 +9380,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
         ordinal: None,
         item: agent_message("kept answer"),
     };
+    write!(file, "{{\"timestamp\":\"broken\",\"payload\"").expect("append truncated record prefix");
     writeln!(
         file,
         "{}",

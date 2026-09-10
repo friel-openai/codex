@@ -493,28 +493,30 @@ where
             }
             continue;
         }
-        let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
+        let Ok(lines) = line_parser::parse_legacy_rollout_lines(raw.as_bytes()) else {
             continue;
         };
-        let planned = match rollback_plan {
-            Some(plan) => plan.apply(replay.parsed_record_index, line)?,
-            None => Some(line),
-        };
-        replay.parsed_record_index = replay
-            .parsed_record_index
-            .checked_add(1)
-            .ok_or_else(|| migration_error("lineage migration record index overflow"))?;
-        let Some(line) = planned else {
-            canonicalizer.skip_source_line()?;
-            continue;
-        };
-        if matches!(
-            line.item,
-            RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
-        ) {
-            continue;
+        for line in lines {
+            let planned = match rollback_plan {
+                Some(plan) => plan.apply(replay.parsed_record_index, line)?,
+                None => Some(line),
+            };
+            replay.parsed_record_index = replay
+                .parsed_record_index
+                .checked_add(1)
+                .ok_or_else(|| migration_error("lineage migration record index overflow"))?;
+            let Some(line) = planned else {
+                canonicalizer.skip_source_line()?;
+                continue;
+            };
+            if matches!(
+                line.item,
+                RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
+            ) {
+                continue;
+            }
+            canonicalizer.process_line(line, writer).await?;
         }
-        canonicalizer.process_line(line, writer).await?;
     }
     let carries_turn_state = plan
         .sources
@@ -1001,10 +1003,12 @@ pub(super) async fn build_rollback_plan(
                 planner.observe(&context.rollout_line())?;
                 continue;
             }
-            let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
+            let Ok(lines) = line_parser::parse_legacy_rollout_lines(raw.as_bytes()) else {
                 continue;
             };
-            planner.observe(&line)?;
+            for line in lines {
+                planner.observe(&line)?;
+            }
         }
     }
     Ok(Some(planner.finish()))

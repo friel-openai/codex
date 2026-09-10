@@ -11,6 +11,126 @@ fn response_message(role: &str, text: &str) -> Result<RolloutItem> {
     }))?)
 }
 
+#[tokio::test]
+async fn concatenated_legacy_ancestor_record_migrates_across_restart() -> Result<()> {
+    let server = responses::start_mock_server().await;
+    let response_mock = responses::mount_sse_sequence(
+        &server,
+        (0..2)
+            .map(|index| {
+                responses::sse(vec![
+                    responses::ev_response_created(&format!("reply-{index}")),
+                    responses::ev_assistant_message(&format!("message-{index}"), "resumed reply"),
+                    responses::ev_completed(&format!("reply-{index}")),
+                ])
+            })
+            .collect(),
+    )
+    .await;
+    let home = TempDir::new()?;
+    MockResponsesConfig::new(&server.uri()).write(home.path())?;
+    let thread_id = ThreadId::new();
+    let parent_segment = SegmentId::new();
+    let filename = format!("rollout-2025-01-03T12-00-00-{thread_id}.jsonl");
+    let parent = home
+        .path()
+        .join("rotated_rollout_segments")
+        .join(thread_id.to_string())
+        .join(parent_segment.to_string())
+        .join(&filename);
+    write_legacy_segment(
+        &parent,
+        home.path(),
+        thread_id,
+        parent_segment,
+        vec![
+            legacy_turn_started("inherited-turn"),
+            legacy_user_message("inherited user".to_string()),
+            response_message("user", "inherited user")?,
+            response_message("assistant", "inherited answer after damage")?,
+            legacy_turn_completed("inherited-turn"),
+        ],
+    )?;
+    let original_parent = fs::read_to_string(&parent)?;
+    let complete_record = original_parent
+        .lines()
+        .find(|line| line.contains("inherited answer after damage"))
+        .expect("find complete ancestor record");
+    let invalid_prefix = r#"{"timestamp":"2025-01-03T12:00:00Z","type":"response_item","payload":{"type":"reasoning","encrypted_content":"truncated"#;
+    let concatenated = format!("{invalid_prefix}{complete_record}");
+    assert!(serde_json::from_str::<serde_json::Value>(&concatenated).is_err());
+    fs::write(
+        &parent,
+        original_parent.replacen(complete_record, &concatenated, 1),
+    )?;
+    let selected = home.path().join("sessions/2025/01/03").join(filename);
+    write_legacy_segment(
+        &selected,
+        home.path(),
+        thread_id,
+        SegmentId::new(),
+        vec![
+            legacy_segment_reference(parent.clone(), thread_id, parent_segment),
+            legacy_turn_started("local-turn"),
+            legacy_user_message("local user".to_string()),
+            response_message("user", "local user")?,
+            response_message("assistant", "local answer")?,
+            legacy_turn_completed("local-turn"),
+        ],
+    )?;
+    let parent_before = fs::read(&parent)?;
+    let selected_before = fs::read(&selected)?;
+
+    for phase in 0..2 {
+        let mut app = TestAppServer::builder()
+            .with_codex_home(home.path())
+            .build_initialized()
+            .await?;
+        let request = app
+            .send_thread_resume_request(ThreadResumeParams {
+                thread_id: thread_id.to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            })
+            .await?;
+        let resumed: ThreadResumeResponse =
+            timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
+        assert_eq!(resumed.thread.history_mode, ThreadHistoryMode::Paginated);
+        let visible =
+            read_public_history_projection(&mut app, thread_id, DEFAULT_READ_TIMEOUT).await?;
+        assert!(
+            visible
+                .iter()
+                .any(|(_, _, item)| String::from_utf8_lossy(item).contains("inherited user"))
+        );
+        timeout(
+            DEFAULT_READ_TIMEOUT,
+            app.start_turn_and_wait_for_completion(TurnStartParams {
+                thread_id: thread_id.to_string(),
+                input: vec![UserInput::Text {
+                    text: format!("new user {phase}"),
+                    text_elements: Vec::new(),
+                }],
+                ..Default::default()
+            }),
+        )
+        .await??;
+        timeout(DEFAULT_READ_TIMEOUT, app.shutdown_gracefully()).await??;
+        let request = response_mock
+            .requests()
+            .last()
+            .expect("resumed model request")
+            .clone();
+        assert!(request.body_contains_text("inherited user"));
+        assert!(request.body_contains_text("inherited answer after damage"));
+        assert!(request.body_contains_text("local user"));
+        assert!(request.body_contains_text("local answer"));
+        assert_eq!(fs::read(&parent)?, parent_before);
+        assert_eq!(fs::read(&selected)?, selected_before);
+    }
+    Ok(())
+}
+
 /// Both stored reference formats can contain a partial ordinary record followed by valid data.
 #[derive(Clone, Copy)]
 enum MalformedHistory {

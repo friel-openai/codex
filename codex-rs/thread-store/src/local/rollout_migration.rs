@@ -244,7 +244,7 @@ struct RolloutMigrationRateLimiter {
 }
 
 struct RolloutRecord {
-    line: Option<RolloutLine>,
+    lines: Vec<RolloutLine>,
     byte_count: u64,
 }
 
@@ -1304,7 +1304,7 @@ impl LocalThreadStore {
         let mut planner = RollbackPlanner::new();
         while let Some(record) = read_rollout_record(&mut source, &mut bytes).await? {
             limiter.account(record.byte_count).await;
-            if let Some(line) = record.line {
+            for line in record.lines {
                 planner.observe(&line)?;
             }
         }
@@ -1412,33 +1412,34 @@ impl LocalThreadStore {
 
         while let Some(record) = read_rollout_record(&mut source, &mut bytes).await? {
             limiter.account(record.byte_count).await;
-            let Some(line) = record.line else {
-                continue;
-            };
-            if plan.is_none()
-                && matches!(
-                    &line.item,
-                    RolloutItem::EventMsg(codex_protocol::protocol::EventMsg::ThreadRolledBack(_))
-                )
-            {
-                return Ok(CanonicalizationAttempt::NeedsRollbackPlan);
-            }
-            let line = if let Some(plan) = plan {
-                let planned = plan.apply(parsed_record_index, line)?;
-                parsed_record_index = parsed_record_index
-                    .checked_add(1)
-                    .ok_or_else(|| migration_error("legacy rollout record index overflow"))?;
-                let Some(line) = planned else {
-                    canonicalizer.skip_source_line()?;
-                    continue;
+            for line in record.lines {
+                if plan.is_none()
+                    && matches!(
+                        &line.item,
+                        RolloutItem::EventMsg(
+                            codex_protocol::protocol::EventMsg::ThreadRolledBack(_)
+                        )
+                    )
+                {
+                    return Ok(CanonicalizationAttempt::NeedsRollbackPlan);
+                }
+                let line = if let Some(plan) = plan {
+                    let planned = plan.apply(parsed_record_index, line)?;
+                    parsed_record_index = parsed_record_index
+                        .checked_add(1)
+                        .ok_or_else(|| migration_error("legacy rollout record index overflow"))?;
+                    let Some(line) = planned else {
+                        canonicalizer.skip_source_line()?;
+                        continue;
+                    };
+                    line
+                } else {
+                    line
                 };
-                line
-            } else {
-                line
-            };
-            last_timestamp = line.timestamp.clone();
-            let written = canonicalizer.process_line(line, &mut staged).await?;
-            limiter.account(written).await;
+                last_timestamp = line.timestamp.clone();
+                let written = canonicalizer.process_line(line, &mut staged).await?;
+                limiter.account(written).await;
+            }
         }
         if let Some(plan) = plan
             && parsed_record_index != plan.record_count()
@@ -1856,15 +1857,13 @@ async fn read_rollout_record(
                 .ok_or_else(|| migration_error("rollout record byte count overflow"))?;
         }
         return Ok(Some(RolloutRecord {
-            line: None,
+            lines: Vec::new(),
             byte_count: byte_count as u64,
         }));
     }
-    // Legacy records do not have ordinals, so malformed complete records cannot be repaired.
-    // Skip them and let the next newline-delimited record resynchronize the stream.
-    let line = line_parser::parse_legacy_rollout_line(bytes).unwrap_or(None);
+    let lines = line_parser::parse_legacy_rollout_lines(bytes).unwrap_or_default();
     Ok(Some(RolloutRecord {
-        line,
+        lines,
         byte_count: byte_count as u64,
     }))
 }

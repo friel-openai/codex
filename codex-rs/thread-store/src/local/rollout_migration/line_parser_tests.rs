@@ -1,9 +1,12 @@
+use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::EventMsg;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutItem;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
 use super::parse_legacy_rollout_line;
+use super::parse_legacy_rollout_lines;
 use super::parse_paginated_rollout_line;
 
 fn assert_decoder_equivalence(value: serde_json::Value) -> bool {
@@ -100,6 +103,36 @@ fn line(payload_type: &str, payload: serde_json::Value) -> Vec<u8> {
         "payload": payload,
     }))
     .expect("serialize fixture")
+}
+
+#[test]
+fn recovers_observed_response_items_after_truncated_legacy_prefixes() {
+    let fixtures = [
+        (
+            r#"{"timestamp":"broken","type":"response_item","payload":{"type":"message"#,
+            r#"{"timestamp":"2026-06-12T19:05:57Z","type":"response_item","payload":{"type":"custom_tool_call","call_id":"call-1","name":"tool","input":"{}"}}"#,
+            "custom_tool_call",
+        ),
+        (
+            r#"{"timestamp":"broken","type":"response_item","payload":{"type":"reasoning","encrypted_content":"truncated"#,
+            r#"{"timestamp":"2026-06-12T19:05:57Z","type":"response_item","payload":{"type":"reasoning","summary":[],"encrypted_content":"ciphertext"}}"#,
+            "reasoning",
+        ),
+    ];
+
+    for (prefix, complete, expected) in fixtures {
+        let bytes = format!("{prefix}{complete}");
+        let lines = parse_legacy_rollout_lines(bytes.as_bytes()).expect("recover complete suffix");
+        assert_eq!(lines.len(), 1);
+        let RolloutItem::ResponseItem(ResponseItemEnvelope { item, .. }) = &lines[0].item else {
+            panic!("expected response item");
+        };
+        assert!(matches!(
+            (expected, item),
+            ("custom_tool_call", ResponseItem::CustomToolCall { .. })
+                | ("reasoning", ResponseItem::Reasoning { .. })
+        ));
+    }
 }
 
 #[test]
