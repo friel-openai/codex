@@ -145,7 +145,7 @@ jobs:
         with:
           tool: nextest@0.9.103
 
-      - name: Run core unit and Saffron integration tests
+      - name: Run core unit and Frodex runtime-recovery tests
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
           # A codex-core unit test starts this MCP server through the shared
@@ -178,4 +178,4 @@ jobs:
             --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
             -p codex-app-server \
             --test all \
-            saffron_goal_supervisor
+            -E 'test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart)'
