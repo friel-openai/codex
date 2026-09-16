@@ -150,7 +150,8 @@ jobs:
         run: |
           # A codex-core unit test starts this MCP server through the shared
           # Cargo target directory. `--lib` does not build workspace binaries.
-          cargo build --profile ci-test \
+          cargo build --manifest-path codex-rs/Cargo.toml \
+            --profile ci-test \
             -p codex-rmcp-client \
             --bin test_stdio_server
 
