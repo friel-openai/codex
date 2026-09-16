@@ -1,0 +1,2980 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca7039948fb2959 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -30,6 +30,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_rollout::ReverseJsonlScanner;
+ use codex_rollout::ScanOutcome;
+ use codex_thread_store::PersistContext;
++use codex_thread_store::ReadThreadsParams;
++use std::collections::HashMap;
+ use std::collections::VecDeque;
+ use std::fs::File;
+ use std::sync::LazyLock;
+@@ -2005,36 +2007,41 @@ impl ThreadRequestProcessor {
+             })?;
+         let subtree_thread_ids = current_agent_membership.candidate_thread_ids().to_vec();
+
+-        let mut archive_thread_ids = Vec::new();
+-        let mut already_archived_thread_ids = Vec::new();
+-        match self
++        let mut indexed_threads = match self
+             .thread_store
+-            .read_thread(StoreReadThreadParams {
+-                thread_id,
+-                include_archived: true,
+-                include_history: false,
++            .read_threads(ReadThreadsParams {
++                thread_ids: subtree_thread_ids.clone(),
+             })
+             .await
+         {
+-            Ok(thread) => {
+-                if thread.archived_at.is_some() {
+-                    already_archived_thread_ids.push(thread_id);
+-                } else {
+-                    archive_thread_ids.push(thread_id);
+-                }
++            Ok(threads) => threads
++                .into_iter()
++                .map(|thread| (thread.thread_id, thread))
++                .collect::<HashMap<_, _>>(),
++            Err(err) => {
++                warn!("failed to batch archive metadata for {thread_id}: {err}");
++                HashMap::new()
+             }
+-            Err(err) => return Err(thread_store_mutation_error("archive", err)),
+-        }
+-        for descendant_thread_id in subtree_thread_ids.iter().copied().skip(1) {
+-            match self
+-                .thread_store
+-                .read_thread(StoreReadThreadParams {
+-                    thread_id: descendant_thread_id,
+-                    include_archived: true,
+-                    include_history: false,
+-                })
+-                .await
+-            {
++        };
++        let mut archive_thread_ids = Vec::new();
++        let mut already_archived_thread_ids = Vec::new();
++        for descendant_thread_id in
++            std::iter::once(thread_id).chain(subtree_thread_ids.iter().copied().skip(1))
++        {
++            // Archive needs current metadata, not migration of every descendant's history.
++            let thread = match indexed_threads.remove(&descendant_thread_id) {
++                Some(thread) => Ok(thread),
++                None => {
++                    self.thread_store
++                        .read_thread(StoreReadThreadParams {
++                            thread_id: descendant_thread_id,
++                            include_archived: true,
++                            include_history: false,
++                        })
++                        .await
++                }
++            };
++            match thread {
+                 Ok(thread) => {
+                     if thread.archived_at.is_some() {
+                         already_archived_thread_ids.push(descendant_thread_id);
+@@ -2042,6 +2049,9 @@ impl ThreadRequestProcessor {
+                         archive_thread_ids.push(descendant_thread_id);
+                     }
+                 }
++                Err(err) if descendant_thread_id == thread_id => {
++                    return Err(thread_store_mutation_error("archive", err));
++                }
+                 Err(ThreadStoreError::ThreadNotFound { .. }) => {}
+                 Err(err) => {
+                     warn!(
+@@ -5098,13 +5108,30 @@ impl ThreadRequestProcessor {
+         let redact_resume_payloads =
+             should_redact_thread_resume_payloads(app_server_client_name.as_deref());
+
+-        let _thread_list_state_permit = match self.acquire_thread_list_state_permit().await {
++        let _thread_list_state_permit = match self.acquire_thread_resume_permit(&params).await {
+             Ok(permit) => permit,
+             Err(error) => {
+                 self.outgoing.send_error(request_id, error).await;
+                 return Ok(());
+             }
+         };
++        if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
++            && self
++                .pending_thread_unloads
++                .lock()
++                .await
++                .contains(&thread_id)
++        {
++            self.outgoing
++                .send_error(
++                    request_id,
++                    invalid_request(format!(
++                        "thread {thread_id} is closing; retry thread/resume after the thread is closed"
++                    )),
++                )
++                .await;
++            return Ok(());
++        }
+         let stored_thread_from_running_probe = match self
+             .resume_running_thread(
+                 &request_id,
+@@ -8509,6 +8536,7 @@ fn build_thread_from_loaded_snapshot(
+ }
+
+ mod goal_scheduler;
++mod resume_preparation;
+
+ #[cfg(test)]
+ #[path = "thread_processor_tests.rs"]
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+index 4ee811728b6e4690ac452f0113995e06fd424de5..3fbc28050f419811e20f4af0f8e178c436656526 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+@@ -17,8 +17,13 @@ impl ThreadRequestProcessor {
+         &self,
+         schedule: ActiveGoalSupervisorSchedule,
+     ) -> Result<(), JSONRPCErrorError> {
+-        let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
+         let thread_id = schedule.thread_id;
++        let _thread_list_state_permit = self
++            .acquire_thread_resume_permit(&ThreadResumeParams {
++                thread_id: thread_id.to_string(),
++                ..Default::default()
++            })
++            .await?;
+         if self
+             .pending_thread_unloads
+             .lock()
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7b48a4b2e8b6d97d788a5dfc7cea91052998770e
+--- /dev/null
++++ b/codex-rs/app-server/src/request_processors/thread_processor/resume_preparation.rs
+@@ -0,0 +1,82 @@
++//! Completes selected-rollout migration before serializing resume lifecycle changes.
++
++use super::*;
++use codex_thread_store::ReadThreadsParams;
++
++impl ThreadRequestProcessor {
++    pub(super) async fn acquire_thread_resume_permit(
++        &self,
++        params: &ThreadResumeParams,
++    ) -> Result<SemaphorePermit<'_>, JSONRPCErrorError> {
++        let mut prepared = params.history.is_some();
++        let requested_id = ThreadId::from_string(&params.thread_id).ok();
++        loop {
++            let running = if let Some(thread_id) = requested_id {
++                self.thread_manager.get_thread(thread_id).await.is_ok()
++            } else {
++                false
++            };
++            if !prepared && !running {
++                let source = self
++                    .read_stored_thread_for_resume(
++                        &params.thread_id,
++                        params.path.as_ref(),
++                        /*include_history*/ false,
++                    )
++                    .await?;
++                if params.path.is_some() {
++                    // Explicit paths can identify external or stale rollouts. Only migrate the
++                    // selected source; the protected resume still validates the requested path.
++                    let indexed = self
++                        .thread_store
++                        .read_threads(ReadThreadsParams {
++                            thread_ids: vec![source.thread_id],
++                        })
++                        .await
++                        .map_err(thread_store_resume_read_error)?;
++                    let selected_path = indexed.iter().any(|current| {
++                        current
++                            .rollout_path
++                            .as_ref()
++                            .zip(source.rollout_path.as_ref())
++                            .is_some_and(|(current, requested)| {
++                                path_utils::paths_match_after_normalization(
++                                    codex_rollout::plain_rollout_path(current).as_path(),
++                                    codex_rollout::plain_rollout_path(requested).as_path(),
++                                )
++                            })
++                    });
++                    let unindexed_local_path = indexed.is_empty()
++                        && source.rollout_path.as_ref().is_some_and(|path| {
++                            path.starts_with(
++                                self.config.codex_home.join(codex_rollout::SESSIONS_SUBDIR),
++                            )
++                        });
++                    if selected_path || unindexed_local_path {
++                        self.thread_store
++                            .read_thread(StoreReadThreadParams {
++                                thread_id: source.thread_id,
++                                include_archived: true,
++                                include_history: false,
++                            })
++                            .await
++                            .map_err(thread_store_resume_read_error)?;
++                    }
++                }
++                prepared = true;
++            }
++            let permit = self.acquire_thread_list_state_permit().await?;
++            if !prepared
++                && let Some(thread_id) = requested_id
++                && self.thread_manager.get_thread(thread_id).await.is_err()
++            {
++                // An idle runtime can unload while this request waits for the lifecycle permit.
++                drop(permit);
++                continue;
++            }
++            // Do not reuse preflight metadata: archive, deletion and source selection may have
++            // changed while migration ran. Existing resume checks run again under this permit.
++            return Ok(permit);
++        }
++    }
++}
+diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
+index 7c6296ec4bad6b6cafd1a10dce9ef30094ff1946..3b3e1db7ddea6badf4c9da8ae10e28f787da4ca1 100644
+--- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
++++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
+@@ -79,8 +79,21 @@ struct LegacyMigrationFixture {
+     total_item_count: usize,
+ }
+
++/// Lookup forms that can reach one stored conversation through different RPC queue keys.
++#[derive(Clone, Copy)]
++enum MigrationResumeSource {
++    Id,
++    Path,
++    OverridingPath,
++}
++
++#[test_case::test_case(MigrationResumeSource::Id; "id")]
++#[test_case::test_case(MigrationResumeSource::Path; "path")]
++#[test_case::test_case(MigrationResumeSource::OverridingPath; "overriding_path")]
+ #[tokio::test]
+-async fn native_thread_remains_interactive_during_an_unrelated_migration() -> Result<()> {
++async fn native_thread_remains_interactive_during_an_unrelated_migration(
++    migration_source: MigrationResumeSource,
++) -> Result<()> {
+     let server = responses::start_mock_server().await;
+     responses::mount_sse_once(
+         &server,
+@@ -128,12 +141,54 @@ async fn native_thread_remains_interactive_during_an_unrelated_migration() -> Re
+         vec![legacy_user_message("unrelated migration".to_string())],
+     )?;
+     let legacy_bytes = fs::read(&legacy_path)?;
+-    let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())?
+-        .expect("hold unrelated migration job");
++    let lock_directory = home.path().join(".tmp");
++    fs::create_dir_all(&lock_directory)?;
++    // Hold only the job lock so foreground intent below is evidence of the server's migration.
++    let job = fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(lock_directory.join("rollout-maintenance-job.lock"))?;
++    job.lock()?;
+     let mut app = TestAppServer::builder()
+         .with_codex_home(home.path())
+         .build_initialized()
+         .await?;
++    let legacy_resume = app
++        .send_thread_resume_request(ThreadResumeParams {
++            thread_id: match migration_source {
++                MigrationResumeSource::Id => legacy_id.to_string(),
++                MigrationResumeSource::Path => String::new(),
++                MigrationResumeSource::OverridingPath => ThreadId::new().to_string(),
++            },
++            path: match migration_source {
++                MigrationResumeSource::Id => None,
++                MigrationResumeSource::Path | MigrationResumeSource::OverridingPath => {
++                    Some(legacy_path.clone())
++                }
++            },
++            exclude_turns: true,
++            ..Default::default()
++        })
++        .await?;
++    let foreground = fs::OpenOptions::new()
++        .read(true)
++        .write(true)
++        .create(true)
++        .truncate(false)
++        .open(lock_directory.join("rollout-maintenance-foreground.lock"))?;
++    timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            match foreground.try_lock() {
++                Ok(()) => foreground.unlock()?,
++                Err(std::fs::TryLockError::WouldBlock) => return Ok::<(), std::io::Error>(()),
++                Err(std::fs::TryLockError::Error(error)) => return Err(error),
++            }
++            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
++        }
++    })
++    .await??;
+     let read_id = app
+         .send_thread_read_request(ThreadReadParams {
+             thread_id: native_id.to_string(),
+@@ -166,6 +221,12 @@ async fn native_thread_remains_interactive_during_an_unrelated_migration() -> Re
+     .await??;
+     assert_eq!(fs::read(&legacy_path)?, legacy_bytes);
+     drop(job);
++    let legacy_response: ThreadResumeResponse =
++        timeout(DEFAULT_READ_TIMEOUT, app.read_response(legacy_resume)).await??;
++    assert_eq!(
++        legacy_response.thread.history_mode,
++        ThreadHistoryMode::Paginated
++    );
+     timeout(DEFAULT_READ_TIMEOUT, app.shutdown_gracefully()).await??;
+
+     let mut restarted = TestAppServer::builder()
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
+index 290d0bc4f1a1c203bcfd9abc1649a47eeb66e96a..51e602df07665a0a8d388939514a331eb7ed6e44 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
+@@ -53,6 +53,78 @@ fn body_contains(request: &wiremock::Request, text: &str) -> bool {
+         .is_some_and(|body| body.contains(text))
+ }
+
++#[tokio::test]
++async fn thread_archive_indexed_legacy_subtree_does_not_wait_for_migration() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri()).write(home.path())?;
++    let state_db = StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
++        "mock_provider".to_string(),
++    )
++    .await?;
++    let mut sources = Vec::new();
++    for preview in ["parent", "child"] {
++        let id = create_fake_rollout(
++            home.path(),
++            "2025-01-01T00-00-00",
++            "2025-01-01T00:00:00Z",
++            preview,
++            Some("mock_provider"),
++            /*git_info*/ None,
++        )?;
++        let thread_id = ThreadId::from_string(&id)?;
++        let path = find_thread_path_by_id_str(home.path(), &id, /*state_db*/ None)
++            .await?
++            .expect("fixture rollout");
++        let mut metadata = codex_state::ThreadMetadataBuilder::new(
++            thread_id,
++            path.clone(),
++            chrono::Utc::now(),
++            codex_protocol::protocol::SessionSource::Cli,
++        )
++        .build("mock_provider");
++        metadata.history_mode = codex_protocol::protocol::ThreadHistoryMode::Legacy;
++        state_db.upsert_thread(&metadata).await?;
++        sources.push((thread_id, std::fs::read(&path)?));
++    }
++    state_db
++        .upsert_thread_spawn_edge(
++            sources[0].0,
++            sources[1].0,
++            DirectionalThreadSpawnEdgeStatus::Open,
++        )
++        .await?;
++    let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())?
++        .expect("held migration job");
++    let mut app = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .build_initialized()
++        .await?;
++    let request = app
++        .send_thread_archive_request(ThreadArchiveParams {
++            thread_id: sources[0].0.to_string(),
++        })
++        .await?;
++    let _: ThreadArchiveResponse =
++        timeout(DEFAULT_READ_TIMEOUT, app.read_response(request)).await??;
++    for (thread_id, source_bytes) in sources {
++        let metadata = state_db
++            .get_thread(thread_id)
++            .await?
++            .expect("archived metadata");
++        assert!(metadata.archived_at.is_some());
++        assert_eq!(
++            metadata.history_mode,
++            codex_protocol::protocol::ThreadHistoryMode::Legacy
++        );
++        assert_eq!(std::fs::read(metadata.rollout_path)?, source_bytes);
++    }
++    drop(job);
++    app.shutdown_gracefully().await?;
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_archive_rejects_owned_unmaterialized_paginated_descendant() -> Result<()> {
+     let server = create_mock_responses_server_repeating_assistant("Done").await;
+diff --git a/codex-rs/core/src/agent/control/legacy.rs b/codex-rs/core/src/agent/control/legacy.rs
+index 760afdaf708f5c316a8202d1c8f7f90451bda6e4..ff43b49d8d060e4bbbb8d5121cd6d8c8cf4927d0 100644
+--- a/codex-rs/core/src/agent/control/legacy.rs
++++ b/codex-rs/core/src/agent/control/legacy.rs
+@@ -2,6 +2,7 @@ use super::*;
+ use crate::codex_thread::CodexThread;
+ use codex_protocol::error::CodexErrorDetails;
+ use codex_thread_store::PersistContext;
++use std::collections::HashMap;
+ use std::time::Duration;
+
+ const INTERNAL_HELPER_TURN_END_TIMEOUT: Duration = Duration::from_secs(10);
+@@ -158,10 +159,28 @@ impl AgentControl {
+             }
+         }
+
++        // Identifying supervisor helpers needs source metadata, not migration of every child.
++        let indexed_metadata = if let Some(state_db) = state.state_db().await {
++            state_db
++                .get_threads_valid(&candidate_ids)
++                .await
++                .map_err(|err| {
++                    CodexErr::Fatal(format!(
++                        "failed to read persisted supervisor metadata for {parent_thread_id}: {err}"
++                    ))
++                })?
++        } else {
++            HashMap::new()
++        };
+         let mut running_supervisor = None;
+         for thread_id in candidate_ids {
+             if !self
+-                .is_goal_supervisor_for_parent(&state, thread_id, parent_thread_id)
++                .is_goal_supervisor_for_parent(
++                    &state,
++                    thread_id,
++                    parent_thread_id,
++                    indexed_metadata.get(&thread_id),
++                )
+                 .await
+             {
+                 continue;
+@@ -196,32 +215,27 @@ impl AgentControl {
+         state: &Arc<ThreadManagerState>,
+         thread_id: ThreadId,
+         parent_thread_id: ThreadId,
++        indexed_metadata: Option<&codex_state::ThreadMetadata>,
+     ) -> bool {
+-        if let Some(snapshot) = self.get_agent_config_snapshot(thread_id).await
+-            && matches!(
+-                snapshot.session_source,
+-                SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+-                    parent_thread_id: source_parent_thread_id,
+-                    agent_role: Some(ref agent_role),
+-                    ..
+-                }) if source_parent_thread_id == parent_thread_id
+-                    && agent_role == crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME
+-            )
+-        {
+-            return true;
+-        }
+-        let Ok(stored_thread) = state
+-            .read_stored_thread(ReadThreadParams {
+-                thread_id,
+-                include_archived: true,
+-                include_history: false,
+-            })
+-            .await
+-        else {
+-            return false;
++        let source = if let Some(snapshot) = self.get_agent_config_snapshot(thread_id).await {
++            snapshot.session_source
++        } else if let Some(metadata) = indexed_metadata {
++            serde_json::from_str(&metadata.source).unwrap_or(SessionSource::Unknown)
++        } else {
++            let Ok(stored_thread) = state
++                .read_stored_thread(ReadThreadParams {
++                    thread_id,
++                    include_archived: true,
++                    include_history: false,
++                })
++                .await
++            else {
++                return false;
++            };
++            stored_thread.source
+         };
+         matches!(
+-            stored_thread.source,
++            source,
+             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                 parent_thread_id: source_parent_thread_id,
+                 agent_role: Some(ref agent_role),
+diff --git a/codex-rs/core/src/agent/control_metadata_tests.rs b/codex-rs/core/src/agent/control_metadata_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9d89a3f30a8242cc4083c1eee6885413e465193d
+--- /dev/null
++++ b/codex-rs/core/src/agent/control_metadata_tests.rs
+@@ -0,0 +1,140 @@
++use super::*;
++use codex_protocol::protocol::SessionMeta;
++use codex_protocol::protocol::SessionMetaLine;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn goal_supervisor_reconciliation_does_not_migrate_indexed_children() {
++    run_goal_supervisor_test(
++        "goal_supervisor_reconciliation_does_not_migrate_indexed_children",
++        async {
++            let (_home, config) = test_config().await;
++            let state_db = init_state_db(&config).await.expect("state db");
++            let store = Arc::new(LocalThreadStore::new(
++                LocalThreadStoreConfig::from_config(&config),
++                Some(state_db.clone()),
++            ));
++            store.start_automatic_rollout_migration();
++            let auth = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("dummy"));
++            let manager = ThreadManager::new(
++                &config,
++                auth.clone(),
++                crate::thread_manager::build_models_manager(&config, auth),
++                crate::CodexAppsToolsCache::default(),
++                SessionSource::Exec,
++                Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
++                empty_extension_registry(),
++                Arc::new(crate::test_support::EmptyUserInstructionsProvider),
++                /*analytics_events_client*/ None,
++                store,
++                crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
++                uuid::Uuid::new_v4().to_string(),
++                /*attestation_provider*/ None,
++                /*external_time_provider*/ None,
++            );
++            let control = manager.agent_control();
++            let parent_id = ThreadId::new();
++            let supervisor_path = AgentPath::root().join("goal_supervisor").expect("path");
++            let directory = config.codex_home.join("sessions/2025/01/03");
++            std::fs::create_dir_all(&directory).expect("session directory");
++            let parent_metadata = codex_state::ThreadMetadataBuilder::new(
++                parent_id,
++                directory.join(format!("{parent_id}.jsonl")).to_path_buf(),
++                chrono::Utc::now(),
++                SessionSource::Exec,
++            )
++            .build("openai");
++            state_db
++                .upsert_thread(&parent_metadata)
++                .await
++                .expect("parent metadata");
++            let mut children = Vec::new();
++            for index in 0..4 {
++                let child_id = ThreadId::new();
++                let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                    parent_thread_id: if index == 3 {
++                        ThreadId::new()
++                    } else {
++                        parent_id
++                    },
++                    depth: 1,
++                    agent_path: None,
++                    agent_nickname: None,
++                    agent_role: match index {
++                        2 | 3 => {
++                            Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME.to_string())
++                        }
++                        1 => Some("worker".to_string()),
++                        _ => None,
++                    },
++                });
++                let path = directory.join(format!("rollout-2025-01-03T12-00-00-{child_id}.jsonl"));
++                let meta = RolloutLine {
++                    timestamp: "2025-01-03T12:00:00Z".to_string(),
++                    ordinal: None,
++                    item: RolloutItem::SessionMeta(SessionMetaLine {
++                        meta: SessionMeta {
++                            session_id: child_id.into(),
++                            id: child_id,
++                            timestamp: "2025-01-03T12:00:00Z".to_string(),
++                            cwd: config.cwd.to_path_buf(),
++                            source: source.clone(),
++                            history_mode: ThreadHistoryMode::Legacy,
++                            ..Default::default()
++                        },
++                        git: None,
++                    }),
++                };
++                let mut bytes = serde_json::to_vec(&meta).expect("session metadata");
++                bytes.push(b'\n');
++                std::fs::write(&path, &bytes).expect("legacy rollout");
++                let metadata = codex_state::ThreadMetadataBuilder::new(
++                    child_id,
++                    path.to_path_buf(),
++                    chrono::Utc::now(),
++                    source,
++                )
++                .build("openai");
++                state_db
++                    .upsert_thread(&metadata)
++                    .await
++                    .expect("child metadata");
++                state_db
++                    .upsert_thread_spawn_edge(
++                        parent_id,
++                        child_id,
++                        DirectionalThreadSpawnEdgeStatus::Open,
++                    )
++                    .await
++                    .expect("child edge");
++                children.push((child_id, path, bytes));
++            }
++            let job = codex_rollout::try_acquire_rollout_maintenance_job_lock(&config.codex_home)
++                .expect("maintenance lock")
++                .expect("exclusive migration job");
++            let result = timeout(
++                Duration::from_secs(2),
++                control.reconcile_goal_supervisor_state(parent_id, &supervisor_path),
++            )
++            .await;
++            drop(job);
++            assert_eq!(
++                result
++                    .expect("metadata must not wait for migration")
++                    .expect("reconcile"),
++                None
++            );
++            let open = state_db
++                .list_thread_spawn_children_with_status(
++                    parent_id,
++                    DirectionalThreadSpawnEdgeStatus::Open,
++                )
++                .await
++                .expect("open children");
++            for (index, (child_id, path, bytes)) in children.iter().enumerate() {
++                assert_eq!(open.contains(child_id), index != 2);
++                assert_eq!(std::fs::read(path).expect("retained source"), *bytes);
++            }
++        },
++    );
++}
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 8fc53ce76838029602f7d788c5c08248ac72dd3b..7851ed7b37af2bf6b8d9f52083e741cdfdd55549 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -110,6 +110,9 @@ use tokio::time::sleep;
+ use tokio::time::timeout;
+ use toml::Value as TomlValue;
+
++#[path = "control_metadata_tests.rs"]
++mod metadata_tests;
++
+ async fn test_config_with_cli_overrides(
+     mut cli_overrides: Vec<(String, TomlValue)>,
+ ) -> (TempDir, Config) {
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index ebdbbffe52c249372d4e78c3921b7c48024b1be1..207167a8f83a3de310fcd76f228d4b5ae4845375 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -106,15 +106,19 @@ pub use list::read_session_meta_line_exact;
+ pub use list::read_thread_item_from_rollout;
+ pub use list::read_thread_item_from_rollout_with_indexed_preview;
+ pub use list::rollout_date_parts;
++pub use maintenance::MAX_CONCURRENT_ROLLOUT_MIGRATIONS;
+ pub use maintenance::RolloutMaintenanceGuard;
++pub use maintenance::RolloutMaintenanceIntentGuard;
+ pub use maintenance::RolloutMaintenanceJobGuard;
+ pub use maintenance::RolloutMaintenanceReadGuard;
++pub use maintenance::acquire_rollout_maintenance_intent;
+ pub use maintenance::acquire_rollout_maintenance_job_lock;
+ pub use maintenance::acquire_rollout_maintenance_lock;
+ pub use maintenance::acquire_rollout_maintenance_read_lock;
+ pub use maintenance::try_acquire_rollout_maintenance_job_lock;
+ pub use maintenance::try_acquire_rollout_maintenance_lock;
+ pub use maintenance::try_acquire_rollout_maintenance_read_lock;
++pub use maintenance::try_acquire_rollout_migration_dependency_lock;
+ pub use metadata::builder_from_items;
+ pub use metadata::forked_from_ordinal_exclusive;
+ pub use metadata::history_rollout_path_with_rollout_id;
+diff --git a/codex-rs/rollout/src/maintenance.rs b/codex-rs/rollout/src/maintenance.rs
+index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add9915edc4 100644
+--- a/codex-rs/rollout/src/maintenance.rs
++++ b/codex-rs/rollout/src/maintenance.rs
+@@ -1,12 +1,14 @@
+ //! Coordinates maintenance jobs that replace local rollout files.
+ //!
+-//! New migration jobs serialize with each other while clean history readers retain shared
+-//! ownership of the original maintenance lock. Old binaries and history repair still acquire
+-//! that original lock exclusively. Compression yields when a reader or migration is waiting.
++//! Migrations with reserved dependencies may overlap. Unknown ancestry and older migration
++//! implementations retain exclusive job ownership. Clean history readers share the original
++//! maintenance lock; old binaries and history repair acquire it exclusively. Compression yields
++//! when a reader or migration is waiting.
+ //!
+ //! This is separate from per-thread writer locks, which protect live rollout appenders. It is also
+ //! separate from compression's durable run marker, which throttles how often compression scans.
+
++use codex_protocol::ThreadId;
+ use std::fs;
+ use std::fs::File;
+ use std::fs::OpenOptions;
+@@ -17,6 +19,14 @@ const ROLLOUT_MAINTENANCE_LOCK: &str = "rollout-maintenance.lock";
+ const ROLLOUT_MAINTENANCE_JOB_LOCK: &str = "rollout-maintenance-job.lock";
+ const ROLLOUT_MAINTENANCE_FOREGROUND_LOCK: &str = "rollout-maintenance-foreground.lock";
+
++/// Bounds migration memory and SQLite contention across processes sharing one Codex home.
++pub const MAX_CONCURRENT_ROLLOUT_MIGRATIONS: usize = 2;
++
++/// Keeps compression aware of queued migrations even between nonblocking lock attempts.
++pub struct RolloutMaintenanceIntentGuard {
++    _file: File,
++}
++
+ /// Holds exclusive ownership of operations that replace local rollout files.
+ pub struct RolloutMaintenanceGuard {
+     _file: File,
+@@ -28,11 +38,80 @@ pub struct RolloutMaintenanceReadGuard {
+     _file: File,
+ }
+
+-/// Serializes new migration and compression jobs without excluding unrelated clean readers.
++/// Reserves a migration against compression and incompatible maintenance implementations.
+ pub struct RolloutMaintenanceJobGuard {
+     _job: File,
+     _compatibility: RolloutMaintenanceReadGuard,
+     _foreground: File,
++    /// Stable lock files are never unlinked: otherwise another process could lock a new inode.
++    _dependencies: Vec<File>,
++    _slot: Option<File>,
++}
++
++pub async fn acquire_rollout_maintenance_intent(
++    codex_home: &Path,
++) -> io::Result<RolloutMaintenanceIntentGuard> {
++    Ok(RolloutMaintenanceIntentGuard {
++        _file: acquire_foreground_intent(codex_home).await?,
++    })
++}
++
++/// Try to admit a migration whose complete dependency identities the caller will revalidate.
++/// Busy dependencies or capacity return immediately and release every partial reservation.
++pub fn try_acquire_rollout_migration_dependency_lock(
++    codex_home: &Path,
++    thread_ids: &[ThreadId],
++) -> io::Result<Option<RolloutMaintenanceJobGuard>> {
++    if thread_ids.is_empty() {
++        return Err(io::Error::new(
++            io::ErrorKind::InvalidInput,
++            "empty migration dependency set",
++        ));
++    }
++    let foreground = open_lock(codex_home, ROLLOUT_MAINTENANCE_FOREGROUND_LOCK)?;
++    match foreground.try_lock_shared() {
++        Ok(()) => {}
++        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
++        Err(std::fs::TryLockError::Error(error)) => return Err(error),
++    }
++    let job = open_lock(codex_home, ROLLOUT_MAINTENANCE_JOB_LOCK)?;
++    match job.try_lock_shared() {
++        Ok(()) => {}
++        Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
++        Err(std::fs::TryLockError::Error(error)) => return Err(error),
++    }
++    let Some(compatibility) = try_acquire_rollout_maintenance_read_lock(codex_home)? else {
++        return Ok(None);
++    };
++    let mut ids = thread_ids.to_vec();
++    ids.sort_unstable_by_key(ThreadId::to_string);
++    ids.dedup();
++    let mut dependencies = Vec::with_capacity(ids.len());
++    for thread_id in ids {
++        let file = open_lock(codex_home, &format!("rollout-migration-{thread_id}.lock"))?;
++        match file.try_lock() {
++            Ok(()) => dependencies.push(file),
++            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
++            Err(std::fs::TryLockError::Error(error)) => return Err(error),
++        }
++    }
++    for slot in 0..MAX_CONCURRENT_ROLLOUT_MIGRATIONS {
++        let file = open_lock(codex_home, &format!("rollout-migration-slot-{slot}.lock"))?;
++        match file.try_lock() {
++            Ok(()) => {
++                return Ok(Some(RolloutMaintenanceJobGuard {
++                    _job: job,
++                    _compatibility: compatibility,
++                    _foreground: foreground,
++                    _dependencies: dependencies,
++                    _slot: Some(file),
++                }));
++            }
++            Err(std::fs::TryLockError::WouldBlock) => {}
++            Err(std::fs::TryLockError::Error(error)) => return Err(error),
++        }
++    }
++    Ok(None)
+ }
+
+ /// Retains compression's original exclusive protocol while foreground waiters ask it to stop.
+@@ -166,6 +245,8 @@ fn try_acquire_foreground_job(
+         _job: job,
+         _compatibility: compatibility,
+         _foreground: foreground,
++        _dependencies: Vec::new(),
++        _slot: None,
+     }))
+ }
+
+diff --git a/codex-rs/rollout/src/maintenance_tests.rs b/codex-rs/rollout/src/maintenance_tests.rs
+index 68f8ded83c88bd3f614da884f7b99a109532c83d..68862baaceb868e00f96e5da81aa405d29cc9760 100644
+--- a/codex-rs/rollout/src/maintenance_tests.rs
++++ b/codex-rs/rollout/src/maintenance_tests.rs
+@@ -1,5 +1,113 @@
+ use super::*;
+
++#[test]
++fn migration_dependency_child() -> std::io::Result<()> {
++    use std::io::Write;
++    let Ok(home) = std::env::var("FRODEX_MIGRATION_LOCK_TEST_HOME") else {
++        return Ok(());
++    };
++    let id = ThreadId::from_string(
++        &std::env::var("FRODEX_MIGRATION_LOCK_TEST_ID").expect("child identity"),
++    )
++    .expect("UUID");
++    let _guard = try_acquire_rollout_migration_dependency_lock(Path::new(&home), &[id])?
++        .expect("child reservation");
++    println!("MIGRATION_ADMITTED");
++    std::io::stdout().flush()?;
++    let mut input = String::new();
++    std::io::stdin().read_line(&mut input)?;
++    Ok(())
++}
++
++#[test]
++fn migration_dependencies_and_capacity_are_reserved_across_processes() -> std::io::Result<()> {
++    use std::io::BufRead;
++    use std::io::Write;
++    use std::process::Stdio;
++    let home = tempfile::tempdir()?;
++    let first = ThreadId::new();
++    let second = ThreadId::new();
++    let mut child = std::process::Command::new(std::env::current_exe()?)
++        .args([
++            "--exact",
++            "maintenance::tests::migration_dependency_child",
++            "--nocapture",
++        ])
++        .env("FRODEX_MIGRATION_LOCK_TEST_HOME", home.path())
++        .env("FRODEX_MIGRATION_LOCK_TEST_ID", first.to_string())
++        .stdin(Stdio::piped())
++        .stdout(Stdio::piped())
++        .spawn()?;
++    let mut output = std::io::BufReader::new(child.stdout.take().expect("stdout"));
++    loop {
++        let mut line = String::new();
++        assert_ne!(
++            output.read_line(&mut line)?,
++            0,
++            "child exited before reservation"
++        );
++        if line.contains("MIGRATION_ADMITTED") {
++            break;
++        }
++    }
++    assert!(try_acquire_rollout_migration_dependency_lock(home.path(), &[first])?.is_none());
++    let independent = try_acquire_rollout_migration_dependency_lock(home.path(), &[second])?
++        .expect("second process overlaps");
++    assert!(
++        try_acquire_rollout_migration_dependency_lock(home.path(), &[ThreadId::new()])?.is_none()
++    );
++    assert!(try_acquire_rollout_maintenance_job_lock(home.path())?.is_none());
++    child.stdin.take().expect("stdin").write_all(b"finish\n")?;
++    assert!(child.wait()?.success());
++    assert!(try_acquire_rollout_migration_dependency_lock(home.path(), &[first])?.is_some());
++    drop(independent);
++    Ok(())
++}
++
++#[test]
++fn independent_migrations_overlap_but_shared_ancestors_and_capacity_do_not() -> std::io::Result<()>
++{
++    let home = tempfile::tempdir()?;
++    let parent = ThreadId::new();
++    let first = ThreadId::new();
++    let second = ThreadId::new();
++    let unrelated = ThreadId::new();
++    let first_job = try_acquire_rollout_migration_dependency_lock(home.path(), &[first, parent])?
++        .expect("first lineage");
++    assert!(
++        try_acquire_rollout_migration_dependency_lock(home.path(), &[second, parent])?.is_none()
++    );
++    // The unsuccessful multi-lock attempt released second's partial reservation.
++    let second_job = try_acquire_rollout_migration_dependency_lock(home.path(), &[second])?
++        .expect("independent lineage");
++    assert!(try_acquire_rollout_migration_dependency_lock(home.path(), &[unrelated])?.is_none());
++    assert!(try_acquire_rollout_maintenance_job_lock(home.path())?.is_none());
++    assert!(try_acquire_rollout_maintenance_lock(home.path())?.is_none());
++    assert!(try_acquire_compression_maintenance(home.path())?.is_none());
++    assert!(try_acquire_rollout_maintenance_read_lock(home.path())?.is_some());
++    drop(first_job);
++    assert!(try_acquire_rollout_migration_dependency_lock(home.path(), &[unrelated])?.is_some());
++    drop(second_job);
++    assert!(try_acquire_rollout_maintenance_job_lock(home.path())?.is_some());
++    Ok(())
++}
++
++#[tokio::test]
++async fn queued_migration_retains_compression_priority_between_attempts() -> std::io::Result<()> {
++    let home = tempfile::tempdir()?;
++    let compression = try_acquire_compression_maintenance(home.path())?.expect("compression");
++    let intent = acquire_rollout_maintenance_intent(home.path()).await?;
++    assert!(
++        try_acquire_rollout_migration_dependency_lock(home.path(), &[ThreadId::new()])?.is_none()
++    );
++    assert!(compression.should_yield()?);
++    drop(compression);
++    assert!(try_acquire_compression_maintenance(home.path())?.is_none());
++    drop(intent);
++    assert!(try_acquire_compression_maintenance(home.path())?.is_some());
++    Ok(())
++}
++
+ #[test]
+ fn jobs_allow_readers_but_exclude_other_jobs_and_legacy_maintenance() -> std::io::Result<()> {
+     let home = tempfile::tempdir()?;
+diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
+index bf4fe909bceba61e4e5e9487c76fc3b9d69ae693..c7a365482e9423066d821018950ff54bcfa9937a 100644
+--- a/codex-rs/state/src/sqlite.rs
++++ b/codex-rs/state/src/sqlite.rs
+@@ -49,7 +49,7 @@ pub(crate) enum StateMigrationStep {
+
+ fn ensure_transactional_migrations(migrator: &Migrator) -> anyhow::Result<()> {
+     if migrator.no_tx || migrator.migrations.iter().any(|migration| migration.no_tx) {
+-        anyhow::bail!("state migrations must all support the startup transaction");
++        anyhow::bail!("database schema migrations must all support the startup transaction");
+     }
+     Ok(())
+ }
+@@ -64,7 +64,7 @@ fn is_sqlite_writer_contention(error: &sqlx::Error) -> bool {
+         .is_some_and(|code| matches!(code & 0xff, 5 | 6))
+ }
+
+-async fn begin_state_migration_transaction<F>(
++async fn begin_runtime_migration_transaction<F>(
+     pool: &SqlitePool,
+     mut on_contention: F,
+ ) -> anyhow::Result<Transaction<'static, Sqlite>>
+@@ -95,7 +95,7 @@ where
+ {
+     ensure_transactional_migrations(migrator)?;
+
+-    let mut transaction = begin_state_migration_transaction(pool, on_contention).await?;
++    let mut transaction = begin_runtime_migration_transaction(pool, on_contention).await?;
+     let migration_result = async {
+         repair_frodex_goal_supervisor_state_migration(&mut transaction).await?;
+         after_step(StateMigrationStep::GoalSupervisorCompatibility)?;
+@@ -379,7 +379,7 @@ impl SqliteConfig {
+         let pool_result = loop {
+             match self.open_read_write_pool(&path).await {
+                 Err(error)
+-                    if matches!(spec.kind, DbKind::State)
++                    if matches!(spec.kind, DbKind::State | DbKind::ThreadHistory)
+                         && is_sqlite_writer_contention(&error) =>
+                 {
+                     tokio::time::sleep(Duration::from_millis(25)).await;
+@@ -401,6 +401,16 @@ impl SqliteConfig {
+         let migrate_result = async {
+             if matches!(spec.kind, DbKind::State) {
+                 migrate_state_database(&pool, migrator).await
++            } else if matches!(spec.kind, DbKind::ThreadHistory) {
++                // Read applied versions only after reserving SQLite's writer. Otherwise two
++                // app-servers can both decide migration 1 must create thread_turns.
++                ensure_transactional_migrations(migrator)?;
++                let mut transaction = begin_runtime_migration_transaction(&pool, || {}).await?;
++                migrator
++                    .run_direct(/*target*/ None, &mut *transaction, /*skip*/ false)
++                    .await?;
++                transaction.commit().await?;
++                Ok(())
+             } else {
+                 migrator.run(&pool).await.map_err(anyhow::Error::from)
+             }
+@@ -458,3 +468,7 @@ impl SqliteConfig {
+             .await
+     }
+ }
++
++#[cfg(test)]
++#[path = "thread_history_migration_tests.rs"]
++mod thread_history_migration_tests;
+diff --git a/codex-rs/state/src/thread_history_migration_tests.rs b/codex-rs/state/src/thread_history_migration_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..dae0f8783bf201f60e9874202c03d3277e999377
+--- /dev/null
++++ b/codex-rs/state/src/thread_history_migration_tests.rs
+@@ -0,0 +1,66 @@
++use std::sync::Arc;
++
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn concurrent_history_database_initialization_applies_each_migration_once() {
++    for existing_schema in [false, true] {
++        let home = crate::runtime::test_support::unique_temp_dir();
++        tokio::fs::create_dir_all(&home).await.expect("home");
++        let _cleanup = scopeguard::guard(home.clone(), |home| {
++            let _ = std::fs::remove_dir_all(home);
++        });
++        let sqlite = crate::SqliteConfig::new_for_testing(home.as_path().abs());
++        let pool = sqlite
++            .open_read_write_pool(&sqlite.thread_history_db_path())
++            .await
++            .expect("WAL file");
++        if existing_schema {
++            let mut migrator = crate::migrations::runtime_thread_history_migrator();
++            migrator.migrations = std::borrow::Cow::Owned(
++                migrator
++                    .migrations
++                    .iter()
++                    .filter(|migration| migration.version == 1)
++                    .cloned()
++                    .collect(),
++            );
++            migrator.run(&pool).await.expect("old history schema");
++        }
++        pool.close().await;
++        let barrier = Arc::new(tokio::sync::Barrier::new(8));
++        let mut requests = tokio::task::JoinSet::new();
++        for _ in 0..8 {
++            let sqlite = sqlite.clone();
++            let barrier = barrier.clone();
++            requests.spawn(async move {
++                barrier.wait().await;
++                crate::open_thread_history_db(&sqlite).await
++            });
++        }
++        while let Some(result) = requests.join_next().await {
++            let pool = result
++                .expect("initializer task")
++                .expect("concurrent history initialization");
++            let versions: Vec<(i64, bool)> =
++                sqlx::query_as("SELECT version, success FROM _sqlx_migrations ORDER BY version")
++                    .fetch_all(&pool)
++                    .await
++                    .expect("applied migrations");
++            let expected = crate::migrations::THREAD_HISTORY_MIGRATOR
++                .migrations
++                .iter()
++                .map(|migration| (migration.version, true))
++                .collect::<Vec<_>>();
++            assert_eq!(versions, expected);
++            let state_tables: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('threads', 'thread_goal_supervisor_state')")
++                .fetch_one(&pool).await.expect("schema isolation");
++            assert_eq!(
++                state_tables, 0,
++                "state compatibility repairs must not run in the history database"
++            );
++            pool.close().await;
++        }
++    }
++}
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index 40f50d09a6149a62bd10e3db3d02a2a7fa6d1bb1..eff698847643a8323cecdab5514a8718c67d7910 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -414,8 +414,18 @@ impl LocalThreadStore {
+         {
+             return Ok(false);
+         }
+-        // A completed or interrupted turn can legitimately have no visible items. The
+-        // checkpoint, not the newest turn's presentation, certifies projection completeness.
++        // The root checkpoint covers same-thread predecessors. Other histories still need their
++        // cross-thread ancestry authenticated, even when the selected file is fully projected.
++        thread_history::validate_thread_for_paginated_reads(
++            self,
++            thread_id,
++            /*include_archived*/ true,
++            "has_history_projection",
++        )
++        .await?;
++        self.resolve_rollout_lineage(thread_id).await?;
++        // A complete turn can contain only tool or reasoning items, so its display summary
++        // may legitimately be empty. Completeness comes from the durable projection boundary.
+         Ok(true)
+     }
+
+diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
+index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c65b170cc4 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration.rs
+@@ -46,6 +46,7 @@ use crate::ThreadStoreResult;
+
+ mod canonical_projection;
+ mod canonicalizer;
++mod dependencies;
+ mod jsonl_spans;
+ mod legacy_event;
+ mod line_parser;
+@@ -90,6 +91,7 @@ mod lineage_benchmark_tests;
+ mod lineage_projection_tests;
+
+ use canonicalizer::LegacyRolloutCanonicalizer;
++use dependencies::MigrationAdmission;
+ use lineage::LegacyLineageMigrationPlan;
+ use lineage::contains_convertible_rollout_reference;
+ use lineage::plan_legacy_lineage;
+@@ -333,19 +335,63 @@ impl LocalThreadStore {
+     async fn migrate_rollout_path_on_demand(
+         &self,
+         path: PathBuf,
++        admission: &mut MigrationAdmission,
+     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
+-        let _maintenance_guard =
+-            codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
+-                .await
+-                .map_err(migration_error)?;
+         let options = RolloutMigrationOptions {
+             mode: RolloutMigrationMode::Apply,
+             thread_ids: Vec::new(),
+             max_mib_per_second: None,
+         };
+         let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
+-        self.migrate_rollout_path(path, &options, &mut limiter)
+-            .await
++        loop {
++            let guard = match admission {
++                MigrationAdmission::Shared(dependencies) => {
++                    codex_rollout::try_acquire_rollout_migration_dependency_lock(
++                        &self.config.codex_home,
++                        &dependencies.thread_ids,
++                    )
++                }
++                MigrationAdmission::Manual
++                | MigrationAdmission::Exclusive
++                | MigrationAdmission::RequiresExclusive => {
++                    *admission = MigrationAdmission::Exclusive;
++                    codex_rollout::try_acquire_rollout_maintenance_job_lock(&self.config.codex_home)
++                }
++            }
++            .map_err(migration_error)?;
++            let Some(guard) = guard else {
++                return Err(ThreadStoreError::Conflict {
++                    message: "rollout migration dependencies or capacity are busy".to_string(),
++                });
++            };
++            if let MigrationAdmission::Shared(dependencies) = admission {
++                let journal = migration_journal_path(
++                    &self.config.codex_home,
++                    dependencies.selected_thread_id(),
++                );
++                if tokio::fs::try_exists(journal)
++                    .await
++                    .map_err(migration_error)?
++                    || !dependencies.unchanged().await.unwrap_or(false)
++                {
++                    *admission = MigrationAdmission::RequiresExclusive;
++                    drop(guard);
++                    continue;
++                }
++                tracing::debug!(
++                    dependency_count = dependencies.thread_ids.len(),
++                    bytes_read = dependencies.bytes_read,
++                    "admitted independent rollout migration"
++                );
++            }
++            let result = self
++                .migrate_rollout_path(path.clone(), &options, &mut limiter, admission, Some(guard))
++                .await;
++            if matches!(admission, MigrationAdmission::RequiresExclusive) {
++                continue;
++            }
++            return result;
++        }
+     }
+
+     /// Inspect or migrate eligible legacy rollout files beneath active and archived sessions.
+@@ -399,7 +445,7 @@ impl LocalThreadStore {
+         paths: RolloutMigrationPaths,
+     ) -> ThreadStoreResult<RolloutMigrationReport> {
+         let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
+-        let _maintenance_guard = match options.mode {
++        let inventory_guard = match options.mode {
+             RolloutMigrationMode::DryRun => None,
+             RolloutMigrationMode::Apply => Some(
+                 codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
+@@ -450,6 +496,7 @@ impl LocalThreadStore {
+                 !thread_id.is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
+             });
+         }
++        drop(inventory_guard);
+         // The name index is global, so read it once before either migrating or repairing names.
+         let legacy_names = if options.mode == RolloutMigrationMode::Apply {
+             let thread_ids = paths
+@@ -466,8 +513,23 @@ impl LocalThreadStore {
+         let mut report = RolloutMigrationReport::default();
+
+         for (index, path) in paths.into_iter().enumerate() {
++            let job_guard = match options.mode {
++                RolloutMigrationMode::DryRun => None,
++                RolloutMigrationMode::Apply => Some(
++                    codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
++                        .await
++                        .map_err(migration_error)?,
++                ),
++            };
+             let outcome = self
+-                .migrate_rollout_path(path, &options, &legacy_names, &mut limiter)
++                .migrate_rollout_path(
++                    path,
++                    &options,
++                    &legacy_names,
++                    &mut limiter,
++                    &mut MigrationAdmission::Manual,
++                    job_guard,
++                )
+                 .await?;
+             let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
+             if let Some(outcome) = outcome {
+@@ -489,6 +551,8 @@ impl LocalThreadStore {
+         options: &RolloutMigrationOptions,
+         legacy_names: &HashMap<ThreadId, String>,
+         limiter: &mut RolloutMigrationRateLimiter,
++        admission: &mut MigrationAdmission,
++        job_guard: Option<codex_rollout::RolloutMaintenanceJobGuard>,
+     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
+         let mut retried_moved_path = false;
+         let metadata = loop {
+@@ -562,6 +626,19 @@ impl LocalThreadStore {
+             }));
+         };
+         let thread_id = metadata.meta.id;
++        if let MigrationAdmission::Shared(dependencies) = admission
++            && (thread_id != dependencies.selected_thread_id()
++                || metadata.meta.history_mode != ThreadHistoryMode::Legacy
++                || tokio::fs::try_exists(migration_journal_path(
++                    &self.config.codex_home,
++                    thread_id,
++                ))
++                .await
++                .map_err(migration_error)?)
++        {
++            *admission = MigrationAdmission::RequiresExclusive;
++            return Ok(None);
++        }
+         if !matches_selection(&options.thread_ids, Some(thread_id)) {
+             return Ok(None);
+         }
+@@ -620,8 +697,12 @@ impl LocalThreadStore {
+                     .len()
+                     > 0;
+                 let recovery = if lineage_journal {
+-                    let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
+-                    self.recover_legacy_lineage(&journal_path, limiter).await
++                    match self.writer_lock_coordinator.acquire(thread_id) {
++                        Ok(_writer_guard) => {
++                            self.recover_legacy_lineage(&journal_path, limiter).await
++                        }
++                        Err(error) => Err(error),
++                    }
+                 } else {
+                     self.recover_published_migration(thread_id, &path, &journal_path, legacy_names, limiter)
+                         .await
+@@ -651,6 +732,9 @@ impl LocalThreadStore {
+                 }
+                 Ok(RolloutMigrationStatus::AlreadyPaginated)
+             };
++            // Repair takes lifecycle before exclusive maintenance. A job's shared maintenance
++            // lease must not survive into projection's lifecycle wait behind a queued writer.
++            drop(job_guard);
+             let result = match result {
+                 Ok(RolloutMigrationStatus::Migrated) => self
+                     .ensure_complete_migrated_projection(thread_id)
+@@ -750,7 +834,19 @@ impl LocalThreadStore {
+             ));
+         }
+
+-        let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
++        let _live_writer_guard = if matches!(admission, MigrationAdmission::Manual) {
++            self.live_writer_locks.lock(thread_id).await
++        } else {
++            match self.live_writer_locks.try_lock(thread_id).await {
++                Ok(guard) => guard,
++                Err(ThreadStoreError::Conflict { message }) => {
++                    return Ok(Some(skipped_busy_outcome(
++                        thread_id, path, message, /*bytes_processed*/ 0,
++                    )));
++                }
++                Err(error) => return Err(error),
++            }
++        };
+         let _writer_guard = match self.writer_lock_coordinator.acquire(thread_id) {
+             Ok(guard) => guard,
+             Err(ThreadStoreError::Conflict { message }) => {
+@@ -817,6 +913,10 @@ impl LocalThreadStore {
+         let lineage_plan = match lineage_plan {
+             Ok(plan) => plan,
+             Err(error) => {
++                if matches!(admission, MigrationAdmission::Shared(_)) {
++                    *admission = MigrationAdmission::RequiresExclusive;
++                    return Err(error);
++                }
+                 return Ok(Some(migration_outcome(
+                     thread_id,
+                     path,
+@@ -826,6 +926,12 @@ impl LocalThreadStore {
+             }
+         };
+         if let Some(plan) = lineage_plan {
++            if let MigrationAdmission::Shared(dependencies) = admission
++                && !dependencies.covers_plan(&plan).await
++            {
++                *admission = MigrationAdmission::RequiresExclusive;
++                return Ok(None);
++            }
+             let bytes_before = limiter.bytes_processed;
+             let result = self
+                 .migrate_legacy_lineage(&path, &journal_path, plan, limiter)
+@@ -844,6 +950,7 @@ impl LocalThreadStore {
+             };
+             drop(_writer_guard);
+             drop(_live_writer_guard);
++            drop(job_guard);
+             let result = match result {
+                 Ok(selected_path) => {
+                     path = selected_path;
+@@ -956,10 +1063,21 @@ impl LocalThreadStore {
+             RolloutMigrationFailureReason::RolloutPublishFailed,
+         )?;
+
+-        let source_metadata = with_failure_reason(
+-            tokio::fs::metadata(rollout_path)
++        #[cfg(test)]
++        {
++            let barrier = self
++                .rollout_migration_coordinator
++                .journal_barriers
++                .lock()
+                 .await
+-                .map_err(migration_error),
++                .remove(&thread_id);
++            if let Some(barrier) = barrier {
++                barrier.wait().await;
++            }
++        }
++
++        let source_metadata = with_failure_reason(
++            tokio::fs::metadata(rollout_path).await.map_err(migration_error),
+             RolloutMigrationFailureReason::RolloutReadFailed,
+         )?;
+         let source_modified = source_metadata.modified().ok();
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/concurrency_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/concurrency_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5c47858865323b2c7c7178f1a577a9d0c921edc6
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_migration/concurrency_tests.rs
+@@ -0,0 +1,505 @@
++use super::super as coordinator;
++use super::super::super::dependencies::MigrationAdmission;
++use super::super::super::dependencies::discover_dependencies;
++use super::*;
++use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn dependency_discovery_reads_bounded_headers_not_growing_payloads() {
++    let home = TempDir::new().expect("home");
++    let id = ThreadId::new();
++    let path = write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++    let filler = serde_json::to_vec(&serde_json::json!({
++        "timestamp": TIMESTAMP,
++        "type": "event_msg",
++        "payload": {"type": "user_message", "message": "x".repeat(16 * 1024)}
++    }))
++    .expect("filler");
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&path)
++        .expect("append");
++    file.write_all(&filler).expect("small suffix");
++    file.write_all(b"\n").expect("newline");
++    let small = discover_dependencies(home.path(), &path)
++        .await
++        .expect("inspect")
++        .expect("known");
++    for _ in 0..128 {
++        file.write_all(&filler).expect("large suffix");
++        file.write_all(b"\n").expect("newline");
++    }
++    let large = discover_dependencies(home.path(), &path)
++        .await
++        .expect("inspect")
++        .expect("known");
++    assert_eq!(small.bytes_read, large.bytes_read);
++    assert!(large.bytes_read <= 4096);
++    assert_eq!(large.thread_ids, vec![id]);
++    assert!(
++        small
++            .unchanged()
++            .await
++            .expect("tail append leaves header unchanged")
++    );
++    set_history_base(
++        &path,
++        HistoryPosition {
++            thread_id: ThreadId::new(),
++            end_ordinal_exclusive: 1,
++            end_byte_offset: 100,
++        },
++    );
++    assert!(!small.unchanged().await.expect("detect changed ancestry"));
++    assert!(
++        discover_dependencies(home.path(), &path)
++            .await
++            .expect("native boundary")
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn dependency_discovery_reserves_shared_legacy_ancestors_and_rejects_cycles() {
++    let home = TempDir::new().expect("home");
++    let parent = ThreadId::new();
++    let child = ThreadId::new();
++    let parent_path = write_rollout(home.path(), parent, ThreadHistoryMode::Legacy);
++    let child_path = write_rollout(home.path(), child, ThreadHistoryMode::Legacy);
++    let reference = |id, path| RolloutReferenceItem {
++        rollout_path: path,
++        thread_id: Some(id),
++        rollout_id: Some(id),
++        rollout_timestamp: None,
++        segment_id: None,
++        max_depth: 2,
++        nth_user_message: None,
++        compacted_replacement_history_filter_texts: None,
++    };
++    prepend_rollout_reference(&child_path, reference(parent, parent_path.clone()));
++    let dependencies = discover_dependencies(home.path(), &child_path)
++        .await
++        .expect("inspect")
++        .expect("complete chain");
++    assert_eq!(dependencies.thread_ids.len(), 2);
++    assert!(dependencies.thread_ids.contains(&parent));
++    assert!(dependencies.thread_ids.contains(&child));
++    let plan = super::super::super::lineage::plan_legacy_lineage(home.path(), &child_path)
++        .await
++        .expect("authenticated plan");
++    assert!(
++        dependencies.covers_plan(&plan).await,
++        "ordinary Legacy references must remain eligible for shared admission"
++    );
++    prepend_rollout_reference(&parent_path, reference(child, child_path.clone()));
++    assert!(
++        discover_dependencies(home.path(), &child_path)
++            .await
++            .expect("cycle")
++            .is_none()
++    );
++}
++
++#[tokio::test]
++async fn dependency_discovery_does_not_scan_past_oversized_or_malformed_headers() {
++    let home = TempDir::new().expect("home");
++    let id = ThreadId::new();
++    let path = write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++    let source = fs::read(&path).expect("source");
++    for prefix in [b"{bad json}\n".to_vec(), vec![b' '; 128 * 1024]] {
++        let mut bytes = prefix;
++        bytes.extend_from_slice(&source);
++        fs::write(&path, bytes).expect("malformed header");
++        assert!(
++            discover_dependencies(home.path(), &path)
++                .await
++                .expect("bounded inspect")
++                .is_none()
++        );
++    }
++}
++
++#[tokio::test]
++async fn dependency_discovery_reserves_rotated_physical_ids_and_their_logical_thread() {
++    let home = TempDir::new().expect("home");
++    let logical = ThreadId::new();
++    let physical = [ThreadId::new(), ThreadId::new()];
++    let mut paths = Vec::new();
++    for id in physical {
++        let path = write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++        let contents = fs::read_to_string(&path).expect("source");
++        let (head, suffix) = contents.split_once('\n').expect("metadata");
++        let mut head: serde_json::Value = serde_json::from_str(head).expect("metadata JSON");
++        head["payload"]["id"] = serde_json::to_value(logical).expect("logical ID");
++        head["payload"]["session_id"] = serde_json::to_value(logical).expect("session ID");
++        fs::write(&path, format!("{head}\n{suffix}")).expect("logical metadata");
++        paths.push(path);
++    }
++    prepend_rollout_reference(
++        &paths[1],
++        RolloutReferenceItem {
++            rollout_path: paths[0].clone(),
++            thread_id: Some(logical),
++            rollout_id: Some(physical[0]),
++            rollout_timestamp: None,
++            segment_id: None,
++            max_depth: 2,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        },
++    );
++    let dependencies = discover_dependencies(home.path(), &paths[1])
++        .await
++        .expect("inspect")
++        .expect("complete rotated chain");
++    let mut expected = vec![logical, physical[0], physical[1]];
++    expected.sort_unstable_by_key(ThreadId::to_string);
++    assert_eq!(dependencies.thread_ids, expected);
++    let plan = super::super::super::lineage::plan_legacy_lineage(home.path(), &paths[1])
++        .await
++        .expect("plan");
++    assert!(dependencies.covers_plan(&plan).await);
++}
++
++#[tokio::test]
++async fn blocked_migration_writers_do_not_starve_an_independent_migration() {
++    let home = TempDir::new().expect("home");
++    let ids = [ThreadId::new(), ThreadId::new(), ThreadId::new()];
++    for id in ids {
++        write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++    }
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    let first = store.live_writer_locks.lock(ids[0]).await;
++    let second = store.live_writer_locks.lock(ids[1]).await;
++    let mut requests = Vec::new();
++    for id in &ids[..2] {
++        let store = store.clone();
++        let id = *id;
++        requests.push(tokio::spawn(async move {
++            coordinator::await_thread_migration(&store, id).await
++        }));
++    }
++    tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            let processed = coordinator::processed_thread_ids(&store).await;
++            if processed.contains(&ids[0]) && processed.contains(&ids[1]) {
++                break;
++            }
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("both busy requests attempted");
++    tokio::time::timeout(
++        Duration::from_secs(5),
++        coordinator::await_thread_migration(&store, ids[2]),
++    )
++    .await
++    .expect("independent migration must not wait for busy writers")
++    .expect("migration");
++    assert!(requests.iter().all(|request| !request.is_finished()));
++    drop(first);
++    drop(second);
++    for request in requests {
++        tokio::time::timeout(Duration::from_secs(5), request)
++            .await
++            .expect("unblocked migration")
++            .expect("join")
++            .expect("migration");
++    }
++}
++
++#[tokio::test]
++async fn independent_migrations_both_create_journals_before_either_continues() {
++    let home = TempDir::new().expect("home");
++    let ids = [ThreadId::new(), ThreadId::new()];
++    for id in ids {
++        write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++    }
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(3));
++    let mut requests = Vec::new();
++    for id in ids {
++        store
++            .rollout_migration_coordinator
++            .journal_barriers
++            .lock()
++            .await
++            .insert(id, barrier.clone());
++        let store = store.clone();
++        requests.push(tokio::spawn(async move {
++            coordinator::await_thread_migration(&store, id).await
++        }));
++    }
++    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
++        .await
++        .expect("both migrations reached their durable journal before release");
++    for request in requests {
++        tokio::time::timeout(Duration::from_secs(5), request)
++            .await
++            .expect("migration finishes")
++            .expect("join")
++            .expect("migration");
++    }
++    for id in ids {
++        assert!(
++            store
++                .has_history_projection(id)
++                .await
++                .expect("complete projection")
++        );
++    }
++}
++
++#[tokio::test]
++async fn canceled_waiter_does_not_cancel_or_duplicate_the_shared_migration() {
++    let home = TempDir::new().expect("home");
++    let id = ThreadId::new();
++    write_rollout(home.path(), id, ThreadHistoryMode::Legacy);
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
++    store
++        .rollout_migration_coordinator
++        .journal_barriers
++        .lock()
++        .await
++        .insert(id, barrier.clone());
++    let mut requests = Vec::new();
++    for _ in 0..2 {
++        let store = store.clone();
++        requests.push(tokio::spawn(async move {
++            coordinator::await_thread_migration(&store, id).await
++        }));
++    }
++    tokio::time::timeout(Duration::from_secs(5), async {
++        loop {
++            if store
++                .rollout_migration_coordinator
++                .state
++                .lock()
++                .await
++                .entries
++                .get(&id)
++                .is_some_and(|entry| entry.completion.receiver_count() == 2)
++            {
++                break;
++            }
++            tokio::task::yield_now().await;
++        }
++    })
++    .await
++    .expect("both callers joined");
++    let canceled = requests.pop().expect("cancel one waiter");
++    canceled.abort();
++    assert!(canceled.await.expect_err("canceled").is_cancelled());
++    tokio::time::timeout(Duration::from_secs(5), barrier.wait())
++        .await
++        .expect("worker continues despite canceled caller");
++    for request in requests {
++        tokio::time::timeout(Duration::from_secs(5), request)
++            .await
++            .expect("remaining caller")
++            .expect("join")
++            .expect("migration");
++    }
++    assert_eq!(coordinator::processed_thread_ids(&store).await, vec![id]);
++    assert!(
++        store
++            .has_history_projection(id)
++            .await
++            .expect("complete projection")
++    );
++}
++
++#[tokio::test]
++async fn changed_ancestry_or_pending_journal_retries_exclusively_without_publication() {
++    for pending_journal in [false, true] {
++        let home = TempDir::new().expect("home");
++        let parent = ThreadId::new();
++        let child = ThreadId::new();
++        let parent_path = write_rollout(home.path(), parent, ThreadHistoryMode::Legacy);
++        let child_path = write_rollout(home.path(), child, ThreadHistoryMode::Legacy);
++        let segment_id = SegmentId::new();
++        let contents = fs::read_to_string(&parent_path).expect("parent");
++        let (head, suffix) = contents.split_once('\n').expect("metadata");
++        let mut head: serde_json::Value = serde_json::from_str(head).expect("metadata JSON");
++        head["payload"]["segment_id"] = serde_json::to_value(segment_id).expect("segment ID");
++        fs::write(&parent_path, format!("{head}\n{suffix}")).expect("immutable parent");
++        let store = indexed_store(home.path()).await;
++        let dependencies = discover_dependencies(home.path(), &child_path)
++            .await
++            .expect("inspect")
++            .expect("initially independent");
++        let mut admission = MigrationAdmission::Shared(std::sync::Arc::new(dependencies));
++        let journal = migration_journal_path(home.path(), child);
++        if pending_journal {
++            write_migration_journal(&journal)
++                .await
++                .expect("journal appeared after discovery");
++        } else {
++            prepend_rollout_reference(
++                &child_path,
++                RolloutReferenceItem {
++                    rollout_path: parent_path,
++                    thread_id: Some(parent),
++                    rollout_id: Some(parent),
++                    rollout_timestamp: None,
++                    segment_id: Some(segment_id),
++                    max_depth: 2,
++                    nth_user_message: None,
++                    compacted_replacement_history_filter_texts: None,
++                },
++            );
++        }
++        let original = fs::read(&child_path).expect("current source");
++        let unrelated = codex_rollout::try_acquire_rollout_migration_dependency_lock(
++            home.path(),
++            &[ThreadId::new()],
++        )
++        .expect("reservation")
++        .expect("unrelated job");
++        let result = store
++            .migrate_rollout_path_on_demand(child_path.clone(), &mut admission)
++            .await;
++        assert!(matches!(
++            result,
++            Err(crate::ThreadStoreError::Conflict { .. })
++        ));
++        assert!(
++            matches!(admission, MigrationAdmission::Exclusive),
++            "exclusive retry must survive contention"
++        );
++        assert_eq!(fs::read(&child_path).expect("source retained"), original);
++        assert_eq!(journal.exists(), pending_journal);
++        drop(unrelated);
++        let outcome = store
++            .migrate_rollout_path_on_demand(child_path, &mut admission)
++            .await
++            .expect("exclusive retry")
++            .expect("outcome");
++        assert_eq!(
++            outcome.status,
++            crate::RolloutMigrationStatus::Migrated,
++            "{outcome:?}"
++        );
++        assert!(
++            store
++                .has_history_projection(child)
++                .await
++                .expect("complete history")
++        );
++        assert!(!journal.exists());
++    }
++}
++
++#[tokio::test]
++async fn failed_migration_reuses_supported_reader_then_retries_changed_or_expired_source() {
++    let home = TempDir::new().expect("home");
++    let parent = ThreadId::new();
++    let child = ThreadId::new();
++    let parent_path = write_rollout(home.path(), parent, ThreadHistoryMode::Legacy);
++    let initial_directory = home
++        .path()
++        .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
++        .join(parent.to_string())
++        .join("initial");
++    fs::create_dir_all(&initial_directory).expect("canonical legacy initial directory");
++    let initial_path = initial_directory.join(parent_path.file_name().expect("rollout filename"));
++    fs::rename(parent_path, &initial_path).expect("retained legacy initial");
++    let child_path = write_rollout(home.path(), child, ThreadHistoryMode::Legacy);
++    prepend_rollout_reference(
++        &child_path,
++        RolloutReferenceItem {
++            rollout_path: initial_path,
++            thread_id: Some(parent),
++            rollout_id: Some(parent),
++            rollout_timestamp: None,
++            segment_id: None,
++            max_depth: 2,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        },
++    );
++    let original = fs::read(&child_path).expect("source");
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    for include_history in [false, true, false] {
++        let thread = store
++            .read_thread(ReadThreadParams {
++                thread_id: child,
++                include_archived: false,
++                include_history,
++            })
++            .await
++            .expect("supported reader after unsupported segmentless cross-thread conversion");
++        assert_eq!(thread.thread_id, child);
++    }
++    assert_eq!(coordinator::processed_thread_ids(&store).await, vec![child]);
++    assert_eq!(fs::read(&child_path).expect("unchanged source"), original);
++
++    tokio::time::pause();
++    tokio::time::advance(Duration::from_secs(61)).await;
++    tokio::time::resume();
++    coordinator::await_thread_migration(&store, child)
++        .await
++        .expect("expired failure retries without depending on a selected-source change");
++    assert_eq!(
++        coordinator::processed_thread_ids(&store).await,
++        vec![child, child]
++    );
++
++    write_rollout(home.path(), child, ThreadHistoryMode::Legacy);
++    coordinator::await_thread_migration(&store, child)
++        .await
++        .expect("changed source retries immediately");
++    assert_eq!(
++        coordinator::processed_thread_ids(&store).await,
++        vec![child, child, child]
++    );
++    assert!(
++        store
++            .has_history_projection(child)
++            .await
++            .expect("projection")
++    );
++}
++
++#[tokio::test]
++async fn failed_migration_does_not_suppress_pending_journal_recovery() {
++    let home = TempDir::new().expect("home");
++    let child = ThreadId::new();
++    let path = write_rollout(home.path(), child, ThreadHistoryMode::Legacy);
++    prepend_rollout_reference(
++        &path,
++        RolloutReferenceItem {
++            rollout_path: home.path().join("missing-parent.jsonl"),
++            thread_id: Some(ThreadId::new()),
++            rollout_id: None,
++            rollout_timestamp: None,
++            segment_id: Some(SegmentId::new()),
++            max_depth: 2,
++            nth_user_message: None,
++            compacted_replacement_history_filter_texts: None,
++        },
++    );
++    let store = indexed_store(home.path()).await;
++    store.start_automatic_rollout_migration();
++    coordinator::await_thread_migration(&store, child)
++        .await
++        .expect("initial fallback");
++    assert_eq!(coordinator::processed_thread_ids(&store).await, vec![child]);
++    let journal = migration_journal_path(home.path(), child);
++    write_migration_journal(&journal).await.expect("journal");
++    fs::write(&journal, b"{invalid}").expect("incomplete recovery state");
++    coordinator::await_thread_migration(&store, child)
++        .await
++        .expect_err("pending recovery cannot use a cached fallback");
++    assert!(journal.exists());
++    assert_eq!(
++        coordinator::processed_thread_ids(&store).await,
++        vec![child, child]
++    );
++}
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/dependencies.rs b/codex-rs/thread-store/src/local/rollout_migration/dependencies.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9859f6fa954cff86e12b08b2d5ac348644b9e75e
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_migration/dependencies.rs
+@@ -0,0 +1,205 @@
++//! Bounded migration admission reads, separate from full lineage authentication.
++//!
++//! Missing or unusual headers retain exclusive maintenance ownership. A complete explicit
++//! reference chain can reserve its logical and physical identities without inventorying home.
++
++use std::collections::HashSet;
++use std::path::Path;
++use std::path::PathBuf;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_rollout::RolloutItem;
++use sha2::Digest;
++use sha2::Sha256;
++use tokio::io::AsyncBufReadExt;
++use tokio::io::AsyncReadExt;
++use tokio::io::BufReader;
++
++use super::lineage::LegacyLineageMigrationPlan;
++
++const MAX_HEADER_BYTES: u64 = 64 * 1024;
++const MAX_DISCOVERY_BYTES: u64 = 4 * 1024 * 1024;
++const MAX_DEPENDENCIES: usize = 512;
++
++/// A failed coverage check must retry exclusively, not be cached as supported-reader success.
++#[derive(Clone)]
++pub(super) enum MigrationAdmission {
++    /// Explicit sweeps retain their existing wait for an in-process writer.
++    Manual,
++    Exclusive,
++    Shared(std::sync::Arc<MigrationDependencies>),
++    RequiresExclusive,
++}
++
++/// Header identities reserved by one migration attempt, never a cached decoded history.
++#[derive(Debug)]
++pub(super) struct MigrationDependencies {
++    pub(super) thread_ids: Vec<ThreadId>,
++    headers: Vec<HeaderSnapshot>,
++    /// Includes reader read-ahead, so classification cost cannot hide buffered payload reads.
++    pub(super) bytes_read: u64,
++}
++
++/// Exact bytes that established an edge; appending an unrelated tail does not change the edge.
++#[derive(Debug)]
++struct HeaderSnapshot {
++    path: PathBuf,
++    logical_id: ThreadId,
++    physical_id: ThreadId,
++    byte_count: u64,
++    sha256: [u8; 32],
++}
++
++impl MigrationDependencies {
++    /// The full planner remains authoritative. Native replay can add ancestors not present in
++    /// its direct dependency collections, so it requires exclusive admission for now.
++    pub(super) async fn covers_plan(&self, plan: &LegacyLineageMigrationPlan) -> bool {
++        if !plan.history_bases.is_empty()
++            || !plan.reference_dependencies.is_empty()
++            || !plan.authentication_sources.is_empty()
++            || !plan.reuse_native_prefixes
++            || plan.replay_native_rollbacks
++        {
++            return false;
++        }
++        for source in &plan.sources {
++            if source.history_mode != ThreadHistoryMode::Legacy
++                || source.has_rollback
++                || source.materialized_predecessor
++                || source.native_replay.is_some()
++            {
++                return false;
++            }
++            let Ok(path) = tokio::fs::canonicalize(&source.path).await else {
++                return false;
++            };
++            if !self.headers.iter().any(|header| {
++                header.path == path
++                    && header.logical_id == source.thread_id
++                    && header.physical_id == source.rollout_id
++            }) {
++                return false;
++            }
++        }
++        true
++    }
++
++    pub(super) fn selected_thread_id(&self) -> ThreadId {
++        self.headers[0].logical_id
++    }
++
++    /// Recheck after reservation, before ordinary migration can write a journal or projection.
++    pub(super) async fn unchanged(&self) -> std::io::Result<bool> {
++        for header in &self.headers {
++            let file = tokio::fs::File::open(&header.path).await?;
++            let mut bytes = Vec::with_capacity(header.byte_count as usize);
++            file.take(header.byte_count).read_to_end(&mut bytes).await?;
++            if bytes.len() as u64 != header.byte_count
++                || <[u8; 32]>::from(Sha256::digest(&bytes)) != header.sha256
++            {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++}
++
++/// `None` is conservative exclusion, not evidence that the rollout has no dependencies.
++pub(super) async fn discover_dependencies(
++    codex_home: &Path,
++    selected_path: &Path,
++) -> std::io::Result<Option<MigrationDependencies>> {
++    let mut path = selected_path.to_path_buf();
++    let mut seen = HashSet::new();
++    let mut identities = HashSet::new();
++    let mut headers = Vec::new();
++    let mut bytes_read = 0;
++    loop {
++        if headers.len() == MAX_DEPENDENCIES || bytes_read == MAX_DISCOVERY_BYTES {
++            return Ok(None);
++        }
++        // Compressed or relocated references still migrate, but this classifier must not start
++        // an unbounded decompressor or filesystem search merely to establish independence.
++        if path.extension().is_some_and(|extension| extension == "zst") {
++            return Ok(None);
++        }
++        let canonical = match tokio::fs::canonicalize(&path).await {
++            Ok(path) => path,
++            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
++            Err(error) => return Err(error),
++        };
++        if !seen.insert(canonical.clone()) {
++            return Ok(None);
++        }
++        let file = tokio::fs::File::open(&canonical).await?;
++        let limit = MAX_HEADER_BYTES.min(MAX_DISCOVERY_BYTES - bytes_read);
++        let mut reader = BufReader::with_capacity(4096, file.take(limit));
++        let mut bytes = Vec::new();
++        reader.read_until(b'\n', &mut bytes).await?;
++        let metadata_end = bytes.len();
++        let Ok(value) = serde_json::from_slice(&bytes) else {
++            return Ok(None);
++        };
++        let Ok(line) = codex_rollout::decode_rollout_line(value) else {
++            return Ok(None);
++        };
++        let RolloutItem::SessionMeta(metadata) = line.item else {
++            return Ok(None);
++        };
++        if metadata.meta.history_mode != ThreadHistoryMode::Legacy
++            || metadata.meta.history_base.is_some()
++        {
++            return Ok(None);
++        }
++        let Some(physical_id) = codex_rollout::rollout_id_from_path(&canonical) else {
++            return Ok(None);
++        };
++        // Reserve physical IDs too: rotated files have distinct rollout IDs, and projections
++        // are keyed by those IDs rather than the logical SessionMeta.id.
++        identities.insert(metadata.meta.id);
++        identities.insert(physical_id);
++        reader.read_until(b'\n', &mut bytes).await?;
++        bytes_read += limit - reader.get_ref().limit();
++        if bytes.last() != Some(&b'\n') || bytes.len() as u64 == limit {
++            return Ok(None);
++        }
++        let predecessor = if bytes.len() == metadata_end {
++            None
++        } else {
++            let Ok(value) = serde_json::from_slice(&bytes[metadata_end..]) else {
++                return Ok(None);
++            };
++            let Ok(line) = codex_rollout::decode_rollout_line(value) else {
++                return Ok(None);
++            };
++            match line.item {
++                RolloutItem::RolloutReference(reference)
++                    if super::lineage::reference_is_history_base_compatible(&reference) =>
++                {
++                    Some(reference)
++                }
++                RolloutItem::RolloutReference(_) | RolloutItem::SessionMeta(_) => return Ok(None),
++                _ => None,
++            }
++        };
++        headers.push(HeaderSnapshot {
++            path: canonical,
++            logical_id: metadata.meta.id,
++            physical_id,
++            byte_count: bytes.len() as u64,
++            sha256: Sha256::digest(&bytes).into(),
++        });
++        if let Some(reference) = predecessor {
++            path = codex_home.join(reference.rollout_path);
++        } else {
++            let mut thread_ids = identities.into_iter().collect::<Vec<_>>();
++            thread_ids.sort_unstable_by_key(ThreadId::to_string);
++            return Ok(Some(MigrationDependencies {
++                thread_ids,
++                headers,
++                bytes_read,
++            }));
++        }
++    }
++}
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/recent_failures.rs b/codex-rs/thread-store/src/local/rollout_migration/recent_failures.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..7c1595f795e91fae77bdebd2a1bdd6f18d5b5230
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_migration/recent_failures.rs
+@@ -0,0 +1,79 @@
++//! Defer repeated failed conversion without caching the history returned by its supported reader.
++
++use std::collections::VecDeque;
++use std::path::PathBuf;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use tokio::time::Instant;
++
++use super::LocalThreadStore;
++use super::MigrationWork;
++use super::RolloutFingerprint;
++use super::retained_selected_source_is_unchanged;
++
++const MAX_RECENT_FAILURES: usize = 128;
++const RETRY_DELAY: Duration = Duration::from_secs(60);
++
++/// Stores only the selected source identity, not decoded history or dependency headers.
++#[derive(Clone)]
++struct RecentFailure {
++    thread_id: ThreadId,
++    path: PathBuf,
++    rollout_id: codex_protocol::RolloutId,
++    source_fingerprint: RolloutFingerprint,
++    retry_after: Instant,
++}
++
++/// Bounded retry suppression for unchanged sources that explicitly retained supported-reader use.
++#[derive(Default)]
++pub(super) struct RecentFailures(VecDeque<RecentFailure>);
++
++impl RecentFailures {
++    pub(super) fn record(&mut self, work: &MigrationWork) {
++        self.0.retain(|entry| {
++            entry.thread_id != work.thread_id && entry.retry_after > Instant::now()
++        });
++        if self.0.len() == MAX_RECENT_FAILURES {
++            self.0.pop_front();
++        }
++        self.0.push_back(RecentFailure {
++            thread_id: work.thread_id,
++            path: work.path.clone(),
++            rollout_id: work.rollout_id,
++            source_fingerprint: work.source_fingerprint,
++            retry_after: Instant::now() + RETRY_DELAY,
++        });
++    }
++}
++
++pub(super) async fn should_defer_retry(store: &LocalThreadStore, thread_id: ThreadId) -> bool {
++    let recent = {
++        let mut state = store.rollout_migration_coordinator.state.lock().await;
++        state
++            .recent_failures
++            .0
++            .retain(|entry| entry.retry_after > Instant::now());
++        state
++            .recent_failures
++            .0
++            .iter()
++            .find(|entry| entry.thread_id == thread_id)
++            .cloned()
++    };
++    let Some(recent) = recent else {
++        return false;
++    };
++    // A new selection, an append, or a recovery journal requires an immediate retry. Ancestor-only
++    // repairs cannot be detected from this bounded identity check, so suppression expires rather
++    // than indefinitely trusting the selected file. History is still read fresh on every request.
++    retained_selected_source_is_unchanged(
++        store,
++        thread_id,
++        &recent.path,
++        recent.rollout_id,
++        recent.source_fingerprint,
++    )
++    .await
++    .unwrap_or(false)
++}
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup.rs b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
+index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a53545b37 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/startup.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
+@@ -16,6 +16,7 @@ use std::collections::VecDeque;
+ use std::io::ErrorKind;
+ use std::path::Path;
+ use std::path::PathBuf;
++use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use std::time::SystemTime;
+@@ -27,6 +28,7 @@ use codex_rollout::StateDbHandle;
+ use codex_state::RolloutMigrationCursor;
+ use codex_state::RolloutMigrationSkippedRollout;
+ use tokio::sync::Mutex;
++use tokio::sync::Notify;
+ use tokio::sync::watch;
+ use tracing::warn;
+
+@@ -35,6 +37,8 @@ use super::RolloutMigrationMode;
+ use super::RolloutMigrationOptions;
+ use super::RolloutMigrationReport;
+ use super::RolloutMigrationStatus;
++use super::dependencies::MigrationAdmission;
++use super::dependencies::discover_dependencies;
+ use super::find_rollout_paths;
+ use super::lineage::contains_convertible_rollout_reference;
+ use super::lineage::has_leading_filtered_rollout_reference;
+@@ -57,20 +61,30 @@ const NATIVE_OR_COMPATIBLE_REASON: &str = "native_or_compatible";
+ const CURSOR_LOOKBACK_SECONDS: i64 = 48 * 60 * 60;
+ const MAINTENANCE_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+-/// Serializes requested automatic migrations and joins concurrent loads of the same thread.
++#[path = "recent_failures.rs"]
++mod recent_failures;
++
++/// Bounds migration workers and joins concurrent loads of the same thread.
+ #[derive(Default)]
+ pub(crate) struct StartupMigrationCoordinator {
+     enabled: AtomicBool,
+     state: Mutex<CoordinatorState>,
++    ready: Notify,
+     #[cfg(test)]
+     processed: Mutex<Vec<ThreadId>>,
++    /// Tests pause after durable journal creation without holding a coordinator mutex.
++    #[cfg(test)]
++    pub(super) journal_barriers: Mutex<HashMap<ThreadId, Arc<tokio::sync::Barrier>>>,
+ }
+
+ #[derive(Default)]
+ struct CoordinatorState {
+-    worker_running: bool,
++    workers: usize,
++    /// Retain compression priority even while every conflicting attempt is waiting to retry.
++    foreground: Option<Arc<codex_rollout::RolloutMaintenanceIntentGuard>>,
+     priority: VecDeque<ThreadId>,
+     entries: HashMap<ThreadId, MigrationEntry>,
++    recent_failures: recent_failures::RecentFailures,
+ }
+
+ struct MigrationEntry {
+@@ -80,6 +94,8 @@ struct MigrationEntry {
+     modified_at: SystemTime,
+     status: MigrationEntryStatus,
+     completion: watch::Sender<MigrationCompletion>,
++    admission: MigrationAdmission,
++    not_before: tokio::time::Instant,
+ }
+
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -100,6 +116,7 @@ struct MigrationWork {
+     path: PathBuf,
+     rollout_id: codex_protocol::RolloutId,
+     source_fingerprint: RolloutFingerprint,
++    admission: MigrationAdmission,
+ }
+
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -147,6 +164,9 @@ pub(super) async fn await_thread_migration(
+     let mut receiver = if let Some(receiver) = existing_receiver {
+         receiver
+     } else {
++        if recent_failures::should_defer_retry(store, thread_id).await {
++            return Ok(());
++        }
+         let Some(mut resolved) =
+             thread_rollout_resolver::resolve_current_including_archived(store, thread_id).await?
+         else {
+@@ -233,14 +253,14 @@ pub(super) async fn await_thread_migration(
+                     native_history_ready = store.has_history_projection(thread_id).await?;
+                 }
+                 result => {
+-                    let work = MigrationWork {
++                    native_history_ready = retained_selected_source_is_unchanged(
++                        store,
+                         thread_id,
+-                        path: resolved.path.clone(),
+-                        rollout_id: resolved.rollout_id,
+-                        source_fingerprint: before,
+-                    };
+-                    native_history_ready =
+-                        retained_selected_source_is_unchanged(store, &work).await?;
++                        &resolved.path,
++                        resolved.rollout_id,
++                        before,
++                    )
++                    .await?;
+                     if native_history_ready && let Err(error) = result {
+                         warn!(
+                             thread_id = %thread_id,
+@@ -265,6 +285,14 @@ pub(super) async fn await_thread_migration(
+                     current.rollout_id == resolved.rollout_id && current.path == resolved.path
+                 });
+         let modified_at = rollout_modified_at(resolved.path.as_path()).await?;
++        let admission = if already_native {
++            MigrationAdmission::Exclusive
++        } else {
++            match discover_dependencies(&store.config.codex_home, &resolved.path).await {
++                Ok(Some(dependencies)) => MigrationAdmission::Shared(Arc::new(dependencies)),
++                Ok(None) | Err(_) => MigrationAdmission::Exclusive,
++            }
++        };
+         let mut state = store.rollout_migration_coordinator.state.lock().await;
+         if let Some(receiver) = subscribe_to_existing(&mut state, thread_id) {
+             receiver
+@@ -282,13 +310,15 @@ pub(super) async fn await_thread_migration(
+                     modified_at,
+                     status: MigrationEntryStatus::Pending,
+                     completion,
++                    admission,
++                    not_before: tokio::time::Instant::now(),
+                 },
+             );
+             state.priority.push_back(thread_id);
+             receiver
+         }
+     };
+-    ensure_worker(store).await;
++    ensure_worker(store).await?;
+
+     loop {
+         let completion = receiver.borrow().clone();
+@@ -328,25 +358,38 @@ async fn rollout_modified_at(path: &Path) -> ThreadStoreResult<SystemTime> {
+         .map_err(migration_error)
+ }
+
+-async fn ensure_worker(store: &LocalThreadStore) {
+-    let should_spawn = {
++async fn ensure_worker(store: &LocalThreadStore) -> ThreadStoreResult<()> {
++    let foreground = Arc::new(
++        codex_rollout::acquire_rollout_maintenance_intent(&store.config.codex_home)
++            .await
++            .map_err(migration_error)?,
++    );
++    let count = {
+         let mut state = store.rollout_migration_coordinator.state.lock().await;
+-        if state.worker_running {
+-            false
+-        } else {
+-            state.worker_running = true;
+-            true
++        state.foreground.get_or_insert(foreground);
++        let pending = state
++            .entries
++            .values()
++            .filter(|entry| entry.status == MigrationEntryStatus::Pending)
++            .count();
++        let count = pending.min(codex_rollout::MAX_CONCURRENT_ROLLOUT_MIGRATIONS - state.workers);
++        state.workers += count;
++        if state.workers == 0 {
++            state.foreground = None;
+         }
++        count
+     };
+-    if should_spawn {
++    store.rollout_migration_coordinator.ready.notify_one();
++    for _ in 0..count {
+         let store = store.clone();
+         tokio::spawn(async move { run_worker(store).await });
+     }
++    Ok(())
+ }
+
+ async fn run_worker(store: LocalThreadStore) {
+     loop {
+-        let Some(work) = next_work(&store).await else {
++        let Some(mut work) = next_work(&store).await else {
+             return;
+         };
+         #[cfg(test)]
+@@ -357,7 +400,7 @@ async fn run_worker(store: LocalThreadStore) {
+             .await
+             .push(work.thread_id);
+         let result = store
+-            .migrate_rollout_path_on_demand(work.path.clone())
++            .migrate_rollout_path_on_demand(work.path.clone(), &mut work.admission)
+             .await;
+         let result = match result {
+             Ok(Some(outcome)) if outcome.status == RolloutMigrationStatus::Failed => {
+@@ -367,7 +410,15 @@ async fn run_worker(store: LocalThreadStore) {
+                         work.path.display()
+                     )
+                 });
+-                match retained_selected_source_is_unchanged(&store, &work).await {
++                match retained_selected_source_is_unchanged(
++                    &store,
++                    work.thread_id,
++                    &work.path,
++                    work.rollout_id,
++                    work.source_fingerprint,
++                )
++                .await
++                {
+                     Ok(true) => {
+                         warn!(
+                             thread_id = %work.thread_id,
+@@ -401,110 +452,146 @@ async fn run_worker(store: LocalThreadStore) {
+                 "failed to record automatic rollout migration fingerprint: {error}"
+             );
+         }
+-        let retry_delay = {
++        {
+             let mut state = store.rollout_migration_coordinator.state.lock().await;
++            if matches!(&result, Ok(Some(outcome)) if outcome.status == RolloutMigrationStatus::Failed)
++            {
++                state.recent_failures.record(&work);
++            }
+             let Some(entry) = state.entries.get_mut(&work.thread_id) else {
+                 continue;
+             };
++            entry.admission = work.admission;
+             match result {
+                 Ok(Some(outcome)) if outcome.status == RolloutMigrationStatus::SkippedBusy => {
+                     entry.status = MigrationEntryStatus::Pending;
++                    entry.not_before =
++                        tokio::time::Instant::now() + std::time::Duration::from_millis(50);
+                     state.priority.push_back(work.thread_id);
+-                    Some(std::time::Duration::from_millis(50))
+                 }
+                 Ok(Some(_)) => {
+                     finish_entry(entry, Ok(()));
+-                    None
+                 }
+                 Ok(None) => {
+                     finish_entry(entry, Ok(()));
+-                    None
+                 }
+                 Err(crate::ThreadStoreError::Conflict { .. }) => {
+                     entry.status = MigrationEntryStatus::Pending;
++                    entry.not_before =
++                        tokio::time::Instant::now() + std::time::Duration::from_millis(250);
+                     state.priority.push_back(work.thread_id);
+-                    Some(std::time::Duration::from_millis(250))
+                 }
+                 Err(error) => {
+                     finish_entry(entry, Err(error.to_string()));
+-                    None
+                 }
+             }
+-        };
+-        if let Some(delay) = retry_delay {
+-            tokio::time::sleep(delay).await;
++            // Receivers retain the terminal watch value. Do not cache completed attempts forever:
++            // a repaired or replaced source must be inspected on its next request.
++            if state
++                .entries
++                .get(&work.thread_id)
++                .is_some_and(|entry| entry.status == MigrationEntryStatus::Complete)
++            {
++                state.entries.remove(&work.thread_id);
++            }
+         }
++        store.rollout_migration_coordinator.ready.notify_one();
+     }
+ }
+
+ async fn next_work(store: &LocalThreadStore) -> Option<MigrationWork> {
+-    let mut state = store.rollout_migration_coordinator.state.lock().await;
+-    let mut priority_thread = None;
+-    while let Some(thread_id) = state.priority.pop_front() {
+-        if state
+-            .entries
+-            .get(&thread_id)
+-            .is_some_and(|entry| entry.status == MigrationEntryStatus::Pending)
+-        {
+-            priority_thread = Some(thread_id);
+-            break;
++    loop {
++        let retry_at = {
++            let mut state = store.rollout_migration_coordinator.state.lock().await;
++            let mut priority_thread = None;
++            for _ in 0..state.priority.len() {
++                let thread_id = state.priority.pop_front()?;
++                if state.entries.get(&thread_id).is_some_and(|entry| {
++                    entry.status == MigrationEntryStatus::Pending
++                        && entry.not_before <= tokio::time::Instant::now()
++                }) {
++                    priority_thread = Some(thread_id);
++                    break;
++                }
++                state.priority.push_back(thread_id);
++            }
++            let thread_id = priority_thread.or_else(|| {
++                state
++                    .entries
++                    .iter()
++                    .filter(|(_, entry)| {
++                        entry.status == MigrationEntryStatus::Pending
++                            && entry.not_before <= tokio::time::Instant::now()
++                    })
++                    .max_by(|left, right| {
++                        left.1
++                            .modified_at
++                            .cmp(&right.1.modified_at)
++                            .then_with(|| right.1.path.cmp(&left.1.path))
++                    })
++                    .map(|(thread_id, _)| *thread_id)
++            });
++            if let Some(thread_id) = thread_id {
++                let entry = state.entries.get_mut(&thread_id)?;
++                entry.status = MigrationEntryStatus::Running;
++                return Some(MigrationWork {
++                    thread_id,
++                    path: entry.path.clone(),
++                    rollout_id: entry.rollout_id,
++                    source_fingerprint: entry.source_fingerprint,
++                    admission: entry.admission.clone(),
++                });
++            }
++            let next = state
++                .entries
++                .values()
++                .filter(|entry| entry.status == MigrationEntryStatus::Pending)
++                .map(|entry| entry.not_before)
++                .min();
++            if let Some(next) = next {
++                next
++            } else {
++                state.workers -= 1;
++                if state.workers == 0 {
++                    state.foreground = None;
++                }
++                return None;
++            }
++        };
++        tokio::select! {
++            _ = tokio::time::sleep_until(retry_at) => {},
++            _ = store.rollout_migration_coordinator.ready.notified() => {},
+         }
+     }
+-    let thread_id = priority_thread.or_else(|| {
+-        state
+-            .entries
+-            .iter()
+-            .filter(|(_, entry)| entry.status == MigrationEntryStatus::Pending)
+-            .max_by(|left, right| {
+-                left.1
+-                    .modified_at
+-                    .cmp(&right.1.modified_at)
+-                    .then_with(|| right.1.path.cmp(&left.1.path))
+-            })
+-            .map(|(thread_id, _)| *thread_id)
+-    });
+-    let Some(thread_id) = thread_id else {
+-        state.worker_running = false;
+-        return None;
+-    };
+-    let entry = state.entries.get_mut(&thread_id)?;
+-    entry.status = MigrationEntryStatus::Running;
+-    Some(MigrationWork {
+-        thread_id,
+-        path: entry.path.clone(),
+-        rollout_id: entry.rollout_id,
+-        source_fingerprint: entry.source_fingerprint,
+-    })
+ }
+
+ /// A failed conversion may fall back only when no publication or recovery state escaped.
+ async fn retained_selected_source_is_unchanged(
+     store: &LocalThreadStore,
+-    work: &MigrationWork,
++    thread_id: ThreadId,
++    path: &Path,
++    rollout_id: codex_protocol::RolloutId,
++    source_fingerprint: RolloutFingerprint,
+ ) -> ThreadStoreResult<bool> {
+-    let journal = migration_journal_path(&store.config.codex_home, work.thread_id);
++    let journal = migration_journal_path(&store.config.codex_home, thread_id);
+     if tokio::fs::try_exists(&journal)
+         .await
+         .map_err(migration_error)?
+     {
+         return Ok(false);
+     }
+-    if rollout_fingerprint(&work.path).await? != work.source_fingerprint {
++    if rollout_fingerprint(path).await? != source_fingerprint {
+         return Ok(false);
+     }
+     let selected =
+-        thread_rollout_resolver::resolve_current_including_archived(store, work.thread_id).await?;
+-    if !selected
+-        .is_some_and(|current| current.rollout_id == work.rollout_id && current.path == work.path)
+-    {
++        thread_rollout_resolver::resolve_current_including_archived(store, thread_id).await?;
++    if !selected.is_some_and(|current| current.rollout_id == rollout_id && current.path == path) {
+         return Ok(false);
+     }
+-    Ok(
+-        rollout_fingerprint(&work.path).await? == work.source_fingerprint
+-            && !tokio::fs::try_exists(&journal)
+-                .await
+-                .map_err(migration_error)?,
+-    )
++    Ok(rollout_fingerprint(path).await? == source_fingerprint
++        && !tokio::fs::try_exists(&journal)
++            .await
++            .map_err(migration_error)?)
+ }
+
+ fn finish_entry(entry: &mut MigrationEntry, result: Result<(), String>) {
+@@ -546,7 +633,7 @@ pub(super) async fn processed_thread_ids(store: &LocalThreadStore) -> Vec<Thread
+ #[cfg(test)]
+ pub(super) async fn automatic_migration_idle(store: &LocalThreadStore) -> bool {
+     let state = store.rollout_migration_coordinator.state.lock().await;
+-    !state.worker_running
++    state.workers == 0
+         && state.entries.values().all(|entry| {
+             !matches!(
+                 entry.status,
+diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
+index 52a84c0bb51d17d1c161aa1886fef54978e90719..83060807cdcdfaae6ec8b97fb55a23b3d521fa69 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
+@@ -38,6 +38,9 @@ use crate::local::test_support::test_config;
+
+ const TIMESTAMP: &str = "2025-01-03T12:00:00Z";
+
++#[path = "concurrency_tests.rs"]
++mod concurrency_tests;
++
+ fn write_rollout(home: &Path, thread_id: ThreadId, history_mode: ThreadHistoryMode) -> PathBuf {
+     let directory = home.join("sessions/2025/01/03");
+     fs::create_dir_all(&directory).expect("create rollout directory");
+@@ -917,10 +920,9 @@ async fn automatic_migration_runs_only_for_requested_thread_while_list_remains_n
+             .is_err(),
+         "concurrent loads must join the same migration"
+     );
+-    assert_eq!(
+-        super::processed_thread_ids(&store).await,
+-        vec![oldest_thread_id]
+-    );
++    let attempts = super::processed_thread_ids(&store).await;
++    assert!(!attempts.is_empty());
++    assert!(attempts.iter().all(|id| *id == oldest_thread_id));
+
+     drop(oldest_guard);
+     load.await
+@@ -930,9 +932,11 @@ async fn automatic_migration_runs_only_for_requested_thread_while_list_remains_n
+         .await
+         .expect("join second thread load")
+         .expect("load requested thread from shared migration");
+-    assert_eq!(
+-        super::processed_thread_ids(&store).await,
+-        vec![oldest_thread_id]
++    assert!(
++        super::processed_thread_ids(&store)
++            .await
++            .iter()
++            .all(|id| *id == oldest_thread_id)
+     );
+     assert_eq!(
+         codex_rollout::read_session_meta_line(&oldest_path)
+diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c02740b40abb6 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
+@@ -38,6 +38,8 @@ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_protocol::protocol::ThreadRolledBackEvent;
++use codex_protocol::protocol::TurnAbortReason;
++use codex_protocol::protocol::TurnAbortedEvent;
+ use codex_protocol::protocol::TurnCompleteEvent;
+ use codex_protocol::protocol::TurnContextItem;
+ use codex_protocol::protocol::TurnStartedEvent;
+@@ -2360,16 +2362,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+                 predecessor_segment_id,
+             ));
+         }
+-        items.extend([
+-            turn_started(turn_id.as_str()),
+-            completed_user_message(
+-                thread_id,
+-                turn_id.as_str(),
+-                format!("user-{index}").as_str(),
+-                format!("question-{index}").as_str(),
+-            ),
+-            turn_complete(turn_id.as_str()),
+-        ]);
++        items.push(turn_started(turn_id.as_str()));
++        if index == 3 {
++            // A valid interrupted turn can have items without a display-summary message.
++            items.extend([
++                item_completed(turn_id.as_str(), "reasoning-3"),
++                RolloutItem::EventMsg(EventMsg::TurnAborted(TurnAbortedEvent {
++                    turn_id: Some(turn_id.clone()),
++                    reason: TurnAbortReason::Interrupted,
++                    started_at: None,
++                    completed_at: None,
++                    duration_ms: None,
++                })),
++            ]);
++        } else {
++            items.extend([
++                completed_user_message(
++                    thread_id,
++                    turn_id.as_str(),
++                    format!("user-{index}").as_str(),
++                    format!("question-{index}").as_str(),
++                ),
++                turn_complete(turn_id.as_str()),
++            ]);
++        }
+         next_ordinal = write_paginated_segment(
+             path.as_path(),
+             home.path(),
+@@ -2414,7 +2430,7 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+         .await
+         .expect("materialize deep native lineage");
+     let materialized = serde_json::to_string(&materialized).expect("serialize native lineage");
+-    for index in 0..4 {
++    for index in 0..3 {
+         assert_eq!(
+             materialized
+                 .matches(format!("question-{index}").as_str())
+@@ -2444,6 +2460,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+         .await
+         .expect("read first migrated lineage page");
+     assert_eq!(first_page.turns.len(), 2);
++    let newest_turn = &first_page.turns[0];
++    assert_eq!(newest_turn.status, crate::StoredTurnStatus::Interrupted);
++    assert!(newest_turn.items.is_empty());
++    let items = store
++        .list_items(ListItemsParams {
++            thread_id,
++            turn_id: Some(newest_turn.turn_id.clone()),
++            include_archived: false,
++            cursor: None,
++            page_size: 2,
++            sort_direction: SortDirection::Asc,
++            sort_key: ItemSortKey::CreatedAtOrdinal,
++            after_updated_at_ordinal: None,
++        })
++        .await
++        .expect("read interrupted turn items");
++    assert_eq!(
++        items
++            .items
++            .iter()
++            .map(|item| item.item_id.as_str())
++            .collect::<Vec<_>>(),
++        vec!["reasoning-3"]
++    );
+     let second_page = store
+         .list_turns(ListTurnsParams {
+             thread_id,
+@@ -5037,18 +5077,109 @@ async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
+         drop(store);
+
+         let restarted = indexed_store(home.path()).await;
+-        let recovered = restarted
+-            .migrate_rollouts(apply_options())
++        if phase == LineageMigrationPhase::Selected {
++            let writer_guard = restarted
++                .writer_lock_coordinator
++                .acquire(thread_id)
++                .expect("hold selected lineage writer lock");
++            let journal = fs::read(&journal_path).expect("read pending lineage journal");
++            let busy = restarted
++                .migrate_rollouts(apply_options())
++                .await
++                .expect("skip busy lineage recovery");
++            assert_eq!(busy.outcomes.len(), 1);
++            assert_eq!(busy.outcomes[0].status, RolloutMigrationStatus::SkippedBusy);
++            assert_eq!(
++                fs::read(&journal_path).expect("reread pending lineage journal"),
++                journal
++            );
++            assert_eq!(
++                [
++                    fs::read(&immutable).expect("reread immutable source"),
++                    fs::read(&active).expect("reread active source"),
++                ],
++                source_bytes
++            );
++            drop(writer_guard);
++        }
++        let independent_id = ThreadId::new();
++        write_rollout(
++            home.path(),
++            independent_id,
++            SessionSource::Cli,
++            vec![user_message("independent")],
++        );
++        restarted.start_automatic_rollout_migration();
++        let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
++        restarted
++            .rollout_migration_coordinator
++            .journal_barriers
++            .lock()
+             .await
+-            .expect("recover lineage migration");
+-        assert_eq!(recovered.outcomes.len(), 1, "phase {phase:?}");
++            .insert(independent_id, barrier.clone());
++        let other_store = restarted.clone();
++        let independent = tokio::spawn(async move {
++            other_store
++                .await_automatic_rollout_migration(independent_id)
++                .await
++        });
++        let independent_journal = migration_journal_path(home.path(), independent_id);
++        tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            while restarted
++                .rollout_migration_coordinator
++                .journal_barriers
++                .lock()
++                .await
++                .contains_key(&independent_id)
++            {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("independent migration journal");
++        let other_journal_bytes = fs::read(&independent_journal).expect("independent journal");
++        let recovery_store = restarted.clone();
++        let recovery = tokio::spawn(async move {
++            recovery_store
++                .await_automatic_rollout_migration(thread_id)
++                .await
++        });
++        tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            while !super::startup::processed_thread_ids(&restarted)
++                .await
++                .contains(&thread_id)
++            {
++                tokio::task::yield_now().await;
++            }
++        })
++        .await
++        .expect("recovery queued");
++        assert!(
++            !recovery.is_finished(),
++            "recovery requires exclusive admission"
++        );
+         assert_eq!(
+-            recovered.outcomes[0].status,
+-            RolloutMigrationStatus::Migrated,
+-            "phase {phase:?}: {:?}",
+-            recovered.outcomes[0].message
++            fs::read(&independent_journal).expect("retained other journal"),
++            other_journal_bytes
+         );
++        tokio::time::timeout(std::time::Duration::from_secs(5), barrier.wait())
++            .await
++            .expect("release independent migration");
++        for request in [independent, recovery] {
++            tokio::time::timeout(std::time::Duration::from_secs(5), request)
++                .await
++                .expect("migration completes")
++                .expect("join")
++                .expect("migration");
++        }
+         assert!(!journal_path.exists());
++        assert!(!independent_journal.exists());
++        assert!(
++            restarted
++                .has_history_projection(independent_id)
++                .await
++                .expect("independent projection")
++        );
+         let selected = restarted
+             .state_db
+             .as_ref()
+@@ -8666,10 +8797,39 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
+         .expect("defer busy journal-less repair");
+     assert_eq!(busy.outcomes[0].status, RolloutMigrationStatus::SkippedBusy);
+     drop(writer);
+-    let repaired = store
+-        .migrate_rollouts(apply_options())
+-        .await
+-        .expect("repair published rollout without a journal");
++    let pause = crate::local::projection_rebuild::inject_projection_rebuild_pause(thread_id);
++    let repair_store = store.clone();
++    let repair = tokio::spawn(async move { repair_store.migrate_rollouts(apply_options()).await });
++    tokio::time::timeout(Duration::from_secs(5), pause.entered.notified())
++        .await
++        .expect("migration reaches projection rebuild");
++    // Repair holds a lifecycle reader while waiting for exclusive maintenance. A queued archive
++    // writer then prevents projection from acquiring another reader until repair can finish.
++    let repair_lifecycle =
++        crate::local::segment::history_repair_publication::reserve_history_repair_lifecycle(
++            &store, thread_id,
++        )
++        .await;
++    let mut archive_lifecycle = Box::pin(store.live_writer_locks.lock_lifecycle(thread_id));
++    assert!(futures::poll!(archive_lifecycle.as_mut()).is_pending());
++    pause.release.notify_one();
++    let repaired = tokio::time::timeout(Duration::from_secs(5), async {
++        let maintenance =
++            crate::local::segment::history_repair_publication::acquire_history_repair_maintenance(
++                &store,
++            )
++            .await
++            .expect("repair acquires maintenance while migration rebuilds its projection");
++        drop(maintenance);
++        drop(repair_lifecycle);
++        drop(archive_lifecycle.await);
++        repair
++            .await
++            .expect("join projection repair")
++            .expect("repair published rollout without a journal")
++    })
++    .await
++    .expect("migration must not deadlock with repair and a queued lifecycle writer");
+     assert_eq!(
+         repaired.outcomes[0].status,
+         RolloutMigrationStatus::AlreadyPaginated,
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 5c57c7126ba896e26315591ae76652e339394c2d..05f531e978a640419673100d123542563cc44e6b 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -25,6 +25,7 @@ pub(super) use read::list_segmented_legacy_items;
+ pub(super) use read::list_segmented_legacy_turns;
+ pub(super) use read::list_turns;
+ pub(super) use realtime::list_timeline;
++pub(super) use read::validate_thread_for_paginated_reads;
+ pub(super) use search::search_thread_occurrences;
+ pub(super) use turn_lookup::find_projected_turn;
+ pub(super) use turn_lookup::find_source_turn;
+diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
+index 526c6e2e0dde8b44bde0ec61c4dcd30f922ea116..c5afe16eceec59e2c54baf3a0bcd661e8915129a 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read.rs
+@@ -621,7 +621,7 @@ async fn indexed_turn_cursor_to_legacy(
+     .map_err(super::thread_history_error)
+ }
+
+-pub(super) async fn validate_thread_for_paginated_reads(
++pub(in crate::local) async fn validate_thread_for_paginated_reads(
+     store: &LocalThreadStore,
+     thread_id: ThreadId,
+     include_archived: bool,
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 421bedd24da770990a0b9a3d7b8ea9d1ffbdd706..467692949a12afb5302eca2543f74c32843a3b60 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -153,6 +153,48 @@ async fn indexed_paginated_reads_trust_current_projection_for_immutable_predeces
+     .await;
+ }
+
++#[tokio::test]
++async fn fork_marked_projection_requires_ancestry_without_history_base() {
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let active_path = write_projected_same_thread_segments(home.path(), thread_id, 2);
++    let mut lines = codex_rollout::RolloutRecorder::load_rollout_lines(&active_path)
++        .await
++        .expect("read active segment")
++        .0;
++    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
++        panic!("active segment must start with metadata");
++    };
++    // Older fork headers lack history_base and must use the ancestry-validating fallback.
++    meta.meta.forked_from_id = Some(ThreadId::new());
++    meta.meta.history_base = None;
++    let predecessor = match &lines[1].item {
++        RolloutItem::RolloutReference(reference) => reference.rollout_path.clone(),
++        _ => panic!("active segment must retain its predecessor reference"),
++    };
++    let mut encoded = Vec::new();
++    for line in &lines {
++        serde_json::to_writer(&mut encoded, line).expect("encode active record");
++        encoded.push(b'\n');
++    }
++    fs::write(&active_path, &encoded).expect("write old fork header");
++    sqlx::query(
++        "INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, ?)",
++    )
++    .bind(thread_id.to_string())
++    .bind(i64::try_from(encoded.len()).expect("byte offset"))
++    .bind(8_i64)
++    .execute(history_db(&store).await)
++    .await
++    .expect("seed complete projection checkpoint");
++    assert!(store.has_history_projection(thread_id).await.expect("valid ancestry"));
++
++    fs::remove_file(predecessor).expect("remove required predecessor");
++    store
++        .has_history_projection(thread_id)
++        .await
++        .expect_err("a complete fallback checkpoint does not authenticate missing ancestry");
++}
++
+ #[tokio::test]
+ async fn indexed_paginated_cursor_pages_never_open_projected_predecessors() {
+     assert_indexed_cursor_pages_ignore_missing_predecessors(ThreadHistoryMode::Paginated).await;

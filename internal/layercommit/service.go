@@ -1,5 +1,5 @@
 // Package layercommit translates between accepted Git commits and canonical
-// Saffrodex layer definitions. A layer owns an exact commit message and an
+// Frodex layer definitions. A layer owns an exact commit message and an
 // optional binary-safe tree diff; callers own ordering and lifecycle policy.
 package layercommit
 
@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
 )
 
 // Service captures, applies, and verifies generated layer commits.

@@ -1,0 +1,7 @@
+Release archive writers and avoid unrelated rollout reads
+
+Combine the existing implementation and corrections:
+
+- Fix archive writer release and avoid unrelated rollout reads
+
+Original-commit: 75b9ca6e46ad9c500db79c9d49e7d64fa300ad77

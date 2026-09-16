@@ -1,0 +1,769 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index a3ebc258e8964390ecb8aeb3182d1c03f8ad41c9..0e078729936a05d66b30bc9fb44b19d12bb76632 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -225,6 +225,7 @@ mod input;
+ mod loaded_threads;
+ mod pending_interactive_replay;
+ mod permission_shortcuts;
++mod pending_thread_approvals;
+ mod pets;
+ mod placed_side;
+ mod platform_actions;
+@@ -261,6 +262,7 @@ use self::side::SideParentStatus;
+ use self::side::SideParentStatusChange;
+ use self::side::SideThreadState;
+ use self::startup_prompts::*;
++pub(crate) use self::thread_events::ThreadEventChannelIdentity;
+ use self::thread_events::*;
+
+ const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
+@@ -636,6 +638,7 @@ pub(crate) struct App {
+
+     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
++    pending_thread_approval_labels: HashMap<ThreadId, String>,
+     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+     agent_navigation: AgentNavigationState,
+     agents_overview: agents_overview::AgentsOverviewState,
+diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
+index c39f5c6375d4965a9819ce0acc99f2e1d137545d..7bcbcfa7775e78ef7d382028f800472adaf73add 100644
+--- a/codex-rs/tui/src/app/background_requests.rs
++++ b/codex-rs/tui/src/app/background_requests.rs
+@@ -664,10 +664,10 @@ impl App {
+             (channel.sender.clone(), Arc::clone(&channel.store))
+         };
+
+-        let should_send = {
++        let (should_send, has_pending_approvals) = {
+             let mut guard = store.lock().await;
+             guard.push_buffered_event(ThreadBufferedEvent::FeedbackSubmission(event.clone()));
+-            guard.active
++            (guard.active, guard.has_pending_thread_approvals())
+         };
+
+         if should_send {
+@@ -685,6 +685,7 @@ impl App {
+                 }
+             }
+         }
++        self.update_pending_thread_approval(thread_id, has_pending_approvals);
+     }
+
+     pub(super) async fn handle_feedback_submitted(
+diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
+index 98e2a5f7902cfd1a334004b29c71addeb45a6dc3..ec1a1f8bf47ead0d7d72ff34d0cc719e2ade26e8 100644
+--- a/codex-rs/tui/src/app/event_dispatch.rs
++++ b/codex-rs/tui/src/app/event_dispatch.rs
+@@ -941,6 +941,20 @@ impl App {
+             AppEvent::SubmitThreadOp { thread_id, op } => {
+                 self.submit_thread_op(app_server, thread_id, op).await?;
+             }
++            AppEvent::ThreadNotification {
++                thread_id,
++                channel_identity,
++                notification,
++            } => {
++                if self
++                    .thread_event_channels
++                    .get(&thread_id)
++                    .is_some_and(|channel| channel_identity.matches(channel))
++                {
++                    self.enqueue_thread_notification(thread_id, notification)
++                        .await?;
++                }
++            }
+             AppEvent::ThreadHistoryEntryResponse { thread_id, event } => {
+                 self.enqueue_thread_history_entry_response(thread_id, event)
+                     .await?;
+diff --git a/codex-rs/tui/src/app/pending_thread_approvals.rs b/codex-rs/tui/src/app/pending_thread_approvals.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf0d534940a8a03e21f4d8d0393790a745128b1e
+--- /dev/null
++++ b/codex-rs/tui/src/app/pending_thread_approvals.rs
+@@ -0,0 +1,78 @@
++use super::*;
++
++impl App {
++    pub(super) async fn refresh_pending_thread_approvals(&mut self) {
++        let side_parent_thread_id = self.active_side_parent_thread_id();
++        let channels: Vec<(ThreadId, Arc<Mutex<ThreadEventStore>>)> = self
++            .thread_event_channels
++            .iter()
++            .map(|(thread_id, channel)| (*thread_id, Arc::clone(&channel.store)))
++            .collect();
++
++        self.pending_thread_approval_labels.clear();
++        for (thread_id, store) in channels {
++            if Some(thread_id) == self.active_thread_id || Some(thread_id) == side_parent_thread_id
++            {
++                continue;
++            }
++
++            let has_pending_approvals = store.lock().await.has_pending_thread_approvals();
++            if has_pending_approvals {
++                let label = self.thread_label(thread_id);
++                self.pending_thread_approval_labels.insert(thread_id, label);
++            }
++        }
++
++        self.publish_pending_thread_approvals();
++    }
++
++    fn publish_pending_thread_approvals(&mut self) {
++        let mut pending_threads: Vec<_> = self.pending_thread_approval_labels.iter().collect();
++        pending_threads.sort_by_key(|(thread_id, _)| thread_id.to_string());
++        let threads = pending_threads
++            .into_iter()
++            .map(|(_, label)| label.clone())
++            .collect();
++        self.chat_widget.set_pending_thread_approvals(threads);
++    }
++
++    pub(super) fn update_pending_thread_approval(
++        &mut self,
++        thread_id: ThreadId,
++        has_pending_approvals: bool,
++    ) {
++        if !has_pending_approvals
++            || Some(thread_id) == self.active_thread_id
++            || Some(thread_id) == self.active_side_parent_thread_id()
++        {
++            if self
++                .pending_thread_approval_labels
++                .remove(&thread_id)
++                .is_some()
++            {
++                self.publish_pending_thread_approvals();
++            }
++            return;
++        }
++
++        if !self.pending_thread_approval_labels.contains_key(&thread_id) {
++            let label = self.thread_label(thread_id);
++            self.pending_thread_approval_labels.insert(thread_id, label);
++            self.publish_pending_thread_approvals();
++        }
++    }
++
++    pub(super) fn update_pending_thread_approval_label(&mut self, thread_id: ThreadId) {
++        if !self.pending_thread_approval_labels.contains_key(&thread_id) {
++            return;
++        }
++
++        let label = self.thread_label(thread_id);
++        if self.pending_thread_approval_labels.get(&thread_id) == Some(&label) {
++            return;
++        }
++
++        self.pending_thread_approval_labels.insert(thread_id, label);
++        self.publish_pending_thread_approvals();
++    }
++}
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index a3c3d6b9712c33bff5f329fe8b43001802f8e31d..e69bb2a590beb09bc2406108318a149e2137e56b 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -281,6 +281,7 @@ impl App {
+         self.agent_navigation
+             .upsert(thread_id, agent_nickname, agent_role, is_closed);
+         self.sync_active_agent_label();
++        self.update_pending_thread_approval_label(thread_id);
+     }
+
+     /// Persists the app-server's authoritative ownership flag and updates the active composer.
+@@ -719,6 +720,7 @@ impl App {
+     pub(super) fn reset_thread_event_state(&mut self) {
+         self.abort_all_thread_event_listeners();
+         self.thread_event_channels.clear();
++        self.pending_thread_approval_labels.clear();
+         self.agent_navigation.clear();
+         self.side_threads.clear();
+         self.active_thread_id = None;
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index 3cb15dae7d44fe4e8e1243b15a9e6fe74cabdae7..a0aeca1166df5a99f19a240743624ce8f718be5d 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -570,6 +570,7 @@ See the Codex keymap documentation for supported actions and examples."
+             windows_sandbox: WindowsSandboxState::default(),
+             thread_event_channels: HashMap::new(),
+             temporary_structured_requests: HashMap::new(),
++            pending_thread_approval_labels: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
+             agent_navigation: AgentNavigationState::default(),
+             agents_overview: Default::default(),
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index 1715fc421339468c03a05bc23c6f1e01207120d6..0ef14f9ad0ae61b556665da3191029380e363401 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -62,6 +62,7 @@ pub(super) async fn make_test_app() -> App {
+         windows_sandbox: WindowsSandboxState::default(),
+         thread_event_channels: HashMap::new(),
+         temporary_structured_requests: HashMap::new(),
++        pending_thread_approval_labels: HashMap::new(),
+         thread_event_listener_tasks: HashMap::new(),
+         agent_navigation: AgentNavigationState::default(),
+         agents_overview: Default::default(),
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index f52bfb22f8c7b906f0ff098432609ca2816ebc65..f406e3e5de86147136a1605207388911324ec29e 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -10,6 +10,8 @@ mod backend_banner_fallback_tests;
+ mod backend_banner_recovery_tests;
+ #[path = "tests/backend_banner_startup_tests.rs"]
+ mod backend_banner_startup_tests;
++#[path = "tests/approval_routing_tests.rs"]
++mod approval_routing;
+ #[path = "tests/background_exit_tests.rs"]
+ mod background_exit_tests;
+ #[path = "tests/connector_policy.rs"]
+@@ -5654,6 +5656,7 @@ async fn make_test_app() -> App {
+         thread_event_channels: HashMap::new(),
+         temporary_structured_requests: HashMap::new(),
+         thread_event_listener_tasks: HashMap::new(),
++        pending_thread_approval_labels: HashMap::new(),
+         agent_navigation: AgentNavigationState::default(),
+         agents_overview: Default::default(),
+         side_threads: HashMap::new(),
+@@ -5738,6 +5741,7 @@ async fn make_test_app_with_channels() -> (
+             thread_event_channels: HashMap::new(),
+             temporary_structured_requests: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
++        pending_thread_approval_labels: HashMap::new(),
+             agent_navigation: AgentNavigationState::default(),
+             agents_overview: Default::default(),
+             side_threads: HashMap::new(),
+diff --git a/codex-rs/tui/src/app/tests/approval_routing_tests.rs b/codex-rs/tui/src/app/tests/approval_routing_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..776af68513d197d1fb05657bc97350882348d428
+--- /dev/null
++++ b/codex-rs/tui/src/app/tests/approval_routing_tests.rs
+@@ -0,0 +1,279 @@
++use super::*;
++use futures::FutureExt;
++use pretty_assertions::assert_eq;
++
++async fn app_with_pending_approval(capacity: usize) -> Result<(App, ThreadId)> {
++    let mut app = make_test_app().await;
++    let main_thread_id = ThreadId::new();
++    let agent_thread_id = ThreadId::new();
++    let primary_session = test_thread_session(main_thread_id, test_path_buf("/tmp/main"));
++
++    app.primary_thread_id = Some(main_thread_id);
++    app.active_thread_id = Some(main_thread_id);
++    app.primary_session_configured = Some(primary_session.clone());
++    app.thread_event_channels.insert(
++        main_thread_id,
++        ThreadEventChannel::new_with_session(/*capacity*/ 1, primary_session, Vec::new()),
++    );
++    app.thread_event_channels.insert(
++        agent_thread_id,
++        ThreadEventChannel::new_with_session(
++            capacity,
++            ThreadSessionState {
++                approval_policy: AskForApproval::OnRequest,
++                permission_profile: PermissionProfile::workspace_write(),
++                ..test_thread_session(agent_thread_id, test_path_buf("/tmp/agent"))
++            },
++            Vec::new(),
++        ),
++    );
++    app.upsert_agent_picker_thread(
++        agent_thread_id,
++        Some("Robie".to_string()),
++        Some("explorer".to_string()),
++        /*is_closed*/ false,
++    );
++    app.enqueue_thread_request(
++        agent_thread_id,
++        exec_approval_request(
++            agent_thread_id,
++            "turn-approval",
++            "call-approval",
++            /*approval_id*/ None,
++        ),
++    )
++    .await?;
++    Ok((app, agent_thread_id))
++}
++
++#[tokio::test]
++async fn agent_message_delta_does_not_wait_for_unrelated_approval_store() -> Result<()> {
++    let mut app = make_test_app().await;
++    let main_thread_id = ThreadId::new();
++    let agent_thread_id = ThreadId::new();
++    let unrelated_thread_id = ThreadId::new();
++
++    app.primary_thread_id = Some(main_thread_id);
++    app.active_thread_id = Some(main_thread_id);
++    app.thread_event_channels
++        .insert(main_thread_id, ThreadEventChannel::new(/*capacity*/ 1));
++    app.thread_event_channels
++        .insert(agent_thread_id, ThreadEventChannel::new(/*capacity*/ 1));
++
++    let unrelated_channel = ThreadEventChannel::new(/*capacity*/ 1);
++    let unrelated_store = Arc::clone(&unrelated_channel.store);
++    app.thread_event_channels
++        .insert(unrelated_thread_id, unrelated_channel);
++    let _unrelated_store_lock = unrelated_store.lock().await;
++
++    app.enqueue_thread_notification(
++        agent_thread_id,
++        agent_message_delta_notification(agent_thread_id, "turn-1", "message-1", "hello"),
++    )
++    .now_or_never()
++    .expect("agent message delta should not scan unrelated approval stores")?;
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn pending_approval_label_updates_the_thread_with_a_duplicate_label() -> Result<()> {
++    let (mut app, first_thread_id) = app_with_pending_approval(/*capacity*/ 4).await?;
++    assert_eq!(
++        app.chat_widget.pending_thread_approvals(),
++        &["Robie [explorer]".to_string()]
++    );
++    let second_thread_id =
++        ThreadId::from_string("ffffffff-ffff-ffff-ffff-ffffffffffff").expect("valid thread id");
++
++    app.thread_event_channels.insert(
++        second_thread_id,
++        ThreadEventChannel::new_with_session(
++            /*capacity*/ 4,
++            ThreadSessionState {
++                approval_policy: AskForApproval::OnRequest,
++                permission_profile: PermissionProfile::workspace_write(),
++                ..test_thread_session(second_thread_id, test_path_buf("/tmp/second-agent"))
++            },
++            Vec::new(),
++        ),
++    );
++    app.upsert_agent_picker_thread(
++        second_thread_id,
++        Some("Robie".to_string()),
++        Some("explorer".to_string()),
++        /*is_closed*/ false,
++    );
++    app.enqueue_thread_request(
++        second_thread_id,
++        exec_approval_request(
++            second_thread_id,
++            "second-turn-approval",
++            "second-call-approval",
++            /*approval_id*/ None,
++        ),
++    )
++    .await?;
++
++    app.upsert_agent_picker_thread(
++        first_thread_id,
++        Some("Nia".to_string()),
++        Some("researcher".to_string()),
++        /*is_closed*/ false,
++    );
++
++    assert_eq!(
++        app.chat_widget.pending_thread_approvals(),
++        &[
++            "Nia [researcher]".to_string(),
++            "Robie [explorer]".to_string()
++        ]
++    );
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn evicted_approval_disappears_after_history_response() -> Result<()> {
++    let (mut app, agent_thread_id) = app_with_pending_approval(/*capacity*/ 1).await?;
++
++    app.enqueue_thread_history_entry_response(
++        agent_thread_id,
++        HistoryLookupResponse::Entry {
++            offset: 0,
++            log_id: 1,
++            entry: None,
++        },
++    )
++    .await?;
++
++    assert!(app.chat_widget.pending_thread_approvals().is_empty());
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn failed_interrupt_evicts_pending_approval_through_app_event() -> Result<()> {
++    let (mut app, agent_thread_id) = app_with_pending_approval(/*capacity*/ 1).await?;
++    let mut tui = crate::tui::test_support::make_test_tui()?;
++    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
++    let (app_event_tx, mut app_event_rx) = mpsc::unbounded_channel();
++    app.app_event_tx = AppEventSender::new(app_event_tx);
++
++    assert!(
++        app.try_submit_active_thread_op_via_app_server(
++            &mut app_server,
++            agent_thread_id,
++            &AppCommand::interrupt(),
++        )
++        .await?
++    );
++    let event = tokio::time::timeout(std::time::Duration::from_secs(5), app_event_rx.recv())
++        .await?
++        .expect("failed interrupt should emit a thread notification");
++    Box::pin(app.handle_event(&mut tui, &mut app_server, event)).await?;
++
++    assert!(app.chat_widget.pending_thread_approvals().is_empty());
++
++    {
++        let store = app.thread_event_channels[&agent_thread_id]
++            .store
++            .lock()
++            .await;
++        assert!(matches!(
++            store.buffer.front(),
++            Some(ThreadBufferedEvent::Notification(notification))
++                if matches!(
++                    notification.as_ref(),
++                    ServerNotification::Warning(notification)
++                if notification.message.contains("thread not found")
++                    && notification.message.contains(&agent_thread_id.to_string())
++                )
++        ));
++    }
++
++    app_server.shutdown().await?;
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn delayed_synthetic_warning_does_not_reach_recreated_thread() -> Result<()> {
++    let (mut app, agent_thread_id) = app_with_pending_approval(/*capacity*/ 1).await?;
++    let mut tui = crate::tui::test_support::make_test_tui()?;
++    let mut app_server = Box::pin(crate::start_embedded_app_server_for_picker(&app.config)).await?;
++    let channel_identity = app.thread_event_channels[&agent_thread_id].identity();
++
++    app.reset_thread_event_state();
++    app.thread_event_channels
++        .insert(agent_thread_id, ThreadEventChannel::new(/*capacity*/ 1));
++    app.upsert_agent_picker_thread(
++        agent_thread_id,
++        Some("Nia".to_string()),
++        Some("researcher".to_string()),
++        /*is_closed*/ false,
++    );
++    app.enqueue_thread_request(
++        agent_thread_id,
++        exec_approval_request(
++            agent_thread_id,
++            "new-turn-approval",
++            "new-call-approval",
++            /*approval_id*/ None,
++        ),
++    )
++    .await?;
++
++    Box::pin(app.handle_event(
++        &mut tui,
++        &mut app_server,
++        AppEvent::ThreadNotification {
++            thread_id: agent_thread_id,
++            channel_identity,
++            notification: ServerNotification::Warning(WarningNotification {
++                thread_id: Some(agent_thread_id.to_string()),
++                message: "Failed to interrupt turn".to_string(),
++            }),
++        },
++    ))
++    .await?;
++
++    assert_eq!(
++        app.chat_widget.pending_thread_approvals(),
++        &["Nia [researcher]".to_string()]
++    );
++    {
++        let store = app.thread_event_channels[&agent_thread_id]
++            .store
++            .lock()
++            .await;
++        assert!(matches!(
++            store.buffer.front(),
++            Some(ThreadBufferedEvent::Request(_))
++        ));
++    }
++
++    app_server.shutdown().await?;
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn evicted_approval_disappears_after_feedback_submission() -> Result<()> {
++    let (mut app, agent_thread_id) = app_with_pending_approval(/*capacity*/ 1).await?;
++
++    app.enqueue_thread_feedback_event(
++        agent_thread_id,
++        FeedbackThreadEvent {
++            category: FeedbackCategory::Bug,
++            include_logs: false,
++            feedback_audience: FeedbackAudience::External,
++            result: Ok("feedback-thread".to_string()),
++        },
++    )
++    .await;
++
++    assert!(app.chat_widget.pending_thread_approvals().is_empty());
++
++    Ok(())
++}
+diff --git a/codex-rs/tui/src/app/thread_events.rs b/codex-rs/tui/src/app/thread_events.rs
+index 32e2d9f368eef21b2524f288017ea0c685c195f6..2ec9bbf8faa33ef0b5028055d1e782b8a4d88818 100644
+--- a/codex-rs/tui/src/app/thread_events.rs
++++ b/codex-rs/tui/src/app/thread_events.rs
+@@ -327,6 +327,21 @@ fn file_change_item_changes(
+     }
+ }
+
++#[derive(Clone)]
++pub(crate) struct ThreadEventChannelIdentity(Arc<Mutex<ThreadEventStore>>);
++
++impl std::fmt::Debug for ThreadEventChannelIdentity {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.write_str("ThreadEventChannelIdentity")
++    }
++}
++
++impl ThreadEventChannelIdentity {
++    pub(super) fn matches(&self, channel: &ThreadEventChannel) -> bool {
++        Arc::ptr_eq(&self.0, &channel.store)
++    }
++}
++
+ #[derive(Debug)]
+ pub(super) struct ThreadEventChannel {
+     pub(super) sender: mpsc::Sender<ThreadBufferedEvent>,
+@@ -336,6 +351,10 @@ pub(super) struct ThreadEventChannel {
+ }
+
+ impl ThreadEventChannel {
++    pub(super) fn identity(&self) -> ThreadEventChannelIdentity {
++        ThreadEventChannelIdentity(Arc::clone(&self.store))
++    }
++
+     pub(super) fn new(capacity: usize) -> Self {
+         let (sender, receiver) = mpsc::channel(capacity);
+         Self {
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb212296f52 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -593,9 +593,9 @@ impl App {
+                     .active_turn_id_for_thread(thread_id)
+                     .await
+                     .unwrap_or_default();
+-                let (thread_event_tx, thread_event_store) = {
++                let (thread_event_store, channel_identity) = {
+                     let channel = self.ensure_thread_channel(thread_id);
+-                    (channel.sender.clone(), Arc::clone(&channel.store))
++                    (Arc::clone(&channel.store), channel.identity())
+                 };
+                 self.reset_backtrack_state();
+                 if !turn_id.is_empty() {
+@@ -607,6 +607,7 @@ impl App {
+                 }
+                 let request_handle = app_server.request_handle();
+                 let request_ids = [app_server.next_request_id(), app_server.next_request_id()];
++                let app_event_tx = self.app_event_tx.clone();
+                 tokio::spawn(async move {
+                     for (attempt, request_id) in request_ids.into_iter().enumerate() {
+                         let result = request_handle
+@@ -637,20 +638,11 @@ impl App {
+                                         thread_id: Some(thread_id.to_string()),
+                                         message: format!("Failed to interrupt turn: {error}"),
+                                     });
+-                                let should_send = {
+-                                    let mut store = thread_event_store.lock().await;
+-                                    store.push_notification_ref(&notification);
+-                                    store.active
+-                                };
+-                                if should_send
+-                                    && let Err(error) = thread_event_tx
+-                                        .send(ThreadBufferedEvent::Notification(Box::new(
+-                                            notification,
+-                                        )))
+-                                        .await
+-                                {
+-                                    tracing::warn!(error = %error, "thread event channel closed");
+-                                }
++                                app_event_tx.send(AppEvent::ThreadNotification {
++                                    thread_id,
++                                    channel_identity,
++                                    notification,
++                                });
+                                 break;
+                             }
+                         }
+@@ -915,37 +907,6 @@ impl App {
+         }
+     }
+
+-    pub(super) async fn refresh_pending_thread_approvals(&mut self) {
+-        let side_parent_thread_id = self.active_side_parent_thread_id();
+-        let channels: Vec<(ThreadId, Arc<Mutex<ThreadEventStore>>)> = self
+-            .thread_event_channels
+-            .iter()
+-            .map(|(thread_id, channel)| (*thread_id, Arc::clone(&channel.store)))
+-            .collect();
+-
+-        let mut pending_thread_ids = Vec::new();
+-        for (thread_id, store) in channels {
+-            if Some(thread_id) == self.active_thread_id || Some(thread_id) == side_parent_thread_id
+-            {
+-                continue;
+-            }
+-
+-            let store = store.lock().await;
+-            if store.has_pending_thread_approvals() {
+-                pending_thread_ids.push(thread_id);
+-            }
+-        }
+-
+-        pending_thread_ids.sort_by_key(ThreadId::to_string);
+-
+-        let threads = pending_thread_ids
+-            .into_iter()
+-            .map(|thread_id| self.thread_label(thread_id))
+-            .collect();
+-
+-        self.chat_widget.set_pending_thread_approvals(threads);
+-    }
+-
+     pub(super) async fn refresh_side_parent_status_from_store(&mut self, thread_id: ThreadId) {
+         let Some(channel) = self.thread_event_channels.get(&thread_id) else {
+             return;
+@@ -1042,7 +1003,13 @@ impl App {
+             let channel = self.ensure_thread_channel(thread_id);
+             (channel.sender.clone(), Arc::clone(&channel.store))
+         };
+-        let (notification, previous_pending_status, pending_status, turn_stopped) = {
++        let (
++            notification,
++            previous_pending_status,
++            pending_status,
++            turn_stopped,
++            has_pending_approvals,
++        ) = {
+             let mut guard = store.lock().await;
+             if guard.session.is_none()
+                 && let Some(session) = inferred_session
+@@ -1063,11 +1030,13 @@ impl App {
+                 guard.push_notification(notification);
+                 None
+             };
++            let has_pending_approvals = guard.has_pending_thread_approvals();
+             (
+                 notification,
+                 previous_pending_status,
+                 guard.side_parent_pending_status(),
+                 turn_stopped,
++                has_pending_approvals,
+             )
+         };
+         if is_turn_started {
+@@ -1100,7 +1069,7 @@ impl App {
+         } else if previous_pending_status.is_some() {
+             self.clear_side_parent_action_status(thread_id);
+         }
+-        self.refresh_pending_thread_approvals().await;
++        self.update_pending_thread_approval(thread_id, has_pending_approvals);
+         Ok(())
+     }
+
+@@ -1202,10 +1171,14 @@ impl App {
+             (channel.sender.clone(), Arc::clone(&channel.store))
+         };
+
+-        let (should_send, pending_status) = {
++        let (should_send, pending_status, has_pending_approvals) = {
+             let mut guard = store.lock().await;
+             guard.push_request(request.clone());
+-            (guard.active, guard.side_parent_pending_status())
++            (
++                guard.active,
++                guard.side_parent_pending_status(),
++                guard.has_pending_thread_approvals(),
++            )
+         };
+         let request_status = SideParentStatus::for_request(&request);
+
+@@ -1231,7 +1204,7 @@ impl App {
+         if let Some(status) = pending_status.or(request_status) {
+             self.set_side_parent_status(thread_id, Some(status));
+         }
+-        self.refresh_pending_thread_approvals().await;
++        self.update_pending_thread_approval(thread_id, has_pending_approvals);
+         Ok(())
+     }
+
+@@ -1245,7 +1218,7 @@ impl App {
+             (channel.sender.clone(), Arc::clone(&channel.store))
+         };
+
+-        let should_send = {
++        let (should_send, has_pending_approvals) = {
+             let mut guard = store.lock().await;
+             let should_send = guard.active;
+             // Active batch responses remain queued in the receiver across a concurrent detach, so
+@@ -1254,7 +1227,7 @@ impl App {
+             if !should_send || !matches!(&event, HistoryLookupResponse::Batch { .. }) {
+                 guard.push_buffered_event(ThreadBufferedEvent::HistoryEntryResponse(event.clone()));
+             }
+-            should_send
++            (should_send, guard.has_pending_thread_approvals())
+         };
+
+         if should_send {
+@@ -1272,6 +1245,7 @@ impl App {
+                 }
+             }
+         }
++        self.update_pending_thread_approval(thread_id, has_pending_approvals);
+         Ok(())
+     }
+
+diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
+index 78e3505d24cb173bc09d8a93785abd6b1f16668b..eec887edd74b52ce85dc7d79666cab50adde6e55 100644
+--- a/codex-rs/tui/src/app_event.rs
++++ b/codex-rs/tui/src/app_event.rs
+@@ -31,6 +31,7 @@ use codex_app_server_protocol::PluginReadParams;
+ use codex_app_server_protocol::PluginReadResponse;
+ use codex_app_server_protocol::PluginUninstallResponse;
+ use codex_app_server_protocol::RequestId as AppServerRequestId;
++use codex_app_server_protocol::ServerNotification;
+ use codex_app_server_protocol::SkillsListResponse;
+ use codex_app_server_protocol::Thread;
+ use codex_app_server_protocol::ThreadGoalStatus;
+@@ -46,6 +47,7 @@ use codex_utils_approval_presets::ApprovalPreset;
+ use strum_macros::IntoStaticStr;
+ use uuid::Uuid;
+
++use crate::app::ThreadEventChannelIdentity;
+ use crate::app_command::AppCommand;
+ use crate::app_server_session::AppServerStartedThread;
+ use crate::bottom_pane::ApprovalRequest;
+@@ -315,6 +317,13 @@ pub(crate) enum AppEvent {
+         prompt: UserMessage,
+     },
+
++    /// Deliver a synthetic server notification through its owning thread.
++    ThreadNotification {
++        thread_id: ThreadId,
++        channel_identity: ThreadEventChannelIdentity,
++        notification: ServerNotification,
++    },
++
+     /// Deliver a synthetic history lookup response to a specific thread channel.
+     ThreadHistoryEntryResponse {
+         thread_id: ThreadId,

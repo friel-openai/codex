@@ -1,4 +1,4 @@
-// Package projection materializes canonical Saffrodex definitions as editable
+// Package projection materializes canonical Frodex definitions as editable
 // local Git refs and manages the worktrees attached to those refs.
 package projection
 
@@ -13,9 +13,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
 )
 
 var namePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)

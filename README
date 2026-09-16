@@ -1,22 +1,20 @@
-Saffrodex layered fork
-======================
+Frodex layered fork
+===================
 
-Saffrodex is a small downstream distribution of OpenAI Codex.
+Frodex is a small downstream distribution of OpenAI Codex.
 This repository keeps its downstream work as stable canonical layers instead
 of continually rebasing one rolling source branch.
 
 `layerctl` projects the repository's ordered layers onto an exact Codex
 `rust-v*` release.
 The resulting Git history has the upstream release as its ancestor and one
-generated commit for each Saffrodex layer, while the canonical layer history
+generated commit for each Frodex layer, while the canonical layer history
 remains stable when upstream changes.
 
-The current product layers provide:
-
-- `saffron.await_exec`, an event-driven wait for unified exec sessions;
-- goal supervision and active-goal editing;
-- current-time context for supervisor check-ins; and
-- isolated Saffron persistence and recovery for scheduled supervisor wakes.
+The current definition has 38 layers. Each layer was generated from one
+maintained Frodex commit. `layers/0000-foundation/` maps to the first maintained
+commit because `layerctl` requires that identifier; it is not an additional
+synthetic commit.
 
 Repository layout
 -----------------
@@ -35,8 +33,8 @@ Layer directory names are applied in lexical order.
 Their four-digit prefixes are the only ordering mechanism.
 Each directory contains the required generated commit message in
 `COMMIT_EDITMSG` and an optional binary-safe tree delta in `patch`.
-`layers/0000-foundation/` is the required first layer and carries changes
-needed by every generated Saffrodex source tree.
+`layers/0000-foundation/` is the required first layer. Its patch and commit
+message define the first maintained Frodex commit.
 
 See `LAYERCTL.md` for projection, layer capture, upstream advancement,
 verification, and release operations.
@@ -48,8 +46,8 @@ tools/release.sh [-b RELEASE_NOTES]
 ```
 
 The script only dispatches that workflow. The workflow reads `upstream.json`,
-materializes the canonical layers, chooses the next Saffrodex release number,
-publishes the immutable projection tag, builds each platform, and creates the
-GitHub release.
+materializes the canonical layers, chooses the next Frodex release number,
+publishes the immutable projection tag, builds `codex` and
+`codex-code-mode-host` for each platform, and creates the GitHub release.
 
 See `AGENTS.md` for the complete repository operating contract.

@@ -1,0 +1,7 @@
+Use opt-in UltraFast approval review with quota fallback
+
+Combine the existing implementation and corrections:
+
+- Use UltraFast for opt-in approval autoreview
+
+Original-commit: 08b37721d731b5e965abf193d6ded8c528b29b77

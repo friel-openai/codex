@@ -1,0 +1,7 @@
+Retire idle environment network proxies
+
+Combine the existing implementation and corrections:
+
+- Recycle idle environment network proxies
+
+Original-commit: dad18539ca56d0802a9e64db0b751cfda288a07b

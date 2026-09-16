@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
 )
 
 func TestServiceCaptureAndApplyRoundTripAcceptedEndpoint(t *testing.T) {

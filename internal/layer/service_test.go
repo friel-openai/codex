@@ -11,11 +11,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layer"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layer"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
 )
 
 func TestAddAndRefreshRoundTripProjectionTrees(t *testing.T) {
@@ -37,7 +37,7 @@ func TestAddAndRefreshRoundTripProjectionTrees(t *testing.T) {
 		t.Fatalf("Remove(delete.txt) error = %v", err)
 	}
 	gitRun(t, addWorktree, "add", "-A")
-	gitRun(t, addWorktree, "commit", "-m", "saffrodex: added layer", "-m", "Exact added body.")
+	gitRun(t, addWorktree, "commit", "-m", "frodex: added layer", "-m", "Exact added body.")
 	addSourceHead := gitOutput(t, root, "rev-parse", "refs/layerctl/projections/add-source/head")
 
 	if err := layers.Add(t.Context(), layer.AddRequest{ID: "0002-added", Projection: "add-source"}); err != nil {
@@ -45,7 +45,7 @@ func TestAddAndRefreshRoundTripProjectionTrees(t *testing.T) {
 	}
 	message := readFile(t, filepath.Join(root, "layers", "0002-added", "COMMIT_EDITMSG"))
 	patch := readFile(t, filepath.Join(root, "layers", "0002-added", "patch"))
-	if message != "saffrodex: added layer\n\nExact added body.\n" ||
+	if message != "frodex: added layer\n\nExact added body.\n" ||
 		!strings.Contains(patch, "base.txt") ||
 		!strings.Contains(patch, "delete.txt") ||
 		!strings.Contains(patch, "new.sh") {
@@ -86,14 +86,14 @@ func TestAddAndRefreshRoundTripProjectionTrees(t *testing.T) {
 	writeFile(t, filepath.Join(refreshWorktree, "base.txt"), "refreshed\n", 0o644)
 	writeFile(t, filepath.Join(refreshWorktree, "feature.txt"), "refreshed feature\n", 0o644)
 	gitRun(t, refreshWorktree, "add", "-A")
-	gitRun(t, refreshWorktree, "commit", "-m", "saffrodex: refreshed feature", "-m", "Exact refresh body.")
+	gitRun(t, refreshWorktree, "commit", "-m", "frodex: refreshed feature", "-m", "Exact refresh body.")
 	refreshSourceHead := gitOutput(t, root, "rev-parse", "refs/layerctl/projections/refresh-source/head")
 
 	if err := layers.Refresh(t.Context(), "0001-feature", "refresh-source"); err != nil {
 		t.Fatalf("Refresh() error = %v", err)
 	}
 	message = readFile(t, filepath.Join(root, "layers", "0001-feature", "COMMIT_EDITMSG"))
-	if message != "saffrodex: refreshed feature\n\nExact refresh body.\n" {
+	if message != "frodex: refreshed feature\n\nExact refresh body.\n" {
 		t.Fatalf("refreshed layer message = %q", message)
 	}
 
@@ -126,18 +126,18 @@ func newCanonicalRepository(t *testing.T) string {
 
 	writeFile(t, filepath.Join(root, "foundation.txt"), "foundation\n", 0o644)
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: foundation")
+	gitRun(t, root, "commit", "-m", "frodex: foundation")
 	foundationLayer := captureLayer(t, root, "HEAD^", "HEAD")
 	writeFile(t, filepath.Join(root, "base.txt"), "feature\n", 0o644)
 	writeFile(t, filepath.Join(root, "feature.txt"), "feature\n", 0o644)
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: feature")
+	gitRun(t, root, "commit", "-m", "frodex: feature")
 	featureLayer := captureLayer(t, root, "HEAD^", "HEAD")
 	writeFile(t, filepath.Join(root, "tail.txt"), "tail\n", 0o644)
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: tail")
+	gitRun(t, root, "commit", "-m", "frodex: tail")
 	tailLayer := captureLayer(t, root, "HEAD^", "HEAD")
-	gitRun(t, root, "switch", "--orphan", "saffrodex-next")
+	gitRun(t, root, "switch", "--orphan", "frodex-next")
 
 	writeFile(t, filepath.Join(root, "upstream.json"), fmt.Sprintf("{\n  \"tag\": \"rust-v1.2.3\",\n  \"commit\": %q\n}\n", upstreamCommit), 0o644)
 	writeLayerDefinition(t, root, "0000-foundation", foundationLayer)

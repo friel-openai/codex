@@ -1,0 +1,15 @@
+Persist goals and supervisor scheduling state
+
+Combine the existing implementation and corrections:
+
+- Add goal supervisor contracts
+- Preserve descendant identity and root recency
+- Retain pending root recency activity
+- Add goal supervisor persistence compatibility
+- Preserve terminal tools and subagent assignments
+
+Original-commit: 12c7834da54e95a4e9a2c2715ea2e40a2169373d
+Original-commit: 2348938a8e30bfa3bbbc3152b4c152813347308d
+Original-commit: 5ffc5131186c6d6b1da28a14ef92d678930e6275
+Original-commit: bd9ec217092b4ea934d130373ff5dbf9643d17fd
+Original-commit: cafaf16895207f9b09db156ab863c66414e397ab

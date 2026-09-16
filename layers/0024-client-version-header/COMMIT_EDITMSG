@@ -1,0 +1,7 @@
+Send the upstream version in ChatGPT request headers
+
+Combine the existing implementation and corrections:
+
+- Strip build metadata from ChatGPT client version
+
+Original-commit: 54c06f1965036df2e708e53d7b023faab7a611ef

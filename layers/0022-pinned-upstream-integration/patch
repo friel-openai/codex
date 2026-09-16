@@ -1,0 +1,4810 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index b6d291d0c4c2ba2d42dd579eac3aa2f071a3ac8a..ba45dc45cb6b4f09e822a8fd860b27ae5f850001 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -394,7 +394,7 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
+
+ [[package]]
+ name = "app_test_support"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1897,7 +1897,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-agent-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -1909,7 +1909,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-agent-graph-store"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-state",
+@@ -1924,7 +1924,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-agent-identity"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -1957,7 +1957,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-analytics"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-app-server-protocol",
+  "codex-git-utils",
+@@ -1978,7 +1978,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-ansi-escape"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "ansi-to-tui",
+  "ratatui",
+@@ -1987,7 +1987,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-api"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "assert_matches",
+@@ -2022,7 +2022,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2124,7 +2124,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-app-server",
+  "codex-app-server-protocol",
+@@ -2151,7 +2151,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server-daemon"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol",
+@@ -2172,7 +2172,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server-protocol"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-app-server-protocol-noop-macros",
+@@ -2206,11 +2206,11 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server-protocol-noop-macros"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+
+ [[package]]
+ name = "codex-app-server-test-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2232,7 +2232,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-app-server-transport"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2274,7 +2274,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-apply-patch"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -2294,7 +2294,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-arg0"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-apply-patch",
+@@ -2316,7 +2316,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-async-utils"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+  "tokio",
+@@ -2325,7 +2325,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-aws-auth"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "aws-config",
+  "aws-credential-types",
+@@ -2340,7 +2340,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-backend-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-api",
+@@ -2360,7 +2360,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-backend-openapi-models"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "serde",
+  "serde_json",
+@@ -2369,7 +2369,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-build-info"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-install-context",
+  "pretty_assertions",
+@@ -2381,7 +2381,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-bwrap"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "cc",
+  "libc",
+@@ -2390,7 +2390,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-chatgpt"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -2412,7 +2412,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cli"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -2502,7 +2502,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-http-client",
+  "eventsource-stream",
+@@ -2515,7 +2515,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cloud-config"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -2540,7 +2540,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cloud-tasks"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2573,7 +2573,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cloud-tasks-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -2588,7 +2588,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-cloud-tasks-mock-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "chrono",
+  "codex-cloud-tasks-client",
+@@ -2597,7 +2597,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-code-mode"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-code-mode-protocol",
+  "codex-http-client",
+@@ -2620,7 +2620,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-code-mode-host"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -2648,7 +2648,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-code-mode-protocol"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "glob",
+@@ -2666,7 +2666,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-code-mode-runtime"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-code-mode-protocol",
+@@ -2684,11 +2684,11 @@ dependencies = [
+
+ [[package]]
+ name = "codex-collaboration-mode-templates"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+
+ [[package]]
+ name = "codex-config"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -2746,7 +2746,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-connectors"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2768,7 +2768,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-connectors-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-connectors",
+  "codex-core-plugins",
+@@ -2782,7 +2782,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-context-fragments"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -2790,7 +2790,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-core"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -2924,7 +2924,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-core-api"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-analytics",
+  "codex-app-server-protocol",
+@@ -2947,7 +2947,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-core-plugins"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3003,7 +3003,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-diagnostics"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -3011,7 +3011,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-exec"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -3060,7 +3060,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-exec-server"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3119,7 +3119,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-exec-server-protocol"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-file-system",
+@@ -3134,7 +3134,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-exec-server-test-support"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-exec-server",
+@@ -3149,7 +3149,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-execpolicy"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3167,7 +3167,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-experimental-api-macros"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "proc-macro2",
+  "quote",
+@@ -3176,7 +3176,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-extension-api"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-config",
+  "codex-context-fragments",
+@@ -3193,7 +3193,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-extension-items"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "pretty_assertions",
+@@ -3205,7 +3205,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-external-agent-migration"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "chrono",
+  "codex-analytics",
+@@ -3235,7 +3235,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-features"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-otel",
+  "codex-protocol",
+@@ -3248,7 +3248,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-feedback"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "bytes",
+@@ -3270,7 +3270,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-file-search"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -3286,7 +3286,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-file-system"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "bytes",
+  "codex-protocol",
+@@ -3298,7 +3298,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-file-watcher"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "notify",
+  "pretty_assertions",
+@@ -3309,7 +3309,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-git-attribution"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-backend-client",
+  "codex-extension-api",
+@@ -3322,7 +3322,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-git-utils"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3348,7 +3348,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-goal-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3381,7 +3381,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-guardian-v2"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-analytics",
+@@ -3411,7 +3411,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-history"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-protocol",
+@@ -3447,7 +3447,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-home"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-extension-api",
+  "codex-utils-absolute-path",
+@@ -3458,7 +3458,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-hooks"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "async-channel",
+@@ -3484,7 +3484,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-http-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "bytes",
+  "codex-utils-cargo-bin",
+@@ -3516,7 +3516,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-image-generation-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -3543,7 +3543,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-install-context"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "codex-utils-home-dir",
+@@ -3556,7 +3556,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-keyring-store"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "keyring",
+  "tracing",
+@@ -3564,7 +3564,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-linux-sandbox"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "clap",
+  "codex-core",
+@@ -3591,7 +3591,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-lmstudio"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-core",
+  "codex-http-client",
+@@ -3605,7 +3605,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-login"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3648,7 +3648,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-mcp"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "arc-swap",
+@@ -3689,7 +3689,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-mcp-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -3720,7 +3720,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-mcp-server"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -3759,7 +3759,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-memories-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-core",
+  "codex-extension-api",
+@@ -3780,7 +3780,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-memories-read"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -3790,7 +3790,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-memories-write"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -3827,7 +3827,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-message-history"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-config",
+  "memchr",
+@@ -3841,7 +3841,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-model-provider"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-agent-identity",
+  "codex-api",
+@@ -3865,7 +3865,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-model-provider-info"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-api",
+  "codex-protocol",
+@@ -3882,7 +3882,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-models-manager"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "arc-swap",
+  "chrono",
+@@ -3903,7 +3903,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-network-proxy"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -3941,7 +3941,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-ollama"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "assert_matches",
+  "async-stream",
+@@ -3961,7 +3961,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-otel"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "chrono",
+  "codex-api",
+@@ -4005,7 +4005,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-plugin"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-config",
+  "codex-protocol",
+@@ -4019,7 +4019,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-process-hardening"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "libc",
+  "pretty_assertions",
+@@ -4027,7 +4027,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-prompts"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-context-fragments",
+@@ -4041,7 +4041,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-protocol"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chardetng",
+@@ -4085,7 +4085,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-queue-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-core",
+@@ -4119,7 +4119,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-response-debug-context"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-api",
+@@ -4130,7 +4130,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-responses-api-proxy"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4147,7 +4147,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-rmcp-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "axum",
+@@ -4193,7 +4193,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-rollout"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4220,7 +4220,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-rollout-trace"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-code-mode",
+@@ -4236,7 +4236,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-sandboxing"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "appcontainer_common",
+@@ -4263,7 +4263,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-secrets"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "age",
+  "anyhow",
+@@ -4284,7 +4284,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-shell-command"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4307,7 +4307,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-shell-escalation"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4327,7 +4327,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-skills"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-shell-command",
+@@ -4344,7 +4344,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-skills-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "assert_matches",
+  "codex-analytics",
+@@ -4381,7 +4381,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-state"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "chrono",
+@@ -4405,7 +4405,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-stdio-to-uds"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-uds",
+@@ -4417,7 +4417,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-terminal-detection"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+  "tracing",
+@@ -4425,7 +4425,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-test-binary-support"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-arg0",
+  "tempfile",
+@@ -4433,7 +4433,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-thread-manager-sample"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "clap",
+@@ -4444,7 +4444,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-thread-store"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "chrono",
+@@ -4477,7 +4477,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-tools"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "bitflags 2.13.1",
+  "codex-code-mode",
+@@ -4502,7 +4502,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-tui"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "app_test_support",
+@@ -4616,7 +4616,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-uds"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "async-io",
+  "pretty_assertions",
+@@ -4628,7 +4628,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-absolute-path"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "dirs",
+  "dunce",
+@@ -4642,14 +4642,14 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-approval-presets"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+ ]
+
+ [[package]]
+ name = "codex-utils-audio"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-protocol",
+@@ -4663,7 +4663,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-cache"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "lru",
+  "sha1 0.10.6",
+@@ -4672,7 +4672,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-cargo-bin"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "assert_cmd",
+  "runfiles",
+@@ -4681,7 +4681,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-cli"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "clap",
+  "codex-protocol",
+@@ -4693,11 +4693,11 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-elapsed"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+
+ [[package]]
+ name = "codex-utils-fuzzy-match"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+
+ [[package]]
+ name = "codex-utils-git-discovery"
+@@ -4714,7 +4714,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-home-dir"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dirs",
+@@ -4724,7 +4724,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-image"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-cache",
+@@ -4737,7 +4737,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-json-to-toml"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+  "serde_json",
+@@ -4746,7 +4746,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-oss"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-core",
+  "codex-lmstudio",
+@@ -4756,7 +4756,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-output-truncation"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-string",
+@@ -4765,7 +4765,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-path"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-utils-absolute-path",
+  "dunce",
+@@ -4775,7 +4775,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-path-uri"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "base64 0.22.1",
+  "codex-utils-absolute-path",
+@@ -4791,7 +4791,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-plugins"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-exec-server",
+  "codex-exec-server-protocol",
+@@ -4805,7 +4805,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-pty"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "filedescriptor",
+@@ -4821,7 +4821,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-readiness"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "assert_matches",
+  "thiserror 2.0.18",
+@@ -4839,14 +4839,14 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-rustls-provider"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "rustls",
+ ]
+
+ [[package]]
+ name = "codex-utils-sandbox-summary"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-protocol",
+  "codex-utils-absolute-path",
+@@ -4855,7 +4855,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-sleep-inhibitor"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "core-foundation 0.9.4",
+  "libc",
+@@ -4865,14 +4865,14 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-stream-parser"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+ ]
+
+ [[package]]
+ name = "codex-utils-string"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+  "regex-lite",
+@@ -4882,14 +4882,14 @@ dependencies = [
+
+ [[package]]
+ name = "codex-utils-template"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+ ]
+
+ [[package]]
+ name = "codex-v8-poc"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "pretty_assertions",
+  "v8",
+@@ -4911,7 +4911,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-web-search-extension"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-api",
+  "codex-core",
+@@ -4932,7 +4932,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-websocket-client"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-http-client",
+  "codex-utils-rustls-provider",
+@@ -4948,7 +4948,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-windows-sandbox"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "base64 0.22.1",
+@@ -4974,7 +4974,7 @@ dependencies = [
+
+ [[package]]
+ name = "codex-workload-identity"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "codex-http-client",
+  "pretty_assertions",
+@@ -5228,7 +5228,7 @@ dependencies = [
+
+ [[package]]
+ name = "core_test_support"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "assert_cmd",
+@@ -9526,7 +9526,7 @@ dependencies = [
+
+ [[package]]
+ name = "mcp_test_support"
+-version = "0.0.0"
++version = "0.148.0-alpha.22"
+ dependencies = [
+  "anyhow",
+  "codex-login",
+diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
+index 427471383c0a2de2eb5a3cb058757a45b0060440..8c5836a053434dd7a4144da91647a89b75d343e8 100644
+--- a/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
++++ b/codex-rs/app-server-protocol/src/protocol/v2/thread_data.rs
+@@ -315,6 +315,8 @@ struct ThreadCompatibility {
+     updated_at: i64,
+     recency_at: Option<i64>,
+     status: ThreadStatus,
++    #[serde(default)]
++    agent_status: Option<CollabAgentStatus>,
+     path: Option<PathBuf>,
+     cwd: AbsolutePathBuf,
+     cli_version: String,
+@@ -353,6 +355,7 @@ impl<'de> Deserialize<'de> for Thread {
+             updated_at: thread.updated_at,
+             recency_at: thread.recency_at,
+             status: thread.status,
++            agent_status: thread.agent_status,
+             path: thread.path,
+             cwd: thread.cwd,
+             cli_version: thread.cli_version,
+diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
+index 5a74f7e0fa1ae20debf3696f7067c9ced9e9489a..af373bfed5d11af435fa92c381937d37ae4e1a8a 100644
+--- a/codex-rs/app-server/src/in_process.rs
++++ b/codex-rs/app-server/src/in_process.rs
+@@ -794,9 +794,9 @@ mod tests {
+     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
+     use codex_app_server_protocol::InitializeCapabilities;
+     use codex_app_server_protocol::SessionSource as ApiSessionSource;
+-    use codex_app_server_protocol::ThreadQueueChangedNotification;
+     use codex_app_server_protocol::ThreadForkParams;
+     use codex_app_server_protocol::ThreadForkResponse;
++    use codex_app_server_protocol::ThreadQueueChangedNotification;
+     use codex_app_server_protocol::ThreadStartParams;
+     use codex_app_server_protocol::ThreadStartResponse;
+     use codex_app_server_protocol::Turn;
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
+index 5e408b02c94341c9e6de2a71ca282eeb0b2cdc7e..b7ca46ec0702e3fcbecbfb0e353d600c49f9c5d8 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings.rs
+@@ -19,19 +19,49 @@ pub(super) fn latest_persisted_resume_settings(
+         .enumerate()
+         .rev()
+         .find_map(|(index, item)| match item {
+-            RolloutItem::TurnContext(turn_context) => Some(PersistedResumeSettings {
+-                approval_policy: turn_context.approval_policy,
+-                approvals_reviewer: turn_context.approvals_reviewer.or_else(|| {
+-                    history[..index].iter().rev().find_map(|item| match item {
+-                        RolloutItem::TurnContext(turn_context) => turn_context.approvals_reviewer,
+-                        RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+-                            Some(event.thread_settings.approvals_reviewer)
+-                        }
+-                        _ => None,
+-                    })
+-                }),
+-                active_permission_profile: turn_context.active_permission_profile.clone(),
+-            }),
++            RolloutItem::TurnContext(turn_context) => {
++                let updated_settings = turn_context.turn_id.as_ref().and_then(|turn_id| {
++                    let turn_start = history[..index].iter().rposition(|item| {
++                        matches!(
++                            item,
++                            RolloutItem::EventMsg(EventMsg::TurnStarted(event))
++                                if &event.turn_id == turn_id
++                        )
++                    })?;
++                    history[turn_start + 1..index]
++                        .iter()
++                        .rev()
++                        .find_map(|item| match item {
++                            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
++                                Some(&event.thread_settings)
++                            }
++                            _ => None,
++                        })
++                });
++                Some(if let Some(settings) = updated_settings {
++                    PersistedResumeSettings {
++                        approval_policy: settings.approval_policy,
++                        approvals_reviewer: Some(settings.approvals_reviewer),
++                        active_permission_profile: settings.active_permission_profile.clone(),
++                    }
++                } else {
++                    PersistedResumeSettings {
++                        approval_policy: turn_context.approval_policy,
++                        approvals_reviewer: turn_context.approvals_reviewer.or_else(|| {
++                            history[..index].iter().rev().find_map(|item| match item {
++                                RolloutItem::TurnContext(turn_context) => {
++                                    turn_context.approvals_reviewer
++                                }
++                                RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
++                                    Some(event.thread_settings.approvals_reviewer)
++                                }
++                                _ => None,
++                            })
++                        }),
++                        active_permission_profile: turn_context.active_permission_profile.clone(),
++                    }
++                })
++            }
+             RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                 Some(PersistedResumeSettings {
+                     approval_policy: event.thread_settings.approval_policy,
+diff --git a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+index 792fc344a181243fbb3a73a11b9a03b812432654..ee7e7ee9f531cd64153005c9eaef455c68affe7e 100644
+--- a/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
++++ b/codex-rs/app-server/src/request_processors/persisted_resume_settings_tests.rs
+@@ -38,6 +38,10 @@ fn settings_item(
+                 permission_profile: PermissionProfile::read_only(),
+                 active_permission_profile,
+                 cwd: cwd(),
++                environments: None,
++                workspace_roots: None,
++                profile_workspace_roots: None,
++                windows_sandbox_level: None,
+                 reasoning_effort: None,
+                 reasoning_summary: None,
+                 personality: None,
+@@ -83,10 +87,24 @@ fn turn_context_item(
+         realtime_active: None,
+         cyber_access_program: None,
+         effort: None,
++        service_tier: None,
++        model_profile: None,
+         summary: codex_protocol::config_types::ReasoningSummary::Auto,
+     })
+ }
+
++fn turn_started_item(turn_id: &str) -> RolloutItem {
++    RolloutItem::EventMsg(EventMsg::TurnStarted(
++        codex_protocol::protocol::TurnStartedEvent {
++            turn_id: turn_id.to_string(),
++            trace_id: None,
++            started_at: None,
++            model_context_window: None,
++            collaboration_mode_kind: ModeKind::Default,
++        },
++    ))
++}
++
+ #[test]
+ fn latest_settings_snapshot_wins() {
+     let expected = PersistedResumeSettings {
+@@ -134,6 +152,33 @@ fn latest_turn_context_wins_over_earlier_settings_update() {
+     assert_eq!(latest_persisted_resume_settings(&history), Some(expected));
+ }
+
++#[test]
++fn settings_applied_during_turn_wins_over_stale_compaction_context() {
++    let history = vec![
++        turn_started_item("turn-1"),
++        settings_item(
++            AskForApproval::Never,
++            ApprovalsReviewer::AutoReview,
++            Some(ActivePermissionProfile::new("dev")),
++        ),
++        turn_context_item(
++            "turn-1",
++            AskForApproval::OnRequest,
++            Some(ApprovalsReviewer::User),
++            Some(ActivePermissionProfile::read_only()),
++        ),
++    ];
++
++    assert_eq!(
++        latest_persisted_resume_settings(&history),
++        Some(PersistedResumeSettings {
++            approval_policy: AskForApproval::Never,
++            approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
++            active_permission_profile: Some(ActivePermissionProfile::new("dev")),
++        })
++    );
++}
++
+ #[test]
+ fn older_reviewer_is_used_when_latest_turn_context_omits_it() {
+     let history = vec![
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 74c8dac2dfe2d98c183942dbf371a0d82e2d76ea..a7e0551dd06e259c2dde630be45dd6823a793a1e 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -8,10 +8,10 @@ use super::*;
+ use crate::error_code::method_not_found;
+ use codex_app_server_protocol::SelectedCapabilityRoot;
+ use codex_app_server_protocol::ThreadHistoryMode as ApiThreadHistoryMode;
++use codex_app_server_protocol::SessionSource;
+ use codex_app_server_protocol::ThreadRevertParams;
+ use codex_app_server_protocol::ThreadRevertResponse;
+ use codex_app_server_protocol::ThreadRevertedNotification;
+-use codex_app_server_protocol::SessionSource;
+ use codex_app_server_protocol::ThreadSection;
+ use codex_app_server_protocol::ThreadSectionAppearance;
+ use codex_app_server_protocol::ThreadSectionMoveParams;
+@@ -1989,7 +1989,7 @@ impl ThreadRequestProcessor {
+                         "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
+                     );
+                 }
+-                return Err(thread_store_archive_error("archive", err));
++                return Err(thread_store_mutation_error("archive", err));
+             }
+         };
+         let mut current_agent_ids_to_evict = already_archived_thread_ids;
+@@ -6317,8 +6317,11 @@ impl ThreadRequestProcessor {
+                 };
+             let prepared =
+                 if let Some(local_store) = local_store {
+-                    let expected_rollout_id = expected_rollout_id
+-                        .expect("local paginated source has a canonical rollout ID");
++                    let Some(expected_rollout_id) = expected_rollout_id else {
++                        return Err(internal_error(
++                            "local paginated source has no canonical rollout ID".to_string(),
++                        ));
++                    };
+                     match (model_context, include_turns) {
+                         (Some((model_context, expected_position)), true) => {
+                             local_store
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs b/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
+index 114e6b88f06da315dd9bb66179760b32ed7cc9dd..495f1eb6c2a222d3fcc164fbc74b36a17fc48fa9 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/current_agent_list.rs
+@@ -183,7 +183,7 @@ impl ThreadRequestProcessor {
+                     sort_key,
+                     sort_direction,
+                     entry,
+-                    false,
++                    /*inclusive*/ false,
+                 )
+             })
+             .transpose()?;
+@@ -196,7 +196,7 @@ impl ThreadRequestProcessor {
+                     sort_key,
+                     opposite_sort_direction(sort_direction),
+                     entry,
+-                    true,
++                    /*inclusive*/ true,
+                 )
+             })
+             .transpose()?;
+@@ -405,6 +405,7 @@ fn minimal_current_agent_thread(
+             ephemeral: true,
+             section: None,
+             section_entered_at: None,
++            project_id: None,
+             history_mode: codex_app_server_protocol::ThreadHistoryMode::Legacy,
+             model_provider: config.model_provider_id.clone(),
+             created_at: 0,
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+index de2ccc76fca36cc146d628fb4428481f385450fd..4ee811728b6e4690ac452f0113995e06fd424de5 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+@@ -30,17 +30,16 @@ impl ThreadRequestProcessor {
+             )));
+         }
+
+-        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await {
+-            if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+-                && Arc::ptr_eq(&observed_thread, &thread)
+-            {
+-                self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
+-                    .await?;
+-                thread
+-                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+-                    .await;
+-                return Ok(());
+-            }
++        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await
++            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
++            && Arc::ptr_eq(&observed_thread, &thread)
++        {
++            self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
++                .await?;
++            thread
++                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
++                .await;
++            return Ok(());
+         }
+
+         let thread_id_string = thread_id.to_string();
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/subagent_history_projection.rs b/codex-rs/app-server/src/request_processors/thread_processor/subagent_history_projection.rs
+index 6a69e14b61961f83d4d360cb81670d11d1e30777..e737e0913e256986f01a1bb603d578a9980a4664 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor/subagent_history_projection.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor/subagent_history_projection.rs
+@@ -145,6 +145,7 @@ async fn scan_segment(
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::Compacted(_)
+             | RolloutItem::TurnContext(_)
++            | RolloutItem::SecurityRiskScore(_)
+             | RolloutItem::WorldState(_) => {}
+         }
+     }
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+index a6984dd16b345220c2920b80fbc63e2ac14a760c..18197e56e6898ca93ce3032300f76a2cc7613c43 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor_tests.rs
+@@ -37,7 +37,7 @@ mod thread_list_cwd_filter_tests {
+ }
+
+ mod persisted_resume_approval_policy_tests {
+-    use super::super::latest_persisted_approval_policy;
++    use super::super::latest_persisted_resume_settings;
+     use codex_protocol::config_types::ApprovalsReviewer;
+     use codex_protocol::config_types::CollaborationMode;
+     use codex_protocol::config_types::ModeKind;
+@@ -112,6 +112,7 @@ mod persisted_resume_approval_policy_tests {
+             approvals_reviewer: None,
+             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+             permission_profile: None,
++            active_permission_profile: None,
+             network: None,
+             file_system_sandbox_policy: None,
+             model: "gpt-5".to_string(),
+@@ -136,7 +137,7 @@ mod persisted_resume_approval_policy_tests {
+         ];
+
+         assert_eq!(
+-            latest_persisted_approval_policy(&history),
++            latest_persisted_resume_settings(&history).map(|settings| settings.approval_policy),
+             Some(AskForApproval::OnRequest)
+         );
+     }
+@@ -150,7 +151,7 @@ mod persisted_resume_approval_policy_tests {
+         ];
+
+         assert_eq!(
+-            latest_persisted_approval_policy(&history),
++            latest_persisted_resume_settings(&history).map(|settings| settings.approval_policy),
+             Some(AskForApproval::Never)
+         );
+     }
+@@ -166,7 +167,7 @@ mod persisted_resume_approval_policy_tests {
+         ];
+
+         assert_eq!(
+-            latest_persisted_approval_policy(&history),
++            latest_persisted_resume_settings(&history).map(|settings| settings.approval_policy),
+             Some(AskForApproval::OnRequest)
+         );
+     }
+diff --git a/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
+index a3d04bfbd620052cd76fddd484203fedacace64c..33f50675df70c607087510e287f5639c6fe7b651 100644
+--- a/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
++++ b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
+@@ -112,7 +112,7 @@ fn prepare_poisoned_rollout(codex_home: &Path) -> Result<(ThreadId, SegmentId, P
+         "2026-08-13T00:00:00Z",
+         "synthetic release acceptance history",
+         Some("openai"),
+-        None,
++        /*git_info*/ None,
+     )?;
+     let path = rollout_path(codex_home, filename_timestamp, &thread_id);
+     let mut lines = std::fs::read(path.as_path())?
+@@ -129,13 +129,13 @@ fn prepare_poisoned_rollout(codex_home: &Path) -> Result<(ThreadId, SegmentId, P
+     meta.meta.segment_id = Some(segment_id);
+     append_delivery(
+         &mut lines,
+-        3,
++        /*ordinal*/ 3,
+         "amsg_01900000-0000-7000-8000-000000000004",
+         POISON_PAYLOAD,
+     );
+     append_delivery(
+         &mut lines,
+-        5,
++        /*ordinal*/ 5,
+         "amsg_01900000-0000-7000-8000-000000000006",
+         FERNET_PAYLOAD,
+     );
+@@ -170,6 +170,7 @@ fn find_agent_message<'a>(lines: &'a [RolloutLine], message_id: &str) -> &'a Res
+             | RolloutItem::EventMsg(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::WorldState(_)
++            | RolloutItem::SecurityRiskScore(_)
+             | RolloutItem::RolloutReference(_) => None,
+         })
+         .expect("agent message must remain in repaired rollout")
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork.rs b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+index 27271ecf96849ec400b379dbad40c31a6cac387b..f37958d15522edd1599ff442fe5fc50f8e40342a 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_fork.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_fork.rs
+@@ -63,7 +63,7 @@ use codex_protocol::models::BaseInstructions;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::MessagePhase;
+ use codex_protocol::models::ResponseItem;
+-use codex_protocol::protocol::AskForApproval;
++use codex_protocol::protocol::AskForApproval as ProtocolAskForApproval;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ItemCompletedEvent;
+ use codex_protocol::protocol::MultiAgentVersion;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
+index 7d3aab7ad71c026cd4f3ca08137dc2b953456959..b21d65438436542a185fed6b9fd10b82f942ec31 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents.rs
+@@ -248,7 +248,7 @@ async fn list_threads_for_relation(
+         limit,
+         model_providers,
+         source_kinds,
+-        None,
++        /*archived*/ None,
+     )
+     .await
+ }
+@@ -278,6 +278,7 @@ async fn list_threads_for_relation_with_archived(
+             source_kinds,
+             archived,
+             section_id: None,
++            project_id: None,
+             cwd: None,
+             use_state_db_only: true,
+             search_term: None,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
+index 60ceab5feea2b49a442e2d0db6a62bb08f206c94..25552f77d92283bf76904806f92e7b9de4053873 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_filters.rs
+@@ -227,7 +227,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+     )
+     .await?;
+     let section = state_db
+-        .create_thread_section("Current Workers", None)
++        .create_thread_section("Current Workers", /*appearance*/ None)
+         .await?;
+     let mut persisted_metadata = state_db
+         .get_thread(persisted_worker_id)
+@@ -243,7 +243,11 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+     );
+     assert!(
+         state_db
+-            .move_thread_to_section(persisted_worker_id, Some(&section.id), None)
++            .move_thread_to_section(
++                persisted_worker_id,
++                Some(&section.id),
++                /*before_thread_id*/ None
++            )
+             .await?
+     );
+
+@@ -259,6 +263,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+                 source_kinds: None,
+                 archived: None,
+                 section_id: Some(Some(section.id.clone())),
++                project_id: None,
+                 cwd: None,
+                 use_state_db_only: true,
+                 search_term: Some("Persisted Worker B".to_string()),
+@@ -318,6 +323,7 @@ async fn thread_list_relation_filters_page_current_members_and_exclude_closed_ag
+                 source_kinds: None,
+                 archived: None,
+                 section_id: None,
++                project_id: None,
+                 cwd: None,
+                 use_state_db_only: true,
+                 search_term: None,
+@@ -463,6 +469,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
+             source_kinds: None,
+             archived: None,
+             section_id: None,
++            project_id: None,
+             cwd: None,
+             use_state_db_only: false,
+             search_term: None,
+@@ -488,6 +495,7 @@ async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
+             source_kinds: None,
+             archived: None,
+             section_id: None,
++            project_id: None,
+             cwd: None,
+             use_state_db_only: false,
+             search_term: None,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs b/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
+index 0a18c4334aaeb60d3e64f2b754c9fc40f86d2ba7..2c8b1a9ab1c777325d27336f897ff6cb25083067 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_membership_reconciliation.rs
+@@ -252,6 +252,7 @@ async fn list_current_members(
+                 source_kinds: None,
+                 archived: None,
+                 section_id: None,
++                project_id: None,
+                 cwd: None,
+                 use_state_db_only: true,
+                 search_term: None,
+@@ -298,6 +299,7 @@ async fn wait_for_completed_current_tree(
+                     source_kinds: None,
+                     archived: None,
+                     section_id: None,
++                    project_id: None,
+                     cwd: None,
+                     use_state_db_only: true,
+                     search_term: None,
+@@ -509,8 +511,10 @@ async fn build_current_tree() -> Result<CurrentTreeFixture> {
+     let branch_b_id = ThreadId::from_string(&branch_b.id)?;
+     start_turn_and_wait(&mut app, branch_a_id, BRANCH_A_PROMPT).await?;
+     start_turn_and_wait(&mut app, branch_b_id, BRANCH_B_PROMPT).await?;
+-    let branch_a_members = wait_for_completed_current_tree(&app, branch_a_id, 1).await?;
+-    let branch_b_members = wait_for_completed_current_tree(&app, branch_b_id, 1).await?;
++    let branch_a_members =
++        wait_for_completed_current_tree(&app, branch_a_id, /*expected_count*/ 1).await?;
++    let branch_b_members =
++        wait_for_completed_current_tree(&app, branch_b_id, /*expected_count*/ 1).await?;
+     let branch_a_leaf_id = *branch_a_members
+         .values()
+         .next()
+@@ -653,7 +657,8 @@ async fn build_current_tree() -> Result<CurrentTreeFixture> {
+             "adoption call {call_id} returned {output}"
+         );
+     }
+-    let ids_by_path = wait_for_completed_current_tree(&app, root_thread_id, 4).await?;
++    let ids_by_path =
++        wait_for_completed_current_tree(&app, root_thread_id, /*expected_count*/ 4).await?;
+
+     assert_eq!(
+         list_current_members(&app, root_thread_id).await?,
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_read.rs b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+index b32da41ed96e83f88b5c7ffd5bae649a70b052d1..3d1cf334d50dc55498598097a7d0814f94223618 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_read.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_read.rs
+@@ -1606,6 +1606,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+             items.push(RolloutItem::Compacted(CompactedItem {
+                 message: "indexed Legacy resume checkpoint".to_string(),
+                 replacement_history: Some(Vec::new()),
++                mcp_resource_origins: None,
+                 window_number: Some(1),
+                 first_window_id: None,
+                 previous_window_id: None,
+@@ -1622,6 +1623,7 @@ async fn segmented_legacy_index_preserves_full_items_cursors_and_restart() -> Re
+                 approvals_reviewer: None,
+                 sandbox_policy: SandboxPolicy::new_read_only_policy(),
+                 permission_profile: None,
++                active_permission_profile: None,
+                 network: None,
+                 file_system_sandbox_policy: None,
+                 model: "mock-model".to_string(),
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_start.rs b/codex-rs/app-server/tests/suite/v2/thread_start.rs
+index 40b5e4979ba2a3e9b4828d632f826bb1f2c58bac..a1fea80fddd67379885a3c474979d7129b5600ef 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_start.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_start.rs
+@@ -48,9 +48,9 @@ use codex_protocol::config_types::SERVICE_TIER_DEFAULT_REQUEST_VALUE;
+ use codex_protocol::config_types::TrustLevel;
+ use codex_protocol::models::BUILT_IN_PERMISSION_PROFILE_WORKSPACE;
+ use codex_protocol::openai_models::ReasoningEffort;
+-use core_test_support::stdio_server_bin;
+ use codex_state::StateRuntime;
+ use codex_utils_absolute_path::test_support::PathExt;
++use core_test_support::stdio_server_bin;
+ use pretty_assertions::assert_eq;
+ use serde_json::Value;
+ use serde_json::json;
+@@ -1190,6 +1190,7 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
+                 model_providers: None,
+                 source_kinds: None,
+                 archived: Some(archived),
++                project_id: None,
+                 cwd: None,
+                 use_state_db_only: false,
+                 search_term: None,
+diff --git a/codex-rs/codex-mcp/src/connection_manager.rs b/codex-rs/codex-mcp/src/connection_manager.rs
+index fa285b8d7eb6f61f4862129a1a63e0eed3594042..4e60d4f107445de73fc9938db51a3b046102c561 100644
+--- a/codex-rs/codex-mcp/src/connection_manager.rs
++++ b/codex-rs/codex-mcp/src/connection_manager.rs
+@@ -118,7 +118,6 @@ pub(crate) struct McpConnectionSet {
+     servers: HashMap<String, McpServerView>,
+     pub(crate) event_stream_connection: Option<Arc<EventStreamConnectionSettings>>,
+     disabled_servers: Vec<String>,
+-    protocol_mode: crate::McpProtocolMode,
+     required_servers: Vec<String>,
+     optional_startup_deadline: OnceLock<tokio::time::Instant>,
+     tool_catalog_revision: Arc<RwLock<u64>>,
+@@ -687,7 +686,6 @@ impl McpConnectionSet {
+             servers,
+             event_stream_connection,
+             disabled_servers,
+-            protocol_mode,
+             required_servers,
+             optional_startup_deadline: OnceLock::new(),
+             tool_catalog_revision: Arc::new(RwLock::new(0)),
+@@ -758,7 +756,6 @@ impl McpConnectionSet {
+             servers: HashMap::new(),
+             event_stream_connection: None,
+             disabled_servers: Vec::new(),
+-            protocol_mode: crate::McpProtocolMode::Legacy,
+             required_servers: Vec::new(),
+             optional_startup_deadline: OnceLock::new(),
+             tool_catalog_revision: Arc::new(RwLock::new(0)),
+diff --git a/codex-rs/codex-mcp/src/connection_manager_tests.rs b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+index 69b50528838d6370c475bca49c6a0d773506468a..42a6a76a8f284e0996d42cdafb36c14d0f3c878a 100644
+--- a/codex-rs/codex-mcp/src/connection_manager_tests.rs
++++ b/codex-rs/codex-mcp/src/connection_manager_tests.rs
+@@ -119,7 +119,6 @@ impl McpConnectionSet {
+             servers: HashMap::new(),
+             event_stream_connection: None,
+             disabled_servers: Vec::new(),
+-            protocol_mode: crate::McpProtocolMode::Legacy,
+             required_servers: Vec::new(),
+             optional_startup_deadline: OnceLock::new(),
+             tool_catalog_revision: Arc::new(RwLock::new(0)),
+@@ -5315,7 +5314,7 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() ->
+         create_test_tool("docs", "search"),
+         create_test_tool("docs", "write"),
+     ];
+-    let mut previous =
++    let previous =
+         manager_with_reusable_ready_server(&config, &runtime_context, tools.clone()).await;
+     let managed_client = create_test_managed_client(tools).await;
+     let (pending_client, startup_started, release_startup) =
+@@ -5325,15 +5324,12 @@ async fn reconciliation_reuses_an_unchanged_pending_server_without_waiting() ->
+         async move { pending_client.client().await }
+     });
+     startup_started.await?;
+-    let connection = Arc::get_mut(
+-        &mut previous
+-            .servers
+-            .get_mut("docs")
+-            .expect("test server should exist")
+-            .connection,
+-    )
+-    .expect("test server should have one connection owner");
+-    connection.client = pending_client;
++    previous
++        .servers
++        .get("docs")
++        .expect("test server should exist")
++        .connection
++        .replace_connection_for_test(pending_client);
+     config.enabled_tools = Some(vec!["search".to_string()]);
+     config.startup_timeout_sec = Some(DEFAULT_STARTUP_TIMEOUT);
+
+@@ -5361,7 +5357,7 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+     let runtime_context = reusable_server_runtime_context();
+     let mut config = reusable_server_config("http://127.0.0.1:1");
+     let tools = vec![create_test_tool("docs", "search")];
+-    let mut previous =
++    let previous =
+         manager_with_reusable_ready_server(&config, &runtime_context, tools.clone()).await;
+     let managed_client = create_test_managed_client(tools).await;
+     let (pending_client, startup_started, release_startup) =
+@@ -5372,15 +5368,12 @@ async fn reconciliation_cancels_a_reused_pending_server_when_disabled() -> anyho
+         async move { pending_client.client().await }
+     });
+     startup_started.await?;
+-    let connection = Arc::get_mut(
+-        &mut previous
+-            .servers
+-            .get_mut("docs")
+-            .expect("test server should exist")
+-            .connection,
+-    )
+-    .expect("test server should have one connection owner");
+-    connection.client = pending_client;
++    previous
++        .servers
++        .get("docs")
++        .expect("test server should exist")
++        .connection
++        .replace_connection_for_test(pending_client);
+
+     let reused =
+         reconcile_reusable_server(&previous, config.clone(), runtime_context.clone()).await;
+diff --git a/codex-rs/codex-mcp/src/runtime.rs b/codex-rs/codex-mcp/src/runtime.rs
+index 55d9d74c718bb2a44b86624677ab2acf4565dba1..d0fdb5f0d35b6344366c6f8498ef3d2a297d1fa1 100644
+--- a/codex-rs/codex-mcp/src/runtime.rs
++++ b/codex-rs/codex-mcp/src/runtime.rs
+@@ -55,8 +55,8 @@ use crate::elicitation::ElicitationRequestRouter;
+ use crate::elicitation::ElicitationReviewerHandle;
+ use crate::event_stream::McpEventStreamOpener;
+ use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+-use crate::resource_origin::ResourceOrigins;
+ use crate::request_router::McpSessionRoute;
++use crate::resource_origin::ResourceOrigins;
+ use crate::server::EffectiveMcpServer;
+ use crate::tool_catalog_cache::McpToolCatalogCache;
+ use crate::tools::ToolInfo;
+diff --git a/codex-rs/codex-mcp/src/server.rs b/codex-rs/codex-mcp/src/server.rs
+index b3cc7868f50870e33fcc53367e774cfa0ea52b9d..f4825778ad41be70ead88803ae3ebc52141defa0 100644
+--- a/codex-rs/codex-mcp/src/server.rs
++++ b/codex-rs/codex-mcp/src/server.rs
+@@ -103,7 +103,6 @@ pub(crate) struct McpServerConnectionIdentity {
+     oauth_store: Option<(OAuthCredentialsStoreMode, AuthKeyringBackendKind)>,
+     oauth_refresh_mode: Option<McpOAuthRefreshMode>,
+     oauth_credentials: Result<Option<StoredOAuthCredentialSnapshot>, String>,
+-    pub(crate) oauth_store_was_contended: bool,
+     resolved_environment: Result<Option<Arc<Environment>>, String>,
+     local_stdio_fallback_cwd: Option<PathBuf>,
+     referenced_environment_variables: Vec<(String, Option<OsString>)>,
+@@ -211,12 +210,6 @@ impl McpServerConnectionIdentity {
+         let referenced_environment_variables = referenced_environment_variables(config);
+         let runtime_auth = runtime_auth_provider.and(auth).cloned();
+         let runtime_auth_token = runtime_auth.as_ref().and_then(|auth| auth.get_token().ok());
+-        let oauth_store_was_contended = oauth_credentials
+-            .as_ref()
+-            .ok()
+-            .and_then(Option::as_ref)
+-            .is_some_and(StoredOAuthCredentialSnapshot::store_was_contended);
+-
+         Self {
+             auth: config.auth.clone(),
+             server_name: server_name.to_string(),
+@@ -228,7 +221,6 @@ impl McpServerConnectionIdentity {
+                 .then_some((store_mode, keyring_backend_kind)),
+             oauth_refresh_mode: stored_oauth_url.is_some().then_some(oauth_refresh_mode),
+             oauth_credentials,
+-            oauth_store_was_contended,
+             resolved_environment: resolved_environment.clone(),
+             local_stdio_fallback_cwd,
+             referenced_environment_variables,
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 946047bbad5cb73ff08d4e0fec2fd58f6c5a6266..b0cf11f4c665f00427a89601d4cb59a903f28c7e 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -6928,4 +6928,4 @@
+   },
+   "title": "ConfigToml",
+   "type": "object"
+-}
++}
+\ No newline at end of file
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index 11ea5da0ed91f0a46c0e25a83758725c50ecce8d..6bdd60119efeff22e108788288688dc3f5e3049d 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -17,7 +17,6 @@ use crate::inherited_thread_state::InheritedThreadState;
+ use crate::rollout_budget::RolloutBudget;
+ use crate::session::emit_subagent_session_started;
+ use crate::session::multi_agents::ResolvedMultiAgentV2UsageHints;
+-use crate::session_prefix::format_inter_agent_completion_message;
+ use crate::session_prefix::format_subagent_context_line;
+ use crate::state::McpToolSnapshot;
+ use crate::thread_manager::ResumeThreadWithHistoryOptions;
+@@ -910,7 +909,6 @@ impl AgentControl {
+             agent_path,
+             agent_nickname,
+             agent_role,
+-            ephemeral: config.ephemeral,
+             last_task_message: None,
+             ..Default::default()
+         })
+@@ -1004,24 +1002,6 @@ impl AgentControl {
+     }
+
+     #[cfg(test)]
+-    pub(crate) fn register_current_only_agent_for_test(
+-        &self,
+-        agent_id: ThreadId,
+-        parent_thread_id: ThreadId,
+-        depth: i32,
+-    ) {
+-        self.state
+-            .reserve_spawn_slot(/*max_threads*/ None)
+-            .expect("current-only test identity should reserve a slot")
+-            .commit(AgentMetadata {
+-                agent_id: Some(agent_id),
+-                parent_thread_id: Some(parent_thread_id),
+-                depth: Some(depth),
+-                ephemeral: false,
+-                ..Default::default()
+-            });
+-    }
+-
+     async fn open_thread_spawn_children(
+         &self,
+         parent_thread_id: ThreadId,
+diff --git a/codex-rs/core/src/agent/control/completion.rs b/codex-rs/core/src/agent/control/completion.rs
+index 3c7c93e1b0943e34e782ed6f2702579968f7b82a..2556c4480f7b99700d33f872244408e66d53fd6b 100644
+--- a/codex-rs/core/src/agent/control/completion.rs
++++ b/codex-rs/core/src/agent/control/completion.rs
+@@ -7,7 +7,7 @@ use crate::context::SubagentNotification;
+ enum AgentDeliveryInput {
+     UserInput(Vec<UserInput>),
+     InterAgentCommunication {
+-        communication: InterAgentCommunication,
++        communication: Box<InterAgentCommunication>,
+         context: AgentCommunicationContext,
+     },
+ }
+@@ -44,6 +44,10 @@ impl AgentControl {
+     }
+
+     /// Deliver a context-bearing communication to an addressable agent, reloading it if needed.
++    #[expect(
++        clippy::too_many_arguments,
++        reason = "delivery keeps the target, communication context, admission mode, and turn ancestry explicit"
++    )]
+     pub(crate) async fn deliver_inter_agent_communication_to_agent(
+         &self,
+         config: Config,
+@@ -58,7 +62,7 @@ impl AgentControl {
+             config,
+             agent_id,
+             AgentDeliveryInput::InterAgentCommunication {
+-                communication,
++                communication: Box::new(communication),
+                 context,
+             },
+             delivery,
+@@ -104,7 +108,8 @@ impl AgentControl {
+                 Box::pin(self.ensure_agent_loaded_locked(&state, config.clone(), agent_id)).await?;
+             if input.starts_turn() {
+                 let thread = state.get_thread(agent_id).await?;
+-                self.ensure_execution_capacity_for_turn_start(&thread).await?;
++                self.ensure_execution_capacity_for_turn_start(&thread)
++                    .await?;
+             }
+             if multi_agent_version != MultiAgentVersion::V2 {
+                 self.maybe_start_completion_watcher_for_loaded_agent(&state, agent_id)
+@@ -131,7 +136,7 @@ impl AgentControl {
+                     self.send_inter_agent_communication_after_capacity_check(
+                         agent_id,
+                         &state,
+-                        communication.clone(),
++                        communication.as_ref().clone(),
+                         context.clone(),
+                         parent_turn_id.clone(),
+                         root_turn_id.clone(),
+diff --git a/codex-rs/core/src/agent/control/ownership.rs b/codex-rs/core/src/agent/control/ownership.rs
+index 8b5975d30caaaaff30f388129cb576084fe1c2d8..724caf8222f81e3f532dda81dd68dfa399daf030 100644
+--- a/codex-rs/core/src/agent/control/ownership.rs
++++ b/codex-rs/core/src/agent/control/ownership.rs
+@@ -14,6 +14,7 @@ const ACTIVE_ADOPTION_IDLE_RECHECK: Duration = Duration::from_millis(10);
+
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+ pub(super) enum ResumedThreadOwnership {
++    #[cfg(test)]
+     Preserve,
+     Transfer,
+ }
+@@ -35,6 +36,10 @@ struct OriginalRoot {
+
+ impl AgentControl {
+     /// Transfer a root into this agent tree without copying or interrupting its history.
++    #[expect(
++        clippy::too_many_arguments,
++        reason = "adoption keeps persisted identity, communication context, and turn ancestry explicit"
++    )]
+     pub(crate) async fn adopt_agent_with_communication(
+         &self,
+         config: Config,
+@@ -385,6 +390,7 @@ impl AgentControl {
+                     | RolloutItem::Compacted(_)
+                     | RolloutItem::TurnContext(_)
+                     | RolloutItem::WorldState(_)
++                    | RolloutItem::SecurityRiskScore(_)
+                     | RolloutItem::EventMsg(_) => None,
+                 })
+                 .unwrap_or(SessionSource::Cli);
+@@ -595,7 +601,7 @@ impl AgentControl {
+             .map_err(|err| {
+                 CodexErr::Fatal(format!("failed to persist root thread metadata: {err}"))
+             })?;
+-        self.register_session_root(thread_id, None);
++        self.register_session_root(thread_id, /*current_parent_thread_id*/ None);
+         state.notify_thread_created(thread_id);
+         Ok(resumed.thread_id)
+     }
+@@ -751,6 +757,7 @@ pub(super) async fn persisted_thread_workspace_roots(
+                 | RolloutItem::InterAgentCommunicationMetadata { .. }
+                 | RolloutItem::Compacted(_)
+                 | RolloutItem::WorldState(_)
++                | RolloutItem::SecurityRiskScore(_)
+                 | RolloutItem::EventMsg(_) => None,
+             }),
+     )
+diff --git a/codex-rs/core/src/agent/control/ownership_tests.rs b/codex-rs/core/src/agent/control/ownership_tests.rs
+index 7ce6da8f9a0934dd137c75e48af471f99545516c..ee8182d92880df66b873e9d97d731c9a2a5bdca5 100644
+--- a/codex-rs/core/src/agent/control/ownership_tests.rs
++++ b/codex-rs/core/src/agent/control/ownership_tests.rs
+@@ -29,6 +29,7 @@ fn stored_root(config: &Config) -> StoredThread {
+         section: None,
+         section_position: None,
+         section_entered_at: None,
++        project_id: None,
+         cwd: config.cwd.as_path().join("original-workspace"),
+         cli_version: "test".to_string(),
+         source: SessionSource::Cli,
+diff --git a/codex-rs/core/src/agent/control/ownership_tree.rs b/codex-rs/core/src/agent/control/ownership_tree.rs
+index 1aa30bba58c26c7cc2e1a2a1ff0a36a07e0b5ef6..853e0c34eeb30982ba704052e3d20f193d135c90 100644
+--- a/codex-rs/core/src/agent/control/ownership_tree.rs
++++ b/codex-rs/core/src/agent/control/ownership_tree.rs
+@@ -400,7 +400,7 @@ impl AgentControl {
+                 &prepared_descendant.metadata,
+             );
+             if let Err(err) = state
+-                .update_thread_metadata(descendant.thread_id, patch, true)
++                .update_thread_metadata(descendant.thread_id, patch, /*include_archived*/ true)
+                 .await
+             {
+                 for restored in persisted.into_iter().rev() {
+@@ -603,7 +603,7 @@ async fn restore_persisted_descendant_metadata(
+                 agent_role: Some(descendant.original_metadata.agent_role.clone()),
+                 ..Default::default()
+             },
+-            true,
++            /*include_archived*/ true,
+         )
+         .await?;
+     Ok(())
+diff --git a/codex-rs/core/src/agent/control/resume.rs b/codex-rs/core/src/agent/control/resume.rs
+index db0f6ff7a368948001a08717afb8e432f4689569..da3ab0a40916aa1f1907c3ef2d7fc198c2f093f6 100644
+--- a/codex-rs/core/src/agent/control/resume.rs
++++ b/codex-rs/core/src/agent/control/resume.rs
+@@ -234,6 +234,7 @@ impl AgentControl {
+     }
+
+     /// Resume an existing agent thread from a recorded rollout file.
++    #[cfg(test)]
+     pub(crate) async fn resume_agent_from_rollout(
+         &self,
+         config: Config,
+@@ -298,6 +299,7 @@ impl AgentControl {
+             rollout_path: stored_thread.rollout_path,
+         });
+         let parent_thread_id = match ownership {
++            #[cfg(test)]
+             ResumedThreadOwnership::Preserve => stored_thread.parent_thread_id,
+             ResumedThreadOwnership::Transfer => session_source
+                 .parent_thread_id()
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index b4a2f909ca78a650ca34fb687060b91fa70b8ac6..b177dfbfa2c96545d6685b4f8b162d53ec6fdeec 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -880,7 +880,7 @@ impl AgentControl {
+             }
+             SpawnAgentForkMode::LastNTurns(last_n_turns) => {
+                 let parent_history =
+-                    load_agent_model_context(&state, parent_thread_id, parent_history_mode)
++                    load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                         .await?
+                         .ok_or_else(|| {
+                             CodexErr::Fatal(format!(
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index 2adc190e424857891c806dfb8d29ee515ce2d36c..1ef3cb1e2bc5e00325f11e3d1b77e38ef3e9097d 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -1046,6 +1046,7 @@ async fn persist_thread_environment_for_resume(
+         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+         cwd: PathUri::from_abs_path(&cwd),
+         workspace_roots: vec![PathUri::from_abs_path(&cwd)],
++        config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
+     };
+     let mut settings = thread.thread_settings_snapshot().await;
+     settings.environments = Some(TurnEnvironmentSelections::new(
+@@ -2755,6 +2756,7 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             codex_protocol::mcp::ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await
+         .expect("thread/fork should copy the complete history-base lineage");
+diff --git a/codex-rs/core/src/agent/registry.rs b/codex-rs/core/src/agent/registry.rs
+index 43ca1e5f23a30559b04b123dbbcdb3e4deeaa559..7fb30a5c6ad9e354a3bbecd284864330aba88027 100644
+--- a/codex-rs/core/src/agent/registry.rs
++++ b/codex-rs/core/src/agent/registry.rs
+@@ -64,8 +64,6 @@ pub(crate) struct AgentMetadata {
+     pub(crate) agent_path: Option<AgentPath>,
+     pub(crate) agent_nickname: Option<String>,
+     pub(crate) agent_role: Option<String>,
+-    /// Whether this identity belongs to an ephemeral thread with no persisted ownership edge.
+-    pub(crate) ephemeral: bool,
+     pub(crate) last_task_message: Option<String>,
+     /// Serializes loaded/cold transitions for this addressable agent. The lock lives with the
+     /// registry entry so unloading the heavy `CodexThread` does not permit concurrent reloads.
+@@ -242,41 +240,6 @@ impl AgentRegistry {
+         subtree
+     }
+
+-    /// Return registered ephemeral descendants whose parent chain stays within `owned_thread_ids`.
+-    pub(crate) fn registered_ephemeral_descendants_within(
+-        &self,
+-        owned_thread_ids: &HashSet<ThreadId>,
+-    ) -> Vec<ThreadId> {
+-        let active_agents = self
+-            .active_agents
+-            .lock()
+-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        let mut included = owned_thread_ids.clone();
+-        let mut descendants = Vec::new();
+-        loop {
+-            let mut changed = false;
+-            for metadata in active_agents.agent_tree.values() {
+-                let (Some(thread_id), Some(parent_thread_id)) =
+-                    (metadata.agent_id, metadata.parent_thread_id)
+-                else {
+-                    continue;
+-                };
+-                if metadata.ephemeral
+-                    && included.contains(&parent_thread_id)
+-                    && included.insert(thread_id)
+-                {
+-                    descendants.push(thread_id);
+-                    changed = true;
+-                }
+-            }
+-            if !changed {
+-                break;
+-            }
+-        }
+-        descendants.sort_by_key(ToString::to_string);
+-        descendants
+-    }
+-
+     pub(crate) fn reserve_spawn_slot(
+         self: &Arc<Self>,
+         max_threads: Option<usize>,
+@@ -410,26 +373,6 @@ impl AgentRegistry {
+         }
+     }
+
+-    pub(crate) fn registered_path_prefix_thread_ids(
+-        &self,
+-        agent_path: &AgentPath,
+-    ) -> Vec<ThreadId> {
+-        let active_agents = self
+-            .active_agents
+-            .lock()
+-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+-        active_agents
+-            .agent_tree
+-            .iter()
+-            .filter_map(|(registered_path, metadata)| {
+-                let suffix = agent_path.as_str().strip_prefix(registered_path)?;
+-                (suffix.is_empty() || suffix.starts_with('/'))
+-                    .then_some(metadata.agent_id)
+-                    .flatten()
+-            })
+-            .collect()
+-    }
+-
+     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
+         self.active_agents
+             .lock()
+diff --git a/codex-rs/core/src/compact_remote_v2.rs b/codex-rs/core/src/compact_remote_v2.rs
+index d36f04a3bc48b4eacd432c820da9ede67b4dc638..4caf258cd5c920fc777a41a37a4d4466c98fa713 100644
+--- a/codex-rs/core/src/compact_remote_v2.rs
++++ b/codex-rs/core/src/compact_remote_v2.rs
+@@ -12,8 +12,8 @@ use crate::compact::InitialContextInjection;
+ use crate::compact::compaction_status_from_result;
+ use crate::compact_model_fallback::record_model_fallback;
+ use crate::compact_model_fallback::should_retry_with_current_model;
+-use crate::compact_remote::should_keep_compacted_history_item;
+ use crate::compact_remote::process_annotated_compacted_history;
++use crate::compact_remote::should_keep_compacted_history_item;
+ use crate::compact_remote_history::HistoryItemGroup;
+ use crate::compact_remote_history::history_item_groups;
+ use crate::context_manager::estimate_item_token_count;
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index a69d80166fab0aa12ce80150eaac242fd604eb29..c5d6e386db2fd13867e0831650f502cf3bb1ca74 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -239,28 +239,6 @@ pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
+ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
+ pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
+ const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+-const DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT: &str =
+-    "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
+-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. `frodex.close_agent` is a separate direct tool for closing an owned descendant agent. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+-
+-All agents share the same directory. In detail:
+-- All agents have access to the same container and filesystem as you.
+-- All agents use the same current working directory.
+-- As a result, edits made by one agent are immediately visible to all other agents.
+-"#;
+-fn default_multi_agent_v2_usage_hint_text(
+-    usage_hint_text: &str,
+-    max_concurrency: usize,
+-    wait_agent_usage_hint_text: Option<&str>,
+-) -> String {
+-    let wait_agent_usage_hint_text = match wait_agent_usage_hint_text {
+-        Some(wait_agent_usage_hint_text) => format!("{wait_agent_usage_hint_text}\n\n"),
+-        None => String::new(),
+-    };
+-    format!(
+-        "{usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{wait_agent_usage_hint_text}There are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
+-    )
+-}
+
+ pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
+ pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
+@@ -2766,39 +2744,6 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
+     let enable_thread_adoption = base
+         .and_then(|config| config.enable_thread_adoption)
+         .unwrap_or(default.enable_thread_adoption);
+-    let default_wait_agent_usage_hint_text = if wait_agent_enabled {
+-        Some(DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT)
+-    } else {
+-        None
+-    };
+-    let mut default_root_agent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+-        DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
+-        max_concurrent_threads_per_session,
+-        default_wait_agent_usage_hint_text,
+-    ));
+-    let mut default_subagent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+-        DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
+-        max_concurrent_threads_per_session,
+-        default_wait_agent_usage_hint_text,
+-    ));
+-    if expose_spawn_agent_model_overrides {
+-        default_root_agent_usage_hint_text = Some(append_usage_hint_text(
+-            default_root_agent_usage_hint_text.as_deref(),
+-            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+-        ));
+-        default_subagent_usage_hint_text = Some(append_usage_hint_text(
+-            default_subagent_usage_hint_text.as_deref(),
+-            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+-        ));
+-    }
+-    let root_agent_usage_hint_text = resolve_optional_prompt_text(
+-        base.map(|config| &config.root_agent_usage_hint_text),
+-        default_root_agent_usage_hint_text,
+-    );
+-    let subagent_usage_hint_text = resolve_optional_prompt_text(
+-        base.map(|config| &config.subagent_usage_hint_text),
+-        default_subagent_usage_hint_text,
+-    );
+     let subagent_developer_instructions = base
+         .and_then(|config| config.subagent_developer_instructions.as_ref())
+         .map(|instructions| instructions.trim().to_string());
+diff --git a/codex-rs/core/src/goal_supervisor.rs b/codex-rs/core/src/goal_supervisor.rs
+index 9702d529a68ed807789931fa5a13e338ae98abb6..2d1df4f0c6122dc2f5e01022186b35132d20c25d 100644
+--- a/codex-rs/core/src/goal_supervisor.rs
++++ b/codex-rs/core/src/goal_supervisor.rs
+@@ -901,6 +901,7 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
+                 parent_turn_id: None,
+                 root_turn_id: None,
+                 environments: None,
++                multi_agent_v2_usage_hints: None,
+                 initial_task_message: None,
+             },
+         )
+diff --git a/codex-rs/core/src/lib.rs b/codex-rs/core/src/lib.rs
+index 12136df9887f2cd240607ce327dd8be70425b824..3431bf7bfa5f2a7ddcb01169609a4129a617a9ca 100644
+--- a/codex-rs/core/src/lib.rs
++++ b/codex-rs/core/src/lib.rs
+@@ -34,6 +34,8 @@ mod compact_remote;
+ mod compact_remote_history;
+ mod compact_remote_v2;
+ mod compact_token_budget;
++pub use agent::CurrentAgentMember;
++pub use agent::CurrentAgentMembershipSnapshot;
+ pub use codex_network_proxy::EnvironmentNetworkPolicy;
+ pub use codex_network_proxy::NetworkDomainPermission;
+ pub use codex_network_proxy::NetworkDomainPermissionEntry;
+@@ -42,8 +44,6 @@ pub use codex_network_proxy::NetworkUnixSocketPermission;
+ pub use codex_network_proxy::NetworkUnixSocketPermissions;
+ pub use codex_protocol::mcp_policy::EnvironmentMcpPolicy;
+ pub use codex_protocol::protocol::EnvironmentConfig;
+-pub use agent::CurrentAgentMember;
+-pub use agent::CurrentAgentMembershipSnapshot;
+ pub use codex_thread::BackgroundTerminalInfo;
+ pub use codex_thread::CodexThread;
+ pub use codex_thread::CodexThreadSettingsOverrides;
+diff --git a/codex-rs/core/src/session/handlers.rs b/codex-rs/core/src/session/handlers.rs
+index e4594f78b7ce3c819f8de444f62678927d529b29..ca3f89362c69d43e4f203cd2d3df0228612d64da 100644
+--- a/codex-rs/core/src/session/handlers.rs
++++ b/codex-rs/core/src/session/handlers.rs
+@@ -333,36 +333,18 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
+         .into_iter()
+         .chain(std::iter::once(RolloutItem::EventMsg(rollback_msg.clone())))
+         .collect::<Vec<_>>();
+-    sess.apply_rollout_reconstruction(turn_context.as_ref(), replay_items.as_slice())
+-        .await;
+-    sess.services
++    sess
++        .services
+         .thread_extension_data
+         .remove::<NodeReplReviewEvidence>();
+     sess.guardian_review_session.invalidate().await;
+-    sess.services
+-        .agent_control
+-        .rollout_budget()
+-        .rearm_reminder(sess.thread_id());
+-    sess.recompute_token_usage(turn_context.as_ref()).await;
+-
+-    sess.persist_rollout_items(&[RolloutItem::EventMsg(rollback_msg.clone())])
+-        .await;
+-    if let Err(err) = sess.flush_rollout().await {
+-        sess.send_event(
+-            turn_context.as_ref(),
+-            EventMsg::Warning(WarningEvent {
+-                message: format!(
+-                    "Rolled the thread back, but failed to save the rollback marker. Codex will continue retrying. Error: {err}"
+-                ),
+-            }),
+-        )
+-        .await;
+-    }
+-
+-    sess.deliver_event_raw(Event {
+-        id: turn_context.sub_id.clone(),
+-        msg: rollback_msg,
+-    })
++    sess.services.agent_control.rollout_budget().rearm_reminder(sess.thread_id());
++    sess.complete_thread_rollback(
++        turn_context,
++        replay_items,
++        rollback_event,
++        live_thread.clone(),
++    )
+     .await;
+ }
+
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index 49f0ca9a16c7f2594acdb6bf0765ebb205856fb7..69ea82dfbabfed3ec43fee1cc022583d95e6f7ec 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -188,7 +188,7 @@ use futures::prelude::*;
+ use rmcp::model::RequestId;
+ use serde_json::Value;
+ use tokio::sync::Mutex;
+-use tokio::sync::MutexGuard;
++use tokio::sync::OwnedMutexGuard;
+ use tokio::sync::RwLock;
+ use tokio::sync::oneshot;
+ use tokio::sync::watch;
+@@ -466,9 +466,9 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::DeprecationNoticeEvent;
++use codex_protocol::protocol::ErrorEvent;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+-use codex_protocol::protocol::ErrorEvent;
+ use codex_protocol::protocol::ExecApprovalRequestEvent;
+ use codex_protocol::protocol::ModelRerouteEvent;
+ use codex_protocol::protocol::ModelRerouteReason;
+@@ -2043,14 +2043,15 @@ impl Session {
+                 shared_model_response_items.is_some(),
+             )
+             .await;
+-        let mut state = self.state.lock().await;
+-        let previous_turn_settings = Self::install_rollout_reconstruction_in_state(
+-            &mut state,
+-            reconstruction,
+-            shared_model_response_items,
+-            shared_model_state,
+-        );
+-        drop(state);
++        let previous_turn_settings = {
++            let mut state = self.state.lock().await;
++            Self::install_rollout_reconstruction_in_state(
++                &mut state,
++                reconstruction,
++                shared_model_response_items,
++                shared_model_state,
++            )
++        };
+         let prefix_tokens = if matches!(
+             turn_context.config.model_auto_compact_token_limit_scope,
+             AutoCompactTokenLimitScope::BodyAfterPrefix
+@@ -2199,7 +2200,9 @@ impl Session {
+             return;
+         }
+
+-        let _checkpoint_admission = self.checkpoint_admission_lock.lock().await;
++        let _checkpoint_admission = Arc::clone(&self.checkpoint_admission_lock)
++            .lock_owned()
++            .await;
+         if self.persistence_restart_required() {
+             self.deliver_event_raw(Event {
+                 id: turn_context.sub_id.clone(),
+@@ -2601,7 +2604,7 @@ impl Session {
+
+     pub(crate) async fn effective_session_config(&self) -> Config {
+         let state = self.state.lock().await;
+-        Self::build_effective_session_config(&state.session_configuration)
++        self.build_effective_session_config(&state.session_configuration)
+     }
+
+     pub(crate) async fn session_source(&self) -> SessionSource {
+@@ -4779,8 +4782,10 @@ impl Session {
+     pub(crate) async fn lock_checkpoint_admission(
+         &self,
+         operation: &str,
+-    ) -> anyhow::Result<MutexGuard<'_, ()>> {
+-        let admission = self.checkpoint_admission_lock.lock().await;
++    ) -> anyhow::Result<OwnedMutexGuard<()>> {
++        let admission = Arc::clone(&self.checkpoint_admission_lock)
++            .lock_owned()
++            .await;
+         if self.persistence_restart_required() {
+             anyhow::bail!(
+                 "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
+@@ -5503,6 +5508,7 @@ impl Session {
+         Ok(())
+     }
+
++    #[cfg(test)]
+     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
+         let token_count = {
+             let mut state = self.state.lock().await;
+diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
+index e5db3b56a5ebadd2bcb55fcb5074cf83424d505e..2d492d1d9de5c1c271e0687c8f438cfeebf18ba8 100644
+--- a/codex-rs/core/src/session/multi_agents.rs
++++ b/codex-rs/core/src/session/multi_agents.rs
+@@ -50,7 +50,7 @@ You may also see them addressed as to=/root/..., which indicates your identity i
+ const DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT: &str = "Full-history forks (`fork_turns` omitted or `\"all\"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `\"none\"` or a positive integer string.";
+ const DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT: &str =
+     "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
+-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
++const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. `frodex.close_agent` is a separate direct tool for closing an owned descendant agent. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+
+ All agents share the same directory. In detail:
+ - All agents have access to the same container and filesystem as you.
+diff --git a/codex-rs/core/src/session/rollout_reconstruction_tests.rs b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+index a41f5d02a51bf5bb93ecc5d24224575d39411ae7..eebf62b07a2485e386fad6f2d719114f74bcf58b 100644
+--- a/codex-rs/core/src/session/rollout_reconstruction_tests.rs
++++ b/codex-rs/core/src/session/rollout_reconstruction_tests.rs
+@@ -21,6 +21,7 @@ use codex_protocol::protocol::SessionMetaLine;
+ use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+ use codex_protocol::protocol::ThreadSettingsSnapshot;
+ use codex_protocol::protocol::TokenCountEvent;
++use codex_protocol::protocol::TurnEnvironmentSelections;
+ use codex_protocol::protocol::WorldStateItem;
+ use codex_protocol::security_risk::SecurityRiskScore;
+ use codex_rollout::ModelContextScan;
+@@ -137,6 +138,7 @@ fn checkpoint_compacted(history: Vec<ResponseItem>) -> CompactedItem {
+     CompactedItem {
+         message: String::new(),
+         replacement_history: Some(annotated(history)),
++        mcp_resource_origins: None,
+         window_number: Some(8),
+         first_window_id: Some(window_id.to_string()),
+         previous_window_id: None,
+@@ -346,7 +348,8 @@ async fn record_initial_history_ignores_security_risk_scores() {
+             ]),
+             rollout_path: Some(PathBuf::from("/tmp/resume.jsonl")),
+         }))
+-        .await;
++        .await
++        .expect("record resumed history");
+
+     assert_eq!(
+         strip_metadata_from_items(&raw_history_items(
+diff --git a/codex-rs/core/src/session/session.rs b/codex-rs/core/src/session/session.rs
+index 99f7c5e2ad665e1e8cf10502965d440874ddc0b5..2482ac0cedad7c69ace1fc768b5ec725ebf8a505 100644
+--- a/codex-rs/core/src/session/session.rs
++++ b/codex-rs/core/src/session/session.rs
+@@ -1442,6 +1442,7 @@ impl Session {
+                     }
+                     RolloutItem::EventMsg(event) => mcp_runtime.observe_event(event),
+                     RolloutItem::SessionMeta(_)
++                    | RolloutItem::RolloutReference(_)
+                     | RolloutItem::ResponseItem(_)
+                     | RolloutItem::InterAgentCommunication(_)
+                     | RolloutItem::InterAgentCommunicationMetadata { .. }
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 1b6b60d3ba2528546d47fc5a1bb0848571ecbaa3..42c96e9c375d0c145c41a22e1c9b606e6ac44c3b 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -3953,7 +3953,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+             .history
+             .set_world_state_baseline(world_state.snapshot());
+         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
+-        state.restore_auto_compact_window(7, window_ids);
++        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
+     }
+     let source_model_state = source
+         .capture_fork_model_state(&source_response_items)
+@@ -3975,42 +3975,43 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
+         )
+         .await?;
+
+-    let mut child_state = child.state.lock().await;
+-    assert!(Arc::ptr_eq(
+-        &child_state.history.shared_annotated_items(),
+-        &source_response_items
+-    ));
+-    assert!(
+-        child_state.history.shared_annotated_items()[0]
+-            .metadata
+-            .as_ref()
+-            .is_some_and(|metadata| metadata.client_authored)
+-    );
+-    assert_eq!(
+-        child_state.reference_context_item(),
+-        Some(reference_context_item)
+-    );
+-    assert_eq!(
+-        child_state.previous_turn_settings(),
+-        Some(previous_turn_settings)
+-    );
+-    assert_eq!(child_state.token_info(), Some(authoritative_tokens));
+-    assert_eq!(
+-        child_state.token_info_and_rate_limits().1,
+-        Some(authoritative_rate_limits.clone())
+-    );
+-    assert_eq!(child_state.auto_compact_window_number(), 7);
+-    assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+-    assert_eq!(child_state.history.history_version(), 1);
+-    assert!(
+-        child_state
+-            .history
+-            .update_world_state(&world_state)
+-            .1
+-            .is_none(),
+-        "an unchanged parent world-state baseline must not be reintroduced"
+-    );
+-    drop(child_state);
++    {
++        let mut child_state = child.state.lock().await;
++        assert!(Arc::ptr_eq(
++            &child_state.history.shared_annotated_items(),
++            &source_response_items
++        ));
++        assert!(
++            child_state.history.shared_annotated_items()[0]
++                .metadata
++                .as_ref()
++                .is_some_and(|metadata| metadata.client_authored)
++        );
++        assert_eq!(
++            child_state.reference_context_item(),
++            Some(reference_context_item)
++        );
++        assert_eq!(
++            child_state.previous_turn_settings(),
++            Some(previous_turn_settings)
++        );
++        assert_eq!(child_state.token_info(), Some(authoritative_tokens));
++        assert_eq!(
++            child_state.token_info_and_rate_limits().1,
++            Some(authoritative_rate_limits.clone())
++        );
++        assert_eq!(child_state.auto_compact_window_number(), 7);
++        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
++        assert_eq!(child_state.history.history_version(), 1);
++        assert!(
++            child_state
++                .history
++                .update_world_state(&world_state)
++                .1
++                .is_none(),
++            "an unchanged parent world-state baseline must not be reintroduced"
++        );
++    }
+
+     child.flush_rollout().await?;
+     let child_rollout_path = child
+@@ -4145,7 +4146,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+             .set_world_state_baseline(world_state.snapshot());
+         state.set_token_info(Some(token_info.clone()));
+         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
+-        state.restore_auto_compact_window(7, window_ids);
++        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
+     }
+
+     let expected_position = store
+@@ -4188,6 +4189,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await?;
+
+@@ -4489,6 +4491,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await?;
+     if use_shared_model_history {
+@@ -9201,7 +9204,9 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
+ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
+     let (session, _turn_context, rx) = make_session_and_context_with_rx().await;
+     let original_personality = session.thread_config_snapshot().await.personality;
+-    let admission = session.checkpoint_admission_lock.lock().await;
++    let admission = Arc::clone(&session.checkpoint_admission_lock)
++        .lock_owned()
++        .await;
+     let task_session = Arc::clone(&session);
+     let update = tokio::spawn(async move {
+         thread_settings::update(
+diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
+index c13bd98582421eb830f8a834116e7b3605e1151f..94cfd71d8134387bc2f0ec9b9dc60d6662f65d3c 100644
+--- a/codex-rs/core/src/session/turn_context.rs
++++ b/codex-rs/core/src/session/turn_context.rs
+@@ -681,10 +681,10 @@ impl TurnContext {
+                 Arc::make_mut(&mut model_info)
+                     .service_tiers
+                     .push(ModelServiceTier {
+-                    id: service_tier.clone(),
+-                    name: service_tier.clone(),
+-                    description: "Configured by a custom model routing profile.".to_string(),
+-                });
++                        id: service_tier.clone(),
++                        name: service_tier.clone(),
++                        description: "Configured by a custom model routing profile.".to_string(),
++                    });
+             }
+             Some(service_tier.clone())
+         } else if fast_mode_enabled {
+@@ -1069,7 +1069,7 @@ impl Session {
+             options,
+             TurnMultiAgentRuntime::ResolveAndStore,
+             self.git_enrichment_policy,
+-            true,
++            /*resolve_model_routing*/ true,
+         )
+         .await
+     }
+@@ -1085,7 +1085,7 @@ impl Session {
+             NewTurnContextOptions::default(),
+             TurnMultiAgentRuntime::Preview,
+             GitEnrichmentPolicy::Skip,
+-            true,
++            /*resolve_model_routing*/ true,
+         )
+         .await
+     }
+@@ -1321,7 +1321,7 @@ impl Session {
+                 },
+                 TurnMultiAgentRuntime::ResolveAndStore,
+                 self.git_enrichment_policy,
+-                false,
++                /*resolve_model_routing*/ false,
+             )
+             .await;
+         let mut refreshed = Arc::try_unwrap(refreshed)
+diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
+index 04ab409bdb331c4e702b717c3111bc1d7472cfad..8f705dab19a4f2acfd137b2467e2979733b95eba 100644
+--- a/codex-rs/core/src/thread_manager.rs
++++ b/codex-rs/core/src/thread_manager.rs
+@@ -303,7 +303,7 @@ pub(crate) enum FullHistorySourceReservation {
+         _reservation: ThreadLifecycleReservation,
+     },
+     /// A paginated source prepared under one selected-rollout reservation.
+-    Prepared { _prepared: PreparedFork },
++    Prepared { _prepared: Box<PreparedFork> },
+ }
+
+ /// Preserve legacy `fork_thread(usize, ...)` callsites by mapping them to the
+@@ -1895,7 +1895,8 @@ impl ThreadManagerState {
+                 .await
+                 .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+         }
+-        self.thread_store
++        let updated = self
++            .thread_store
+             .update_thread_metadata(UpdateThreadMetadataParams {
+                 thread_id,
+                 patch,
+@@ -1907,7 +1908,19 @@ impl ThreadManagerState {
+                     CodexErr::ThreadNotFound(thread_id)
+                 }
+                 err => thread_store_metadata_update_error(thread_id, err),
+-            })
++            })?;
++        match updated {
++            Some(thread) => Ok(thread),
++            None => self
++                .thread_store
++                .read_thread(ReadThreadParams {
++                    thread_id,
++                    include_archived,
++                    include_history: false,
++                })
++                .await
++                .map_err(|err| thread_store_metadata_update_error(thread_id, err)),
++        }
+     }
+
+     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
+@@ -2092,7 +2105,7 @@ impl ThreadManagerState {
+                     InitialHistory::Forked(logical_history.clone()),
+                     logical_history,
+                     FullHistorySourceReservation::Prepared {
+-                        _prepared: prepared,
++                        _prepared: Box::new(prepared),
+                     },
+                 ));
+             }
+@@ -2119,7 +2132,7 @@ impl ThreadManagerState {
+                 reference_history,
+                 logical_history,
+                 FullHistorySourceReservation::Prepared {
+-                    _prepared: prepared,
++                    _prepared: Box::new(prepared),
+                 },
+             ));
+         }
+@@ -2148,6 +2161,10 @@ impl ThreadManagerState {
+         ))
+     }
+
++    #[expect(
++        clippy::too_many_arguments,
++        reason = "snapshot selection keeps source identity, history mode, cutoff, and validation expectations explicit"
++    )]
+     async fn reference_backed_snapshot_history(
+         &self,
+         source_thread_id: ThreadId,
+@@ -2224,7 +2241,7 @@ impl ThreadManagerState {
+                         prepared.frozen_segment.clone(),
+                         prepared.response_history.as_ref().clone(),
+                         FullHistorySourceReservation::Prepared {
+-                            _prepared: prepared,
++                            _prepared: Box::new(prepared),
+                         },
+                     )
+                 }
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index 0de50e99f5205031ae91a4372ea772635ba7517a..ada23b7935c1c1d31d7a871dcef8898ed0df3b24 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -333,11 +333,13 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+         cwd: PathUri::from_abs_path(&boundary_cwd),
+         workspace_roots: vec![PathUri::from_abs_path(&boundary_cwd)],
++        config: EnvironmentConfigState::FromThread,
+     };
+     let latest_environment = TurnEnvironmentSelection {
+         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+         cwd: PathUri::from_abs_path(&latest_cwd),
+         workspace_roots: vec![PathUri::from_abs_path(&latest_cwd)],
++        config: EnvironmentConfigState::FromThread,
+     };
+     let boundary_context = vec![
+         RolloutItem::ResponseItem(user_msg("boundary response").into()),
+@@ -423,6 +425,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await
+         .expect("fork prepared checkpoint history");
+@@ -451,6 +454,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
+         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
+         cwd: PathUri::from_abs_path(&restored_cwd),
+         workspace_roots: vec![PathUri::from_abs_path(&restored_cwd)],
++        config: EnvironmentConfigState::FromThread,
+     };
+     let thread_id = ThreadId::new();
+     let manager = ThreadManager::with_models_provider_and_home_for_tests(
+@@ -3109,6 +3113,7 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await
+         .expect("fork source after append");
+@@ -3151,6 +3156,7 @@ async fn interrupted_fork_accepts_source_appends_before_freeze_inner() {
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+             ClientMcpExtensions::default(),
++            /*reserved_thread_id*/ None,
+         )
+         .await
+     {
+@@ -3254,6 +3260,7 @@ async fn reference_backed_fork_reserves_source_until_child_reference_is_durable(
+                     /*thread_source*/ None,
+                     /*parent_trace*/ None,
+                     ClientMcpExtensions::default(),
++                    /*reserved_thread_id*/ None,
+                 )
+                 .await
+         }
+diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
+index cdcdd8665c760e3d7cfcc7a1f0e9c599b45a5af1..4bfe34f34844e3cfb9438241201f86fedf63daf6 100644
+--- a/codex-rs/core/src/tools/context.rs
++++ b/codex-rs/core/src/tools/context.rs
+@@ -255,6 +255,7 @@ impl FunctionToolOutput {
+         function_call_output_content_items_to_text(&self.body).unwrap_or_default()
+     }
+
++    #[cfg(test)]
+     pub fn into_terminal_no_response(mut self) -> Self {
+         self.terminal_no_response = true;
+         self
+diff --git a/codex-rs/core/src/tools/handlers/workspace.rs b/codex-rs/core/src/tools/handlers/workspace.rs
+index ca11ee026ca4ea16a36228d24a859850c62a0abb..b17e6d5870f8d163ca9b161913a5b431e04810e2 100644
+--- a/codex-rs/core/src/tools/handlers/workspace.rs
++++ b/codex-rs/core/src/tools/handlers/workspace.rs
+@@ -532,17 +532,17 @@ mod tests {
+             .environments
+             .single_local_environment()
+             .expect("one local environment");
+-        let environment_id = current_environment.environment_id.clone();
++        let mut selection = current_environment.selection.clone();
++        selection.cwd = PathUri::from_abs_path(&fixture.primary);
++        selection.workspace_roots = vec![PathUri::from_abs_path(&fixture.primary)];
++        let config_origin = current_environment.config_origin;
+         let environment = Arc::clone(&current_environment.environment);
+         let shell = current_environment.shell.clone();
+-        let config = current_environment.config.clone();
+         turn.environments.environments = vec![TurnEnvironmentState::Ready(TurnEnvironment::new(
+-            environment_id,
++            selection,
++            config_origin,
+             environment,
+-            PathUri::from_abs_path(&fixture.primary),
+-            vec![PathUri::from_abs_path(&fixture.primary)],
+             shell,
+-            config,
+         ))];
+         let turn = Arc::new(turn);
+         let step_context = StepContext::for_test(Arc::clone(&turn));
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index dd183c177abda3f84373a729397555d10e2eb5c8..ed3781c836fff7645ce7336f391be99f83844380 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -3237,7 +3237,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
+ async fn goal_supervisor_uses_supervisor_tools_when_model_does_not_advertise_v2() {
+     let plan = probe(|turn| {
+         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+-        turn.model_info.multi_agent_version = Some(MultiAgentVersion::V1);
++        Arc::make_mut(&mut turn.model_info).multi_agent_version = Some(MultiAgentVersion::V1);
+         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+             parent_thread_id: ThreadId::new(),
+             depth: 1,
+diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
+index 54a6a361d4f89f2e257aa385cd4053dc11e42adf..2c23e2baaa285cafe8c07be218c8206fecacd4be 100755
+--- a/codex-rs/core/tests/suite/client_websockets.rs
++++ b/codex-rs/core/tests/suite/client_websockets.rs
+@@ -1039,9 +1039,9 @@ async fn routed_profile_rebases_websocket_after_partial_commentary() {
+
+     test.codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: "stream the routing test commentary".to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: "stream the routing test commentary".to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await
+         .expect("submit routed websocket commentary turn");
+     let mut events = Vec::new();
+diff --git a/codex-rs/core/tests/suite/mcp_agent_tree.rs b/codex-rs/core/tests/suite/mcp_agent_tree.rs
+index e8cd9bbf2ba532967b51cf22d93e5b9bae009a56..2a1cd5e4d6eb7845de34e057e4243843e873907d 100644
+--- a/codex-rs/core/tests/suite/mcp_agent_tree.rs
++++ b/codex-rs/core/tests/suite/mcp_agent_tree.rs
+@@ -330,6 +330,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
+                 environments: Some(environments),
+                 thread_extension_init: Default::default(),
+                 client_mcp_extensions: Default::default(),
++                reserved_thread_id: None,
+             },
+         )
+         .await?;
+diff --git a/codex-rs/core/tests/suite/model_routing_midturn.rs b/codex-rs/core/tests/suite/model_routing_midturn.rs
+index 86b99b3f09d53ddf5652e0c08a8dcc0bdbb7a53d..ecf11af1c0c398762c30fc7d20307c31a206efdf 100644
+--- a/codex-rs/core/tests/suite/model_routing_midturn.rs
++++ b/codex-rs/core/tests/suite/model_routing_midturn.rs
+@@ -87,9 +87,9 @@ async fn build_routed_test(
+ async fn submit_prompt(test: &TestCodex, text: &str) -> Result<()> {
+     test.codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: text.to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: text.to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await?;
+     Ok(())
+ }
+@@ -190,7 +190,7 @@ async fn parallel_tool_outputs_are_complete_before_midturn_reroute() -> Result<(
+         ],
+     )
+     .await;
+-    let test = build_routed_test(&server, false).await?;
++    let test = build_routed_test(&server, /*multi_agent_v2*/ false).await?;
+
+     submit_prompt(&test, "run two tools").await?;
+     let events = events_until_complete(&test).await;
+@@ -239,7 +239,7 @@ async fn steering_during_tool_wait_is_recorded_once_before_midturn_reroute() ->
+         ],
+     )
+     .await;
+-    let test = build_routed_test(&server, true).await?;
++    let test = build_routed_test(&server, /*multi_agent_v2*/ true).await?;
+
+     submit_prompt(&test, INITIAL_PROMPT).await?;
+     wait_for_event(&test.codex, |event| {
+@@ -249,9 +249,9 @@ async fn steering_during_tool_wait_is_recorded_once_before_midturn_reroute() ->
+     let submission = test
+         .codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: STEER_PROMPT.to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: STEER_PROMPT.to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await
+         .expect("steering should be accepted");
+     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
+@@ -357,9 +357,9 @@ async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -
+     let submission = test
+         .codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Mention {
+-                name: MCP_SERVER.to_string(),
+-                path: format!("mcp://{MCP_SERVER}"),
+-            }]))
++            name: MCP_SERVER.to_string(),
++            path: format!("mcp://{MCP_SERVER}"),
++        }]))
+         .await
+         .expect("steering should be accepted");
+     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
+diff --git a/codex-rs/core/tests/suite/model_routing_profiles.rs b/codex-rs/core/tests/suite/model_routing_profiles.rs
+index c42788738544425ed8bf5f79b2ef4c8f441d58eb..398e42415d69490a61b8cdd6d58812a5eb9dae58 100644
+--- a/codex-rs/core/tests/suite/model_routing_profiles.rs
++++ b/codex-rs/core/tests/suite/model_routing_profiles.rs
+@@ -230,9 +230,9 @@ async fn submit_prompt_text(
+ ) -> Result<()> {
+     test.codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: text.to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: text.to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await?;
+     Ok(())
+ }
+@@ -387,9 +387,19 @@ async fn continuation_failure_reroutes_after_recorded_tool_output() -> Result<()
+         ],
+     )
+     .await;
+-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     primary.experimental_supported_tools = vec![TOOL_NAME.to_string()];
+-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     fallback.experimental_supported_tools = vec![TOOL_NAME.to_string()];
+     let test = test_codex()
+         .with_config(move |config| {
+@@ -938,7 +948,7 @@ async fn smaller_fallback_compacts_before_its_first_sampling_request() -> Result
+         vec![
+             sse_response(sse(vec![
+                 ev_assistant_message("message-primary-history", "history before reroute"),
+-                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
+             ])),
+             sse_response(sse(vec![overload_failure])),
+             sse_response(sse(vec![
+@@ -949,17 +959,27 @@ async fn smaller_fallback_compacts_before_its_first_sampling_request() -> Result
+                         "encrypted_content": "test-routed-compaction-summary"
+                     }
+                 }),
+-                ev_completed_with_tokens("response-fallback-compact", 10),
++                ev_completed_with_tokens("response-fallback-compact", /*total_tokens*/ 10),
+             ])),
+             sse_response(sse_completed("response-fallback-final")),
+         ],
+     )
+     .await;
+-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     primary.context_window = Some(100_000);
+     primary.auto_compact_token_limit = Some(90_000);
+     primary.comp_hash = None;
+-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     fallback.context_window = Some(10_000);
+     fallback.auto_compact_token_limit = Some(9_000);
+     fallback.comp_hash = None;
+@@ -1048,7 +1068,7 @@ async fn typed_compaction_failure_falls_through_without_terminating_the_turn() -
+         vec![
+             sse_response(sse(vec![
+                 ev_assistant_message("message-primary-history", "history before reroute"),
+-                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
+             ])),
+             sse_response(sse(vec![overload_failure()])),
+             sse_response(sse(vec![
+@@ -1059,13 +1079,28 @@ async fn typed_compaction_failure_falls_through_without_terminating_the_turn() -
+         ],
+     )
+     .await;
+-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     primary.context_window = Some(100_000);
+     primary.auto_compact_token_limit = Some(90_000);
+-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     fallback.context_window = Some(10_000);
+     fallback.auto_compact_token_limit = Some(9_000);
+-    let mut second_fallback = catalog_model(SECOND_FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut second_fallback = catalog_model(
++        SECOND_FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     second_fallback.context_window = Some(100_000);
+     second_fallback.auto_compact_token_limit = Some(90_000);
+     let test = test_codex()
+@@ -1159,17 +1194,27 @@ async fn token_budget_reroute_runs_post_compact_hook_once_after_route_commit() -
+         vec![
+             sse_response(sse(vec![
+                 ev_assistant_message("message-primary-history", "history before reroute"),
+-                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
+             ])),
+             sse_response(sse(vec![overload_failure])),
+             sse_response(sse_completed("response-fallback-final")),
+         ],
+     )
+     .await;
+-    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     primary.context_window = Some(100_000);
+     primary.auto_compact_token_limit = Some(90_000);
+-    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
+     fallback.context_window = Some(10_000);
+     fallback.auto_compact_token_limit = Some(9_000);
+     let test = test_codex()
+@@ -1285,8 +1330,18 @@ async fn catalog_rejects_primary_tuple_and_selects_supported_fallback() -> Resul
+             ]);
+             config.model_catalog = Some(ModelsResponse {
+                 models: vec![
+-                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
+-                    catalog_model(FALLBACK, &[ReasoningEffort::High], &[], None),
++                    catalog_model(
++                        PRIMARY,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
++                    catalog_model(
++                        FALLBACK,
++                        &[ReasoningEffort::High],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
+                 ],
+             });
+         })
+@@ -1332,8 +1387,18 @@ async fn all_locally_rejected_candidates_send_lowest_exact_tuple() -> Result<()>
+             ]);
+             config.model_catalog = Some(ModelsResponse {
+                 models: vec![
+-                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
+-                    catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None),
++                    catalog_model(
++                        PRIMARY,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
++                    catalog_model(
++                        FALLBACK,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
+                 ],
+             });
+         })
+@@ -1379,7 +1444,7 @@ async fn omitted_service_tier_uses_catalog_default_when_fast_mode_is_enabled() -
+             });
+             config
+                 .features
+-                .set_enabled(Feature::FastMode, true)
++                .set_enabled(Feature::FastMode, /*enabled*/ true)
+                 .expect("enable fast mode");
+         })
+         .build(&server)
+@@ -1425,7 +1490,7 @@ async fn omitted_service_tier_stays_omitted_when_fast_mode_is_disabled() -> Resu
+             });
+             config
+                 .features
+-                .set_enabled(Feature::FastMode, false)
++                .set_enabled(Feature::FastMode, /*enabled*/ false)
+                 .expect("disable fast mode");
+         })
+         .build(&server)
+diff --git a/codex-rs/core/tests/suite/model_routing_streaming.rs b/codex-rs/core/tests/suite/model_routing_streaming.rs
+index 7018334cb512eecaacf91f7872c811f25bbecf4b..40e34b3cf40970a22f5789c51ce4b2719d409f34 100644
+--- a/codex-rs/core/tests/suite/model_routing_streaming.rs
++++ b/codex-rs/core/tests/suite/model_routing_streaming.rs
+@@ -700,9 +700,9 @@ async fn queued_steer_follows_untagged_partial_message_into_reroute() -> Result<
+
+     test.codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: INITIAL_PROMPT.to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: INITIAL_PROMPT.to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await?;
+     wait_for_event(
+         &test.codex,
+@@ -712,9 +712,9 @@ async fn queued_steer_follows_untagged_partial_message_into_reroute() -> Result<
+     let submission = test
+         .codex
+         .start_or_steer_turn(TurnInputRequest::user_input(vec![UserInput::Text {
+-                text: STEER_PROMPT.to_string(),
+-                text_elements: Vec::new(),
+-            }]))
++            text: STEER_PROMPT.to_string(),
++            text_elements: Vec::new(),
++        }]))
+         .await
+         .map_err(|err| anyhow::anyhow!("steer input failed: {err:?}"))?;
+     assert!(matches!(submission, TurnInputSubmission::Steered { .. }));
+diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
+index e861da4071782d680ff12bf1b4a4ead2c87cd10e..f4916dfce8e3ecc5ca786302db0b863df4b05570 100644
+--- a/codex-rs/core/tests/suite/model_switching.rs
++++ b/codex-rs/core/tests/suite/model_switching.rs
+@@ -8,8 +8,8 @@ use codex_features::Feature;
+ use codex_history::RolloutItem;
+ use codex_history::RolloutLine;
+ use codex_login::CodexAuth;
+-use codex_models_manager::bundled_models_response;
+ use codex_models_manager::CustomModelConfig;
++use codex_models_manager::bundled_models_response;
+ use codex_models_manager::manager::RefreshStrategy;
+ use codex_protocol::config_types::ApprovalsReviewer;
+ use codex_protocol::config_types::CollaborationMode;
+@@ -60,7 +60,6 @@ use pretty_assertions::assert_eq;
+ use serde_json::json;
+ use std::collections::HashMap;
+ use test_case::test_case;
+-use std::collections::HashMap;
+ use wiremock::MockServer;
+
+ fn read_only_user_turn(test: &TestCodex, items: Vec<UserInput>, model: String) -> TurnInputRequest {
+diff --git a/codex-rs/core/tests/suite/openai_file_mcp.rs b/codex-rs/core/tests/suite/openai_file_mcp.rs
+index 9ae4b31214adcbc21cde15221f11575d6a478146..c56891986b79004ddcbe1c9434de29946e3191d9 100644
+--- a/codex-rs/core/tests/suite/openai_file_mcp.rs
++++ b/codex-rs/core/tests/suite/openai_file_mcp.rs
+@@ -44,7 +44,6 @@ use serde_json::json;
+ use wiremock::Mock;
+ use wiremock::MockServer;
+ use wiremock::ResponseTemplate;
+-use wiremock::matchers::body_json;
+ use wiremock::matchers::body_partial_json;
+ use wiremock::matchers::header;
+ use wiremock::matchers::method;
+diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
+index c30a0f78d71f1ce2268e05e8bb55b92856407ba2..197ba33afd41837cdea5ad124ece911e1c7ece0a 100644
+--- a/codex-rs/core/tests/suite/subagent_notifications.rs
++++ b/codex-rs/core/tests/suite/subagent_notifications.rs
+@@ -124,27 +124,6 @@ fn request_has_input_type(req: &wiremock::Request, ty: &str) -> bool {
+         })
+ }
+
+-fn request_has_user_input_text(req: &wiremock::Request, text: &str) -> bool {
+-    decoded_body(req)
+-        .and_then(|body| serde_json::from_slice::<Value>(&body).ok())
+-        .and_then(|body| body.get("input").and_then(Value::as_array).cloned())
+-        .is_some_and(|items| {
+-            items.iter().any(|item| {
+-                item.get("type").and_then(Value::as_str) == Some("message")
+-                    && item.get("role").and_then(Value::as_str) == Some("user")
+-                    && item
+-                        .get("content")
+-                        .and_then(Value::as_array)
+-                        .is_some_and(|content| {
+-                            content.iter().any(|span| {
+-                                span.get("type").and_then(Value::as_str) == Some("input_text")
+-                                    && span.get("text").and_then(Value::as_str) == Some(text)
+-                            })
+-                        })
+-            })
+-        })
+-}
+-
+ fn decoded_body(req: &wiremock::Request) -> Option<Vec<u8>> {
+     let is_zstd = req
+         .headers
+@@ -2044,7 +2023,7 @@ async fn spawned_child_inherits_parent_app_server_client_tool_filters_impl() ->
+         .set_app_server_client_info(
+             Some("codex-tui".to_string()),
+             Some("test-client-version".to_string()),
+-            false,
++            /*mcp_elicitations_auto_deny*/ false,
+         )
+         .await?;
+
+diff --git a/codex-rs/core/tests/suite/workspace_cwd.rs b/codex-rs/core/tests/suite/workspace_cwd.rs
+index d78eab967d1ff9f78a833618e645ac7fc218d33f..03dfe27380959c040720aeb42444c544bf8ac476 100644
+--- a/codex-rs/core/tests/suite/workspace_cwd.rs
++++ b/codex-rs/core/tests/suite/workspace_cwd.rs
+@@ -32,6 +32,7 @@ fn skills_extensions() -> std::sync::Arc<ExtensionRegistry<Config>> {
+     let mut extensions = ExtensionRegistryBuilder::<Config>::new();
+     install(&mut extensions, |config: &Config| SkillsExtensionConfig {
+         include_instructions: config.include_skill_instructions,
++        max_context_tokens: config.skill_max_context_tokens,
+         bundled_skills_enabled: config.bundled_skills_enabled(),
+         orchestrator_skills_enabled: config.orchestrator_skills_enabled,
+         shadow_selection_enabled: config.features.enabled(Feature::SkillSearch),
+diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+index f7f5aa411b75de8963d2ef3fa08235297a235b12..ce40bd26e0f739903988bd8696927d7ad1a502b7 100644
+--- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
++++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
+@@ -416,8 +416,10 @@ impl LunaSampler {
+                 ApiError::Transport(TransportError::Build(_))
+                 | ApiError::ContextWindowExceeded
+                 | ApiError::QuotaExceeded
++                | ApiError::UsageLimitReached(_)
+                 | ApiError::UsageNotIncluded
+                 | ApiError::RateLimit(_)
++                | ApiError::ModelUnavailable { .. }
+                 | ApiError::InvalidRequest { .. }
+                 | ApiError::MisalignmentPolicyViolation { .. }
+                 | ApiError::CyberPolicy { .. },
+diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
+index 3fb3e87a2aa9b034713687b20b7f11c38b182389..e20951cde46511deace95788438af9b60393c014 100644
+--- a/codex-rs/model-provider-info/src/lib.rs
++++ b/codex-rs/model-provider-info/src/lib.rs
+@@ -59,6 +59,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
+ pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
+ pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
+
++/// Returns the upstream Codex version used for ChatGPT model eligibility.
++///
++/// Frodex release versions use SemVer build metadata, but the ChatGPT model
++/// catalog does not accept build metadata in the `version` header. The
++/// prerelease component must remain because model eligibility can depend on
++/// the upstream alpha version.
++fn openai_client_version_header(version: &str) -> &str {
++    version
++        .split_once('+')
++        .map_or(version, |(upstream_version, _)| upstream_version)
++}
++
+ /// Wire protocol that the provider speaks.
+ #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
+ #[serde(rename_all = "lowercase")]
+@@ -395,9 +407,12 @@ impl ModelProviderInfo {
+             wire_api: WireApi::Responses,
+             query_params: None,
+             http_headers: Some(
+-                [("version".to_string(), env!("CARGO_PKG_VERSION").into())]
+-                    .into_iter()
+-                    .collect(),
++                [(
++                    "version".to_string(),
++                    openai_client_version_header(env!("CARGO_PKG_VERSION")).to_string(),
++                )]
++                .into_iter()
++                .collect(),
+             ),
+             env_http_headers: Some(
+                 [
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index d08af0ffb54c266d81465cd056944e2085889b97..6ba2910a9f0dd978932b6779a73ee0ffa2863f73 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -167,6 +167,32 @@ fn codex_backend_routes_require_codex_base_url() {
+     }
+ }
+
++#[test]
++fn openai_client_version_header_preserves_prerelease_and_strips_build_metadata() {
++    assert_eq!(
++        openai_client_version_header("0.148.0-alpha.20+frodex.0"),
++        "0.148.0-alpha.20"
++    );
++    assert_eq!(
++        openai_client_version_header("0.148.0-alpha.20"),
++        "0.148.0-alpha.20"
++    );
++}
++
++#[test]
++fn openai_provider_uses_upstream_client_version_header() {
++    let api_provider = ModelProviderInfo::create_openai_provider(/*base_url*/ None)
++        .to_api_provider(Some(AuthMode::Chatgpt))
++        .expect("OpenAI provider should build API provider");
++
++    assert_eq!(
++        api_provider.headers.get("version"),
++        Some(&HeaderValue::from_static(openai_client_version_header(
++            env!("CARGO_PKG_VERSION")
++        )))
++    );
++}
++
+ #[test]
+ fn test_uses_openai_actor_authorization() {
+     let mut provider = ModelProviderInfo {
+diff --git a/codex-rs/protocol/src/environment.rs b/codex-rs/protocol/src/environment.rs
+index 9f204ae1b0e1473fcc61ae0497d3f3f1338ec50d..b456d2a69cc9f6df1adfc82ba3ebe7f1e5ed4cf9 100644
+--- a/codex-rs/protocol/src/environment.rs
++++ b/codex-rs/protocol/src/environment.rs
+@@ -13,9 +13,10 @@ use codex_utils_path_uri::PathUri;
+
+ /// Configuration supplied for a thread's selected environment.
+ #[allow(clippy::large_enum_variant)]
+-#[derive(Clone, Debug, PartialEq)]
++#[derive(Clone, Debug, Default, PartialEq)]
+ pub enum EnvironmentConfigState {
+     /// Preserve the existing thread-derived environment configuration.
++    #[default]
+     FromThread,
+     /// The owner will supply environment configuration later.
+     Pending,
+diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
+index 2579e7061698884703b2198d6faf1b3feb963168..d96e7c51f9111fccff1c1f9e310901ace8cbdcec 100644
+--- a/codex-rs/protocol/src/protocol.rs
++++ b/codex-rs/protocol/src/protocol.rs
+@@ -158,6 +158,13 @@ pub struct TurnEnvironmentSelection {
+     pub environment_id: String,
+     pub cwd: PathUri,
+     pub workspace_roots: Vec<PathUri>,
++    /// Runtime environment configuration is resolved by the environment owner.
++    ///
++    /// Rollout checkpoints retain the selected environment and roots but must not persist shell
++    /// environment policy values or transient pending and failure states.
++    #[serde(skip, default)]
++    #[schemars(skip)]
++    #[ts(skip)]
+     pub config: EnvironmentConfigState,
+ }
+
+@@ -4616,6 +4623,24 @@ mod tests {
+     use tempfile::NamedTempFile;
+     use tempfile::TempDir;
+
++    #[test]
++    fn turn_environment_selection_does_not_persist_runtime_config() -> Result<()> {
++        let cwd = test_path_buf("/workspace").abs();
++        let selection = TurnEnvironmentSelection {
++            environment_id: "remote".to_string(),
++            cwd: PathUri::from_abs_path(&cwd),
++            workspace_roots: vec![PathUri::from_abs_path(&cwd)],
++            config: EnvironmentConfigState::Pending,
++        };
++
++        let value = serde_json::to_value(&selection)?;
++        assert_eq!(value.get("config"), None);
++
++        let decoded: TurnEnvironmentSelection = serde_json::from_value(value)?;
++        assert_eq!(decoded.config, EnvironmentConfigState::FromThread);
++        Ok(())
++    }
++
+     #[test]
+     fn review_decision_denied_round_trip() -> Result<()> {
+         let decision = ReviewDecision::Denied {
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index 3217222e132ed28593383ef4057946ef75393c4e..1ff3689c13cf569f5c4499f39bfc6abd3beae39a 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -1082,12 +1082,12 @@ async fn select_thread_candidates(
+                 continue;
+             }
+         }
+-        selected.push(
+-            candidates
+-                .into_iter()
+-                .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
+-                .expect("duplicate group is nonempty"),
+-        );
++        if let Some(candidate) = candidates
++            .into_iter()
++            .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
++        {
++            selected.push(candidate);
++        }
+     }
+     Ok(selected)
+ }
+diff --git a/codex-rs/rollout/src/metadata_tests.rs b/codex-rs/rollout/src/metadata_tests.rs
+index 55947e7a247d6944065e3f022df73cce298f58e8..f02b9777311d0591fd28ca85c4e2078ca79a137f 100644
+--- a/codex-rs/rollout/src/metadata_tests.rs
++++ b/codex-rs/rollout/src/metadata_tests.rs
+@@ -130,6 +130,51 @@ fn canonical_path_parsing_distinguishes_stable_and_physical_ids() {
+     );
+ }
+
++#[test]
++fn physical_history_filename_sorts_before_active_rollout() {
++    let thread_id =
++        ThreadId::from_string("019ff1a2-b3c4-7d5e-8f60-112233445566").expect("thread id");
++    let rollout_id =
++        ThreadId::from_string("019ff1a2-b3c4-7d5e-8f60-667788990011").expect("rollout id");
++    let active = PathBuf::from(format!("rollout-2026-08-11T18-42-07-{thread_id}.jsonl"));
++    let history = history_rollout_path_with_rollout_id(active.as_path(), rollout_id)
++        .expect("physical history path");
++    let expected = format!("rollout-2026-08-11T18-42-06-{thread_id}_{rollout_id}.jsonl");
++
++    assert_eq!(
++        history.file_name().and_then(|name| name.to_str()),
++        Some(expected.as_str())
++    );
++    assert_eq!(thread_id_from_path(history.as_path()), Some(thread_id));
++    assert_eq!(rollout_id_from_path(history.as_path()), Some(rollout_id));
++}
++
++#[tokio::test]
++async fn session_backfill_excludes_native_history_segments() {
++    let home = tempdir().expect("tempdir");
++    let sessions = home.path().join(SESSIONS_SUBDIR);
++    let thread_id = ThreadId::new();
++    let rollout_id = ThreadId::new();
++    let active = sessions.join(format!(
++        "2026/08/11/rollout-2026-08-11T18-42-07-{thread_id}.jsonl"
++    ));
++    let history = sessions.join(ROLLOUT_SEGMENTS_SUBDIR).join(format!(
++        "2026/08/11/rollout-2026-08-11T18-42-06-{thread_id}_{rollout_id}.jsonl"
++    ));
++    std::fs::create_dir_all(active.parent().expect("active parent")).expect("create active parent");
++    std::fs::create_dir_all(history.parent().expect("history parent"))
++        .expect("create history parent");
++    std::fs::write(active.as_path(), b"active\n").expect("write active rollout");
++    std::fs::write(history.as_path(), b"history\n").expect("write history rollout");
++
++    assert_eq!(
++        collect_rollout_paths(sessions.as_path())
++            .await
++            .expect("collect session rollouts"),
++        vec![active]
++    );
++}
++
+ #[tokio::test]
+ async fn extract_metadata_from_rollout_uses_session_meta() {
+     let dir = tempdir().expect("tempdir");
+@@ -306,6 +351,132 @@ async fn extract_metadata_from_rollout_returns_latest_memory_mode() {
+     assert_eq!(outcome.memory_mode.as_deref(), Some("polluted"));
+ }
+
++#[tokio::test]
++async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
++    let dir = tempdir().expect("tempdir");
++    let uuid = Uuid::new_v4();
++    let id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
++    let path = dir
++        .path()
++        .join(format!("rollout-2026-01-27T12-34-56-{uuid}.jsonl"));
++    let session_meta = SessionMetaLine {
++        meta: SessionMeta {
++            session_id: id.into(),
++            id,
++            timestamp: "2026-01-27T12:34:56Z".to_string(),
++            cwd: dir.path().to_path_buf(),
++            originator: "cli".to_string(),
++            cli_version: "0.0.0".to_string(),
++            model_provider: Some("openai".to_string()),
++            history_mode: ThreadHistoryMode::Paginated,
++            ..SessionMeta::default()
++        },
++        git: None,
++    };
++    let mut file = File::create(&path).expect("create rollout");
++    let mut ordinal = 0_u64;
++    for item in std::iter::once(RolloutItem::SessionMeta(session_meta)).chain((0..32).map(|_| {
++        RolloutItem::Compacted(CompactedItem {
++            message: "x".repeat(256 * 1024),
++            replacement_history: None,
++            mcp_resource_origins: None,
++            window_number: None,
++            first_window_id: None,
++            previous_window_id: None,
++            window_id: None,
++            segment_state_checkpoint: None,
++        })
++    })) {
++        let line = RolloutLine {
++            timestamp: "2026-01-27T12:34:56Z".to_string(),
++            ordinal: Some(ordinal),
++            item,
++        };
++        ordinal += 1;
++        writeln!(
++            file,
++            "{}",
++            serde_json::to_string(&line).expect("serialize rollout line")
++        )
++        .expect("write rollout line");
++    }
++    file.flush().expect("flush rollout");
++    let compressed = path.with_extension("jsonl.zst");
++    let mut source = File::open(&path).expect("open rollout");
++    let mut target = File::create(&compressed).expect("create compressed rollout");
++    zstd::stream::copy_encode(&mut source, &mut target, 3).expect("compress rollout");
++    target.flush().expect("flush compressed rollout");
++
++    for rollout_path in [&path, &compressed] {
++        let outcome = extract_metadata_from_rollout(rollout_path, "openai")
++            .await
++            .expect("extract streamed metadata");
++        assert_eq!(outcome.metadata.id, id);
++        assert_eq!(outcome.metadata.history_mode, ThreadHistoryMode::Paginated);
++        assert_eq!(outcome.metadata.model_provider, "openai");
++        assert_eq!(outcome.metadata.rollout_path, *rollout_path);
++        assert_eq!(outcome.parse_errors, 0);
++    }
++}
++
++#[tokio::test]
++async fn extract_metadata_replays_items_before_a_late_session_meta() {
++    let dir = tempdir().expect("tempdir");
++    let filename_uuid = Uuid::new_v4();
++    let session_uuid = Uuid::new_v4();
++    let id = ThreadId::from_string(&session_uuid.to_string()).expect("thread id");
++    let path = dir
++        .path()
++        .join(format!("rollout-2026-01-27T12-34-56-{filename_uuid}.jsonl"));
++    let lines = [
++        RolloutLine {
++            timestamp: "2026-01-27T12:34:55Z".to_string(),
++            ordinal: Some(0),
++            item: RolloutItem::Compacted(CompactedItem {
++                message: "prefix".to_string(),
++                replacement_history: None,
++                mcp_resource_origins: None,
++                window_number: None,
++                first_window_id: None,
++                previous_window_id: None,
++                window_id: None,
++                segment_state_checkpoint: None,
++            }),
++        },
++        RolloutLine {
++            timestamp: "2026-01-27T12:34:56Z".to_string(),
++            ordinal: Some(1),
++            item: RolloutItem::SessionMeta(SessionMetaLine {
++                meta: SessionMeta {
++                    session_id: id.into(),
++                    id,
++                    timestamp: "2026-01-27T12:34:56Z".to_string(),
++                    cwd: dir.path().to_path_buf(),
++                    originator: "cli".to_string(),
++                    cli_version: "0.0.0".to_string(),
++                    model_provider: Some("openai".to_string()),
++                    ..SessionMeta::default()
++                },
++                git: None,
++            }),
++        },
++    ];
++    let mut file = File::create(&path).expect("create rollout");
++    for line in lines {
++        writeln!(
++            file,
++            "{}",
++            serde_json::to_string(&line).expect("serialize rollout line")
++        )
++        .expect("write rollout line");
++    }
++
++    let outcome = extract_metadata_from_rollout(&path, "openai")
++        .await
++        .expect("extract metadata");
++    assert_eq!(outcome.metadata.id, id);
++}
++
+ #[test]
+ fn builder_from_items_falls_back_to_filename() {
+     let dir = tempdir().expect("tempdir");
+diff --git a/codex-rs/rollout/src/ordinal.rs b/codex-rs/rollout/src/ordinal.rs
+index b3c8f1472190c2c28cd3ce4a0abd591391b80f9e..da01248936152645f8b78add4fafbef09ed8191f 100644
+--- a/codex-rs/rollout/src/ordinal.rs
++++ b/codex-rs/rollout/src/ordinal.rs
+@@ -6,7 +6,6 @@ use std::io::Seek;
+ use std::io::SeekFrom;
+ use std::path::Path;
+
+-use codex_protocol::protocol::HistoryPosition;
+ use codex_protocol::protocol::ThreadHistoryMode;
+
+ use crate::RolloutItem;
+@@ -21,16 +20,6 @@ pub(crate) enum RolloutOrdinalState {
+ }
+
+ impl RolloutOrdinalState {
+-    pub(crate) fn for_new_rollout(
+-        history_mode: ThreadHistoryMode,
+-        history_base: Option<HistoryPosition>,
+-    ) -> Self {
+-        Self::for_new_rollout_at(
+-            history_mode,
+-            history_base.map_or(0, |base| base.end_ordinal_exclusive),
+-        )
+-    }
+-
+     pub(crate) fn for_new_rollout_at(
+         history_mode: ThreadHistoryMode,
+         initial_rollout_ordinal: u64,
+diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
+index 37509c54b04ab16b27c1dcd25808ba3bcd649e21..55c5fff7e6aa1d3f28f5d563cf9948aab80bbbe0 100644
+--- a/codex-rs/rollout/src/reference.rs
++++ b/codex-rs/rollout/src/reference.rs
+@@ -19,7 +19,6 @@ use codex_protocol::SegmentId;
+ use codex_protocol::ThreadId;
+ use codex_protocol::models::ContentItem;
+ use codex_protocol::models::ResponseItem;
+-use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::RolloutReferenceItem;
+ use codex_protocol::protocol::SessionMetaLine;
+diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
+index 72dceca69b146353f1b7b87aadd4618ff14875ec..854d0a6abe4d73ac64aaa88d243677ea2bc976c1 100644
+--- a/codex-rs/rollout/src/reference_tests.rs
++++ b/codex-rs/rollout/src/reference_tests.rs
+@@ -179,6 +179,7 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
+             approvals_reviewer: None,
+             sandbox_policy: SandboxPolicy::new_read_only_policy(),
+             permission_profile: None,
++            active_permission_profile: None,
+             network: None,
+             file_system_sandbox_policy: None,
+             model: "test-model".to_string(),
+@@ -203,6 +204,7 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
+         item: RolloutItem::Compacted(CompactedItem {
+             message: message.to_string(),
+             replacement_history: Some(Vec::new()),
++            mcp_resource_origins: None,
+             window_number: Some(1),
+             first_window_id: None,
+             previous_window_id: None,
+@@ -217,6 +219,7 @@ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
+     let compacted = CompactedItem {
+         message: message.to_string(),
+         replacement_history: Some(Vec::new()),
++        mcp_resource_origins: None,
+         window_number: Some(1),
+         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
+         previous_window_id: None,
+diff --git a/codex-rs/rollout/src/segment_checkpoint_tests.rs b/codex-rs/rollout/src/segment_checkpoint_tests.rs
+index 119be3c46c545ce5c5df5df33e733f5a8df8e028..d0ff99078355decc65e68f98cc61a33c14e18e57 100644
+--- a/codex-rs/rollout/src/segment_checkpoint_tests.rs
++++ b/codex-rs/rollout/src/segment_checkpoint_tests.rs
+@@ -38,6 +38,7 @@ fn compacted() -> CompactedItem {
+             phase: None,
+             internal_chat_message_metadata_passthrough: None,
+         })]),
++        mcp_resource_origins: None,
+         window_number: Some(3),
+         first_window_id: Some("019b3f6e-0000-7000-8000-000000000001".to_string()),
+         previous_window_id: Some("019b3f6e-0000-7000-8000-000000000002".to_string()),
+diff --git a/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
+index ba21f4cd176b5bb6956f00a53e9e70b924cb3597..af1b45cefab963dcbed25c24ff20b3f1b654f991 100644
+--- a/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
++++ b/codex-rs/thread-store/src/local/goal_supervisor_history_repair.rs
+@@ -128,6 +128,7 @@ pub(super) fn repair_legacy_goal_supervisor_lines(
+
+ /// Repairs exact legacy damage when this rollout or same-thread rotation ancestry proves that the
+ /// affected Frodex build wrote the lineage.
++#[cfg(test)]
+ pub(super) fn repair_legacy_goal_supervisor_lines_with_provenance(
+     lines: &mut [RolloutLine],
+     inherited_provenance: GoalSupervisorLineageProvenance,
+@@ -140,6 +141,7 @@ pub(super) fn repair_legacy_goal_supervisor_lines_with_provenance(
+ /// A bounded history reader can use this API after materialization identifies the records it will
+ /// consume. Target-shaped records outside that set are not classified, so excluded encrypted
+ /// content cannot be changed or reject the bounded read.
++#[cfg(test)]
+ pub(super) fn repair_legacy_goal_supervisor_lines_selected_with_provenance(
+     lines: &mut [RolloutLine],
+     inherited_provenance: GoalSupervisorLineageProvenance,
+@@ -207,6 +209,7 @@ fn repair_selected_legacy_goal_supervisor_lines_with_provenance(
+ /// Unchanged physical lines are copied byte-for-byte. Changed records are serialized from the
+ /// structured protocol type and padded with trailing JSON whitespace before their newline. The
+ /// fixed physical spans preserve paginated history cutoffs and SQLite byte offsets.
++#[cfg(test)]
+ pub(super) fn rewrite_legacy_goal_supervisor_jsonl_same_length(
+     source: &[u8],
+ ) -> ThreadStoreResult<Option<Vec<u8>>> {
+diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
+index e9452a9b70d4b5451dfc929b36b63160845ec5c5..c5d6e8218beb1b6e48c9d2bf51ca330e075a05f6 100644
+--- a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
++++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
+@@ -137,17 +137,17 @@ impl GoalSupervisorHistoryAccess {
+                     "goal-supervisor publication is missing maintenance ownership for thread {thread_id}"
+                 ),
+             })?;
+-        if !self
++        let Some(lifecycle) = self
+             .lifecycle
+             .iter()
+-            .any(|lease| lease.thread_id() == thread_id)
+-        {
++            .find(|lease| lease.thread_id() == thread_id)
++        else {
+             return Err(ThreadStoreError::Internal {
+                 message: format!(
+                     "goal-supervisor publication is missing lifecycle ownership for thread {thread_id}"
+                 ),
+             });
+-        }
++        };
+         let reservation = self
+             .reservation
+             .as_ref()
+@@ -157,11 +157,6 @@ impl GoalSupervisorHistoryAccess {
+                     "goal-supervisor publication is missing writer ownership for thread {thread_id}"
+                 ),
+             })?;
+-        let lifecycle = self
+-            .lifecycle
+-            .iter()
+-            .find(|lease| lease.thread_id() == thread_id)
+-            .expect("lifecycle ownership checked above");
+         authorize_history_repair_writer(store, thread_id, maintenance, lifecycle, reservation).await
+     }
+ }
+@@ -481,7 +476,7 @@ async fn discover_scope(
+     let mut lineage_thread_ids = lineage
+         .segments()
+         .iter()
+-        .map(|segment| segment.thread_id())
++        .map(super::rollout_lineage::RolloutLineageSegment::thread_id)
+         .collect::<Vec<_>>();
+     lineage_thread_ids.push(thread_id);
+     lineage_thread_ids.sort_unstable_by_key(ThreadId::to_string);
+@@ -507,9 +502,7 @@ async fn discover_scope(
+             .await?,
+         );
+     }
+-    if roots.is_empty() {
+-        roots.push(root);
+-    } else if !roots.iter().any(|candidate| candidate.path == root.path) {
++    if roots.is_empty() || !roots.iter().any(|candidate| candidate.path == root.path) {
+         roots.push(root);
+     }
+     // Fork preparation has always reserved every stable thread identity in the consumed lineage,
+@@ -633,6 +626,10 @@ async fn scan_reference(
+         selected_candidate_ids: HashSet<String>,
+     }
+
++    #[expect(
++        clippy::too_many_arguments,
++        reason = "the iterative lineage scan carries each bounded traversal constraint explicitly"
++    )]
+     async fn load_scan_frame(
+         store: &LocalThreadStore,
+         reference: RolloutReferenceItem,
+@@ -1014,7 +1011,7 @@ fn canonical_home_key(store: &LocalThreadStore) -> ThreadStoreResult<PathBuf> {
+ fn quarantined_thread(home: &Path, thread_id: ThreadId) -> bool {
+     INDETERMINATE_HISTORY_REPAIRS
+         .lock()
+-        .expect("history repair quarantine mutex")
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .get(home)
+         .is_some_and(|threads| threads.contains(&thread_id))
+ }
+@@ -1022,7 +1019,7 @@ fn quarantined_thread(home: &Path, thread_id: ThreadId) -> bool {
+ fn reject_quarantined_scope(home: &Path, thread_ids: &[ThreadId]) -> ThreadStoreResult<()> {
+     let quarantined = INDETERMINATE_HISTORY_REPAIRS
+         .lock()
+-        .expect("history repair quarantine mutex");
++        .unwrap_or_else(std::sync::PoisonError::into_inner);
+     if let Some(thread_id) = quarantined
+         .get(home)
+         .and_then(|threads| thread_ids.iter().find(|id| threads.contains(id)))
+@@ -1035,7 +1032,7 @@ fn reject_quarantined_scope(home: &Path, thread_ids: &[ThreadId]) -> ThreadStore
+ fn quarantine_threads(home: &Path, thread_ids: impl IntoIterator<Item = ThreadId>) {
+     INDETERMINATE_HISTORY_REPAIRS
+         .lock()
+-        .expect("history repair quarantine mutex")
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .entry(home.to_path_buf())
+         .or_default()
+         .extend(thread_ids);
+@@ -1326,6 +1323,10 @@ async fn repair_reference(
+     }
+ }
+
++#[expect(
++    clippy::too_many_arguments,
++    reason = "the iterative repair traversal carries each bounded lineage constraint explicitly"
++)]
+ async fn load_frame(
+     store: &LocalThreadStore,
+     reference: RolloutReferenceItem,
+diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
+index 02c589a5dfdc12e8a10c8e89634504efacd82791..9d1e7ab66eff111d1707b242119af91ed7746592 100644
+--- a/codex-rs/thread-store/src/local/live_writer.rs
++++ b/codex-rs/thread-store/src/local/live_writer.rs
+@@ -224,15 +224,22 @@ pub(super) async fn resume_thread(
+         };
+     let rollout_id = match codex_rollout::rollout_id_from_path(rollout_path.as_path()) {
+         Some(rollout_id) => rollout_id,
+-        None => super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
+-            rollout_path.as_path(),
+-            params.thread_id,
+-            noncanonical_session_meta
++        None => {
++            let authenticated_thread_id = noncanonical_session_meta
+                 .as_ref()
+-                .expect("noncanonical rollout metadata is loaded")
+-                .meta
+-                .id,
+-        )?,
++                .map(|metadata| metadata.meta.id)
++                .ok_or_else(|| ThreadStoreError::Internal {
++                    message: format!(
++                        "noncanonical rollout metadata is missing for {}",
++                        rollout_path.display()
++                    ),
++                })?;
++            super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
++                rollout_path.as_path(),
++                params.thread_id,
++                authenticated_thread_id,
++            )?
++        }
+     };
+     let segmented_legacy_projection_complete = if segmented_rollout {
+         Some(if store.state_db().await.is_none() {
+diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
+index bfb1aac8ca99a3cc08e9fc2c920ebd0ab50ec052..fce515fbdf402eeb67359050c3050dabf7a76fa8 100644
+--- a/codex-rs/thread-store/src/local/mod.rs
++++ b/codex-rs/thread-store/src/local/mod.rs
+@@ -101,8 +101,8 @@ use crate::StoredThread;
+ use crate::StoredThreadHistory;
+ use crate::StoredThreadSection;
+ use crate::StoredThreadSectionsPage;
+-use crate::ThreadMetadataPatch;
+ use crate::StoredTurnItemsView;
++use crate::ThreadMetadataPatch;
+ use crate::ThreadOccurrenceSearchPage;
+ use crate::ThreadPage;
+ use crate::ThreadPersistenceMode;
+diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
+index eae0321100bdf29c3fee7527ba2f6e1edecb8f3f..b6c9a5d2af47dc518641e5b1a8fb300535cb27d8 100644
+--- a/codex-rs/thread-store/src/local/model_context_tests.rs
++++ b/codex-rs/thread-store/src/local/model_context_tests.rs
+@@ -1431,6 +1431,7 @@ fn compacted_without_window(
+         message: message.to_string(),
+         replacement_history: replacement_history
+             .map(|items| items.into_iter().map(Into::into).collect()),
++        mcp_resource_origins: None,
+         window_number: None,
+         first_window_id: None,
+         previous_window_id: None,
+@@ -1458,6 +1459,7 @@ fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoin
+                 }
+                 .into(),
+             ]),
++            mcp_resource_origins: None,
+             window_number: Some(4),
+             first_window_id: Some(window_id.to_string()),
+             previous_window_id: None,
+diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
+index dbf3f6cd7df570b908d93bc8fd9c56f0dd43985a..c2d8cba80620afff7d62a3d73a4d3dca8a2c6641 100644
+--- a/codex-rs/thread-store/src/local/paginated_fork.rs
++++ b/codex-rs/thread-store/src/local/paginated_fork.rs
+@@ -50,7 +50,7 @@ struct ForkHistoryReservation {
+ }
+
+ enum IndexedForkAttempt {
+-    Prepared(PreparedFork),
++    Prepared(Box<PreparedFork>),
+     Fallback(ForkHistoryReservation),
+ }
+
+@@ -259,7 +259,7 @@ async fn prepare_with_response_history(
+             message: format!("failed to prepare indexed fork: {error}"),
+         })??;
+         match attempt {
+-            IndexedForkAttempt::Prepared(prepared) => return Ok(prepared),
++            IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
+             IndexedForkAttempt::Fallback(reservation) => {
+                 drop(reservation);
+             }
+@@ -532,20 +532,23 @@ async fn prepare_with_response_history(
+         None
+     };
+     let (response_history, projected_response_turns) = match response_history {
+-        ForkResponseHistory::Full if copied_history.is_some() => (
+-            Arc::clone(copied_history.as_ref().expect("copied history is present")),
+-            None,
+-        ),
+-        ForkResponseHistory::Full if indexed_root_latest => (
+-            Arc::clone(&model_context),
+-            Some(Arc::new(
+-                load_projected_response_turns(store, thread_id).await?,
+-            )),
+-        ),
+-        ForkResponseHistory::Full => (
+-            Arc::new(model_context::load_full_for_fork(lineage, history_base).await?),
+-            None,
+-        ),
++        ForkResponseHistory::Full => {
++            if let Some(copied_history) = copied_history.as_ref() {
++                (Arc::clone(copied_history), None)
++            } else if indexed_root_latest {
++                (
++                    Arc::clone(&model_context),
++                    Some(Arc::new(
++                        load_projected_response_turns(store, thread_id).await?,
++                    )),
++                )
++            } else {
++                (
++                    Arc::new(model_context::load_full_for_fork(lineage, history_base).await?),
++                    None,
++                )
++            }
++        }
+         ForkResponseHistory::ModelContext => (Arc::clone(&model_context), None),
+     };
+     let mut prepared = PreparedFork::new(
+@@ -969,7 +972,7 @@ async fn try_prepare_indexed_latest_fork(
+     );
+     prepared.projected_response_turns = projected_response_turns;
+     prepared.shared_model_response_items = shared_model_response_items;
+-    Ok(IndexedForkAttempt::Prepared(prepared))
++    Ok(IndexedForkAttempt::Prepared(Box::new(prepared)))
+ }
+
+ fn canonical_same_thread_reference(
+diff --git a/codex-rs/thread-store/src/local/pending_thread_metadata_tests.rs b/codex-rs/thread-store/src/local/pending_thread_metadata_tests.rs
+index 6811a0b3af495d6a3f628c50ad4a1bdda4f969eb..d287121ad1c260555bccfc5c5fef53d0ddc9734f 100644
+--- a/codex-rs/thread-store/src/local/pending_thread_metadata_tests.rs
++++ b/codex-rs/thread-store/src/local/pending_thread_metadata_tests.rs
+@@ -276,6 +276,8 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
+         history_mode: ThreadHistoryMode::Legacy,
+         history_base: None,
+         subagent_history_start_ordinal: None,
++        persistence_mode: Default::default(),
++        initial_rollout_ordinal: 0,
+         initial_window_id: uuid::Uuid::now_v7().to_string(),
+         metadata: ThreadPersistenceMetadata {
+             cwd: Some(std::env::current_dir().expect("cwd")),
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index e9ac451716e255f727f576aac7833378b395d10e..eb3c75330bfd497db5b59d8b290fa6f83ae15867 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -559,6 +559,10 @@ struct PendingLineageSegment {
+     reference: Option<PendingLineageReference>,
+ }
+
++#[expect(
++    clippy::too_many_arguments,
++    reason = "the iterative lineage traversal carries each bounded resolution constraint explicitly"
++)]
+ async fn resolve_path(
+     store: &LocalThreadStore,
+     expected_thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
+index d72ea6ff4aa33396b3f7b0160fd2719532b14bae..17ae47402cd826472e6b192a43218f79878a9467 100644
+--- a/codex-rs/thread-store/src/local/segment.rs
++++ b/codex-rs/thread-store/src/local/segment.rs
+@@ -46,8 +46,8 @@ use crate::ThreadPersistenceMode;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+
+-pub(super) mod history_repair_publication;
+ pub(crate) mod confined_publication;
++pub(super) mod history_repair_publication;
+
+ #[cfg(test)]
+ static SEGMENT_REOPEN_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
+diff --git a/codex-rs/thread-store/src/local/segment/confined_publication.rs b/codex-rs/thread-store/src/local/segment/confined_publication.rs
+index 460bb8d9390025be04eab99b66b781bd769bc772..dd10f6af633a8754b3a2b4c3a1eb460f25263d29 100644
+--- a/codex-rs/thread-store/src/local/segment/confined_publication.rs
++++ b/codex-rs/thread-store/src/local/segment/confined_publication.rs
+@@ -25,12 +25,12 @@ use sha2::Sha256;
+
+ static TEMPORARY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+ #[cfg(test)]
+-pub(crate) static CRASH_TEST_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+-    std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
++pub(crate) static CRASH_TEST_LOCK: std::sync::LazyLock<std::sync::Arc<tokio::sync::Mutex<()>>> =
++    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Mutex::new(())));
+
+ #[cfg(test)]
+-pub(crate) async fn crash_test_guard() -> tokio::sync::MutexGuard<'static, ()> {
+-    CRASH_TEST_LOCK.lock().await
++pub(crate) async fn crash_test_guard() -> tokio::sync::OwnedMutexGuard<()> {
++    std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await
+ }
+ #[cfg(test)]
+ static CRASH_BOUNDARIES: std::sync::LazyLock<
+@@ -153,6 +153,7 @@ impl FileIdentity {
+ }
+
+ /// Reads one confined regular file and fingerprints the opened file descriptor.
++#[cfg(test)]
+ pub(crate) async fn read_confined_file(
+     codex_home: &Path,
+     path: &Path,
+@@ -225,6 +226,7 @@ pub(crate) async fn ensure_confined_directory_under_root(
+ ///
+ /// `replacement` is synchronized before rename. The installed descriptor and destination parent
+ /// are synchronized before success is returned.
++#[cfg(test)]
+ pub(crate) async fn replace_confined_file(
+     codex_home: &Path,
+     destination: &Path,
+@@ -279,6 +281,7 @@ pub(crate) async fn replace_confined_file_under_root(
+ ///
+ /// An existing file is reused only when its bytes and metadata already match. Different existing
+ /// bytes fail with `AlreadyExists`.
++#[cfg(test)]
+ pub(crate) async fn install_confined_file(
+     codex_home: &Path,
+     destination: &Path,
+@@ -415,7 +418,12 @@ mod platform {
+                     std::process::id(),
+                     thread_token()
+                 ))
+-                .expect("temporary rollout name has no NUL");
++                .map_err(|_| {
++                    io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "temporary rollout name contains NUL",
++                    )
++                })?;
+                 match openat_file(
+                     &self.parent,
+                     &name,
+@@ -773,6 +781,7 @@ fn ensure_confined_directory_sync_under_root(
+ }
+
+ #[cfg(unix)]
++#[cfg(test)]
+ fn read_confined_file_sync(
+     codex_home: &Path,
+     path: &Path,
+@@ -807,6 +816,7 @@ fn confined_entry_exists_sync_under_root(
+ }
+
+ #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
++#[cfg(test)]
+ fn replace_confined_file_sync(
+     codex_home: &Path,
+     destination: &Path,
+@@ -934,6 +944,7 @@ fn ensure_confined_directory_sync(
+ }
+
+ #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
++#[cfg(test)]
+ fn install_confined_file_sync(
+     codex_home: &Path,
+     destination: &Path,
+diff --git a/codex-rs/thread-store/src/local/segment/confined_publication_tests.rs b/codex-rs/thread-store/src/local/segment/confined_publication_tests.rs
+index 262e4b7ccc1192f7c61c24c2ee3f71ff4c81fd0d..c71748d3f32d416605f14f39c9412a83bfe31bf9 100644
+--- a/codex-rs/thread-store/src/local/segment/confined_publication_tests.rs
++++ b/codex-rs/thread-store/src/local/segment/confined_publication_tests.rs
+@@ -5,8 +5,8 @@ use tempfile::TempDir;
+
+ use super::*;
+
+-async fn reset_crash_injection() -> tokio::sync::MutexGuard<'static, ()> {
+-    let guard = CRASH_TEST_LOCK.lock().await;
++async fn reset_crash_injection() -> tokio::sync::OwnedMutexGuard<()> {
++    let guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
+     CRASH_BOUNDARIES
+         .lock()
+         .expect("confined crash boundary mutex")
+@@ -156,7 +156,7 @@ async fn immutable_install_never_replaces_different_bytes_and_reuses_equal_bytes
+             path.as_path(),
+             b"bytes",
+             permissions.clone(),
+-            None,
++            /*modified*/ None,
+         )
+         .await
+         .expect("install"),
+@@ -168,15 +168,21 @@ async fn immutable_install_never_replaces_different_bytes_and_reuses_equal_bytes
+             path.as_path(),
+             b"bytes",
+             permissions.clone(),
+-            None,
++            /*modified*/ None,
+         )
+         .await
+         .expect("reuse"),
+         ConfinedInstallOutcome::Reused
+     );
+-    let error = install_confined_file(home.path(), path.as_path(), b"other", permissions, None)
+-        .await
+-        .expect_err("different existing bytes");
++    let error = install_confined_file(
++        home.path(),
++        path.as_path(),
++        b"other",
++        permissions,
++        /*modified*/ None,
++    )
++    .await
++    .expect_err("different existing bytes");
+     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+     assert_eq!(tokio::fs::read(path).await.expect("bytes"), b"bytes");
+ }
+@@ -203,7 +209,7 @@ async fn immutable_reuse_does_not_mutate_a_hard_link_target() {
+         destination.as_path(),
+         b"bytes",
+         Permissions::from_mode(0o640),
+-        None,
++        /*modified*/ None,
+     )
+     .await
+     .expect("reuse equal hard-linked bytes without mutation");
+@@ -249,7 +255,8 @@ async fn read_removes_a_crash_left_staged_entry_before_returning() {
+     tokio::fs::write(path.as_path(), b"source")
+         .await
+         .expect("write source");
+-    let confined = ConfinedParent::open(home.path(), path.as_path(), None).expect("open parent");
++    let confined = ConfinedParent::open(home.path(), path.as_path(), /*expected_root*/ None)
++        .expect("open parent");
+     let staged = confined
+         .create_stale_staged_for_test(b"stale repair")
+         .expect("stage repair");
+@@ -279,8 +286,18 @@ async fn staged_cleanup_is_scoped_to_one_destination() {
+     tokio::fs::write(second_path.as_path(), b"second")
+         .await
+         .unwrap();
+-    let first = ConfinedParent::open(home.path(), first_path.as_path(), None).unwrap();
+-    let second = ConfinedParent::open(home.path(), second_path.as_path(), None).unwrap();
++    let first = ConfinedParent::open(
++        home.path(),
++        first_path.as_path(),
++        /*expected_root*/ None,
++    )
++    .unwrap();
++    let second = ConfinedParent::open(
++        home.path(),
++        second_path.as_path(),
++        /*expected_root*/ None,
++    )
++    .unwrap();
+     let first_staged = first.create_stale_staged_for_test(b"first repair").unwrap();
+     let second_staged = second
+         .create_stale_staged_for_test(b"second repair")
+diff --git a/codex-rs/thread-store/src/local/segment/history_repair_publication.rs b/codex-rs/thread-store/src/local/segment/history_repair_publication.rs
+index 037564bd566166178537e9a54ea3b69ae483f8fa..f9e79c82a15ebc9a961a59dbcc8f510807d93831 100644
+--- a/codex-rs/thread-store/src/local/segment/history_repair_publication.rs
++++ b/codex-rs/thread-store/src/local/segment/history_repair_publication.rs
+@@ -303,7 +303,7 @@ impl ConfinedRepairAuthority {
+         #[cfg(all(test, unix))]
+         if let Some(target) = CODEX_HOME_RETARGETS
+             .lock()
+-            .expect("CODEX_HOME retarget mutex")
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
+             .remove(codex_home)
+         {
+             use std::os::unix::fs::symlink;
+@@ -356,7 +356,7 @@ pub(crate) fn clear_history_repair_segment_id(
+     bytes: &[u8],
+     segment_id: SegmentId,
+ ) -> ThreadStoreResult<Vec<u8>> {
+-    rewrite_physical_segment_id(bytes, segment_id, None)
++    rewrite_physical_segment_id(bytes, segment_id, /*replacement_segment_id*/ None)
+ }
+
+ /// Replaces the fixed-width persisted segment identity without changing any other byte.
+@@ -495,7 +495,7 @@ async fn install_history_repair_segment_bytes(
+         destination.as_path(),
+         bytes,
+         permissions,
+-        None,
++        /*modified*/ None,
+         &authority.root_identity,
+     )
+     .await;
+@@ -1394,7 +1394,11 @@ fn clear_physical_segment_id(
+     session_record: &[u8],
+     segment_id: SegmentId,
+ ) -> ThreadStoreResult<Vec<u8>> {
+-    rewrite_physical_segment_id_record(session_record, segment_id, None)
++    rewrite_physical_segment_id_record(
++        session_record,
++        segment_id,
++        /*replacement_segment_id*/ None,
++    )
+ }
+
+ fn rewrite_physical_segment_id_record(
+diff --git a/codex-rs/thread-store/src/local/segment/history_repair_publication_tests.rs b/codex-rs/thread-store/src/local/segment/history_repair_publication_tests.rs
+index e7df5fcda674a1e6cf9e2c268bfdd423aeccb9f4..497d7be0b293f9d706068060f9bcd50d0e02f11d 100644
+--- a/codex-rs/thread-store/src/local/segment/history_repair_publication_tests.rs
++++ b/codex-rs/thread-store/src/local/segment/history_repair_publication_tests.rs
+@@ -1011,7 +1011,7 @@ async fn publication_failure_is_old_before_commit_and_visible_unknown_after_comm
+
+ #[tokio::test]
+ async fn recovery_cleans_a_crash_left_stage_before_a_clean_runtime_return() {
+-    let _crash_guard = CRASH_TEST_LOCK.lock().await;
++    let _crash_guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
+     let home = TempDir::new().expect("temp home");
+     let path = home.path().join("rollout.jsonl");
+     let source = active_source(ThreadId::new(), "old");
+@@ -1047,7 +1047,7 @@ async fn recovery_cleans_a_crash_left_stage_before_a_clean_runtime_return() {
+ #[tokio::test]
+ async fn runtime_recovery_token_borrows_every_required_lock() {
+     let home = TempDir::new().expect("temp home");
+-    let store = LocalThreadStore::new(test_config(home.path()), None);
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+     let path = home.path().join("rollout.jsonl");
+     let source = active_source(ThreadId::new(), "clean");
+     let thread_id = thread_id_from_source(source.as_slice());
+@@ -1076,10 +1076,10 @@ async fn runtime_recovery_token_borrows_every_required_lock() {
+ #[tokio::test]
+ async fn runtime_recovery_accepts_clean_segmentless_rollout() {
+     let home = TempDir::new().expect("temp home");
+-    let store = LocalThreadStore::new(test_config(home.path()), None);
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+     let path = home.path().join("rollout.jsonl");
+     let thread_id = ThreadId::new();
+-    let source = source_with_segment(thread_id, None, b"");
++    let source = source_with_segment(thread_id, /*segment_id*/ None, b"");
+     tokio::fs::write(path.as_path(), source.as_slice())
+         .await
+         .expect("write clean segmentless source");
+@@ -1507,7 +1507,7 @@ async fn segmentless_source_fails_closed_without_touching_history_cache_or_creat
+     let home = TempDir::new().expect("temp home");
+     let path = home.path().join("rollout.jsonl");
+     let thread_id = ThreadId::new();
+-    let source = source_with_segment(thread_id, None, b"poison\n");
++    let source = source_with_segment(thread_id, /*segment_id*/ None, b"poison\n");
+     let replacement = replace_ascii(source.clone(), b"poison", b"repair");
+     tokio::fs::write(path.as_path(), source.as_slice())
+         .await
+@@ -1713,7 +1713,7 @@ async fn active_publication_binds_one_symlinked_codex_home_target() {
+     .expect("install source backup");
+     CODEX_HOME_RETARGETS
+         .lock()
+-        .expect("CODEX_HOME retarget mutex")
++        .unwrap_or_else(std::sync::PoisonError::into_inner)
+         .insert(linked_home.clone(), second.path().to_path_buf());
+
+     let publication = publish_history_repair_replacement(
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index c14f617152458740e6aa9f2e9533419445039c70..b96458b3f1dc5fdbf068a0e56133e5c2d6593d28 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -2120,6 +2120,7 @@ async fn segmented_legacy_index_preserves_implicit_compaction_only_turn() {
+     let compacted = RolloutItem::Compacted(CompactedItem {
+         message: String::new(),
+         replacement_history: None,
++        mcp_resource_origins: None,
+         window_number: None,
+         first_window_id: None,
+         previous_window_id: None,
+diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+index 5a31e664ad8909a52b30ff8392fa6dab4eea7ee8..235886787c4b5d8b77d13f5cd4da1a32108522f3 100644
+--- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
+@@ -2365,6 +2365,177 @@ async fn indexed_latest_fork_rebuilds_history_when_projection_disappears_before_
+     ));
+ }
+
++#[tokio::test]
++async fn ephemeral_latest_side_uses_certified_active_context_without_freezing_source() {
++    let home = TempDir::new().expect("temp dir");
++    let store = projection_store(home.path()).await;
++    let thread_id = ThreadId::default();
++    create_paginated_thread(&store, thread_id).await;
++    store
++        .persist_thread(thread_id, PersistContext::Standard)
++        .await
++        .expect("persist paginated source metadata");
++
++    let mut immutable_predecessors = Vec::new();
++    for index in 0..8 {
++        let turn_id = format!("turn-{index}");
++        let message = format!("bounded side message {index}");
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id,
++                items: vec![
++                    turn_started(turn_id.as_str()),
++                    user_message(message.as_str()),
++                    completed_item(
++                        thread_id,
++                        turn_id.as_str(),
++                        TurnItem::UserMessage(UserMessageItem {
++                            id: format!("item-{index}"),
++                            client_id: None,
++                            content: Vec::new(),
++                        }),
++                    ),
++                    turn_completed(turn_id.as_str()),
++                ],
++            })
++            .await
++            .expect("append source turn");
++        immutable_predecessors.push(
++            store
++                .freeze_thread_segment(
++                    thread_id,
++                    FreezeRolloutSegmentParams::rotate_checkpoint(certified_test_checkpoint(
++                        format!("checkpoint {index}").as_str(),
++                    )),
++                )
++                .await
++                .expect("rotate source segment")
++                .reference
++                .rollout_path,
++        );
++    }
++    index_paginated_source_metadata(&store, thread_id).await;
++    let projected = store
++        .projected_history_position(thread_id)
++        .await
++        .expect("read projected position")
++        .expect("projected position");
++    let pool = codex_state::open_thread_history_db(&codex_state::SqliteConfig::new_for_testing(
++        home.path().abs(),
++    ))
++    .await
++    .expect("open projected thread history");
++    for statement in [
++        "DELETE FROM thread_items WHERE thread_id = ?",
++        "DELETE FROM thread_turns WHERE thread_id = ?",
++        "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
++    ] {
++        sqlx::query(statement)
++            .bind(projected.thread_id.to_string())
++            .execute(&pool)
++            .await
++            .expect("remove projected source history");
++    }
++    for predecessor in immutable_predecessors
++        .iter()
++        .take(immutable_predecessors.len().saturating_sub(1))
++    {
++        fs::remove_file(predecessor).expect("remove obsolete immutable predecessor");
++    }
++
++    let prepared = store
++        .prepare_fork_without_response_history_for_rollout(
++            PrepareForkParams {
++                thread_id,
++                boundary: ForkBoundary::Latest,
++            },
++            projected.thread_id,
++            /*ephemeral_context_only*/ true,
++        )
++        .await
++        .expect("prepare bounded side without projection or old predecessors");
++
++    assert!(prepared.projected_response_turns.is_none());
++    assert!(prepared.model_context.iter().any(|item| {
++        matches!(
++            item,
++            RolloutItem::Compacted(compacted) if compacted.message == "checkpoint 7"
++        )
++    }));
++    assert!(
++        prepared.frozen_segment.is_none(),
++        "an ephemeral side must not snapshot or copy the source rollout"
++    );
++}
++
++fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
++    let window_id = uuid::Uuid::now_v7();
++    let cwd: AbsolutePathBuf =
++        serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd");
++    CertifiedSegmentStateCheckpoint::new(
++        CompactedItem {
++            message: message.to_string(),
++            replacement_history: Some(vec![
++                ResponseItem::Message {
++                    id: None,
++                    role: "developer".to_string(),
++                    content: vec![ContentItem::InputText {
++                        text: "bounded checkpoint history".to_string(),
++                    }],
++                    phase: None,
++                    internal_chat_message_metadata_passthrough: None,
++                }
++                .into(),
++            ]),
++            mcp_resource_origins: None,
++            window_number: Some(1),
++            first_window_id: Some(window_id.to_string()),
++            previous_window_id: None,
++            window_id: Some(window_id.to_string()),
++            segment_state_checkpoint: None,
++        },
++        Some(SegmentPreviousTurnSettings {
++            model: "test-model".to_string(),
++            comp_hash: None,
++            realtime_active: None,
++        }),
++        /*world_state*/ None,
++        /*reference_context*/ None,
++        ThreadSettingsAppliedEvent {
++            thread_settings: ThreadSettingsSnapshot {
++                model: "test-model".to_string(),
++                model_provider_id: "test-provider".to_string(),
++                service_tier: None,
++                approval_policy: AskForApproval::Never,
++                approvals_reviewer: ApprovalsReviewer::User,
++                permission_profile: PermissionProfile::workspace_write(),
++                active_permission_profile: None,
++                cwd: cwd.clone(),
++                environments: Some(TurnEnvironmentSelections::new(cwd, Vec::new())),
++                workspace_roots: Some(Vec::new()),
++                profile_workspace_roots: Some(Vec::new()),
++                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
++                reasoning_effort: None,
++                reasoning_summary: None,
++                personality: None,
++                collaboration_mode: CollaborationMode {
++                    mode: ModeKind::Default,
++                    settings: Settings {
++                        model: "test-model".to_string(),
++                        reasoning_effort: None,
++                        developer_instructions: None,
++                    },
++                },
++            },
++        },
++        TokenCountEvent {
++            info: None,
++            rate_limits: None,
++        },
++    )
++    .expect("valid certified checkpoint")
++}
++
+ #[tokio::test]
+ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
+     let home = TempDir::new().expect("temp dir");
+diff --git a/codex-rs/thread-store/src/local/update_thread_metadata.rs b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+index 8fc1eca35b98fffdcac2e6da581ad83a152b23ce..60d0e3c80c316f6ac6d134e212cf959c72705344 100644
+--- a/codex-rs/thread-store/src/local/update_thread_metadata.rs
++++ b/codex-rs/thread-store/src/local/update_thread_metadata.rs
+@@ -1520,7 +1520,8 @@ mod tests {
+                 include_archived: false,
+             })
+             .await
+-            .expect("set workspace metadata");
++            .expect("set workspace metadata")
++            .expect("workspace metadata update should return the thread");
+
+         assert_eq!(thread.cwd, worktree_cwd);
+         assert_eq!(
+diff --git a/codex-rs/thread-store/src/thread_metadata_sync.rs b/codex-rs/thread-store/src/thread_metadata_sync.rs
+index ed42eea24fc8d87f77cb90f0926d47852641bae9..45a2829256e5549a95c8c74986a95f5f92e1f2be 100644
+--- a/codex-rs/thread-store/src/thread_metadata_sync.rs
++++ b/codex-rs/thread-store/src/thread_metadata_sync.rs
+@@ -454,6 +454,8 @@ mod tests {
+             history_mode: ThreadHistoryMode::Legacy,
+             history_base: None,
+             subagent_history_start_ordinal: None,
++            persistence_mode: crate::ThreadPersistenceMode::Durable,
++            initial_rollout_ordinal: 0,
+             initial_window_id: uuid::Uuid::now_v7().to_string(),
+             metadata: ThreadPersistenceMetadata {
+                 cwd: None,
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 0e078729936a05d66b30bc9fb44b19d12bb76632..fea02c334457d4dacd56f8cd4797ebc3fb9cb7a4 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -239,8 +239,8 @@ mod resume_config;
+ mod safety_buffering;
+ mod session_lifecycle;
+ mod side;
+-mod startup;
+ mod standalone_side;
++mod startup;
+ mod startup_prompts;
+ mod thread_event_buffer;
+ mod thread_events;
+diff --git a/codex-rs/tui/src/app/standalone_side_tests.rs b/codex-rs/tui/src/app/standalone_side_tests.rs
+index fcd95e362091c07c358edce003a6feca3c4a479f..82e946b81f8661bd9d73f7a81cf51c2ca4235db4 100644
+--- a/codex-rs/tui/src/app/standalone_side_tests.rs
++++ b/codex-rs/tui/src/app/standalone_side_tests.rs
+@@ -116,6 +116,7 @@ async fn standalone_side_starts_real_fork_and_returns_blank_replay_inner(
+     let target = SessionTarget {
+         path: None,
+         thread_id: parent_thread_id,
++        history_mode: None,
+     };
+     let side = App::start_standalone_side(
+         &mut app_server,
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index f406e3e5de86147136a1605207388911324ec29e..d3221586c8a162276c21880f0912ff1b6b2dfa49 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -2030,6 +2030,7 @@ async fn relation_refresh_preserves_cold_ephemeral_agent_identity() -> Result<()
+             ephemeral: true,
+             section: None,
+             section_entered_at: None,
++            project_id: None,
+             history_mode: Default::default(),
+             model_provider: app.config.model_provider_id.clone(),
+             created_at: 0,
+@@ -5741,7 +5742,7 @@ async fn make_test_app_with_channels() -> (
+             thread_event_channels: HashMap::new(),
+             temporary_structured_requests: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
+-        pending_thread_approval_labels: HashMap::new(),
++            pending_thread_approval_labels: HashMap::new(),
+             agent_navigation: AgentNavigationState::default(),
+             agents_overview: Default::default(),
+             side_threads: HashMap::new(),
+diff --git a/codex-rs/tui/src/app/tests/startup.rs b/codex-rs/tui/src/app/tests/startup.rs
+index 432af6d86e77d7f1bf0307a0e83030b9151dc55c..eceb2abd7a9c6183a3b5f56075ce26236f8b65b8 100644
+--- a/codex-rs/tui/src/app/tests/startup.rs
++++ b/codex-rs/tui/src/app/tests/startup.rs
+@@ -167,6 +167,7 @@ fn startup_waiting_gate_is_only_for_fresh_or_exit_session_selection() {
+         &SessionSelection::Side(crate::resume_picker::SessionTarget {
+             path: Some(PathBuf::from("/tmp/side")),
+             thread_id: ThreadId::new(),
++            history_mode: None,
+         })
+     ));
+ }
+@@ -186,6 +187,7 @@ fn startup_paused_goal_prompt_gate_is_only_for_quiet_resume() {
+     let side = SessionSelection::Side(crate::resume_picker::SessionTarget {
+         path: Some(PathBuf::from("/tmp/side")),
+         thread_id: ThreadId::new(),
++        history_mode: None,
+     });
+     let no_images: Vec<PathBuf> = Vec::new();
+     let initial_images = vec![PathBuf::from("/tmp/image.png")];
+@@ -285,6 +287,7 @@ fn startup_waiting_gate_not_applied_for_resume_fork_or_side_session_selection()
+         crate::resume_picker::SessionTarget {
+             path: Some(PathBuf::from("/tmp/side")),
+             thread_id: ThreadId::new(),
++            history_mode: None,
+         },
+     ));
+     assert!(App::should_handle_active_thread_events(
+diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
+index d57fd02d35d2505e529825cf6acd3df060733a61..339a66538a8bcc048e0d9496725c9072eb565720 100644
+--- a/codex-rs/tui/src/history_cell/messages.rs
++++ b/codex-rs/tui/src/history_cell/messages.rs
+@@ -187,8 +187,8 @@ pub(crate) fn finish_user_message_lines(
+         if left_padding > 0 {
+             spans.push(Span::raw(" ".repeat(left_padding)));
+             for hyperlink in &mut line.hyperlinks {
+-                hyperlink.columns = hyperlink.columns.start + left_padding
+-                    ..hyperlink.columns.end + left_padding;
++                hyperlink.columns =
++                    hyperlink.columns.start + left_padding..hyperlink.columns.end + left_padding;
+             }
+         }
+         if line_width == 0 {
+diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
+index 3e55aa6577086c76829719e728a22cc94b053c66..af1645233eaebdde11cf56485e4760a7bd0ecf4d 100644
+--- a/codex-rs/tui/src/history_cell/tests.rs
++++ b/codex-rs/tui/src/history_cell/tests.rs
+@@ -2376,24 +2376,28 @@ fn user_message_alignment_padding_does_not_inherit_bubble_background() {
+     let bubble_style = Style::default().bg(Color::Blue);
+     let lines = finish_user_message_lines(
+         vec![
+-            Line::default().style(bubble_style),
+-            Line::from(vec!["› ".dim(), "longer".into()]).style(bubble_style),
+-            Line::from(vec!["  ".into(), "x".into()]).style(bubble_style),
+-            Line::default().style(bubble_style),
++            Line::default().style(bubble_style).into(),
++            Line::from(vec!["› ".dim(), "longer".into()])
++                .style(bubble_style)
++                .into(),
++            Line::from(vec!["  ".into(), "x".into()])
++                .style(bubble_style)
++                .into(),
++            Line::default().style(bubble_style).into(),
+         ],
+         /*width*/ 40,
+         /*available_width*/ 39,
+         bubble_style,
+     );
+-    let first_alignment_width = lines[1].spans[0].width();
+-    assert_eq!(first_alignment_width, lines[2].spans[0].width());
+-    assert_eq!(lines[0].style, Style::default());
+-    assert_eq!(lines[0].spans[0].style, Style::default());
+-    assert_eq!(lines[1].spans[0].style, Style::default());
++    let first_alignment_width = lines[1].line.spans[0].width();
++    assert_eq!(first_alignment_width, lines[2].line.spans[0].width());
++    assert_eq!(lines[0].line.style, Style::default());
++    assert_eq!(lines[0].line.spans[0].style, Style::default());
++    assert_eq!(lines[1].line.spans[0].style, Style::default());
+
+     let area = Rect::new(0, 0, 40, 4);
+     let mut buffer = Buffer::empty(area);
+-    Paragraph::new(Text::from(lines)).render(area, &mut buffer);
++    Paragraph::new(Text::from(visible_lines(lines))).render(area, &mut buffer);
+     for x in 0..first_alignment_width as u16 {
+         for y in 0..4 {
+             assert_eq!(buffer[(x, y)].bg, Color::Reset);
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index da615eb7671905835d74bb0fee1f2d716f18cf73..d5ac78c6db7277f74d79926a1a15fdbbc39da896 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -131,10 +131,10 @@ mod exec_cell;
+ mod exec_command;
+ mod external_agent_config_migration;
+ mod external_editor;
+-mod ghostty_fork;
+ mod file_search;
+ mod frames;
+ mod get_git_diff;
++mod ghostty_fork;
+ mod git_action_directives;
+ mod goal_display;
+ mod goal_files;
+@@ -2774,14 +2774,10 @@ mod tests {
+         });
+
+         assert!(!allow_interactive_session_cwd_prompt(
+-            /*uses_remote_workspace*/ false,
+-            /*cli_cwd_is_set*/ false,
+-            &side,
++            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &side,
+         ));
+         assert!(allow_interactive_session_cwd_prompt(
+-            /*uses_remote_workspace*/ false,
+-            /*cli_cwd_is_set*/ false,
+-            &fork,
++            /*uses_remote_workspace*/ false, /*cli_cwd_is_set*/ false, &fork,
+         ));
+     }
+
+diff --git a/codex-rs/tui/src/resume_picker_transcript_preview_tests.rs b/codex-rs/tui/src/resume_picker_transcript_preview_tests.rs
+index d08b188ea25971c7c07b0a1e1394316222fa8928..ea29b719d22c2a84d302c39d583cbffb8fdf1f32 100644
+--- a/codex-rs/tui/src/resume_picker_transcript_preview_tests.rs
++++ b/codex-rs/tui/src/resume_picker_transcript_preview_tests.rs
+@@ -82,6 +82,7 @@ fn legacy_transcript_preview_scans_tail_across_compaction() {
+                 window_id: None,
+                 compaction_response_id: None,
+                 latest_token_usage_record: None,
++                segment_state_checkpoint: None,
+             }),
+             rollout_user_message("recent user"),
+             rollout_agent_message("commentary one\ncommentary two"),
+@@ -216,6 +217,7 @@ fn legacy_transcript_preview_falls_back_for_oversized_hidden_record() {
+                 window_id: None,
+                 compaction_response_id: None,
+                 latest_token_usage_record: None,
++                segment_state_checkpoint: None,
+             }),
+             rollout_agent_message("recent assistant"),
+         ],
+@@ -246,6 +248,7 @@ fn legacy_transcript_preview_falls_back_when_scan_budget_is_exhausted() {
+         window_id: None,
+         compaction_response_id: None,
+         latest_token_usage_record: None,
++        segment_state_checkpoint: None,
+     });
+     let mut items = vec![rollout_user_message("older user")];
+     items.extend(std::iter::repeat_n(compacted, 9));

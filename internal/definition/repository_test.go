@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
 )
 
 func TestLoadSortsNumberedLayerDirectories(t *testing.T) {

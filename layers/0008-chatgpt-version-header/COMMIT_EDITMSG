@@ -1,8 +1,0 @@
-Send upstream version to ChatGPT
-
-Saffrodex release versions include build metadata that the ChatGPT model
-catalog does not recognize for eligibility checks.
-
-Strip build metadata from the built-in OpenAI provider version header
-while preserving the upstream prerelease. Versions without build metadata
-remain unchanged.

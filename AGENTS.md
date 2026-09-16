@@ -1,6 +1,6 @@
-# Saffrodex repository
+# Frodex repository
 
-This repository stores the canonical Saffrodex layer definitions and the
+This repository stores the canonical Frodex layer definitions and the
 tooling that projects them onto exact OpenAI Codex releases.
 It is not itself a Codex source checkout.
 
@@ -8,13 +8,16 @@ It is not itself a Codex source checkout.
 
 `upstream.json` identifies the exact Codex release used by the current
 projection.
-`layers/0000-foundation/` contains the non-feature changes that every
-projected Saffrodex tree needs.
+`layers/0000-foundation/` defines the first maintained Frodex commit. The
+identifier is required by `layerctl`; it does not imply that the layer is
+synthetic or outside the maintained commit stack.
 Every generated commit is defined by one `layers/NNNN-layer-slug/` directory.
 The four-digit prefix determines application order through ordinary lexical
 sorting; no separate series or order file exists.
 Each directory contains a required `COMMIT_EDITMSG` and an optional binary-safe
 tree delta in `patch`. Original commit authorship is not part of a layer.
+Source commit, plan, owner, and test provenance is maintained outside this
+public repository; do not add private release records to layer directories.
 Treat layer directories as generated artifacts:
 edit and review source in a hydrated projection,
 then use `layerctl layer add` or `layerctl layer refresh` to capture it.
@@ -25,12 +28,13 @@ upstream tree and each refreshed predecessor.
 Before handoff, verify that a fresh checkout containing only the configured
 upstream tag and commit can apply the complete layer stack.
 Layer application must not depend on historical projection objects,
-published Saffrodex tags, or objects retained by a maintainer's local clone.
+published Frodex tags, or objects retained by a maintainer's local clone.
 
 Repository-owned guidance, release tooling, the root `.github/workflows/`
 directory, and `layerctl` do not belong in a generated projection.
-Changes needed in every generated source tree belong in
-`layers/0000-foundation/`.
+New projected source changes belong in a new layer. Do not modify
+`layers/0000-foundation/` merely because a change affects every supported
+platform or task.
 
 ## Conditional guidance
 

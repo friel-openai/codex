@@ -1,7 +1,0 @@
-Add isolated database foundation
-
-Saffron auxiliary state needs schema evolution without touching a
-Codex-owned database or migration ledger.
-
-Introduce `saffron_1.sqlite`, its private SQLx migrator, and an empty
-migration directory. The foundation creates no application tables.

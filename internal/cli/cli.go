@@ -12,11 +12,11 @@ import (
 	"os"
 	"strings"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layer"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
-	"github.com/abg-OAI/codex/layerctl/internal/upstream"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layer"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/upstream"
 )
 
 // Run executes one layerctl invocation from the repository containing the

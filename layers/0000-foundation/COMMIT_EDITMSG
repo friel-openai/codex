@@ -1,4 +1,7 @@
-Add downstream repository foundation
+Preserve fork context cache state
 
-Prepare exact Codex release trees for the Saffrodex product layers.
-Add downstream source guidance before applying feature commits.
+Combine the existing implementation and corrections:
+
+- Preserve fork context cache state
+
+Original-commit: 2f62915f99828579e675e4d8ae1d1f82edd87d1f

@@ -1,0 +1,1194 @@
+diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
+index ba45dc45cb6b4f09e822a8fd860b27ae5f850001..91cd22c6c3d67adc10d835567382b1f73ae56419 100644
+--- a/codex-rs/Cargo.lock
++++ b/codex-rs/Cargo.lock
+@@ -2309,6 +2309,7 @@ dependencies = [
+  "codex-windows-sandbox",
+  "dotenvy",
+  "pathdiff",
++ "libc",
+  "pretty_assertions",
+  "tempfile",
+  "tokio",
+diff --git a/codex-rs/arg0/Cargo.toml b/codex-rs/arg0/Cargo.toml
+index 4619d6203b122124af465b11ddf9fa7c3c9966d4..54a92a51fca889e2d6e2a41486c305228af5263c 100644
+--- a/codex-rs/arg0/Cargo.toml
++++ b/codex-rs/arg0/Cargo.toml
+@@ -27,6 +27,9 @@ dotenvy = { workspace = true }
+ tempfile = { workspace = true }
+ tokio = { workspace = true, features = ["rt-multi-thread"] }
+
++[target.'cfg(unix)'.dependencies]
++libc = { workspace = true }
++
+ [target.'cfg(windows)'.dependencies]
+ codex-windows-sandbox = { workspace = true }
+ pathdiff = { workspace = true }
+diff --git a/codex-rs/arg0/src/lib.rs b/codex-rs/arg0/src/lib.rs
+index 4673f84e4280c2cf4a8f1998a939eb13105c4f11..0811235375d2e9cc353849676b1257a5f845f24d 100644
+--- a/codex-rs/arg0/src/lib.rs
++++ b/codex-rs/arg0/src/lib.rs
+@@ -154,6 +154,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+         std::process::exit(exit_code);
+     }
+
++    #[cfg(unix)]
++    raise_open_file_limit();
++
+     // This modifies the environment, which is not thread-safe, so do this
+     // before creating any threads/the Tokio runtime.
+     load_dotenv();
+@@ -173,6 +176,38 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+     path_entry_guard
+ }
+
++/// Raises the soft descriptor limit to the process's existing hard limit.
++///
++/// Listener retirement keeps steady-state descriptor use low. This additional headroom prevents
++/// a short command or connection burst from failing unrelated persistence work with `EMFILE`.
++#[cfg(unix)]
++fn raise_open_file_limit() {
++    let mut limit = libc::rlimit {
++        rlim_cur: 0,
++        rlim_max: 0,
++    };
++    // SAFETY: `limit` points to writable storage for one `rlimit` value.
++    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &raw mut limit) } != 0 {
++        eprintln!(
++            "WARNING: failed to read the open-file limit: {}",
++            std::io::Error::last_os_error()
++        );
++        return;
++    }
++    if limit.rlim_cur >= limit.rlim_max {
++        return;
++    }
++
++    limit.rlim_cur = limit.rlim_max;
++    // SAFETY: `limit` was initialized by `getrlimit` and retains its existing hard limit.
++    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &raw const limit) } != 0 {
++        eprintln!(
++            "WARNING: failed to raise the open-file limit: {}",
++            std::io::Error::last_os_error()
++        );
++    }
++}
++
+ fn prepare_path_env_var_with_aliases(
+     install_context: &InstallContext,
+     existing_path: Option<OsString>,
+diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
+index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3cbb3dfe39 100644
+--- a/codex-rs/core/src/exec.rs
++++ b/codex-rs/core/src/exec.rs
+@@ -348,8 +348,9 @@ pub fn build_exec_request(
+     );
+     tracing::debug!("Sandbox type: {sandbox_type:?}");
+
++    let mut environment_proxy_lease = None;
+     if let Some(network) = network.as_ref() {
+-        network
++        environment_proxy_lease = network
+             .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
+             .map_err(|err| {
+                 network_proxy_environment_error(network_environment_id.as_deref(), err)
+@@ -397,7 +398,10 @@ pub fn build_exec_request(
+     } else {
+         windows_sandbox_workspace_roots.to_vec()
+     };
+-    ExecRequest::from_sandbox_exec_request(request, options, windows_sandbox_workspace_roots)
++    let mut request =
++        ExecRequest::from_sandbox_exec_request(request, options, windows_sandbox_workspace_roots)?;
++    request.environment_proxy_lease = environment_proxy_lease;
++    Ok(request)
+ }
+
+ pub(crate) async fn execute_exec_request(
+@@ -422,6 +426,7 @@ pub(crate) async fn execute_exec_request(
+         permission_profile,
+         windows_sandbox_filesystem_overrides,
+         network_environment_id,
++        environment_proxy_lease: _environment_proxy_lease,
+         arg0,
+         exec_server_sandbox: _,
+         exec_server_enforce_managed_network: _,
+@@ -591,13 +596,15 @@ async fn exec_windows_sandbox(
+         windows_sandbox_private_desktop,
+         ..
+     } = params;
+-    if let Some(network) = network.as_ref() {
++    let _environment_proxy_lease = if let Some(network) = network.as_ref() {
+         network
+             .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
+             .map_err(|err| {
+                 network_proxy_environment_error(network_environment_id.as_deref(), err)
+-            })?;
+-    }
++            })?
++    } else {
++        None
++    };
+     let network_proxy_restricting_sid = network
+         .as_ref()
+         .map(|network| {
+@@ -902,13 +909,15 @@ async fn exec(
+         sandbox_permissions: _,
+         justification: _,
+     } = params;
+-    if let Some(network) = network.as_ref() {
++    let _environment_proxy_lease = if let Some(network) = network.as_ref() {
+         network
+             .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
+             .map_err(|err| {
+                 network_proxy_environment_error(network_environment_id.as_deref(), err)
+-            })?;
+-    }
++            })?
++    } else {
++        None
++    };
+
+     let (program, args) = command.split_first().ok_or_else(|| {
+         CodexErr::Io(io::Error::new(
+diff --git a/codex-rs/core/src/sandboxing/mod.rs b/codex-rs/core/src/sandboxing/mod.rs
+index fae02bf120d4187b6270dbcc2a380c0ce604b54a..4450ad5ff97eaa166e4cba90829da65d823c84f1 100644
+--- a/codex-rs/core/src/sandboxing/mod.rs
++++ b/codex-rs/core/src/sandboxing/mod.rs
+@@ -15,6 +15,7 @@ use crate::exec::execute_exec_request;
+ use crate::spawn::CODEX_SANDBOX_ENV_VAR;
+ use crate::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
+ use codex_file_system::FileSystemSandboxContext;
++use codex_network_proxy::EnvironmentProxyLease;
+ use codex_network_proxy::ManagedNetworkSandboxContext;
+ use codex_network_proxy::NetworkProxy;
+ use codex_network_proxy::RemoteNetworkProxyLaunchConfig;
+@@ -55,6 +56,8 @@ pub struct ExecRequest {
+     pub(crate) exec_server_shell_snapshot: Option<codex_exec_server::ShellSnapshotRequest>,
+     pub network: Option<NetworkProxy>,
+     pub network_environment_id: Option<String>,
++    /// Keeps environment-specific proxy listeners alive for this execution.
++    pub(crate) environment_proxy_lease: Option<EnvironmentProxyLease>,
+     pub expiration: ExecExpiration,
+     pub capture_policy: ExecCapturePolicy,
+     pub sandbox: SandboxType,
+@@ -100,6 +103,7 @@ impl ExecRequest {
+             exec_server_shell_snapshot: None,
+             network,
+             network_environment_id,
++            environment_proxy_lease: None,
+             expiration,
+             capture_policy,
+             sandbox,
+@@ -189,6 +193,7 @@ impl ExecRequest {
+             exec_server_shell_snapshot: None,
+             network,
+             network_environment_id,
++            environment_proxy_lease: None,
+             expiration,
+             capture_policy,
+             sandbox,
+diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
+index 7d72cde5690d866e8fc5455f0cc5b572d10bfcf3..f8abc3ceb1a438f8198bf43128b057590f895848 100644
+--- a/codex-rs/core/src/tasks/user_shell.rs
++++ b/codex-rs/core/src/tasks/user_shell.rs
+@@ -218,6 +218,7 @@ pub(crate) async fn execute_user_shell_command(
+         // inherit a managed proxy from the surrounding session or turn.
+         network: None,
+         network_environment_id: None,
++        environment_proxy_lease: None,
+         expiration: timeout_ms.unwrap_or(USER_SHELL_TIMEOUT_MS).into(),
+         capture_policy: ExecCapturePolicy::ShellTool,
+         sandbox: SandboxType::None,
+diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+index aea36d9f48ebbc22d2ea5d3b0fbb6964009f9376..e2bbc024b0a9e2d925ef81efd6ef9aaf58f97ed2 100644
+--- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
++++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
+@@ -41,6 +41,7 @@ use crate::unified_exec::UnifiedExecError;
+ use crate::unified_exec::UnifiedExecProcess;
+ use crate::unified_exec::UnifiedExecProcessManager;
+ use codex_core_plugins::PluginMetricsSidecar;
++use codex_network_proxy::EnvironmentProxyLease;
+ use codex_network_proxy::ManagedNetworkSandboxContext;
+ use codex_network_proxy::NetworkProxy;
+ use codex_protocol::error::CodexErr;
+@@ -109,6 +110,8 @@ pub(crate) struct UnifiedExecAttempt {
+     pub(crate) process: UnifiedExecProcess,
+     pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
+     pub(crate) permissions: TerminalPermissions,
++    /// Keeps the command's environment-specific proxy listeners alive until process exit.
++    pub(crate) environment_proxy_lease: Option<EnvironmentProxyLease>,
+ }
+
+ fn unified_exec_options(
+@@ -287,35 +290,37 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+             launch_sandbox_permissions,
+         ));
+         let env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
+-        let (mut env, managed_network_context, network_proxy_launch) = match managed_network {
+-            Some(network) if environment_is_remote => {
+-                let mut launch = network.remote_launch_config().await.map_err(|err| {
+-                    ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
+-                })?;
+-                if routes_approval_policy_to_guardian(
+-                    ctx.step_context.settings.approval_policy(),
+-                    ctx.step_context.settings.approvals_reviewer(),
+-                ) && network.remote_policy_decider().is_some()
+-                {
+-                    let timeout = ctx
+-                        .session
+-                        .hooks()
+-                        .max_permission_request_timeout()
+-                        .saturating_add(GUARDIAN_REVIEW_TIMEOUT)
+-                        .saturating_add(REMOTE_NETWORK_POLICY_DECISION_MARGIN);
+-                    launch.policy_decision_timeout_ms =
+-                        Some(u64::try_from(timeout.as_millis()).map_err(|_| {
+-                            ToolError::Rejected(
+-                                "remote network policy decision timeout exceeds protocol limit"
+-                                    .to_string(),
+-                            )
+-                        })?);
+-                }
+-                if !launch.proxy.enabled {
+-                    (env, None, None)
+-                } else {
+-                    let environment_info =
+-                        req.turn_environment
++        let (mut env, managed_network_context, network_proxy_launch, environment_proxy_lease) =
++            match managed_network {
++                Some(network) if environment_is_remote => {
++                    let mut launch = network.remote_launch_config().await.map_err(|err| {
++                        ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
++                    })?;
++                    if routes_approval_policy_to_guardian(
++                        ctx.step_context.settings.approval_policy(),
++                        ctx.step_context.settings.approvals_reviewer(),
++                    )
++                        && network.remote_policy_decider().is_some()
++                    {
++                        let timeout = ctx
++                            .session
++                            .hooks()
++                            .max_permission_request_timeout()
++                            .saturating_add(GUARDIAN_REVIEW_TIMEOUT)
++                            .saturating_add(REMOTE_NETWORK_POLICY_DECISION_MARGIN);
++                        launch.policy_decision_timeout_ms =
++                            Some(u64::try_from(timeout.as_millis()).map_err(|_| {
++                                ToolError::Rejected(
++                                    "remote network policy decision timeout exceeds protocol limit"
++                                        .to_string(),
++                                )
++                            })?);
++                    }
++                    if !launch.proxy.enabled {
++                        (env, None, None, None)
++                    } else {
++                        let environment_info = req
++                            .turn_environment
+                             .environment
+                             .info()
+                             .await
+@@ -324,31 +329,36 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                                     "failed to query exec-server capabilities: {err}"
+                                 ))))
+                             })?;
+-                    if !environment_info.capabilities.network_proxy_launch {
+-                        return Err(ToolError::Rejected(
++                        if !environment_info.capabilities.network_proxy_launch {
++                            return Err(ToolError::Rejected(
+                             "selected exec-server does not support executor-local network proxy launches"
+                                 .to_string(),
+                         ));
++                        }
++                        (env, None, Some(launch), None)
+                     }
+-                    (env, None, Some(launch))
+                 }
+-            }
+-            Some(network) => {
+-                let prepared = network
+-                    .prepare_for_optional_environment(
+-                        env,
+-                        Some(&req.turn_environment.selection.environment_id),
++                Some(network) => {
++                    let prepared = network
++                        .prepare_for_optional_environment(
++                            env,
++                            Some(&req.turn_environment.selection.environment_id),
++                        )
++                        .map_err(|err| {
++                            ToolError::Codex(CodexErr::Io(io::Error::other(format!(
++                                "failed to prepare network proxy for environment `{}`: {err}",
++                                req.turn_environment.selection.environment_id
++                            ))))
++                        })?;
++                    (
++                        prepared.env,
++                        Some(prepared.sandbox_context),
++                        None,
++                        prepared.environment_proxy_lease,
+                     )
+-                    .map_err(|err| {
+-                        ToolError::Codex(CodexErr::Io(io::Error::other(format!(
+-                            "failed to prepare network proxy for environment `{}`: {err}",
+-                            req.turn_environment.selection.environment_id
+-                        ))))
+-                    })?;
+-                (prepared.env, Some(prepared.sandbox_context), None)
+-            }
+-            None => (env, None, None),
+-        };
++                }
++                None => (env, None, None, None),
++            };
+         let explicit_env_overrides = req.explicit_env_overrides.clone();
+         let metrics_sidecar = sidecar_for_command(
+             ctx,
+@@ -496,6 +506,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                         process,
+                         metrics_sidecar,
+                         permissions,
++                        environment_proxy_lease,
+                     });
+                 }
+                 None => {
+@@ -541,6 +552,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+             process,
+             metrics_sidecar,
+             permissions,
++            environment_proxy_lease,
+         })
+     }
+ }
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+index 0c3ae3dc4c3e4d38b4dd1e7db139c9aa899e5f65..cf4286d555296485905aa6175ee0509ef8453665 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
+@@ -16,6 +16,7 @@ use codex_execpolicy::Evaluation;
+ use codex_execpolicy::MatchOptions;
+ use codex_execpolicy::Policy;
+ use codex_execpolicy::RuleMatch;
++use codex_network_proxy::EnvironmentProxyLease;
+ use codex_protocol::config_types::WindowsSandboxLevel;
+ use codex_protocol::error::CodexErr;
+ use codex_protocol::models::AdditionalPermissionProfile;
+@@ -135,6 +136,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+         env: exec_request.env.clone(),
+         network: exec_request.network.clone(),
+         network_environment_id: exec_request.network_environment_id.clone(),
++        _environment_proxy_lease: exec_request.environment_proxy_lease.clone(),
+         windows_sandbox_level: exec_request.windows_sandbox_level,
+         arg0: exec_request.arg0.clone(),
+         sandbox_policy_cwd,
+@@ -572,6 +574,8 @@ struct CoreShellCommandExecutor {
+     env: HashMap<String, String>,
+     network: Option<codex_network_proxy::NetworkProxy>,
+     network_environment_id: Option<String>,
++    /// Keeps the proxy addresses in `env` live for every command in this escalation session.
++    _environment_proxy_lease: Option<EnvironmentProxyLease>,
+     windows_sandbox_level: WindowsSandboxLevel,
+     arg0: Option<String>,
+     sandbox_policy_cwd: AbsolutePathBuf,
+@@ -644,6 +648,7 @@ impl CoreShellCommandExecutor {
+                 exec_server_shell_snapshot: None,
+                 network: self.network.clone(),
+                 network_environment_id: self.network_environment_id.clone(),
++                environment_proxy_lease: None,
+                 expiration: ExecExpiration::Cancellation(cancel_rx),
+                 capture_policy: ExecCapturePolicy::ShellTool,
+                 sandbox: self.sandbox,
+diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
+index 84343cd3b3c6df1bf93cf76178ad66c3bb756ad1..0c12660dc1682bc829d7076c487dbf288ddbd80e 100644
+--- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
++++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
+@@ -365,6 +365,7 @@ async fn unsandboxed_intercepted_exec_strips_managed_network_env() -> anyhow::Re
+         env: HashMap::new(),
+         network: Some(network.clone()),
+         network_environment_id: None,
++        _environment_proxy_lease: None,
+         windows_sandbox_level: WindowsSandboxLevel::Disabled,
+         arg0: None,
+         sandbox_policy_cwd: workdir.clone(),
+diff --git a/codex-rs/core/src/unified_exec/async_watcher.rs b/codex-rs/core/src/unified_exec/async_watcher.rs
+index 366f6310523b46114d8672c29bc96652a54c78dd..6f9c7e593def14aabd3eba9b5a9ab7ab2c0252f9 100644
+--- a/codex-rs/core/src/unified_exec/async_watcher.rs
++++ b/codex-rs/core/src/unified_exec/async_watcher.rs
+@@ -22,6 +22,7 @@ use crate::tools::events::ToolEventFailure;
+ use crate::tools::events::ToolEventStage;
+ use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
+ use codex_core_plugins::PluginCommandAttribution;
++use codex_network_proxy::EnvironmentProxyLease;
+ use codex_protocol::exec_output::ExecToolCallOutput;
+ use codex_protocol::exec_output::StreamOutput;
+ use codex_protocol::protocol::EventMsg;
+@@ -175,12 +176,15 @@ pub(crate) fn spawn_exit_watcher(
+     started_at: Instant,
+     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
++    environment_proxy_lease: Option<EnvironmentProxyLease>,
+ ) {
+     let exit_token = process.cancellation_token();
+     let output_drained = process.output_drained_notify();
+     let interaction_lock = process.interaction_lock();
+
+     tokio::spawn(async move {
++        // Retain the listener ownership token until the command reaches its terminal state.
++        let _environment_proxy_lease = environment_proxy_lease;
+         exit_token.cancelled().await;
+         output_drained.notified().await;
+         // Deferred network denial deliberately remains observable for a short
+diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
+index aada95e966dff9ea7fb6ff8b496a6a5532344627..701f602040fc185dda4d8ae1e9585314acdecbf5 100644
+--- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
++++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
+@@ -239,6 +239,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
+         Instant::now(),
+         Some(network_denial_monitor),
+         /*plugin_metrics_sidecar*/ None,
++        /*environment_proxy_lease*/ None,
+     );
+
+     let exited_at = Instant::now();
+diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
+index 21218570af85277b4e21885cfa77c53c6271bed1..40fb99cc3151aac656a5b23809e3e8d63ba694ab 100644
+--- a/codex-rs/core/src/unified_exec/process_manager.rs
++++ b/codex-rs/core/src/unified_exec/process_manager.rs
+@@ -70,6 +70,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
+ use codex_core_plugins::PluginCommandAttribution;
+ use codex_core_plugins::PluginMetricsSidecar;
+ use codex_core_plugins::strip_output_env;
++use codex_network_proxy::EnvironmentProxyLease;
+ use codex_network_proxy::NetworkPolicyDecider;
+ use codex_network_proxy::NetworkProxy;
+ use codex_protocol::config_types::ShellEnvironmentPolicy;
+@@ -505,6 +506,7 @@ impl UnifiedExecProcessManager {
+             process,
+             metrics_sidecar,
+             permissions,
++            environment_proxy_lease,
+         } = attempt;
+         let process = Arc::new(process);
+         if let Some(completion) = completion.as_ref() {
+@@ -575,6 +577,7 @@ impl UnifiedExecProcessManager {
+                 deferred_network_approval.clone(),
+                 network_denial_monitor,
+                 metrics_sidecar,
++                environment_proxy_lease,
+                 Arc::clone(&transcript),
+                 Arc::clone(&initial_exec_command_active),
+             )
+@@ -1123,6 +1126,7 @@ impl UnifiedExecProcessManager {
+         network_approval: Option<DeferredNetworkApproval>,
+         network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
+         metrics_sidecar: Option<PluginMetricsSidecar>,
++        environment_proxy_lease: Option<EnvironmentProxyLease>,
+         transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
+         initial_exec_command_active: Arc<AtomicBool>,
+     ) {
+@@ -1169,6 +1173,7 @@ impl UnifiedExecProcessManager {
+             started_at,
+             network_denial_monitor,
+             plugin_metrics_sidecar,
++            environment_proxy_lease,
+         );
+     }
+
+diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+index 523e7eb513921c29b8cc617325ad380f1325e35b..54f4839d027e8a8d64e09a781bebd27785842489 100644
+--- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
++++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
+@@ -197,6 +197,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
+         exec_server_shell_snapshot: None,
+         network: None,
+         network_environment_id: None,
++        environment_proxy_lease: None,
+         expiration: crate::exec::ExecExpiration::DefaultTimeout,
+         capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
+         sandbox: codex_sandboxing::SandboxType::None,
+diff --git a/codex-rs/network-proxy/src/lib.rs b/codex-rs/network-proxy/src/lib.rs
+index 060ee0cdd6ae2eeb8ac80ff7ec58eee9532b2cb4..c0d2443aaf7b0e84f606ab9f4ab05a964023d39d 100644
+--- a/codex-rs/network-proxy/src/lib.rs
++++ b/codex-rs/network-proxy/src/lib.rs
+@@ -69,6 +69,7 @@ pub use proxy::Args;
+ #[cfg(target_os = "macos")]
+ pub use proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
+ pub use proxy::DEFAULT_NO_PROXY_VALUE;
++pub use proxy::EnvironmentProxyLease;
+ pub use proxy::ManagedNetworkSandboxContext;
+ pub use proxy::NO_PROXY_ENV_KEYS;
+ pub use proxy::NetworkProxy;
+diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
+index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8a40d8b2e 100644
+--- a/codex-rs/network-proxy/src/proxy.rs
++++ b/codex-rs/network-proxy/src/proxy.rs
+@@ -35,6 +35,11 @@ use std::ops::RangeInclusive;
+ use std::sync::Arc;
+ use std::sync::Mutex;
+ use std::sync::RwLock;
++use std::sync::Weak;
++use std::sync::atomic::AtomicU64;
++use std::sync::atomic::AtomicUsize;
++use std::sync::atomic::Ordering;
++use std::time::Duration;
+ use tokio::task::JoinHandle;
+ use tracing::warn;
+
+@@ -45,6 +50,12 @@ const WINDOWS_MANAGED_HTTP_PROXY_PORTS: RangeInclusive<u16> = 3128..=3159;
+ #[cfg(target_os = "windows")]
+ const WINDOWS_MANAGED_SOCKS_PROXY_PORTS: RangeInclusive<u16> = 8081..=8112;
+
++/// How long an unused environment proxy remains available for command reuse.
++///
++/// This interval affects only listener reuse and idle file-descriptor residency. A live command
++/// owns a lease and cannot be retired, regardless of how long the command runs.
++const DEFAULT_ENVIRONMENT_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
++
+ #[derive(Debug, Clone, Parser)]
+ #[command(name = "codex-network-proxy", about = "Codex network sandbox proxy")]
+ pub struct Args {}
+@@ -132,6 +143,7 @@ pub struct NetworkProxyBuilder {
+     managed_by_codex: bool,
+     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
+     blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
++    environment_proxy_idle_timeout: Duration,
+ }
+
+ impl Default for NetworkProxyBuilder {
+@@ -143,6 +155,7 @@ impl Default for NetworkProxyBuilder {
+             managed_by_codex: true,
+             policy_decider: None,
+             blocked_request_observer: None,
++            environment_proxy_idle_timeout: DEFAULT_ENVIRONMENT_PROXY_IDLE_TIMEOUT,
+         }
+     }
+ }
+@@ -197,6 +210,12 @@ impl NetworkProxyBuilder {
+         self
+     }
+
++    #[cfg(test)]
++    fn environment_proxy_idle_timeout(mut self, idle_timeout: Duration) -> Self {
++        self.environment_proxy_idle_timeout = idle_timeout;
++        self
++    }
++
+     pub async fn build(self) -> Result<NetworkProxy> {
+         let state = self.state.ok_or_else(|| {
+             anyhow::anyhow!(
+@@ -296,6 +315,7 @@ impl NetworkProxyBuilder {
+             reserved_listeners,
+             policy_decider: self.policy_decider,
+             environment_proxies: Arc::new(Mutex::new(HashMap::new())),
++            environment_proxy_idle_timeout: self.environment_proxy_idle_timeout,
+             execution_scope: None,
+             #[cfg(target_os = "windows")]
+             windows_runtime,
+@@ -466,11 +486,144 @@ pub struct PreparedManagedNetwork {
+     pub env: HashMap<String, String>,
+     /// Matching portable sandbox inputs for the command environment.
+     pub sandbox_context: ManagedNetworkSandboxContext,
++    /// Keeps this environment's proxy listeners alive until the command exits.
++    pub environment_proxy_lease: Option<EnvironmentProxyLease>,
+ }
+
+ struct EnvironmentProxy {
+     addrs: EnvironmentProxyAddrs,
+     runtime: EnvironmentProxyRuntime,
++    lease_state: Arc<EnvironmentProxyLeaseState>,
++}
++
++/// Ownership token for one command's use of environment-specific proxy listeners.
++///
++/// Cloning the token acquires another owner and cancels pending idle retirement. Dropping the last
++/// token starts the reuse interval; it does not close listeners used by another command.
++pub struct EnvironmentProxyLease {
++    state: Arc<EnvironmentProxyLeaseState>,
++}
++
++impl Clone for EnvironmentProxyLease {
++    fn clone(&self) -> Self {
++        self.state.acquire();
++        Self {
++            state: Arc::clone(&self.state),
++        }
++    }
++}
++
++impl std::fmt::Debug for EnvironmentProxyLease {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        f.debug_struct("EnvironmentProxyLease")
++            .field("environment_id", &self.state.environment_id)
++            .finish_non_exhaustive()
++    }
++}
++
++impl PartialEq for EnvironmentProxyLease {
++    fn eq(&self, other: &Self) -> bool {
++        Arc::ptr_eq(&self.state, &other.state)
++    }
++}
++
++impl Eq for EnvironmentProxyLease {}
++
++impl Drop for EnvironmentProxyLease {
++    fn drop(&mut self) {
++        self.state.release();
++    }
++}
++
++struct EnvironmentProxyLeaseState {
++    /// Cache key for the listener pair owned by this state.
++    environment_id: String,
++    /// Weak reference avoids a cycle between the cache and each cached entry.
++    environment_proxies: Weak<Mutex<HashMap<String, EnvironmentProxy>>>,
++    /// Runtime used to retire listeners even when the last lease drops synchronously.
++    runtime: tokio::runtime::Handle,
++    idle_timeout: Duration,
++    active_leases: AtomicUsize,
++    generation: AtomicU64,
++    /// At most one retirement timer exists for an environment proxy.
++    idle_task: Mutex<Option<JoinHandle<()>>>,
++}
++
++impl EnvironmentProxyLeaseState {
++    fn acquire(&self) {
++        self.generation.fetch_add(1, Ordering::AcqRel);
++        self.active_leases.fetch_add(1, Ordering::AcqRel);
++        if let Some(task) = self
++            .idle_task
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner)
++            .take()
++        {
++            task.abort();
++        }
++    }
++
++    fn lease(self: &Arc<Self>) -> EnvironmentProxyLease {
++        self.acquire();
++        EnvironmentProxyLease {
++            state: Arc::clone(self),
++        }
++    }
++
++    fn release(self: &Arc<Self>) {
++        let previous = self.active_leases.fetch_sub(1, Ordering::AcqRel);
++        debug_assert!(previous > 0, "environment proxy lease count underflow");
++        if previous != 1 {
++            return;
++        }
++
++        // A distinct generation for every transition to idle prevents an older timer from
++        // shortening the reuse interval after a concurrent acquire/release pair.
++        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
++        let state = Arc::downgrade(self);
++        let idle_timeout = self.idle_timeout;
++        let task = self.runtime.spawn(async move {
++            tokio::time::sleep(idle_timeout).await;
++            if let Some(state) = state.upgrade() {
++                state.retire_if_idle(generation).await;
++            }
++        });
++        let mut idle_task = self
++            .idle_task
++            .lock()
++            .unwrap_or_else(std::sync::PoisonError::into_inner);
++        if self.active_leases.load(Ordering::Acquire) != 0
++            || self.generation.load(Ordering::Acquire) != generation
++        {
++            task.abort();
++            return;
++        }
++        if let Some(previous) = idle_task.replace(task) {
++            previous.abort();
++        }
++    }
++
++    async fn retire_if_idle(self: &Arc<Self>, generation: u64) {
++        let Some(environment_proxies) = self.environment_proxies.upgrade() else {
++            return;
++        };
++        let retired = {
++            let mut proxies = environment_proxies
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner);
++            let is_current_and_idle = proxies.get(&self.environment_id).is_some_and(|proxy| {
++                Arc::ptr_eq(&proxy.lease_state, self)
++                    && self.active_leases.load(Ordering::Acquire) == 0
++                    && self.generation.load(Ordering::Acquire) == generation
++            });
++            is_current_and_idle
++                .then(|| proxies.remove(&self.environment_id))
++                .flatten()
++        };
++        if let Some(proxy) = retired {
++            abort_environment_proxy(proxy).await;
++        }
++    }
+ }
+
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+@@ -517,6 +670,7 @@ pub struct NetworkProxy {
+     reserved_listeners: Option<Arc<ReservedListeners>>,
+     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
+     environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
++    environment_proxy_idle_timeout: Duration,
+     execution_scope: Option<Arc<ExecutionScope>>,
+     #[cfg(target_os = "windows")]
+     windows_runtime: Option<Arc<WindowsSharedProxyRuntime>>,
+@@ -1005,6 +1159,7 @@ impl NetworkProxy {
+         &self,
+         mut env: HashMap<String, String>,
+         addrs: EnvironmentProxyAddrs,
++        environment_proxy_lease: Option<EnvironmentProxyLease>,
+         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+         client: EnvironmentProxyClient,
+     ) -> PreparedManagedNetwork {
+@@ -1074,6 +1229,7 @@ impl NetworkProxy {
+                 loopback_ports,
+                 allow_local_binding: runtime_settings.allow_local_binding,
+             },
++            environment_proxy_lease,
+         }
+     }
+
+@@ -1085,6 +1241,7 @@ impl NetworkProxy {
+         let prepared = self.prepare_for_addrs(
+             std::mem::take(env),
+             addrs,
++            /*environment_proxy_lease*/ None,
+             EnvironmentProxyClient::SandboxedProcess,
+         );
+         *env = prepared.env;
+@@ -1122,23 +1279,25 @@ impl NetworkProxy {
+         &self,
+         env: &mut HashMap<String, String>,
+         environment_id: &str,
+-    ) -> Result<()> {
+-        let addrs =
++    ) -> Result<EnvironmentProxyLease> {
++        let (addrs, lease) =
+             self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::SandboxedProcess)?;
+         self.apply_to_env_for_addrs(env, addrs);
+-        Ok(())
++        Ok(lease)
+     }
+
+     pub fn apply_to_env_for_optional_environment(
+         &self,
+         env: &mut HashMap<String, String>,
+         environment_id: Option<&str>,
+-    ) -> Result<()> {
++    ) -> Result<Option<EnvironmentProxyLease>> {
+         match environment_id {
+-            Some(environment_id) => self.apply_to_env_for_environment(env, environment_id),
++            Some(environment_id) => self
++                .apply_to_env_for_environment(env, environment_id)
++                .map(Some),
+             None => {
+                 self.apply_to_env(env);
+-                Ok(())
++                Ok(None)
+             }
+         }
+     }
+@@ -1150,17 +1309,23 @@ impl NetworkProxy {
+         env: HashMap<String, String>,
+         environment_id: Option<&str>,
+     ) -> Result<PreparedManagedNetwork> {
+-        let addrs = match environment_id {
+-            Some(environment_id) => self.environment_proxy_addrs(
+-                environment_id,
+-                EnvironmentProxyClient::SandboxedProcess,
+-            )?,
+-            None => EnvironmentProxyAddrs {
+-                http_addr: self.http_addr,
+-                socks_addr: self.socks_addr,
+-            },
++        let (addrs, lease) = match environment_id {
++            Some(environment_id) => {
++                let (addrs, lease) = self.environment_proxy_addrs(
++                    environment_id,
++                    EnvironmentProxyClient::SandboxedProcess,
++                )?;
++                (addrs, Some(lease))
++            }
++            None => (
++                EnvironmentProxyAddrs {
++                    http_addr: self.http_addr,
++                    socks_addr: self.socks_addr,
++                },
++                None,
++            ),
+         };
+-        Ok(self.prepare_for_addrs(env, addrs, EnvironmentProxyClient::SandboxedProcess))
++        Ok(self.prepare_for_addrs(env, addrs, lease, EnvironmentProxyClient::SandboxedProcess))
+     }
+
+     /// Prepares proxy settings for a remote executor whose connection reaches this process through
+@@ -1170,9 +1335,14 @@ impl NetworkProxy {
+         env: HashMap<String, String>,
+         environment_id: &str,
+     ) -> Result<PreparedManagedNetwork> {
+-        let addrs =
++        let (addrs, lease) =
+             self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::TrustedBridge)?;
+-        Ok(self.prepare_for_addrs(env, addrs, EnvironmentProxyClient::TrustedBridge))
++        Ok(self.prepare_for_addrs(
++            env,
++            addrs,
++            Some(lease),
++            EnvironmentProxyClient::TrustedBridge,
++        ))
+     }
+
+     fn environment_proxy_addrs(
+@@ -1180,7 +1350,7 @@ impl NetworkProxy {
+         environment_id: &str,
+         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
+         client: EnvironmentProxyClient,
+-    ) -> Result<EnvironmentProxyAddrs> {
++    ) -> Result<(EnvironmentProxyAddrs, EnvironmentProxyLease)> {
+         if let Some(execution_scope) = self.execution_scope.as_ref() {
+             anyhow::ensure!(
+                 execution_scope.environment_id == environment_id,
+@@ -1206,9 +1376,13 @@ impl NetworkProxy {
+                 ),
+                 "network proxy for environment `{environment_id}` was prepared for a different client type"
+             );
+-            return Ok(proxy.addrs);
++            return Ok((proxy.addrs, proxy.lease_state.lease()));
+         }
+
++        let runtime = tokio::runtime::Handle::try_current().with_context(|| {
++            format!("failed to create network proxy for environment `{environment_id}`")
++        })?;
++
+         #[cfg(target_os = "windows")]
+         if client == EnvironmentProxyClient::SandboxedProcess
+             && let Some(windows_runtime) = self.windows_runtime.as_ref()
+@@ -1240,19 +1414,27 @@ impl NetworkProxy {
+                 http_addr: self.http_addr,
+                 socks_addr: self.socks_addr,
+             };
++            let lease_state = Arc::new(EnvironmentProxyLeaseState {
++                environment_id: environment_id.clone(),
++                environment_proxies: Arc::downgrade(&self.environment_proxies),
++                runtime,
++                idle_timeout: self.environment_proxy_idle_timeout,
++                active_leases: AtomicUsize::new(0),
++                generation: AtomicU64::new(0),
++                idle_task: Mutex::new(None),
++            });
++            let lease = lease_state.lease();
+             proxies.insert(
+                 environment_id,
+                 EnvironmentProxy {
+                     addrs,
+                     runtime: EnvironmentProxyRuntime::SharedIngress { _route: route },
++                    lease_state,
+                 },
+             );
+-            return Ok(addrs);
++            return Ok((addrs, lease));
+         }
+
+-        let runtime = tokio::runtime::Handle::try_current().with_context(|| {
+-            format!("failed to create network proxy for environment `{environment_id}`")
+-        })?;
+         let listeners =
+             reserve_loopback_ephemeral_listeners(self.socks_enabled).with_context(|| {
+                 format!("failed to reserve network proxy for environment `{environment_id}`")
+@@ -1273,6 +1455,16 @@ impl NetworkProxy {
+         } = listeners;
+
+         let environment_id = environment_id.to_string();
++        let lease_state = Arc::new(EnvironmentProxyLeaseState {
++            environment_id: environment_id.clone(),
++            environment_proxies: Arc::downgrade(&self.environment_proxies),
++            runtime: runtime.clone(),
++            idle_timeout: self.environment_proxy_idle_timeout,
++            active_leases: AtomicUsize::new(0),
++            generation: AtomicU64::new(0),
++            idle_task: Mutex::new(None),
++        });
++        let lease = lease_state.lease();
+         let http_state = self.state.clone();
+         let http_decider = self.policy_decider.clone();
+         let http_environment_id = Some(environment_id.clone());
+@@ -1315,9 +1507,10 @@ impl NetworkProxy {
+                     http_task,
+                     socks_task,
+                 },
++                lease_state,
+             },
+         );
+-        Ok(addrs)
++        Ok((addrs, lease))
+     }
+
+     pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
+@@ -1573,17 +1766,21 @@ async fn abort_environment_proxies(
+         guard.drain().map(|(_, proxy)| proxy).collect::<Vec<_>>()
+     };
+     for proxy in proxies {
+-        match proxy.runtime {
+-            EnvironmentProxyRuntime::ListenerTasks {
+-                http_task,
+-                socks_task,
+-            } => {
+-                abort_task(Some(http_task)).await;
+-                abort_task(socks_task).await;
+-            }
+-            #[cfg(target_os = "windows")]
+-            EnvironmentProxyRuntime::SharedIngress { .. } => {}
++        abort_environment_proxy(proxy).await;
++    }
++}
++
++async fn abort_environment_proxy(proxy: EnvironmentProxy) {
++    match proxy.runtime {
++        EnvironmentProxyRuntime::ListenerTasks {
++            http_task,
++            socks_task,
++        } => {
++            abort_task(Some(http_task)).await;
++            abort_task(socks_task).await;
+         }
++        #[cfg(target_os = "windows")]
++        EnvironmentProxyRuntime::SharedIngress { .. } => {}
+     }
+ }
+
+@@ -2092,6 +2289,232 @@ mod tests {
+         Ok(())
+     }
+
++    #[cfg(not(target_os = "windows"))]
++    #[tokio::test]
++    async fn active_environment_proxy_lease_prevents_idle_retirement() -> Result<()> {
++        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
++            enabled: true,
++            ..NetworkProxyConfig::default()
++        }));
++        let proxy = NetworkProxy::builder()
++            .state(state)
++            .environment_proxy_idle_timeout(Duration::from_millis(25))
++            .build()
++            .await?;
++        let handle = proxy.run().await?;
++
++        let prepared =
++            proxy.prepare_for_optional_environment(HashMap::new(), Some("active-environment"))?;
++        let http_addr = prepared
++            .env
++            .get("HTTP_PROXY")
++            .and_then(|value| value.strip_prefix("http://"))
++            .context("missing HTTP proxy URL")?
++            .parse::<SocketAddr>()?;
++
++        tokio::time::sleep(Duration::from_millis(100)).await;
++        assert_eq!(
++            proxy
++                .environment_proxies
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .len(),
++            1
++        );
++        tokio::net::TcpStream::connect(http_addr).await?;
++
++        drop(prepared);
++        tokio::time::timeout(Duration::from_secs(2), async {
++            loop {
++                if proxy
++                    .environment_proxies
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .is_empty()
++                {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await?;
++        assert!(tokio::net::TcpStream::connect(http_addr).await.is_err());
++
++        handle.shutdown().await?;
++        Ok(())
++    }
++
++    #[cfg(not(target_os = "windows"))]
++    #[tokio::test]
++    async fn environment_proxy_reuse_refreshes_idle_retirement() -> Result<()> {
++        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
++            enabled: true,
++            ..NetworkProxyConfig::default()
++        }));
++        let proxy = NetworkProxy::builder()
++            .state(state)
++            .environment_proxy_idle_timeout(Duration::from_millis(80))
++            .build()
++            .await?;
++        let handle = proxy.run().await?;
++
++        let first = proxy.prepare_for_optional_environment(HashMap::new(), Some("reused"))?;
++        drop(first);
++        tokio::time::sleep(Duration::from_millis(50)).await;
++        let second = proxy.prepare_for_optional_environment(HashMap::new(), Some("reused"))?;
++        drop(second);
++
++        tokio::time::sleep(Duration::from_millis(45)).await;
++        assert_eq!(
++            proxy
++                .environment_proxies
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .len(),
++            1,
++            "the first idle timer must not retire a reused environment proxy"
++        );
++        tokio::time::timeout(Duration::from_secs(2), async {
++            loop {
++                if proxy
++                    .environment_proxies
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .is_empty()
++                {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await?;
++
++        handle.shutdown().await?;
++        Ok(())
++    }
++
++    #[cfg(not(target_os = "windows"))]
++    #[tokio::test]
++    async fn idle_environment_proxies_release_all_listener_pairs() -> Result<()> {
++        const ENVIRONMENT_COUNT: usize = 128;
++
++        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
++            enabled: true,
++            ..NetworkProxyConfig::default()
++        }));
++        let proxy = NetworkProxy::builder()
++            .state(state)
++            .environment_proxy_idle_timeout(Duration::from_millis(25))
++            .build()
++            .await?;
++        let handle = proxy.run().await?;
++        let mut prepared = Vec::with_capacity(ENVIRONMENT_COUNT);
++        let mut http_addrs = Vec::with_capacity(ENVIRONMENT_COUNT);
++        for index in 0..ENVIRONMENT_COUNT {
++            let environment = proxy.prepare_for_optional_environment(
++                HashMap::new(),
++                Some(&format!("environment-{index}")),
++            )?;
++            http_addrs.push(
++                environment
++                    .env
++                    .get("HTTP_PROXY")
++                    .and_then(|value| value.strip_prefix("http://"))
++                    .context("missing HTTP proxy URL")?
++                    .parse::<SocketAddr>()?,
++            );
++            prepared.push(environment);
++        }
++        assert_eq!(
++            proxy
++                .environment_proxies
++                .lock()
++                .unwrap_or_else(std::sync::PoisonError::into_inner)
++                .len(),
++            ENVIRONMENT_COUNT
++        );
++
++        drop(prepared);
++        tokio::time::timeout(Duration::from_secs(3), async {
++            loop {
++                if proxy
++                    .environment_proxies
++                    .lock()
++                    .unwrap_or_else(std::sync::PoisonError::into_inner)
++                    .is_empty()
++                {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await?;
++        tokio::time::timeout(Duration::from_secs(3), async {
++            loop {
++                let mut listening = false;
++                for addr in &http_addrs {
++                    if tokio::net::TcpStream::connect(addr).await.is_ok() {
++                        listening = true;
++                    }
++                }
++                if !listening {
++                    break;
++                }
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await?;
++
++        handle.shutdown().await?;
++        Ok(())
++    }
++
++    #[cfg(not(target_os = "windows"))]
++    #[tokio::test]
++    async fn released_environment_batches_do_not_accumulate_listeners() -> Result<()> {
++        const BATCH_COUNT: usize = 8;
++        const ENVIRONMENTS_PER_BATCH: usize = 48;
++
++        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
++            enabled: true,
++            ..NetworkProxyConfig::default()
++        }));
++        let proxy = NetworkProxy::builder()
++            .state(state)
++            .environment_proxy_idle_timeout(Duration::from_millis(10))
++            .build()
++            .await?;
++        let handle = proxy.run().await?;
++
++        for batch in 0..BATCH_COUNT {
++            let mut prepared = Vec::with_capacity(ENVIRONMENTS_PER_BATCH);
++            for index in 0..ENVIRONMENTS_PER_BATCH {
++                prepared.push(proxy.prepare_for_optional_environment(
++                    HashMap::new(),
++                    Some(&format!("batch-{batch}-environment-{index}")),
++                )?);
++            }
++            drop(prepared);
++            tokio::time::timeout(Duration::from_secs(2), async {
++                loop {
++                    if proxy
++                        .environment_proxies
++                        .lock()
++                        .unwrap_or_else(std::sync::PoisonError::into_inner)
++                        .is_empty()
++                    {
++                        break;
++                    }
++                    tokio::time::sleep(Duration::from_millis(5)).await;
++                }
++            })
++            .await?;
++        }
++
++        handle.shutdown().await?;
++        Ok(())
++    }
++
+     #[tokio::test]
+     async fn remote_launch_config_carries_execution_scope() -> Result<()> {
+         #[cfg(target_os = "windows")]

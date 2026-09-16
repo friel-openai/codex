@@ -1,0 +1,25 @@
+Restore and list current agents without eager history reads
+
+Combine the existing implementation and corrections:
+
+- Add lazy agent identity graph queries
+- Add current membership thread store operations
+- Restore agent identities lazily
+- Keep persisted descendants lazy on resume
+- Project current agent membership in ThreadManager
+- Project current subagents into world state
+- List current agents with bounded pagination
+- Retain current agents across residency eviction
+- Project current agent membership in app-server
+- Preserve current-agent membership during lifecycle changes
+
+Original-commit: 0a87665242d215118fd3df1eae7f6ce93bb3e09d
+Original-commit: 5709755c56233fee307b3f60ee23396ee4d14a5f
+Original-commit: 63b2747f91d4007a0d49566fbdf6fc513d264246
+Original-commit: 7602c65e48467c6137218d453d0290ffcbb779da
+Original-commit: b014d5502ac636102a1cebaf0fe0fa4d7b310946
+Original-commit: b9a857bc3407bb24d2745574f2bf9783614ae37c
+Original-commit: bdd2517f58f03dd230fefe6e17817e4f76dc6e51
+Original-commit: bff4392d0a62ef0ec7de63041577070e45646452
+Original-commit: c3fd052de171c9de3e698007021d13b0c1d7865c
+Original-commit: d60ae11d8e126b87bac7b1e31c74bdcc9bb222d1

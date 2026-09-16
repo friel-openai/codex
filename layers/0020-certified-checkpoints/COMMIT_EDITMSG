@@ -1,0 +1,7 @@
+Resume model context from certified segment checkpoints
+
+Combine the existing implementation and corrections:
+
+- Restore certified checkpoint recovery
+
+Original-commit: 3bb2638a31e02fd709fa3c64517e5acede29c51e

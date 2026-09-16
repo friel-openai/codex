@@ -1,0 +1,159 @@
+name: frodex-ci
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+concurrency:
+  group: frodex-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test projected Frodex
+    runs-on: ubuntu-24.04
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf -- \
+            /opt/hostedtoolcache/CodeQL \
+            /usr/local/.ghcup \
+            /usr/local/lib/android \
+            /usr/share/dotnet
+          df -h /
+
+      - name: Materialize projection
+        id: projection
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          upstream=$(jq -er '
+            [.tag, .commit]
+            | if all(.[]; type == "string" and length > 0)
+              then @tsv
+              else error("tag and commit must be non-empty strings")
+              end
+          ' upstream.json)
+          IFS=$'\t' read -r codex_tag codex_commit <<<"${upstream}"
+
+          # Fetch only the configured release boundary, then verify that its
+          # tag and commit still identify the same upstream source tree.
+          git fetch --no-tags --depth=1 https://github.com/openai/codex.git \
+            "+refs/tags/${codex_tag}:refs/tags/${codex_tag}"
+          actual_codex_commit=$(git rev-parse "${codex_tag}^{commit}")
+          [[ "${actual_codex_commit}" == "${codex_commit}" ]] || {
+            echo "${codex_tag} resolves to ${actual_codex_commit}, not ${codex_commit}." >&2
+            exit 1
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          projection_path="${RUNNER_TEMP}/frodex-projection"
+          go run ./cmd/layerctl projection create ci --worktree "${projection_path}"
+
+          echo "path=${projection_path}" >>"${GITHUB_OUTPUT}"
+          {
+            echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/cargo-target"
+            echo "CODEX_REPO_ROOT=${projection_path}"
+          } >>"${GITHUB_ENV}"
+
+      - name: Configure Linux sandboxing
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            bubblewrap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Install projected Rust toolchain
+        working-directory: ${{ steps.projection.outputs.path }}/codex-rs
+        run: cargo --version
+
+      - name: Configure rusty_v8 artifacts
+        shell: bash
+        env:
+          TARGET: x86_64-unknown-linux-gnu
+        run: |
+          set -euo pipefail
+
+          version=$(python3 \
+            "${{ steps.projection.outputs.path }}/.github/scripts/rusty_v8_bazel.py" \
+            resolved-v8-crate-version)
+          release_tag="rusty-v8-v${version}"
+          base_url="https://github.com/openai/codex/releases/download/${release_tag}"
+          artifact_dir="${RUNNER_TEMP}/rusty_v8"
+          profile="ptrcomp_sandbox_release"
+
+          archive_name="librusty_v8_${profile}_${TARGET}.a.gz"
+          binding_name="src_binding_${profile}_${TARGET}.rs"
+          checksums_name="rusty_v8_${profile}_${TARGET}.sha256"
+          archive_path="${artifact_dir}/${archive_name}"
+          binding_path="${artifact_dir}/${binding_name}"
+          checksums_path="${artifact_dir}/${checksums_name}"
+
+          mkdir -p "${artifact_dir}"
+          curl -fsSL "${base_url}/${archive_name}" -o "${archive_path}"
+          curl -fsSL "${base_url}/${binding_name}" -o "${binding_path}"
+          curl -fsSL "${base_url}/${checksums_name}" -o "${checksums_path}"
+
+          [[ $(wc -l <"${checksums_path}") -eq 2 ]] || {
+            echo "Expected exactly two checksums for ${TARGET}." >&2
+            exit 1
+          }
+          (
+            cd "${artifact_dir}"
+            tr -d '\r' <"${checksums_path}" | sha256sum -c -
+          )
+          {
+            echo "RUSTY_V8_ARCHIVE=${archive_path}"
+            echo "RUSTY_V8_SRC_BINDING_PATH=${binding_path}"
+          } >>"${GITHUB_ENV}"
+
+      - uses: facebook/install-dotslash@1e4e7b3e07eaca387acb98f1d4720e0bee8dbb6a # v2
+
+      - name: Make DotSlash available to integration tests
+        shell: bash
+        run: sudo cp "$(command -v dotslash)" /usr/local/bin/dotslash
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: just@1.51.0
+
+      - uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2.62.49
+        with:
+          tool: nextest@0.9.103
+
+      - name: Run core unit and Saffron integration tests
+        working-directory: ${{ steps.projection.outputs.path }}
+        run: |
+          just test --cargo-profile ci-test \
+            --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
+            -p codex-core \
+            --lib
+          just test --cargo-profile ci-test \
+            --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
+            -p codex-app-server \
+            --test all \
+            saffron_goal_supervisor

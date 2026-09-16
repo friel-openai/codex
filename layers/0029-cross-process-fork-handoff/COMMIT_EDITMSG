@@ -1,0 +1,20 @@
+Hand off fork and side sessions from the owning app-server
+
+Combine the existing implementation and corrections:
+
+- Retain shared types in stable schema exports
+- Reserve fork history across process boundaries
+- Hand off forks from their owning app-server
+- Start fork panes from prepared handoffs
+- Validate independent fork handoffs and preserve older model context
+- Preserve nonlocal thread-store forks
+- fixup! Start fork panes from prepared handoffs
+
+Original-commit: 2015affe25ec9f54a122750cd6957585a24c0639
+Original-commit: 5817ce9f1b431e2966c735c16aeb8638c7d691d0
+Original-commit: 61ff7e407d6b824f4ad0d4eb892b31ac52039189
+Original-commit: a831876cd9cbd32c13fd836b5051217d26ab3d56
+Original-commit: e0cc9f0684ef72c47703de4d66b68360efe6af73
+Original-commit: e16f60f6c47e506cf183069a12b71e3c269969c3
+Original-commit: fb93e877c80946653ef84db4c09deee3dcd151f2
+Co-authored-by: Friel <friel@openai.com>

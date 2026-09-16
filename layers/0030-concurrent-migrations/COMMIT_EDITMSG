@@ -1,0 +1,19 @@
+Schedule independent migrations without blocking unrelated tasks
+
+Combine the existing implementation and corrections:
+
+- Keep unrelated resume and metadata reads outside rollout migration waits
+- Reserve bounded concurrent migration jobs across processes
+- Serialize history schema initialization across app-server processes
+- Schedule independent rollout migrations using bounded dependency reservations
+- Cover migration overlap, dependency changes, retry and recovery isolation
+- Release migration jobs before projection lifecycle waits
+
+Original-commit: 0331aa2987ac6363acb502e6e2baf2037a7fef20
+Original-commit: 3c8cffefa3caaf2dbcc26c0db80719a38f8f3ef0
+Original-commit: 5d4cbfea18f99d6a57b3e23f63fb6f09df35272a
+Original-commit: 646fb1aa1eed9fb13e09fe7a310c8dc6cf0c66d8
+Original-commit: 87ea724d585e695831bef921ccfa5ee00d5feb4e
+Original-commit: fa40ffc0b9e8dec838aa52cbb2a55a16e91a5c83
+Co-authored-by: Aaron Friel <friel@openai.com>
+Co-authored-by: Tamir Duberstein <tamird@openai.com>

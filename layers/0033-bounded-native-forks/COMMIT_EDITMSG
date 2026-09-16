@@ -1,0 +1,7 @@
+Bound native checkpoint forks across active turns
+
+Combine the existing implementation and corrections:
+
+- Keep native checkpoint forks bounded across active turns
+
+Original-commit: 0455909a0e77b37b9ea6eaeed85e0f211f0d0ac7

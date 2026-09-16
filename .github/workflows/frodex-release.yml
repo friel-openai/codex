@@ -1,0 +1,433 @@
+name: frodex-release
+run-name: Release Frodex
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: Optional release notes
+        required: false
+        default: ""
+        type: string
+
+concurrency:
+  group: frodex-release
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    name: Materialize release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      codex_commit: ${{ steps.release.outputs.codex_commit }}
+      codex_tag: ${{ steps.release.outputs.codex_tag }}
+      release_commit: ${{ steps.release.outputs.release_commit }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Materialize and publish immutable projection
+        id: release
+        shell: bash
+        env:
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          set -euo pipefail
+
+          # Treat the tag and commit as one validated upstream identity. The
+          # commit check below protects against a moved or incorrectly fetched
+          # tag before any projection is published.
+          upstream=$(jq -er '
+            [.tag, .commit]
+            | if all(.[]; type == "string" and length > 0)
+              then @tsv
+              else error("tag and commit must be non-empty strings")
+              end
+          ' upstream.json)
+          IFS=$'\t' read -r codex_tag codex_commit <<<"${upstream}"
+          codex_version=${codex_tag#rust-v}
+          pattern='^[0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?$'
+          if [[ "${codex_tag}" == "${codex_version}" || ! "${codex_version}" =~ ${pattern} ]]; then
+            echo "upstream.json must identify a Codex rust-v* release tag." >&2
+            exit 1
+          fi
+
+          git fetch --no-tags https://github.com/openai/codex.git \
+            "+refs/tags/${codex_tag}:refs/tags/${codex_tag}"
+          actual_codex_commit=$(git rev-parse "${codex_tag}^{commit}")
+          [[ "${actual_codex_commit}" == "${codex_commit}" ]] || {
+            echo "${codex_tag} resolves to ${actual_codex_commit}, not ${codex_commit}." >&2
+            exit 1
+          }
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Keep a worktree attached through version stamping so the immutable
+          # tag records the exact source tree used by every platform build.
+          release_worktree="${RUNNER_TEMP}/frodex-release"
+          go run ./cmd/layerctl projection create release \
+            --worktree "${release_worktree}"
+          release_ref=refs/layerctl/projections/release/head
+
+          # Derive the next suffix from remote tags so a fresh runner never
+          # reuses an already published release number.
+          tag_prefix="frodex-v${codex_version}+frodex."
+          release_number=0
+          while IFS= read -r candidate; do
+            [[ -n "${candidate}" ]] || continue
+            suffix=${candidate#"${tag_prefix}"}
+            [[ "${suffix}" =~ ^[0-9]+$ ]] || {
+              echo "invalid Frodex release tag: ${candidate}" >&2
+              exit 1
+            }
+            if ((suffix >= release_number)); then
+              release_number=$((suffix + 1))
+            fi
+          done < <(
+            git ls-remote --refs --tags origin "refs/tags/${tag_prefix}*" |
+              sed 's#^[^[:space:]]*[[:space:]]*refs/tags/##'
+          )
+
+          version="${codex_version}+frodex.${release_number}"
+          release_tag="frodex-v${version}"
+
+          (
+            cd "${release_worktree}/codex-rs"
+            python3 - "${version}" <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          version = sys.argv[1]
+          manifest_path = Path("Cargo.toml")
+          manifest = manifest_path.read_text()
+          manifest = re.sub(
+              r'^version = "[^"]+"$',
+              f'version = "{version}"',
+              manifest,
+              count=1,
+              flags=re.MULTILINE,
+          )
+          manifest_path.write_text(manifest)
+
+          path = Path("Cargo.lock")
+          text = path.read_text()
+
+          def replace_workspace_package_version(match: re.Match[str]) -> str:
+              block = match.group(0)
+              name_match = re.search(r'^name = "([^"]+)"$', block, flags=re.MULTILINE)
+              if name_match is None:
+                  return block
+              name = name_match.group(1)
+              if not (
+                  name.startswith("codex-")
+                  or name in {"app_test_support", "core_test_support"}
+              ):
+                  return block
+              return re.sub(
+                  r'^version = "[^"]+"$',
+                  f'version = "{version}"',
+                  block,
+                  count=1,
+                  flags=re.MULTILINE,
+              )
+
+          text = re.sub(
+              r'(?ms)^\[\[package\]\]\n.*?(?=^\[\[package\]\]\n|\Z)',
+              replace_workspace_package_version,
+              text,
+          )
+          path.write_text(text)
+          PY
+            grep -n "^version = \"${version}\"" Cargo.toml
+          )
+
+          # GitHub's workflow token cannot introduce workflow files through a
+          # pushed tag. Release builds still retain the neighboring actions and
+          # scripts they consume from the generated source tree.
+          git -C "${release_worktree}" rm -r -- .github/workflows
+          git -C "${release_worktree}" add -- \
+            codex-rs/Cargo.toml codex-rs/Cargo.lock
+          git -C "${release_worktree}" commit -m "frodex ${version}"
+          release_commit=$(git rev-parse "${release_ref}^{commit}")
+          [[ -z "$(
+            git -C "${release_worktree}" ls-tree -r --name-only \
+              "${release_commit}" -- .github/workflows
+          )" ]] || {
+            echo "${release_tag} still contains GitHub workflow files." >&2
+            exit 1
+          }
+
+          # Release notes require an annotated tag; releases without notes use
+          # a lightweight tag. Both forms point at the exact release commit.
+          if [[ -n "${RELEASE_NOTES}" ]]; then
+            message=$(mktemp)
+            trap 'rm -f "${message}"' EXIT
+            {
+              printf 'frodex %s\n\n' "${version}"
+              printf '%s\n' "${RELEASE_NOTES}"
+            } >"${message}"
+            git tag --annotate "${release_tag}" --file "${message}" "${release_commit}"
+          else
+            git tag "${release_tag}" "${release_commit}"
+          fi
+
+          # Publish the immutable identity before fan-out build jobs consume it.
+          git push origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+
+          # Downstream jobs validate and build from these exact values rather
+          # than rediscovering mutable repository state.
+          {
+            echo "codex_commit=${codex_commit}"
+            echo "codex_tag=${codex_tag}"
+            echo "release_commit=${release_commit}"
+            echo "release_tag=${release_tag}"
+            echo "version=${version}"
+          } >>"${GITHUB_OUTPUT}"
+
+  build:
+    needs: materialize
+    name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 360
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_LTO: "off"
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CODEX_COMMIT: ${{ needs.materialize.outputs.codex_commit }}
+      CODEX_TAG: ${{ needs.materialize.outputs.codex_tag }}
+      RELEASE_TAG: ${{ needs.materialize.outputs.release_tag }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.materialize.outputs.release_tag }}
+
+      - name: Install Linux build dependencies
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Validate Frodex tag and Codex base
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_commit=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}") || {
+            echo "release input must identify an existing tag: ${RELEASE_TAG}" >&2
+            exit 1
+          }
+          [[ $(git rev-parse HEAD) == "${release_commit}" ]] || {
+            echo "checkout does not match ${RELEASE_TAG}." >&2
+            exit 1
+          }
+          version="${RELEASE_TAG#frodex-v}"
+          pattern='^([0-9]+\.[0-9]+\.[0-9]+(-(alpha(\.[0-9]+){0,2}|beta(\.[0-9]+)?))?)\+frodex\.([0-9]+)$'
+          if [[ ! "${version}" =~ ${pattern} ]]; then
+            echo "Frodex tags must have the form frodex-v<codex-version>+frodex.<release>." >&2
+            exit 1
+          fi
+
+          codex_version="${BASH_REMATCH[1]}"
+          [[ "${CODEX_TAG}" == "rust-v${codex_version}" ]] || {
+            echo "${RELEASE_TAG} does not match ${CODEX_TAG}." >&2
+            exit 1
+          }
+          git merge-base --is-ancestor "${CODEX_COMMIT}" HEAD || {
+            echo "${CODEX_TAG} (${CODEX_COMMIT}) is not an ancestor of ${RELEASE_TAG}." >&2
+            exit 1
+          }
+
+      - name: Configure rusty_v8 artifact overrides and verify checksums
+        uses: ./.github/actions/setup-rusty-v8
+        with:
+          target: ${{ matrix.target }}
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ runner.os }}" == "Linux" ]]; then
+            cargo build --jobs 2 --target ${{ matrix.target }} --release --timings \
+              --bin codex --bin codex-code-mode-host
+          else
+            cargo build --target ${{ matrix.target }} --release --timings \
+              --bin codex --bin codex-code-mode-host
+          fi
+
+      - name: Upload Cargo timings
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: cargo-timings-frodex-release-${{ matrix.target }}
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: Build code-mode host JavaScript test
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --target ${{ matrix.target }} --release \
+            -p codex-code-mode-host --test stdio --no-run
+
+      - name: Verify Frodex version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#frodex-v}"
+          actual=$(target/${{ matrix.target }}/release/codex --version)
+          expected="codex-cli ${version}"
+          [[ "${actual}" == "${expected}" ]] || {
+            echo "expected version '${expected}', got '${actual}'" >&2
+            exit 1
+          }
+
+      - name: Sign and verify macOS code-mode host
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          host="target/${{ matrix.target }}/release/codex-code-mode-host"
+          entitlements="${GITHUB_WORKSPACE}/.github/scripts/macos-signing/codex-code-mode-host.entitlements.plist"
+          actual=$(mktemp)
+          normalized_actual=$(mktemp)
+          normalized_expected=$(mktemp)
+          trap 'rm -f "$actual" "$normalized_actual" "$normalized_expected"' EXIT
+
+          codesign --force --sign - --identifier codex-code-mode-host \
+            --options runtime --timestamp=none --entitlements "$entitlements" "$host"
+          codesign --verify --strict --verbose=2 "$host"
+          codesign -d --entitlements :- "$host" >"$actual"
+          plutil -convert xml1 -o "$normalized_actual" "$actual"
+          plutil -convert xml1 -o "$normalized_expected" "$entitlements"
+          cmp "$normalized_actual" "$normalized_expected"
+
+      - name: Verify code-mode host executes JavaScript
+        shell: bash
+        run: |
+          set -euo pipefail
+          test_binary=""
+          for candidate in target/${{ matrix.target }}/release/deps/stdio-*; do
+            if [[ -f "$candidate" && -x "$candidate" ]]; then
+              test_binary="$candidate"
+              break
+            fi
+          done
+          [[ -n "$test_binary" ]] || {
+            echo "code-mode host integration test executable not found" >&2
+            exit 1
+          }
+          "$test_binary" \
+            remote_session_persists_values_forwards_delegates_and_controls_cells --exact
+
+      - name: Stage archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="${GITHUB_WORKSPACE}/dist/${{ matrix.target }}"
+          mkdir -p "${dest}"
+          tar -C "target/${{ matrix.target }}/release" \
+            -czf "${dest}/frodex-${{ matrix.target }}.tar.gz" \
+            codex codex-code-mode-host
+
+          entries=$(tar -tzf "${dest}/frodex-${{ matrix.target }}.tar.gz")
+          [[ "$entries" == $'codex\ncodex-code-mode-host' ]]
+
+      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+        with:
+          name: frodex-${{ matrix.target }}
+          path: dist/${{ matrix.target }}/*
+
+  release:
+    needs:
+      - materialize
+      - build
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      CODEX_COMMIT: ${{ needs.materialize.outputs.codex_commit }}
+      CODEX_TAG: ${{ needs.materialize.outputs.codex_tag }}
+      RELEASE_NOTES: ${{ inputs.release_notes }}
+      RELEASE_TAG: ${{ needs.materialize.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ needs.materialize.outputs.release_tag }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List staged artifacts
+        shell: bash
+        run: find dist -type f -print
+
+      - name: Write release provenance
+        id: provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD) == "${{ needs.materialize.outputs.release_commit }}" ]]
+          git merge-base --is-ancestor "${CODEX_COMMIT}" HEAD
+
+          body_path="${RUNNER_TEMP}/frodex-release.md"
+          {
+            echo "Based on OpenAI Codex \`${CODEX_TAG}\` (\`${CODEX_COMMIT}\`)."
+            if [[ -n "${RELEASE_NOTES}" ]]; then
+              printf '\n'
+              printf '%s\n' "${RELEASE_NOTES}"
+            fi
+          } >"${body_path}"
+          echo "body_path=${body_path}" >>"${GITHUB_OUTPUT}"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2.6.1
+        with:
+          tag_name: ${{ needs.materialize.outputs.release_tag }}
+          body_path: ${{ steps.provenance.outputs.body_path }}
+          files: dist/**
+          prerelease: true

@@ -2,7 +2,7 @@ layerctl
 ========
 
 `layerctl` materializes, captures, verifies, and advances the canonical
-Saffrodex layers.
+Frodex layers.
 Run it from this repository with `go run ./cmd/layerctl`.
 
 Projections
@@ -21,7 +21,7 @@ projection refs.
 `projection delete` is intentionally destructive and deletes the named
 projection without checking whether its work was captured.
 
-Read the projected tree's `AGENTS.md` before changing Codex or Saffron source.
+Read the projected tree's `AGENTS.md` before changing Codex or Frodex source.
 Use `layerctl layer add` or `layerctl layer refresh` to capture accepted
 projection work instead of hand-editing generated patches.
 The hydrated projection commit is the source-review surface;
@@ -99,12 +99,12 @@ Run `go run ./cmd/layerctl check` before handoff or release.
 Run `tools/release.sh [-b RELEASE_NOTES]` to dispatch the release workflow from
 the remote default branch.
 The workflow verifies the exact Codex tag and commit in `upstream.json`, creates
-a full projection, chooses the next available Saffrodex release number, pushes
+a full projection, chooses the next available Frodex release number, pushes
 the immutable projection tag, builds each platform from that tag, and creates
 the GitHub release.
 Release dispatch does not require or accept a caller-provided projection ref or
 version.
-Never change a published Saffrodex tag.
+Never change a published Frodex tag.
 
 Implementation
 --------------

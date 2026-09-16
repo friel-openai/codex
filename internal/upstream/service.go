@@ -1,4 +1,4 @@
-// Package upstream advances canonical Saffrodex definitions to another exact
+// Package upstream advances canonical Frodex definitions to another exact
 // Codex release through one resumable local projection.
 package upstream
 
@@ -12,9 +12,9 @@ import (
 	"path/filepath"
 	"regexp"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
 )
 
 const projectionName = "upstream-advance"

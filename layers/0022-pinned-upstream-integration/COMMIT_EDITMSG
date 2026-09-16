@@ -1,0 +1,7 @@
+Integrate maintained features with pinned upstream APIs
+
+Combine the existing implementation and corrections:
+
+- Adapt Frodex feature stack to upstream alpha.20
+
+Original-commit: 8033f1349c5820a68618faae3a041cc228994124

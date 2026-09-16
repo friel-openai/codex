@@ -1,0 +1,57 @@
+Run goal supervisors and agent ownership transitions
+
+Combine the existing implementation and corrections:
+
+- Add goal supervisor runtime and tools
+- Complete goal supervisor session scheduling
+- Restrict goal tools to root threads
+- Add agent lifecycle ownership transitions
+- Complete goal supervisor core integration
+- Restore agents from indexed descendant identities
+- Expose multi-agent ownership tools
+- Preserve starting environments across agent spawn
+- Test cold agent delivery serialization
+- Test goal supervisor cold bootstrap history
+- Cover goal supervisor lifecycle recovery
+- Exclude goal supervisors from agent capacity
+- Persist explicit subagent assignments
+- Preserve pending and terminal supervisor state
+- Test multi-agent ownership tool exposure
+- Cover supervisor transition and fork context
+- Restore goal supervisor full-history forks
+- Deduplicate supervisor test helpers
+- Scope supervisor tools to supervisor helpers
+- Test goal supervisor runtime contracts
+- Update multi-agent feature config fixture
+- Preserve persisted multi-agent versions
+- Render live goal supervisor communications
+- Reject encrypted goal supervisor follow-ups
+- Align multi-agent test manager CODEX_HOME
+- Hide internal collaboration envelopes from TUI
+
+Original-commit: 141b9cb10fee03fa84cde7e4ef18b34a16357e95
+Original-commit: 18d461804c092cc7bcf882abf6fc12bdfe7f9caa
+Original-commit: 2e0887b4d23bee36efa9d7d9fcfefd6db1d28b11
+Original-commit: 2fa3036597f1ebc859e9fc31f897809e63f5e56b
+Original-commit: 31e359913d4188aecb67ea2a452de1e43172ac78
+Original-commit: 33fc289eeb63a96bdfa950dd73905621e8a68489
+Original-commit: 39f4457c8c93c15e8142f6bc341e584fbe0f064c
+Original-commit: 5d3eba9676408a6ef733cd11f607eee581fefb66
+Original-commit: 5e0c0cec0f79c343367311fd86851db2faa7c263
+Original-commit: 5ef45d169f85252a21ad695628a028df05f1265a
+Original-commit: 6e2d442201f5f4da79a25b338c53414ec601e02f
+Original-commit: 76ceb41fce48cd6b749a786e60d408a6ddb9026c
+Original-commit: 7a13c6fe87ba609db0c1273874689cc2275eb7c3
+Original-commit: 88c135375d2c295655a45c9f6747e3e8f97d858a
+Original-commit: 8ee03315461f7f35f78c91f8f981eb9c39f7970c
+Original-commit: 9069e7da6eb592cef9879425e389574873466231
+Original-commit: 94a5eac682544607488b23d26aedda02d735bdf4
+Original-commit: ab4ba88ddc96ab50cfe1cd1eb5be4d0163117113
+Original-commit: b5cd50de97242b37caeb66c670d323da71e6290d
+Original-commit: bf3df7ecef8553ccfc9f4fc3dddf32332b304cc7
+Original-commit: c1e15938042da0d0a92fc08970ef3a298dba6ceb
+Original-commit: c9413bf5bff29fac6832c5c817035d9643414fc7
+Original-commit: cd9e571c74dd8a1d66ebc6d9573a8c0c192126d5
+Original-commit: d448b9ba5e192af8a986432b2db766c08374cb63
+Original-commit: d77c3ac0da51291efb7b80cf001ed73697182a33
+Original-commit: dd98c1031da9f183d1465978fa7c502131e59d9b

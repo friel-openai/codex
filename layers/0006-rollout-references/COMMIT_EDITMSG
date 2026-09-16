@@ -1,0 +1,19 @@
+Read and publish reference-backed rollout history
+
+Combine the existing implementation and corrections:
+
+- Add rollout segment references
+- Avoid rescanning prepared fork model context
+- Sanitize reference-backed full-history agent forks
+- Bind history cursors to selected rollout
+- Preserve stable thread identity across physical rollouts
+- Repair rollout reference inheritance
+- Harden rollout segment publication
+
+Original-commit: 092faccb9649be0423f37d43419ef8852cfa6d69
+Original-commit: 498a0cc4d7bdc0efb0eca22dabd0573f4c494ed0
+Original-commit: 8814e736891451a10973668d0711928bd75cf8ee
+Original-commit: 885a5b96d63f3caa606b7f07a1af485dfd586154
+Original-commit: be02a4b6c84321d7397586cb72a7a8c002f525a5
+Original-commit: dea2ae88ae6e3a85a3fb60e195249bc39537bd44
+Original-commit: f13c07582da227288f6332ad3e350c7da0daa033

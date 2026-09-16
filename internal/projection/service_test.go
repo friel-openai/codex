@@ -10,10 +10,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
 )
 
 func TestProjectionLifecycleUsesCustomRefs(t *testing.T) {
@@ -34,10 +34,10 @@ func TestProjectionLifecycleUsesCustomRefs(t *testing.T) {
 	if created.Base != created.Head {
 		t.Fatalf("Create() base = %q, head = %q", created.Base, created.Head)
 	}
-	if got := gitOutput(t, repositoryRoot, "show", "-s", "--format=%B", created.Head); got != "saffrodex: feature\n\nFeature body." {
+	if got := gitOutput(t, repositoryRoot, "show", "-s", "--format=%B", created.Head); got != "frodex: feature\n\nFeature body." {
 		t.Fatalf("generated feature commit message = %q", got)
 	}
-	if got := gitOutput(t, repositoryRoot, "show", "-s", "--format=%B", created.Head+"^"); got != "saffrodex: foundation\n\nFoundation body." {
+	if got := gitOutput(t, repositoryRoot, "show", "-s", "--format=%B", created.Head+"^"); got != "frodex: foundation\n\nFoundation body." {
 		t.Fatalf("generated foundation commit message = %q", got)
 	}
 
@@ -151,14 +151,14 @@ func newCanonicalRepository(t *testing.T) string {
 
 	writeFile(t, filepath.Join(root, "foundation.txt"), "foundation\n")
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: foundation", "-m", "Foundation body.")
+	gitRun(t, root, "commit", "-m", "frodex: foundation", "-m", "Foundation body.")
 	foundationLayer := captureLayer(t, root, "HEAD^", "HEAD")
 	writeFile(t, filepath.Join(root, "base.txt"), "changed\n")
 	writeFile(t, filepath.Join(root, "feature.txt"), "feature\n")
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: feature", "-m", "Feature body.")
+	gitRun(t, root, "commit", "-m", "frodex: feature", "-m", "Feature body.")
 	featureLayer := captureLayer(t, root, "HEAD^", "HEAD")
-	gitRun(t, root, "switch", "--orphan", "saffrodex-next")
+	gitRun(t, root, "switch", "--orphan", "frodex-next")
 	writeFile(t, filepath.Join(root, "upstream.json"), fmt.Sprintf("{\n  \"tag\": \"rust-v1.2.3\",\n  \"commit\": %q\n}\n", upstreamCommit))
 	writeLayerDefinition(t, root, "0000-foundation", foundationLayer)
 	writeLayerDefinition(t, root, "0001-feature", featureLayer)

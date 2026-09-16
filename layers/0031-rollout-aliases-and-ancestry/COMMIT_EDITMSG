@@ -1,0 +1,13 @@
+Preserve rollout aliases and immutable fork ancestry
+
+Combine the existing implementation and corrections:
+
+- Preserve rollout identity and immutable fork ancestry
+- Accept selected rollout aliases in app-server resume
+- Resolve compressed rollout selections before resume
+
+Original-commit: 5840b52f194efad9ef5084299ed54371d0c70872
+Original-commit: a19878aae70a8df4314ef03647387d34157489dd
+Original-commit: ab4ad0b8591e3982af8d57439f72624dffd338d6
+Co-authored-by: Aaron Friel <friel@openai.com>
+Co-authored-by: Friel <friel@openai.com>

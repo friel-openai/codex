@@ -1,4 +1,4 @@
-// Package layer captures accepted projection commits as canonical Saffrodex
+// Package layer captures accepted projection commits as canonical Frodex
 // layer patches.
 package layer
 
@@ -11,10 +11,10 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
 )
 
 // Service owns updates to the canonical layers directory.

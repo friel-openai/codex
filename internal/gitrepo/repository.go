@@ -1,5 +1,5 @@
 // Package gitrepo provides the bounded system-Git operations needed by
-// layerctl. It owns command construction and error reporting, not Saffrodex
+// layerctl. It owns command construction and error reporting, not Frodex
 // projection policy.
 package gitrepo
 

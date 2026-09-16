@@ -1,0 +1,9 @@
+Enable Frodex defaults and config options
+
+Combine the existing implementation and corrections:
+
+- Enable goal supervisor by default in Frodex
+- Enable maintained agent behavior by default in Frodex
+
+Original-commit: b39484ffc6b0f0c7b1835e9a76b0063c779a1a12
+Original-commit: d92b8fde4ad79bcb77fb5507b99e154ce500c8b2

@@ -1,0 +1,1533 @@
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index 8e78c929e14b65fa7189d8597ed7a077c805003e..5a5027d44f0f5885ca2e375e2aa4910e0ce27eae 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -78,6 +78,8 @@ use codex_core::config::Config;
+ use codex_core::config::ThreadStoreConfig;
+ use codex_exec_server::EnvironmentManager;
+ use codex_feedback::CodexFeedback;
++use codex_goal_extension::GoalActivator;
++use codex_goal_extension::GoalSchedulerHandle;
+ use codex_goal_extension::GoalService;
+ use codex_home::CodexHomeUserInstructionsProvider;
+ use codex_login::AuthManager;
+@@ -157,6 +159,7 @@ pub(crate) struct MessageProcessor {
+     project_processor: ProjectRequestProcessor,
+     remote_control_processor: RemoteControlRequestProcessor,
+     search_processor: SearchRequestProcessor,
++    goal_scheduler: Option<GoalSchedulerHandle>,
+     thread_goal_processor: ThreadGoalRequestProcessor,
+     thread_queue_processor: ThreadQueueRequestProcessor,
+     thread_processor: ThreadRequestProcessor,
+@@ -287,6 +290,7 @@ impl MessageProcessor {
+             remote_control_handle,
+             plugin_startup_tasks,
+         } = args;
++        let start_goal_scheduler = !matches!(rpc_transport, AppServerRpcTransport::InProcess);
+         let thread_state_manager = ThreadStateManager::new();
+         // The thread store is intentionally process-scoped. Config reloads can
+         // affect per-thread behavior, but they must not move newly started,
+@@ -507,6 +511,22 @@ impl MessageProcessor {
+             turn_cost_worker.as_ref().map(TurnCostWorker::handle),
+             config_warnings,
+         );
++        let goal_scheduler = if start_goal_scheduler {
++            state_db.as_ref().map(|state_db| {
++                let thread_processor = thread_processor.clone();
++                let activator: GoalActivator = Arc::new(move |schedule| {
++                    let thread_processor = thread_processor.clone();
++                    Box::pin(async move {
++                        thread_processor
++                            .activate_goal_supervisor_schedule(schedule)
++                            .await
++                    })
++                });
++                GoalSchedulerHandle::start(Arc::clone(state_db), activator)
++            })
++        } else {
++            None
++        };
+         let turn_processor = TurnRequestProcessor::new(
+             auth_manager,
+             Arc::clone(&thread_manager),
+@@ -589,6 +609,7 @@ impl MessageProcessor {
+             project_processor,
+             remote_control_processor,
+             search_processor,
++            goal_scheduler,
+             thread_goal_processor,
+             thread_queue_processor,
+             thread_processor,
+@@ -603,6 +624,9 @@ impl MessageProcessor {
+         self.apps_processor.shutdown();
+         self.models_refresh_worker.shutdown();
+         self.skills_watcher.shutdown();
++        if let Some(goal_scheduler) = self.goal_scheduler.as_ref() {
++            goal_scheduler.stop();
++        }
+     }
+
+     pub(crate) async fn process_request(
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 1490d1e17c4b2fe8a8276cc64e67666af3151110..74c8dac2dfe2d98c183942dbf371a0d82e2d76ea 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -8058,6 +8058,8 @@ fn build_thread_from_loaded_snapshot(
+     )
+ }
+
++mod goal_scheduler;
++
+ #[cfg(test)]
+ #[path = "thread_processor_tests.rs"]
+ mod thread_processor_tests;
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..de2ccc76fca36cc146d628fb4428481f385450fd
+--- /dev/null
++++ b/codex-rs/app-server/src/request_processors/thread_processor/goal_scheduler.rs
+@@ -0,0 +1,220 @@
++use super::*;
++use codex_state::ActiveGoalSupervisorSchedule;
++
++const SCHEDULER_MATERIALIZED_RELEASE_POLL_INTERVAL: Duration = Duration::from_secs(1);
++
++impl ThreadRequestProcessor {
++    pub(crate) async fn activate_goal_supervisor_schedule(
++        &self,
++        schedule: ActiveGoalSupervisorSchedule,
++    ) -> Result<(), String> {
++        self.activate_goal_supervisor_schedule_inner(schedule)
++            .await
++            .map_err(|err| err.message)
++    }
++
++    async fn activate_goal_supervisor_schedule_inner(
++        &self,
++        schedule: ActiveGoalSupervisorSchedule,
++    ) -> Result<(), JSONRPCErrorError> {
++        let _thread_list_state_permit = self.acquire_thread_list_state_permit().await?;
++        let thread_id = schedule.thread_id;
++        if self
++            .pending_thread_unloads
++            .lock()
++            .await
++            .contains(&thread_id)
++        {
++            return Err(invalid_request(format!(
++                "thread {thread_id} is closing; retry goal supervisor activation after the thread is closed"
++            )));
++        }
++
++        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await {
++            if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
++                && Arc::ptr_eq(&observed_thread, &thread)
++            {
++                self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
++                    .await?;
++                thread
++                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
++                    .await;
++                return Ok(());
++            }
++        }
++
++        let thread_id_string = thread_id.to_string();
++        let stored_thread = self
++            .read_stored_thread_for_resume(
++                thread_id_string.as_str(),
++                /*path*/ None,
++                /*include_history*/ false,
++            )
++            .await?;
++        let (thread_history, _stored_thread) = self
++            .load_resume_initial_history_from_stored_thread(stored_thread)
++            .await?;
++        let history_cwd = thread_history.session_cwd();
++        let mut request_overrides = None;
++        let mut typesafe_overrides = ConfigOverrides {
++            codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
++            main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
++            ..Default::default()
++        };
++        self.load_and_apply_persisted_resume_metadata(
++            &thread_history,
++            &mut request_overrides,
++            &mut typesafe_overrides,
++        )
++        .await;
++        let config = self
++            .config_manager
++            .load_for_cwd(request_overrides, typesafe_overrides, history_cwd)
++            .await
++            .map_err(|err| config_load_error(&err))?;
++
++        let new_thread = self
++            .thread_manager
++            .resume_thread_with_history(
++                config,
++                thread_history,
++                self.auth_manager.clone(),
++                /*parent_trace*/ None,
++                Default::default(),
++            )
++            .await
++            .map_err(|err| internal_error(format!("error resuming thread: {err}")))?;
++        let NewThread {
++            thread_id: resumed_thread_id,
++            thread,
++            ..
++        } = new_thread;
++        if resumed_thread_id != thread_id {
++            return Err(internal_error(format!(
++                "goal scheduler resumed thread {resumed_thread_id} for expected thread {thread_id}"
++            )));
++        }
++
++        self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
++            .await?;
++
++        thread
++            .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
++            .await;
++        let processor = self.clone();
++        tokio::spawn(async move {
++            processor
++                .release_scheduler_materialized_thread_after_terminal_action(schedule, thread)
++                .await;
++        });
++        Ok(())
++    }
++
++    async fn ensure_background_listener_for_thread(
++        &self,
++        thread_id: ThreadId,
++        thread: Arc<CodexThread>,
++    ) -> Result<(), JSONRPCErrorError> {
++        let thread_id_string = thread_id.to_string();
++        self.thread_watch_manager
++            .upsert_thread(&thread_id_string)
++            .await;
++        let thread_state = self.thread_state_manager.thread_state(thread_id).await;
++        self.ensure_listener_task_running(thread_id, thread, thread_state)
++            .await
++    }
++
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "subscriber attachment and scheduler-owned unload must be serialized"
++    )]
++    async fn release_scheduler_materialized_thread_after_terminal_action(
++        &self,
++        mut activated_schedule: ActiveGoalSupervisorSchedule,
++        thread: Arc<CodexThread>,
++    ) {
++        let Some(state_db) = self.state_db.as_ref() else {
++            return;
++        };
++        loop {
++            tokio::time::sleep(SCHEDULER_MATERIALIZED_RELEASE_POLL_INTERVAL).await;
++            if !self
++                .thread_state_manager
++                .subscribed_connection_ids(activated_schedule.thread_id)
++                .await
++                .is_empty()
++            {
++                return;
++            }
++            let Ok(loaded_thread) = self
++                .thread_manager
++                .get_thread(activated_schedule.thread_id)
++                .await
++            else {
++                return;
++            };
++            if !Arc::ptr_eq(&loaded_thread, &thread) {
++                return;
++            }
++
++            let current_schedule = match state_db
++                .thread_goals()
++                .get_active_goal_supervisor_schedule(activated_schedule.thread_id)
++                .await
++            {
++                Ok(current_schedule) => current_schedule,
++                Err(err) => {
++                    warn!(
++                        thread_id = %activated_schedule.thread_id,
++                        "failed to inspect scheduler-materialized goal before release: {err}"
++                    );
++                    return;
++                }
++            };
++            let terminal_action_persisted = match current_schedule {
++                None => true,
++                Some(current_schedule)
++                    if current_schedule.goal_id != activated_schedule.goal_id =>
++                {
++                    activated_schedule = current_schedule;
++                    false
++                }
++                Some(current_schedule) => {
++                    current_schedule.snoozed_until_ms.is_some()
++                        && current_schedule != activated_schedule
++                }
++            };
++            if !terminal_action_persisted
++                || thread.has_running_goal_supervisor().await
++                || matches!(thread.agent_status().await, AgentStatus::Running)
++            {
++                continue;
++            }
++
++            {
++                let mut pending_thread_unloads = self.pending_thread_unloads.lock().await;
++                if !self
++                    .thread_state_manager
++                    .subscribed_connection_ids(activated_schedule.thread_id)
++                    .await
++                    .is_empty()
++                    || pending_thread_unloads.contains(&activated_schedule.thread_id)
++                {
++                    return;
++                }
++                pending_thread_unloads.insert(activated_schedule.thread_id);
++            }
++            super::super::thread_lifecycle::unload_thread_without_subscribers(
++                Arc::clone(&self.thread_manager),
++                Arc::clone(&self.outgoing),
++                Arc::clone(&self.pending_thread_unloads),
++                self.thread_state_manager.clone(),
++                self.thread_watch_manager.clone(),
++                activated_schedule.thread_id,
++                thread,
++            )
++            .await;
++            return;
++        }
++    }
++}
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index 8aa9b2a8b25fab3cbde223ffc3cc410cd4bbe5cc..8bdb6d458b1b5c113ffe0e62889baa080feec576 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -2703,6 +2703,323 @@ async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
+     Ok(())
+ }
+
++#[tokio::test]
++async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let codex_home = TempDir::new()?;
++    mock_responses_config(&server.uri()).write(codex_home.path())?;
++    let config_path = codex_home.path().join("config.toml");
++    let config = std::fs::read_to_string(&config_path)?;
++    std::fs::write(
++        &config_path,
++        config.replace(
++            "personality = true\n",
++            "personality = true\ngoals = true\ngoal_supervisor = true\n",
++        ),
++    )?;
++    let thread_id = create_fake_rollout(
++        codex_home.path(),
++        "2025-01-05T12-00-00",
++        "2025-01-05T12:00:00Z",
++        "continue without a client resume",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++    let thread_id = ThreadId::from_string(thread_id.as_str())?;
++    let state_db = StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
++        "mock_provider".into(),
++    )
++    .await?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "continue after app-server restart",
++            codex_state::ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await?;
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal.goal_id,
++            Some(Utc::now().timestamp_millis() + 60_000),
++        )
++        .await?;
++
++    let mut first = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build()
++        .await?;
++    timeout(DEFAULT_READ_TIMEOUT, first.initialize()).await??;
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    assert!(
++        server
++            .received_requests()
++            .await
++            .is_some_and(|requests| requests.is_empty()),
++        "the future deadline must not run before restart"
++    );
++    first.shutdown_gracefully().await?;
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal.goal_id,
++            Some(Utc::now().timestamp_millis() - 1),
++        )
++        .await?;
++
++    let mut second = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build()
++        .await?;
++    timeout(DEFAULT_READ_TIMEOUT, second.initialize()).await??;
++    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
++    let requests = server
++        .received_requests()
++        .await
++        .expect("wiremock should record requests");
++    let request = requests
++        .iter()
++        .find(|request| request.url.path().ends_with("/responses"))
++        .expect("goal supervisor should make a Responses request");
++    let body: serde_json::Value = serde_json::from_slice(request.body.as_slice())?;
++    let input = body
++        .get("input")
++        .expect("Responses request should contain input")
++        .to_string();
++    assert!(input.contains("# Goal Supervisor Assignment"));
++    assert!(input.contains("continue after app-server restart"));
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_materialized_thread_unloads_after_supervisor_snoozes() -> Result<()> {
++    let server = MockServer::start().await;
++    let _response_mock = responses::mount_sse_once(
++        &server,
++        responses::sse(vec![
++            responses::ev_response_created("supervisor-response"),
++            responses::ev_function_call_with_namespace(
++                "snooze-call",
++                "supervisor",
++                "snooze",
++                &json!({"delay_seconds": 3_600}).to_string(),
++            ),
++            responses::ev_completed("supervisor-response"),
++        ]),
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    mock_responses_config(&server.uri()).write(codex_home.path())?;
++    let config_path = codex_home.path().join("config.toml");
++    let config = std::fs::read_to_string(&config_path)?;
++    std::fs::write(
++        &config_path,
++        config.replace(
++            "personality = true\n",
++            "personality = true\ngoals = true\ngoal_supervisor = true\n",
++        ),
++    )?;
++    let thread_id = create_fake_rollout(
++        codex_home.path(),
++        "2025-01-05T12-00-00",
++        "2025-01-05T12:00:00Z",
++        "snooze and unload",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++    let thread_id = ThreadId::from_string(thread_id.as_str())?;
++    let state_db = StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
++        "mock_provider".into(),
++    )
++    .await?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "snooze after checking",
++            codex_state::ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await?;
++    // Do not initialize the protocol connection until the process-owned scheduler has run. This
++    // leaves the cold-resumed thread without a subscriber, as it would be after Desktop disconnects.
++    let mut mcp = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build()
++        .await?;
++    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
++    timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            let snoozed_until_ms = state_db
++                .thread_goals()
++                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
++                .await?;
++            if snoozed_until_ms.is_some_and(|deadline| deadline > Utc::now().timestamp_millis()) {
++                return Ok::<(), anyhow::Error>(());
++            }
++            tokio::time::sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await??;
++
++    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
++    timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            let request_id = mcp
++                .send_thread_loaded_list_request(ThreadLoadedListParams::default())
++                .await?;
++            let response = mcp
++                .read_stream_until_response_message(RequestId::Integer(request_id))
++                .await?;
++            let ThreadLoadedListResponse { data, .. } = to_response(response)?;
++            if data
++                .iter()
++                .all(|loaded_id| loaded_id != &thread_id.to_string())
++            {
++                return Ok::<(), anyhow::Error>(());
++            }
++            tokio::time::sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await??;
++
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_materialized_thread_unloads_and_retries_after_supervisor_failure() -> Result<()>
++{
++    let server = MockServer::start().await;
++    let _response_mock = responses::mount_sse_sequence(
++        &server,
++        vec![
++            responses::sse_failed(
++                "supervisor-failure-1",
++                "model_not_found",
++                "saved model unavailable",
++            ),
++            responses::sse_failed(
++                "supervisor-failure-2",
++                "model_not_found",
++                "saved model unavailable",
++            ),
++        ],
++    )
++    .await;
++    let codex_home = TempDir::new()?;
++    mock_responses_config(&server.uri()).write(codex_home.path())?;
++    let config_path = codex_home.path().join("config.toml");
++    let config = std::fs::read_to_string(&config_path)?;
++    std::fs::write(
++        &config_path,
++        config.replace(
++            "personality = true\n",
++            "personality = true\ngoals = true\ngoal_supervisor = true\n",
++        ),
++    )?;
++    let thread_id = create_fake_rollout(
++        codex_home.path(),
++        "2025-01-05T12-00-00",
++        "2025-01-05T12:00:00Z",
++        "retry a failed goal supervisor",
++        Some("mock_provider"),
++        /*git_info*/ None,
++    )?;
++    let thread_id = ThreadId::from_string(thread_id.as_str())?;
++    let state_db = StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
++        "mock_provider".into(),
++    )
++    .await?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "continue after a transient supervisor failure",
++            codex_state::ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await?;
++
++    let mut first = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build()
++        .await?;
++    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
++    let first_deadline_ms = timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            if let Some(deadline_ms) = state_db
++                .thread_goals()
++                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
++                .await?
++                && deadline_ms > Utc::now().timestamp_millis()
++            {
++                return Ok::<i64, anyhow::Error>(deadline_ms);
++            }
++            tokio::time::sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await??;
++    assert!(
++        first_deadline_ms - Utc::now().timestamp_millis() <= 60_000,
++        "the first automatic failure retry should use the one-minute tier"
++    );
++
++    timeout(DEFAULT_READ_TIMEOUT, first.initialize()).await??;
++    timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            let request_id = first
++                .send_thread_loaded_list_request(ThreadLoadedListParams::default())
++                .await?;
++            let response = first
++                .read_stream_until_response_message(RequestId::Integer(request_id))
++                .await?;
++            let ThreadLoadedListResponse { data, .. } = to_response(response)?;
++            if data
++                .iter()
++                .all(|loaded_id| loaded_id != &thread_id.to_string())
++            {
++                return Ok::<(), anyhow::Error>(());
++            }
++            tokio::time::sleep(Duration::from_millis(25)).await;
++        }
++    })
++    .await??;
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    wait_for_responses_request_count(&server, /*expected_count*/ 1).await?;
++
++    drop(first);
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal.goal_id,
++            Some(Utc::now().timestamp_millis() - 1),
++        )
++        .await?;
++    let _second = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_managed_config()
++        .build()
++        .await?;
++    wait_for_responses_request_count(&server, /*expected_count*/ 2).await?;
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    wait_for_responses_request_count(&server, /*expected_count*/ 2).await?;
++
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn thread_goal_set_enforces_configured_maximum_token_budget() -> Result<()> {
+     let server = create_mock_responses_server_repeating_assistant("Done").await;
+diff --git a/codex-rs/ext/goal/Cargo.toml b/codex-rs/ext/goal/Cargo.toml
+index 22ee1794fdf1341819bb8041882b84124ef2362e..70146332c183f6fff5e1fefaffae58248756f080 100644
+--- a/codex-rs/ext/goal/Cargo.toml
++++ b/codex-rs/ext/goal/Cargo.toml
+@@ -15,6 +15,7 @@ workspace = true
+
+ [dependencies]
+ codex-analytics = { workspace = true }
++chrono = { workspace = true }
+ codex-core = { workspace = true }
+ codex-extension-api = { workspace = true }
+ codex-otel = { workspace = true }
+diff --git a/codex-rs/ext/goal/src/lib.rs b/codex-rs/ext/goal/src/lib.rs
+index ccd091affce4646394f7c6e41f84b2153feb6654..e95dcc01d2e3026dc58fce5d9426ec4e85cfdd77 100644
+--- a/codex-rs/ext/goal/src/lib.rs
++++ b/codex-rs/ext/goal/src/lib.rs
+@@ -7,6 +7,7 @@ mod events;
+ mod extension;
+ mod metrics;
+ mod runtime;
++mod scheduler;
+ mod spec;
+ mod steering;
+ mod tool;
+@@ -22,6 +23,10 @@ pub use extension::GoalExtensionConfig;
+ pub use extension::install_with_backend;
+ pub use runtime::GoalRuntimeHandle;
+ pub use runtime::PreviousGoalSnapshot;
++pub use scheduler::GoalActivationFuture;
++pub use scheduler::GoalActivator;
++pub use scheduler::GoalSchedulerHandle;
++pub use scheduler::GoalSchedulerOptions;
+ pub use spec::CREATE_GOAL_TOOL_NAME;
+ pub use spec::GET_GOAL_TOOL_NAME;
+ pub use spec::UPDATE_GOAL_TOOL_NAME;
+diff --git a/codex-rs/ext/goal/src/runtime.rs b/codex-rs/ext/goal/src/runtime.rs
+index 84fa4204ba41947d2d7ea638d94183b87b8d547d..7b5f2f5f228344fcc06b30c4667043f025598474 100644
+--- a/codex-rs/ext/goal/src/runtime.rs
++++ b/codex-rs/ext/goal/src/runtime.rs
+@@ -42,6 +42,12 @@ pub(crate) enum ActiveGoalStopReason {
+     ExecutionUnavailable { expected_goal_id: String },
+ }
+
++#[derive(Clone, Copy)]
++enum GoalContinuationTrigger {
++    ThreadIdle,
++    GoalResumed,
++}
++
+ struct GoalRuntimeInner {
+     thread_id: ThreadId,
+     state_dbs: Arc<codex_state::StateRuntime>,
+@@ -199,6 +205,10 @@ impl GoalRuntimeHandle {
+         let previous_status = previous_goal
+             .as_ref()
+             .and_then(|previous_goal| (!replaced_existing_goal).then_some(previous_goal.status));
++        let resumed_goal = previous_status.is_some_and(|status| {
++            status != codex_state::ThreadGoalStatus::Active
++                && goal.status == codex_state::ThreadGoalStatus::Active
++        });
+         self.inner
+             .metrics
+             .record_resumed_if_status_changed(previous_status, goal.status);
+@@ -227,7 +237,11 @@ impl GoalRuntimeHandle {
+                     let item = objective_updated_steering_item(&protocol_goal_from_state(goal));
+                     self.inject_active_turn_steering(item).await;
+                 }
+-                self.continue_if_idle().await?;
++                if resumed_goal {
++                    self.continue_if_idle_after_goal_resume().await?;
++                } else {
++                    self.continue_if_idle().await?;
++                }
+             }
+             codex_state::ThreadGoalStatus::BudgetLimited => {
+                 if self.inner.accounting_state.current_turn_id().is_none() {
+@@ -397,6 +411,19 @@ impl GoalRuntimeHandle {
+     }
+
+     pub(crate) async fn continue_if_idle(&self) -> Result<(), String> {
++        self.continue_if_idle_for_trigger(GoalContinuationTrigger::ThreadIdle)
++            .await
++    }
++
++    async fn continue_if_idle_after_goal_resume(&self) -> Result<(), String> {
++        self.continue_if_idle_for_trigger(GoalContinuationTrigger::GoalResumed)
++            .await
++    }
++
++    async fn continue_if_idle_for_trigger(
++        &self,
++        trigger: GoalContinuationTrigger,
++    ) -> Result<(), String> {
+         if !self.tools_visible() {
+             self.inner.accounting_state.clear_active_goal();
+             return Ok(());
+@@ -445,10 +472,25 @@ impl GoalRuntimeHandle {
+             .get::<TurnStartOptions>()
+             .map(|options| options.as_ref().clone())
+             .unwrap_or_default();
+-        let item = continuation_steering_item(
+-            &protocol_goal_from_state(goal),
+-            thread.config().await.update_plan_enabled,
+-        );
++        let goal_id = goal.goal_id.clone();
++        let goal = protocol_goal_from_state(goal);
++        let supervisor_started = match trigger {
++            GoalContinuationTrigger::ThreadIdle => {
++                thread
++                    .maybe_start_goal_supervisor_checkin(goal_id.as_str(), &goal)
++                    .await
++            }
++            GoalContinuationTrigger::GoalResumed => {
++                thread
++                    .maybe_start_goal_supervisor_checkin_after_goal_resume(goal_id.as_str(), &goal)
++                    .await
++            }
++        }
++        .map_err(|err| err.to_string())?;
++        if supervisor_started {
++            return Ok(());
++        }
++        let item = continuation_steering_item(&goal, thread.config().await.update_plan_enabled);
+
+         match thread
+             .start_turn_if_idle(
+diff --git a/codex-rs/ext/goal/src/scheduler.rs b/codex-rs/ext/goal/src/scheduler.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..4a362623b5fc06443b0927a0a7693d24e3ba9e30
+--- /dev/null
++++ b/codex-rs/ext/goal/src/scheduler.rs
+@@ -0,0 +1,303 @@
++use std::collections::HashMap;
++use std::fs::File;
++use std::fs::TryLockError;
++use std::future::Future;
++use std::io;
++use std::path::Path;
++use std::pin::Pin;
++use std::sync::Arc;
++use std::time::Duration;
++
++use chrono::Utc;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadSource;
++use codex_state::ActiveGoalSupervisorSchedule;
++use codex_state::ListActiveGoalSupervisorSchedulesParams;
++use codex_state::StateRuntime;
++use tokio::sync::Semaphore;
++use tokio::task::JoinHandle;
++use tracing::debug;
++use tracing::warn;
++
++const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(30);
++const DEFAULT_RETRY_INTERVAL: Duration = Duration::from_secs(30);
++const DEFAULT_MAX_RETRY_INTERVAL: Duration = Duration::from_secs(5 * 60);
++const DEFAULT_PAGE_SIZE: usize = 256;
++const DEFAULT_MAX_CONCURRENT_ACTIVATIONS: usize = 4;
++
++pub type GoalActivationFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'static>>;
++pub type GoalActivator =
++    Arc<dyn Fn(ActiveGoalSupervisorSchedule) -> GoalActivationFuture + Send + Sync + 'static>;
++
++/// Runtime limits for the process-level active-goal scheduler.
++#[derive(Clone, Debug)]
++pub struct GoalSchedulerOptions {
++    pub scan_interval: Duration,
++    pub retry_interval: Duration,
++    pub max_retry_interval: Duration,
++    pub page_size: usize,
++    pub max_concurrent_activations: usize,
++}
++
++impl Default for GoalSchedulerOptions {
++    fn default() -> Self {
++        Self {
++            scan_interval: DEFAULT_SCAN_INTERVAL,
++            retry_interval: DEFAULT_RETRY_INTERVAL,
++            max_retry_interval: DEFAULT_MAX_RETRY_INTERVAL,
++            page_size: DEFAULT_PAGE_SIZE,
++            max_concurrent_activations: DEFAULT_MAX_CONCURRENT_ACTIVATIONS,
++        }
++    }
++}
++
++/// Owns the background task that restores persisted goal supervisor deadlines.
++pub struct GoalSchedulerHandle {
++    task: JoinHandle<()>,
++}
++
++impl GoalSchedulerHandle {
++    pub fn start(state_db: Arc<StateRuntime>, activator: GoalActivator) -> Self {
++        Self::start_with_options(state_db, activator, GoalSchedulerOptions::default())
++    }
++
++    pub fn start_with_options(
++        state_db: Arc<StateRuntime>,
++        activator: GoalActivator,
++        options: GoalSchedulerOptions,
++    ) -> Self {
++        let task = tokio::spawn(run_scheduler(state_db, activator, options));
++        Self { task }
++    }
++
++    pub fn stop(&self) {
++        self.task.abort();
++    }
++}
++
++impl Drop for GoalSchedulerHandle {
++    fn drop(&mut self) {
++        self.task.abort();
++    }
++}
++
++struct ScheduledActivation {
++    schedule: ActiveGoalSupervisorSchedule,
++    task: JoinHandle<()>,
++}
++
++async fn run_scheduler(
++    state_db: Arc<StateRuntime>,
++    activator: GoalActivator,
++    options: GoalSchedulerOptions,
++) {
++    loop {
++        match try_acquire_scheduler_ownership(state_db.sqlite().home()) {
++            Ok(Some(_ownership)) => {
++                debug!(
++                    sqlite_home = %state_db.sqlite().home().display(),
++                    "acquired active goal scheduler ownership"
++                );
++                run_as_owner(state_db, activator, options).await;
++                return;
++            }
++            Ok(None) => {}
++            Err(err) => {
++                warn!(
++                    sqlite_home = %state_db.sqlite().home().display(),
++                    "failed to acquire active goal scheduler ownership: {err}"
++                );
++            }
++        }
++        tokio::time::sleep(options.scan_interval).await;
++    }
++}
++
++fn try_acquire_scheduler_ownership(sqlite_home: &Path) -> io::Result<Option<File>> {
++    // Lock the existing SQLite home directory rather than a SQLite file. This keeps scheduler
++    // ownership independent from SQLite's byte-range locks and adds no persistent lock file.
++    let file = File::open(sqlite_home)?;
++    match file.try_lock() {
++        Ok(()) => Ok(Some(file)),
++        Err(TryLockError::WouldBlock) => Ok(None),
++        Err(TryLockError::Error(err)) => Err(err),
++    }
++}
++
++async fn run_as_owner(
++    state_db: Arc<StateRuntime>,
++    activator: GoalActivator,
++    options: GoalSchedulerOptions,
++) {
++    let activation_permits = Arc::new(Semaphore::new(options.max_concurrent_activations.max(1)));
++    let mut scheduled = HashMap::<ThreadId, ScheduledActivation>::new();
++
++    loop {
++        match scan_active_schedules(state_db.as_ref(), options.page_size).await {
++            Ok(current_schedules) => {
++                scheduled.retain(|thread_id, activation| {
++                    let unchanged = current_schedules
++                        .get(thread_id)
++                        .is_some_and(|current| current == &activation.schedule);
++                    if !unchanged {
++                        activation.task.abort();
++                    }
++                    unchanged
++                });
++
++                for (thread_id, schedule) in current_schedules {
++                    if scheduled.contains_key(&thread_id) {
++                        continue;
++                    }
++                    let task = tokio::spawn(run_scheduled_activation(
++                        Arc::clone(&state_db),
++                        Arc::clone(&activator),
++                        Arc::clone(&activation_permits),
++                        schedule.clone(),
++                        options.clone(),
++                    ));
++                    scheduled.insert(thread_id, ScheduledActivation { schedule, task });
++                }
++            }
++            Err(err) => warn!("failed to scan active goal supervisor schedules: {err}"),
++        }
++
++        tokio::time::sleep(options.scan_interval).await;
++    }
++}
++
++async fn scan_active_schedules(
++    state_db: &StateRuntime,
++    page_size: usize,
++) -> Result<HashMap<ThreadId, ActiveGoalSupervisorSchedule>, String> {
++    let mut schedules = HashMap::new();
++    let mut cursor = None;
++    loop {
++        let page = state_db
++            .thread_goals()
++            .list_active_goal_supervisor_schedules(ListActiveGoalSupervisorSchedulesParams {
++                after_thread_id: cursor,
++                limit: page_size,
++            })
++            .await
++            .map_err(|err| err.to_string())?;
++        for schedule in page.data {
++            if !is_subagent_thread(state_db, schedule.thread_id).await? {
++                schedules.insert(schedule.thread_id, schedule);
++            }
++        }
++        let Some(next_cursor) = page.next_cursor else {
++            break;
++        };
++        if cursor == Some(next_cursor) {
++            warn!(thread_id = %next_cursor, "active goal scheduler scan cursor did not advance");
++            break;
++        }
++        cursor = Some(next_cursor);
++    }
++    Ok(schedules)
++}
++
++async fn is_subagent_thread(state_db: &StateRuntime, thread_id: ThreadId) -> Result<bool, String> {
++    let Some(metadata) = state_db
++        .get_thread(thread_id)
++        .await
++        .map_err(|err| err.to_string())?
++    else {
++        return Ok(false);
++    };
++
++    if matches!(metadata.thread_source, Some(ThreadSource::Subagent)) {
++        return Ok(true);
++    }
++
++    let source = serde_json::from_str::<SessionSource>(&metadata.source)
++        .or_else(|_| serde_json::from_value(serde_json::Value::String(metadata.source)));
++    Ok(matches!(source, Ok(SessionSource::SubAgent(_))))
++}
++
++async fn run_scheduled_activation(
++    state_db: Arc<StateRuntime>,
++    activator: GoalActivator,
++    activation_permits: Arc<Semaphore>,
++    schedule: ActiveGoalSupervisorSchedule,
++    options: GoalSchedulerOptions,
++) {
++    wait_until_deadline(&schedule, options.scan_interval).await;
++    let mut retry_interval = options.retry_interval;
++    loop {
++        let current = match state_db
++            .thread_goals()
++            .get_active_goal_supervisor_schedule(schedule.thread_id)
++            .await
++        {
++            Ok(current) => current,
++            Err(err) => {
++                warn!(
++                    thread_id = %schedule.thread_id,
++                    "failed to verify active goal supervisor schedule: {err}"
++                );
++                tokio::time::sleep(retry_interval).await;
++                retry_interval = next_retry_interval(retry_interval, options.max_retry_interval);
++                continue;
++            }
++        };
++        if current.as_ref() != Some(&schedule) {
++            return;
++        }
++
++        match is_subagent_thread(state_db.as_ref(), schedule.thread_id).await {
++            Ok(true) => return,
++            Ok(false) => {}
++            Err(err) => {
++                warn!(
++                    thread_id = %schedule.thread_id,
++                    "failed to verify persisted goal thread source: {err}"
++                );
++                tokio::time::sleep(retry_interval).await;
++                retry_interval = next_retry_interval(retry_interval, options.max_retry_interval);
++                continue;
++            }
++        }
++
++        let permit = match Arc::clone(&activation_permits).acquire_owned().await {
++            Ok(permit) => permit,
++            Err(_) => return,
++        };
++        let result = activator(schedule.clone()).await;
++        drop(permit);
++        if let Err(err) = result {
++            warn!(
++                thread_id = %schedule.thread_id,
++                goal_id = %schedule.goal_id,
++                "failed to activate persisted goal supervisor schedule: {err}"
++            );
++        }
++        // Activation can be a no-op while the thread is temporarily busy. Keep retrying until the
++        // supervisor records a new snooze deadline or changes the goal status.
++        tokio::time::sleep(retry_interval).await;
++        retry_interval = next_retry_interval(retry_interval, options.max_retry_interval);
++    }
++}
++
++async fn wait_until_deadline(schedule: &ActiveGoalSupervisorSchedule, max_sleep: Duration) {
++    let Some(deadline_ms) = schedule.snoozed_until_ms else {
++        return;
++    };
++    loop {
++        let remaining_ms = deadline_ms.saturating_sub(Utc::now().timestamp_millis());
++        let Ok(remaining_ms) = u64::try_from(remaining_ms) else {
++            return;
++        };
++        let remaining = Duration::from_millis(remaining_ms);
++        if remaining.is_zero() {
++            return;
++        }
++        tokio::time::sleep(remaining.min(max_sleep)).await;
++    }
++}
++
++fn next_retry_interval(current: Duration, maximum: Duration) -> Duration {
++    current.saturating_mul(2).min(maximum)
++}
+diff --git a/codex-rs/ext/goal/tests/goal_scheduler.rs b/codex-rs/ext/goal/tests/goal_scheduler.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..61fa856d686c8239195abe58828730ae49428dfe
+--- /dev/null
++++ b/codex-rs/ext/goal/tests/goal_scheduler.rs
+@@ -0,0 +1,455 @@
++use std::sync::Arc;
++use std::time::Duration;
++
++use chrono::Utc;
++use codex_goal_extension::GoalActivator;
++use codex_goal_extension::GoalSchedulerHandle;
++use codex_goal_extension::GoalSchedulerOptions;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::SubAgentSource;
++use codex_state::ActiveGoalSupervisorSchedule;
++use codex_state::SqliteConfig;
++use codex_state::StateRuntime;
++use codex_state::ThreadGoalStatus;
++use codex_utils_absolute_path::test_support::PathExt;
++use tempfile::TempDir;
++use tokio::sync::Semaphore;
++use tokio::sync::mpsc;
++
++fn scheduler_options() -> GoalSchedulerOptions {
++    GoalSchedulerOptions {
++        scan_interval: Duration::from_millis(10),
++        retry_interval: Duration::from_millis(10),
++        max_retry_interval: Duration::from_millis(40),
++        page_size: 1,
++        max_concurrent_activations: 2,
++    }
++}
++
++async fn test_runtime() -> anyhow::Result<(TempDir, Arc<StateRuntime>)> {
++    let sqlite_home = tempfile::tempdir()?;
++    let state_db = StateRuntime::init(
++        SqliteConfig::new_for_testing(sqlite_home.path().abs()),
++        "test-provider".to_string(),
++    )
++    .await?;
++    Ok((sqlite_home, state_db))
++}
++
++fn test_thread_id(suffix: u128) -> anyhow::Result<ThreadId> {
++    Ok(ThreadId::from_string(
++        format!("00000000-0000-0000-0000-{suffix:012x}").as_str(),
++    )?)
++}
++
++fn recording_activator(tx: mpsc::UnboundedSender<ActiveGoalSupervisorSchedule>) -> GoalActivator {
++    Arc::new(move |schedule| {
++        let tx = tx.clone();
++        Box::pin(async move {
++            tx.send(schedule)
++                .map_err(|_| "activation receiver closed".to_string())
++        })
++    })
++}
++
++fn gated_recording_activator(
++    tx: mpsc::UnboundedSender<ActiveGoalSupervisorSchedule>,
++    completion_gates: Arc<Semaphore>,
++) -> GoalActivator {
++    Arc::new(move |schedule| {
++        let tx = tx.clone();
++        let completion_gates = Arc::clone(&completion_gates);
++        Box::pin(async move {
++            tx.send(schedule)
++                .map_err(|_| "activation receiver closed".to_string())?;
++            let permit = completion_gates
++                .acquire_owned()
++                .await
++                .map_err(|_| "activation completion gate closed".to_string())?;
++            permit.forget();
++            Ok(())
++        })
++    })
++}
++
++fn recording_terminal_activator(
++    state_db: Arc<StateRuntime>,
++    tx: mpsc::UnboundedSender<ActiveGoalSupervisorSchedule>,
++) -> GoalActivator {
++    Arc::new(move |schedule| {
++        let state_db = Arc::clone(&state_db);
++        let tx = tx.clone();
++        Box::pin(async move {
++            tx.send(schedule.clone())
++                .map_err(|_| "activation receiver closed".to_string())?;
++            state_db
++                .thread_goals()
++                .update_thread_goal(
++                    schedule.thread_id,
++                    codex_state::GoalUpdate {
++                        objective: None,
++                        status: Some(ThreadGoalStatus::Paused),
++                        token_budget: None,
++                        expected_goal_id: Some(schedule.goal_id),
++                    },
++                )
++                .await
++                .map_err(|err| err.to_string())?;
++            Ok(())
++        })
++    })
++}
++
++#[tokio::test]
++async fn scheduler_runs_immediate_and_future_deadlines_once() -> anyhow::Result<()> {
++    let (_codex_home, state_db) = test_runtime().await?;
++    let immediate_thread_id = test_thread_id(/*suffix*/ 1)?;
++    let future_thread_id = test_thread_id(/*suffix*/ 2)?;
++    state_db
++        .thread_goals()
++        .replace_thread_goal(
++            immediate_thread_id,
++            "run now",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("immediate goal should persist");
++    let future_goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            future_thread_id,
++            "run later",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("future goal should persist");
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            future_thread_id,
++            &future_goal.goal_id,
++            Some(Utc::now().timestamp_millis() + 150),
++        )
++        .await
++        .expect("future deadline should persist");
++
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let scheduler = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_terminal_activator(Arc::clone(&state_db), tx),
++        scheduler_options(),
++    );
++
++    let immediate = tokio::time::timeout(Duration::from_secs(1), rx.recv())
++        .await
++        .expect("immediate goal should activate promptly")
++        .expect("activation channel should remain open");
++    assert_eq!(immediate_thread_id, immediate.thread_id);
++    assert!(
++        tokio::time::timeout(Duration::from_millis(50), rx.recv())
++            .await
++            .is_err(),
++        "future deadline must not activate early"
++    );
++    let future = tokio::time::timeout(Duration::from_secs(1), rx.recv())
++        .await
++        .expect("future goal should activate")
++        .expect("activation channel should remain open");
++    assert_eq!(future_thread_id, future.thread_id);
++    assert!(
++        tokio::time::timeout(Duration::from_millis(50), rx.recv())
++            .await
++            .is_err(),
++        "changed schedules must not activate twice"
++    );
++    scheduler.stop();
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_ignores_subagent_goals_with_legacy_thread_metadata() -> anyhow::Result<()> {
++    let (_codex_home, state_db) = test_runtime().await?;
++    let root_thread_id = test_thread_id(/*suffix*/ 7)?;
++    let review_thread_id = test_thread_id(/*suffix*/ 8)?;
++    let spawned_thread_id = test_thread_id(/*suffix*/ 9)?;
++
++    for (thread_id, source) in [
++        (root_thread_id, SessionSource::Cli),
++        (
++            review_thread_id,
++            SessionSource::SubAgent(SubAgentSource::Review),
++        ),
++        (
++            spawned_thread_id,
++            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
++                parent_thread_id: root_thread_id,
++                depth: 1,
++                agent_path: None,
++                agent_nickname: None,
++                agent_role: None,
++            }),
++        ),
++    ] {
++        let metadata = codex_state::ThreadMetadataBuilder::new(
++            thread_id,
++            state_db
++                .sqlite()
++                .home()
++                .join(format!("rollout-{thread_id}.jsonl")),
++            Utc::now(),
++            source,
++        )
++        .build("test-provider");
++        assert!(metadata.thread_source.is_none());
++        state_db.upsert_thread(&metadata).await?;
++        state_db
++            .thread_goals()
++            .replace_thread_goal(
++                thread_id,
++                "persisted active goal",
++                ThreadGoalStatus::Active,
++                /*token_budget*/ None,
++            )
++            .await?;
++    }
++
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let scheduler = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_terminal_activator(Arc::clone(&state_db), tx),
++        scheduler_options(),
++    );
++
++    let activation = tokio::time::timeout(Duration::from_secs(1), rx.recv())
++        .await
++        .expect("the root goal should activate")
++        .expect("activation channel should remain open");
++    assert_eq!(root_thread_id, activation.thread_id);
++    assert!(
++        tokio::time::timeout(Duration::from_millis(100), rx.recv())
++            .await
++            .is_err(),
++        "subagent goals must not activate"
++    );
++
++    scheduler.stop();
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_rechecks_goal_before_deadline() -> anyhow::Result<()> {
++    let (_codex_home, state_db) = test_runtime().await?;
++    let thread_id = test_thread_id(/*suffix*/ 3)?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "pause before wakeup",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("goal should persist");
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal.goal_id,
++            Some(Utc::now().timestamp_millis() + 100),
++        )
++        .await
++        .expect("deadline should persist");
++
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let scheduler = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_activator(tx),
++        scheduler_options(),
++    );
++    tokio::time::sleep(Duration::from_millis(30)).await;
++    state_db
++        .thread_goals()
++        .update_thread_goal(
++            thread_id,
++            codex_state::GoalUpdate {
++                objective: None,
++                status: Some(ThreadGoalStatus::Paused),
++                token_budget: None,
++                expected_goal_id: Some(goal.goal_id),
++            },
++        )
++        .await
++        .expect("goal pause should succeed")
++        .expect("goal should still exist");
++
++    assert!(
++        tokio::time::timeout(Duration::from_millis(200), rx.recv())
++            .await
++            .is_err(),
++        "paused goal must not activate"
++    );
++    scheduler.stop();
++    Ok(())
++}
++
++#[tokio::test]
++async fn one_process_owns_each_goal_database_scheduler() -> anyhow::Result<()> {
++    let (sqlite_home, state_db) = test_runtime().await?;
++    let second_state_db = StateRuntime::init(
++        SqliteConfig::new_for_testing(sqlite_home.path().abs()),
++        "test-provider".to_string(),
++    )
++    .await?;
++    let thread_id = test_thread_id(/*suffix*/ 4)?;
++    state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "activate once",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("goal should persist");
++
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let first = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_terminal_activator(Arc::clone(&state_db), tx.clone()),
++        scheduler_options(),
++    );
++    let second = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&second_state_db),
++        recording_terminal_activator(second_state_db, tx),
++        scheduler_options(),
++    );
++
++    let activation = tokio::time::timeout(Duration::from_secs(1), rx.recv())
++        .await
++        .expect("one scheduler should activate the goal")
++        .expect("activation channel should remain open");
++    assert_eq!(thread_id, activation.thread_id);
++    assert!(
++        tokio::time::timeout(Duration::from_millis(100), rx.recv())
++            .await
++            .is_err(),
++        "the second process contender must not duplicate activation"
++    );
++    first.stop();
++    second.stop();
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_retries_until_the_schedule_changes() -> anyhow::Result<()> {
++    let (_codex_home, state_db) = test_runtime().await?;
++    let thread_id = test_thread_id(/*suffix*/ 6)?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "retry transient no-op activation",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("goal should persist");
++
++    let (tx, mut rx) = mpsc::unbounded_channel();
++    let completion_gates = Arc::new(Semaphore::new(0));
++    let scheduler = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        gated_recording_activator(tx, Arc::clone(&completion_gates)),
++        scheduler_options(),
++    );
++
++    for expected_attempt in 1..=2 {
++        let activation = tokio::time::timeout(Duration::from_secs(1), rx.recv())
++            .await
++            .unwrap_or_else(|_| panic!("activation attempt {expected_attempt} should run"))
++            .expect("activation channel should remain open");
++        assert_eq!(thread_id, activation.thread_id);
++        if expected_attempt == 1 {
++            completion_gates.add_permits(1);
++        }
++    }
++
++    state_db
++        .thread_goals()
++        .update_thread_goal(
++            thread_id,
++            codex_state::GoalUpdate {
++                objective: None,
++                status: Some(ThreadGoalStatus::Paused),
++                token_budget: None,
++                expected_goal_id: Some(goal.goal_id),
++            },
++        )
++        .await
++        .expect("goal pause should succeed")
++        .expect("goal should still exist");
++    completion_gates.add_permits(1);
++
++    assert!(
++        tokio::time::timeout(Duration::from_millis(100), rx.recv())
++            .await
++            .is_err(),
++        "a changed schedule must stop activation retries"
++    );
++    scheduler.stop();
++    Ok(())
++}
++
++#[tokio::test]
++async fn scheduler_recovers_an_overdue_deadline_after_restart() -> anyhow::Result<()> {
++    let (_codex_home, state_db) = test_runtime().await?;
++    let thread_id = test_thread_id(/*suffix*/ 5)?;
++    let goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            thread_id,
++            "survive restart",
++            ThreadGoalStatus::Active,
++            /*token_budget*/ None,
++        )
++        .await
++        .expect("goal should persist");
++    state_db
++        .thread_goals()
++        .set_thread_goal_supervisor_snoozed_until_ms(
++            thread_id,
++            &goal.goal_id,
++            Some(Utc::now().timestamp_millis() + 100),
++        )
++        .await
++        .expect("deadline should persist");
++
++    let (first_tx, mut first_rx) = mpsc::unbounded_channel();
++    let first = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_activator(first_tx),
++        scheduler_options(),
++    );
++    tokio::time::sleep(Duration::from_millis(30)).await;
++    first.stop();
++    drop(first);
++    assert!(first_rx.try_recv().is_err());
++
++    tokio::time::sleep(Duration::from_millis(100)).await;
++    let (second_tx, mut second_rx) = mpsc::unbounded_channel();
++    let second = GoalSchedulerHandle::start_with_options(
++        Arc::clone(&state_db),
++        recording_activator(second_tx),
++        scheduler_options(),
++    );
++    let activation = tokio::time::timeout(Duration::from_secs(1), second_rx.recv())
++        .await
++        .expect("replacement scheduler should recover the deadline")
++        .expect("activation channel should remain open");
++    assert_eq!(thread_id, activation.thread_id);
++    second.stop();
++    Ok(())
++}

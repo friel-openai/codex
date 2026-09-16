@@ -5,7 +5,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/abg-OAI/codex/layerctl/internal/cli"
+	"github.com/friel-openai/codex/layerctl/internal/cli"
 )
 
 func main() {

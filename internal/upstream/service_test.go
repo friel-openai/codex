@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/abg-OAI/codex/layerctl/internal/definition"
-	"github.com/abg-OAI/codex/layerctl/internal/gitrepo"
-	"github.com/abg-OAI/codex/layerctl/internal/layer"
-	"github.com/abg-OAI/codex/layerctl/internal/layercommit"
-	"github.com/abg-OAI/codex/layerctl/internal/projection"
-	"github.com/abg-OAI/codex/layerctl/internal/upstream"
+	"github.com/friel-openai/codex/layerctl/internal/definition"
+	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
+	"github.com/friel-openai/codex/layerctl/internal/layer"
+	"github.com/friel-openai/codex/layerctl/internal/layercommit"
+	"github.com/friel-openai/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/upstream"
 )
 
 func TestAdvanceConflictRefreshContinueAndAbort(t *testing.T) {
@@ -151,14 +151,14 @@ func newCanonicalRepository(t *testing.T) string {
 	gitRun(t, root, "switch", "--detach", v1Commit)
 	writeFile(t, filepath.Join(root, "foundation.txt"), "foundation\n")
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: foundation")
+	gitRun(t, root, "commit", "-m", "frodex: foundation")
 	foundationLayer := captureLayer(t, root, "HEAD^", "HEAD")
 	writeFile(t, filepath.Join(root, "base.txt"), "feature\n")
 	writeFile(t, filepath.Join(root, "feature.txt"), "feature\n")
 	gitRun(t, root, "add", "-A")
-	gitRun(t, root, "commit", "-m", "saffrodex: feature")
+	gitRun(t, root, "commit", "-m", "frodex: feature")
 	featureLayer := captureLayer(t, root, "HEAD^", "HEAD")
-	gitRun(t, root, "switch", "--orphan", "saffrodex-next")
+	gitRun(t, root, "switch", "--orphan", "frodex-next")
 
 	writeFile(t, filepath.Join(root, "upstream.json"), fmt.Sprintf("{\n  \"tag\": \"rust-v1.0.0\",\n  \"commit\": %q\n}\n", v1Commit))
 	writeLayerDefinition(t, root, "0000-foundation", foundationLayer)

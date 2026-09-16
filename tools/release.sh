@@ -6,7 +6,7 @@ usage() {
 	cat <<'EOF'
 Usage: tools/release.sh [-b BODY]
 
-Dispatch the default-branch Saffrodex release workflow. The workflow
+Dispatch the default-branch Frodex release workflow. The workflow
 materializes the configured Codex base, chooses the next version, publishes
 the projection tag, builds release binaries, and creates the GitHub release.
 
@@ -41,12 +41,12 @@ while (($# > 0)); do
 done
 
 repository=$(git rev-parse --show-toplevel 2>/dev/null) ||
-	die "run this command from the Saffrodex repository"
+	die "run this command from the Frodex repository"
 cd "$repository"
 
 command -v gh >/dev/null || die "gh is required to dispatch the release workflow"
 
-arguments=(workflow run saffrodex-release.yml)
+arguments=(workflow run frodex-release.yml)
 if [[ -n "$body" ]]; then
 	arguments+=(-f "release_notes=$body")
 fi

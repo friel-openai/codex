@@ -1,0 +1,11 @@
+Repair persisted history and selected-rollout boundaries
+
+Combine the existing implementation and corrections:
+
+- Repair malformed goal supervisor history
+- Fix reverted rollout history boundaries
+- Adapt Frodex behavior to upstream contracts
+
+Original-commit: 06c04d4a78a5ca7a965e7fcf7e3724d77ea6e14f
+Original-commit: 9615e3f6fa1de9d4b34a73df5a382ae26569c06d
+Original-commit: c0abd8a9c51f49b6208df5bc9c828666032803d6

@@ -1,8 +1,0 @@
-Persist supervisor wake state
-
-Process-local snooze and retry timers cannot retain their exact deadline
-across app-server lifetimes.
-
-Add a wake table keyed by thread and exact goal revision, then replace
-or clear its rows with supervisor state transitions.
-This records durable state without discovering or resuming goals.

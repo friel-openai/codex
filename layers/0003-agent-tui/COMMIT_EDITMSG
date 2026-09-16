@@ -1,0 +1,7 @@
+Show subagent status and fork metadata in the TUI
+
+Combine the existing implementation and corrections:
+
+- Add subagent TUI status and fork metadata
+
+Original-commit: a13bcd7e408dee6e8eaa44ccc77759546cda8e8c

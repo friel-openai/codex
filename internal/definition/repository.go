@@ -1,4 +1,4 @@
-// Package definition reads and validates the canonical Saffrodex repository.
+// Package definition reads and validates the canonical Frodex repository.
 // It owns the on-disk layer representation, while projection and maintenance
 // packages own operations performed with those definitions.
 package definition
@@ -18,7 +18,7 @@ var layerIDPattern = regexp.MustCompile(`^[0-9]{4}-[a-z0-9]+(-[a-z0-9]+)*$`)
 // FoundationLayerID identifies the required first generated commit.
 const FoundationLayerID = "0000-foundation"
 
-// Repository is one complete canonical Saffrodex definition.
+// Repository is one complete canonical Frodex definition.
 // Layers are ordered lexically by their numbered directory names.
 type Repository struct {
 	Root     string

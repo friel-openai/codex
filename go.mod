@@ -1,3 +1,3 @@
-module github.com/abg-OAI/codex/layerctl
+module github.com/friel-openai/codex/layerctl
 
 go 1.26

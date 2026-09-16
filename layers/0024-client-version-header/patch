@@ -1,0 +1,15 @@
+diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+index 6ba2910a9f0dd978932b6779a73ee0ffa2863f73..3e3523756c0ba36ab521daf44e42346243500cf2 100644
+--- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
++++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
+@@ -177,6 +177,10 @@ fn openai_client_version_header_preserves_prerelease_and_strips_build_metadata()
+         openai_client_version_header("0.148.0-alpha.20"),
+         "0.148.0-alpha.20"
+     );
++    assert_eq!(
++        openai_client_version_header("not-a-version"),
++        "not-a-version"
++    );
+ }
+
+ #[test]
