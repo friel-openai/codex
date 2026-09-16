@@ -160,18 +160,20 @@ jobs:
           # after its one-shot root-agent instruction has been consumed, one
           # races an asynchronous child reference-context update, and one
           # compares a pinned contract with the current bundled model catalog.
-          # The named skips keep every other codex-core library test active.
+          # Use a nextest-native exact filter: `just` consumes the libtest
+          # `--` separator before its variadic recipe forwards arguments.
+          core_filter='not (
+            test(=agent::control::tests::spawn_agent_can_fork_parent_thread_history_with_sanitized_items) |
+            test(=session::tests::record_context_updates_and_set_reference_context_item_injects_full_context_when_baseline_missing) |
+            test(=session::tests::record_context_updates_and_set_reference_context_item_reinjects_full_context_after_clear) |
+            test(=thread_manager::tests::ignores_session_prefix_messages_when_truncating) |
+            test(=tools::spec_plan::collaboration_contract_tests::canonical_collaboration_contract_matches_pinned_upstream)
+          )'
           just test --cargo-profile ci-test \
             --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
             -p codex-core \
             --lib \
-            -- \
-            --exact \
-            --skip agent::control::tests::spawn_agent_can_fork_parent_thread_history_with_sanitized_items \
-            --skip session::tests::record_context_updates_and_set_reference_context_item_injects_full_context_when_baseline_missing \
-            --skip session::tests::record_context_updates_and_set_reference_context_item_reinjects_full_context_after_clear \
-            --skip thread_manager::tests::ignores_session_prefix_messages_when_truncating \
-            --skip tools::spec_plan::collaboration_contract_tests::canonical_collaboration_contract_matches_pinned_upstream
+            -E "${core_filter}"
           just test --cargo-profile ci-test \
             --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
             -p codex-app-server \
