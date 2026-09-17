@@ -3237,7 +3237,7 @@ async fn multi_agent_v2_bedrock_workers_only_delegate_when_model_supports_v2() {
 async fn goal_supervisor_uses_supervisor_tools_when_model_does_not_advertise_v2() {
     let plan = probe(|turn| {
         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
-        turn.model_info.multi_agent_version = Some(MultiAgentVersion::V1);
+        Arc::make_mut(&mut turn.model_info).multi_agent_version = Some(MultiAgentVersion::V1);
         turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
             parent_thread_id: ThreadId::new(),
             depth: 1,

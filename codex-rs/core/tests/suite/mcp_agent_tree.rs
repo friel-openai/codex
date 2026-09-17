@@ -330,6 +330,7 @@ async fn api_spawned_descendant_shares_the_root_mcp_server_process() -> Result<(
                 environments: Some(environments),
                 thread_extension_init: Default::default(),
                 client_mcp_extensions: Default::default(),
+                reserved_thread_id: None,
             },
         )
         .await?;

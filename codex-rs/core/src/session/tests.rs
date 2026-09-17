@@ -3976,7 +3976,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             .history
             .set_world_state_baseline(world_state.snapshot());
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
     }
     let source_model_state = source
         .capture_fork_model_state(&source_response_items)
@@ -3998,42 +3998,43 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         )
         .await?;
 
-    let mut child_state = child.state.lock().await;
-    assert!(Arc::ptr_eq(
-        &child_state.history.shared_annotated_items(),
-        &source_response_items
-    ));
-    assert!(
-        child_state.history.shared_annotated_items()[0]
-            .metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.client_authored)
-    );
-    assert_eq!(
-        child_state.reference_context_item(),
-        Some(reference_context_item)
-    );
-    assert_eq!(
-        child_state.previous_turn_settings(),
-        Some(previous_turn_settings)
-    );
-    assert_eq!(child_state.token_info(), Some(authoritative_tokens));
-    assert_eq!(
-        child_state.token_info_and_rate_limits().1,
-        Some(authoritative_rate_limits.clone())
-    );
-    assert_eq!(child_state.auto_compact_window_number(), 7);
-    assert_eq!(child_state.auto_compact_window_ids(), window_ids);
-    assert_eq!(child_state.history.history_version(), 1);
-    assert!(
-        child_state
-            .history
-            .update_world_state(&world_state)
-            .1
-            .is_none(),
-        "an unchanged parent world-state baseline must not be reintroduced"
-    );
-    drop(child_state);
+    {
+        let mut child_state = child.state.lock().await;
+        assert!(Arc::ptr_eq(
+            &child_state.history.shared_annotated_items(),
+            &source_response_items
+        ));
+        assert!(
+            child_state.history.shared_annotated_items()[0]
+                .metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.client_authored)
+        );
+        assert_eq!(
+            child_state.reference_context_item(),
+            Some(reference_context_item)
+        );
+        assert_eq!(
+            child_state.previous_turn_settings(),
+            Some(previous_turn_settings)
+        );
+        assert_eq!(child_state.token_info(), Some(authoritative_tokens));
+        assert_eq!(
+            child_state.token_info_and_rate_limits().1,
+            Some(authoritative_rate_limits.clone())
+        );
+        assert_eq!(child_state.auto_compact_window_number(), 7);
+        assert_eq!(child_state.auto_compact_window_ids(), window_ids);
+        assert_eq!(child_state.history.history_version(), 1);
+        assert!(
+            child_state
+                .history
+                .update_world_state(&world_state)
+                .1
+                .is_none(),
+            "an unchanged parent world-state baseline must not be reintroduced"
+        );
+    }
 
     child.flush_rollout().await?;
     let child_rollout_path = child
@@ -4169,7 +4170,7 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
             .set_world_state_baseline(world_state.snapshot());
         state.set_token_info(Some(token_info.clone()));
         state.set_previous_turn_settings(Some(previous_turn_settings.clone()));
-        state.restore_auto_compact_window(7, window_ids);
+        state.restore_auto_compact_window(/*window_number*/ 7, window_ids);
     }
 
     let expected_position = store
@@ -5096,6 +5097,134 @@ async fn thread_rollback_fails_without_persisted_thread_history() {
         raw_history_items(&sess.clone_history().await),
         raw_history_items(&history_before_rollback)
     );
+}
+
+async fn assert_failed_thread_rollback_preserves_runtime_state(
+    checkpoint_outcome: SegmentCheckpointPersistenceOutcome,
+    expect_restart_required: bool,
+) {
+    let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+    let store = attach_in_memory_thread_store(
+        Arc::get_mut(&mut sess).expect("session should not have additional references"),
+    )
+    .await;
+    let initial_context = build_initial_context(&sess, &tc).await;
+    let mut full_history = initial_context;
+    full_history.extend([
+        user_message("turn before failed rollback"),
+        assistant_message("assistant before failed rollback"),
+    ]);
+    sess.replace_history(full_history.clone(), Some(tc.to_turn_context_item()))
+        .await;
+    sess.persist_rollout_items(
+        &full_history
+            .into_iter()
+            .map(ResponseItemEnvelope::new)
+            .map(RolloutItem::ResponseItem)
+            .collect::<Vec<_>>(),
+    )
+    .await;
+    sess.flush_rollout()
+        .await
+        .expect("initial history should flush");
+    store
+        .queue_segment_checkpoint_outcomes_for_testing([checkpoint_outcome])
+        .await;
+
+    sess.services
+        .thread_extension_data
+        .insert(crate::context::NodeReplReviewEvidence::default());
+
+    let (mut guardian_session, _guardian_turn) = make_session_and_context().await;
+    let guardian_rollout_path = attach_thread_persistence(
+        Arc::get_mut(&mut guardian_session)
+            .expect("guardian session should not have additional references"),
+    )
+    .await;
+    let (guardian_tx_sub, _guardian_rx_sub) = async_channel::bounded(1);
+    let (_guardian_tx_event, guardian_rx_event) = async_channel::unbounded();
+    sess.guardian_review_session
+        .cache_for_test(
+            guardian_session,
+            SessionIo {
+                tx_sub: guardian_tx_sub,
+                rx_event: guardian_rx_event,
+                agent_status: watch::channel(AgentStatus::PendingInit).1,
+                session_loop_termination: completed_session_loop_termination(),
+            },
+        )
+        .await;
+
+    let rollout_budget = sess.services.agent_control.rollout_budget();
+    rollout_budget.configure(crate::config::RolloutBudgetConfig {
+        limit_tokens: 100,
+        reminder_at_remaining_tokens: vec![100],
+        sampling_token_weight: 1.0,
+        prefill_token_weight: 1.0,
+    });
+    let window_id = "failed-rollback-window";
+    let reminder = rollout_budget
+        .pending_reminder(sess.thread_id(), window_id)
+        .expect("configured reminder should be pending");
+    rollout_budget.mark_reminder_delivered(sess.thread_id(), window_id, reminder);
+    assert!(
+        rollout_budget
+            .pending_reminder(sess.thread_id(), window_id)
+            .is_none(),
+        "test setup must mark the reminder as delivered"
+    );
+
+    handlers::thread_rollback(&sess, "sub-1".to_string(), /*num_turns*/ 1).await;
+    let error = wait_for_thread_rollback_failed(&rx).await;
+    assert_eq!(
+        error.codex_error_info,
+        Some(CodexErrorInfo::ThreadRollbackFailed)
+    );
+    assert_eq!(sess.persistence_restart_required(), expect_restart_required);
+    assert!(
+        sess.services
+            .thread_extension_data
+            .get::<crate::context::NodeReplReviewEvidence>()
+            .is_some(),
+        "a rollback without a confirmed commit must preserve Node REPL review evidence"
+    );
+    assert_eq!(
+        sess.guardian_review_session.trunk_rollout_path().await,
+        Some(guardian_rollout_path),
+        "a rollback without a confirmed commit must preserve the cached Guardian review session"
+    );
+    assert!(
+        rollout_budget
+            .pending_reminder(sess.thread_id(), window_id)
+            .is_none(),
+        "a rollback without a confirmed commit must not rearm the rollout-budget reminder"
+    );
+}
+
+#[tokio::test]
+async fn thread_rollback_not_committed_preserves_runtime_state() {
+    assert_failed_thread_rollback_preserves_runtime_state(
+        SegmentCheckpointPersistenceOutcome::NotCommitted {
+            error: codex_thread_store::ThreadStoreError::Internal {
+                message: "injected proven non-commit".to_string(),
+            },
+        },
+        /*expect_restart_required*/ false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn thread_rollback_indeterminate_preserves_runtime_state() {
+    assert_failed_thread_rollback_preserves_runtime_state(
+        SegmentCheckpointPersistenceOutcome::Indeterminate {
+            error: codex_thread_store::ThreadStoreError::Internal {
+                message: "injected indeterminate publication".to_string(),
+            },
+        },
+        /*expect_restart_required*/ true,
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -9306,7 +9435,9 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
 async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
     let (session, _turn_context, rx) = make_session_and_context_with_rx().await;
     let original_personality = session.thread_config_snapshot().await.personality;
-    let admission = session.checkpoint_admission_lock.lock().await;
+    let admission = Arc::clone(&session.checkpoint_admission_lock)
+        .lock_owned()
+        .await;
     let task_session = Arc::clone(&session);
     let update = tokio::spawn(async move {
         thread_settings::update(

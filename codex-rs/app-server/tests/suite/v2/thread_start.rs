@@ -1192,6 +1192,7 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
                 model_providers: None,
                 source_kinds: None,
                 archived: Some(archived),
+                project_id: None,
                 cwd: None,
                 use_state_db_only: false,
                 search_term: None,

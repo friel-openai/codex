@@ -128,6 +128,7 @@ pub(super) fn repair_legacy_goal_supervisor_lines(
 
 /// Repairs exact legacy damage when this rollout or same-thread rotation ancestry proves that the
 /// affected Frodex build wrote the lineage.
+#[cfg(test)]
 pub(super) fn repair_legacy_goal_supervisor_lines_with_provenance(
     lines: &mut [RolloutLine],
     inherited_provenance: GoalSupervisorLineageProvenance,
@@ -140,6 +141,7 @@ pub(super) fn repair_legacy_goal_supervisor_lines_with_provenance(
 /// A bounded history reader can use this API after materialization identifies the records it will
 /// consume. Target-shaped records outside that set are not classified, so excluded encrypted
 /// content cannot be changed or reject the bounded read.
+#[cfg(test)]
 pub(super) fn repair_legacy_goal_supervisor_lines_selected_with_provenance(
     lines: &mut [RolloutLine],
     inherited_provenance: GoalSupervisorLineageProvenance,
@@ -207,6 +209,7 @@ fn repair_selected_legacy_goal_supervisor_lines_with_provenance(
 /// Unchanged physical lines are copied byte-for-byte. Changed records are serialized from the
 /// structured protocol type and padded with trailing JSON whitespace before their newline. The
 /// fixed physical spans preserve paginated history cutoffs and SQLite byte offsets.
+#[cfg(test)]
 pub(super) fn rewrite_legacy_goal_supervisor_jsonl_same_length(
     source: &[u8],
 ) -> ThreadStoreResult<Option<Vec<u8>>> {

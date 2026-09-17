@@ -305,7 +305,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
             updated_at: 1,
             recency_at: Some(1),
             status: ThreadStatus::Idle,
-            agent_status: None,
+            agent_status: Some(CollabAgentStatus::Running),
             path: None,
             cwd: absolute_path("tmp"),
             cli_version: "0.0.0".to_string(),
@@ -357,6 +357,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
         })
     );
     assert_eq!(value["thread"]["sectionEnteredAt"], json!(1));
+    assert_eq!(value["thread"]["agentStatus"], json!("running"));
 
     let mut legacy_thread = value["thread"].clone();
     let legacy_thread_fields = legacy_thread
@@ -367,6 +368,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
     legacy_thread_fields.remove("projectId");
     legacy_thread_fields.remove("environments");
     legacy_thread_fields.remove("originator");
+    legacy_thread_fields.remove("agentStatus");
     let legacy_thread =
         serde_json::from_value::<Thread>(legacy_thread).expect("deserialize legacy thread");
     assert_eq!(legacy_thread.section, None);
@@ -374,6 +376,7 @@ fn thread_resume_response_round_trips_initial_turns_page() {
     assert_eq!(legacy_thread.project_id, None);
     assert_eq!(legacy_thread.environments, None);
     assert_eq!(legacy_thread.originator, None);
+    assert_eq!(legacy_thread.agent_status, None);
 
     assert_eq!(
         value.get("initialTurnsPage"),

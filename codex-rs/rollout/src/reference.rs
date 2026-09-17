@@ -19,7 +19,6 @@ use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
-use codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SessionMetaLine;

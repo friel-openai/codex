@@ -50,7 +50,7 @@ struct ForkHistoryReservation {
 }
 
 enum IndexedForkAttempt {
-    Prepared(PreparedFork),
+    Prepared(Box<PreparedFork>),
     Fallback(ForkHistoryReservation),
 }
 
@@ -259,7 +259,7 @@ async fn prepare_with_response_history(
             message: format!("failed to prepare indexed fork: {error}"),
         })??;
         match attempt {
-            IndexedForkAttempt::Prepared(prepared) => return Ok(prepared),
+            IndexedForkAttempt::Prepared(prepared) => return Ok(*prepared),
             IndexedForkAttempt::Fallback(reservation) => {
                 drop(reservation);
             }
@@ -532,20 +532,23 @@ async fn prepare_with_response_history(
         None
     };
     let (response_history, projected_response_turns) = match response_history {
-        ForkResponseHistory::Full if copied_history.is_some() => (
-            Arc::clone(copied_history.as_ref().expect("copied history is present")),
-            None,
-        ),
-        ForkResponseHistory::Full if indexed_root_latest => (
-            Arc::clone(&model_context),
-            Some(Arc::new(
-                load_projected_response_turns(store, thread_id).await?,
-            )),
-        ),
-        ForkResponseHistory::Full => (
-            Arc::new(model_context::load_full_for_fork(lineage, history_base).await?),
-            None,
-        ),
+        ForkResponseHistory::Full => {
+            if let Some(copied_history) = copied_history.as_ref() {
+                (Arc::clone(copied_history), None)
+            } else if indexed_root_latest {
+                (
+                    Arc::clone(&model_context),
+                    Some(Arc::new(
+                        load_projected_response_turns(store, thread_id).await?,
+                    )),
+                )
+            } else {
+                (
+                    Arc::new(model_context::load_full_for_fork(lineage, history_base).await?),
+                    None,
+                )
+            }
+        }
         ForkResponseHistory::ModelContext => (Arc::clone(&model_context), None),
     };
     let mut prepared = PreparedFork::new(
@@ -969,7 +972,7 @@ async fn try_prepare_indexed_latest_fork(
     );
     prepared.projected_response_turns = projected_response_turns;
     prepared.shared_model_response_items = shared_model_response_items;
-    Ok(IndexedForkAttempt::Prepared(prepared))
+    Ok(IndexedForkAttempt::Prepared(Box::new(prepared)))
 }
 
 fn canonical_same_thread_reference(

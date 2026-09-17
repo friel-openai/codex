@@ -400,7 +400,7 @@ impl AgentControl {
                 &prepared_descendant.metadata,
             );
             if let Err(err) = state
-                .update_thread_metadata(descendant.thread_id, patch, true)
+                .update_thread_metadata(descendant.thread_id, patch, /*include_archived*/ true)
                 .await
             {
                 for restored in persisted.into_iter().rev() {
@@ -603,7 +603,7 @@ async fn restore_persisted_descendant_metadata(
                 agent_role: Some(descendant.original_metadata.agent_role.clone()),
                 ..Default::default()
             },
-            true,
+            /*include_archived*/ true,
         )
         .await?;
     Ok(())

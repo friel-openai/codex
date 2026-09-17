@@ -1046,6 +1046,7 @@ async fn persist_thread_environment_for_resume(
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&cwd),
         workspace_roots: vec![PathUri::from_abs_path(&cwd)],
+        config: codex_protocol::protocol::EnvironmentConfigState::FromThread,
     };
     let mut settings = thread.thread_settings_snapshot().await;
     settings.environments = Some(TurnEnvironmentSelections::new(
@@ -7696,12 +7697,26 @@ async fn failed_goal_supervisor_waits_for_one_persisted_retry_inner() -> anyhow:
 fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot() -> anyhow::Result<()> {
     run_goal_supervisor_test(
         "goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot",
-        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(),
+        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+            ThreadHistoryMode::Legacy,
+        ),
     )
 }
 
-async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner()
--> anyhow::Result<()> {
+#[test]
+#[serial(fork_env)]
+fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow::Result<()> {
+    run_goal_supervisor_test(
+        "paginated_goal_supervisor_helper_preserves_parent_request_prefix",
+        goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+            ThreadHistoryMode::Paginated,
+        ),
+    )
+}
+
+async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+    history_mode: ThreadHistoryMode,
+) -> anyhow::Result<()> {
     const AGENTS_MARKER: &str =
         "goal-supervisor-parent-agents-marker-3b0ac7d8-55de-4cb7-a5b5-7c7ec44d9c7d";
     let server = start_mock_server().await;
@@ -7830,7 +7845,10 @@ while True:
         .state_db
         .as_ref()
         .expect("sqlite state db should be available");
-    let (parent_thread_id, parent_thread) = harness.start_thread().await;
+    let (parent_thread_id, parent_thread) = match history_mode {
+        ThreadHistoryMode::Legacy => harness.start_thread().await,
+        ThreadHistoryMode::Paginated => harness.start_paginated_thread().await,
+    };
     let parent_prompt_cache_key = parent_thread.session.prompt_cache_key();
     let mcp_runtime = Arc::clone(&parent_thread.session.services.mcp_runtime);
     assert!(
@@ -7889,6 +7907,26 @@ while True:
     );
 
     wait_for_turn_complete(child_thread.as_ref()).await;
+    if history_mode == ThreadHistoryMode::Paginated {
+        child_thread.session.flush_rollout().await?;
+        let child_rollout_path = child_thread
+            .session
+            .current_rollout_path()
+            .await?
+            .expect("paginated supervisor child should have a physical rollout");
+        let InitialHistory::Resumed(child_rollout) =
+            RolloutRecorder::get_rollout_history(child_rollout_path.as_path()).await?
+        else {
+            panic!("paginated supervisor child should load as resumed physical history");
+        };
+        assert!(
+            child_rollout
+                .history
+                .iter()
+                .any(|item| matches!(item, RolloutItem::RolloutReference(_))),
+            "paginated supervisor children must retain the physical RolloutReference while the model request uses materialized logical history"
+        );
+    }
     let requests = request_log.requests();
     assert_eq!(requests.len(), 2);
     let parent_body = requests[0].body_json();
@@ -7918,6 +7956,12 @@ while True:
         child_body["prompt_cache_key"].as_str(),
         Some(expected_prompt_cache_key.as_str())
     );
+    assert!(
+        parent_body["instructions"]
+            .as_str()
+            .is_some_and(|instructions| !instructions.is_empty()),
+        "the parent request must exercise nonempty top-level instructions"
+    );
     assert_eq!(
         child_body["instructions"], parent_body["instructions"],
         "goal supervisor helpers must preserve the parent's exact top-level instructions"
@@ -7928,6 +7972,20 @@ while True:
         "goal supervisor helpers must preserve the exact parent request prefix, including the discovered AGENTS.md instructions and their order, through the fork point"
     );
     let child_suffix = &child_input[parent_input.len()..];
+    assert!(
+        child_suffix.iter().all(|item| {
+            item["content"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .all(|content_item| {
+                    content_item["text"]
+                        .as_str()
+                        .is_none_or(|text| !text.contains(AGENTS_MARKER))
+                })
+        }),
+        "the inherited AGENTS.md marker must remain exclusively in the exact parent prefix"
+    );
     assert!(
         child_suffix.first().is_some_and(|item| {
             item["role"] == "developer"

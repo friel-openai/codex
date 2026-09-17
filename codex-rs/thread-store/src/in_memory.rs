@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -25,6 +26,7 @@ use crate::AppendThreadItemsParams;
 use crate::ArchiveThreadParams;
 use crate::CreateThreadParams;
 use crate::DeleteThreadParams;
+use crate::FreezeRolloutSegmentParams;
 use crate::ListThreadsParams;
 use crate::LoadThreadHistoryParams;
 use crate::MoveThreadToSectionParams;
@@ -32,6 +34,7 @@ use crate::PersistContext;
 use crate::ReadThreadByRolloutPathParams;
 use crate::ReadThreadParams;
 use crate::ResumeThreadParams;
+use crate::SegmentCheckpointPersistenceOutcome;
 use crate::StoredModelContext;
 use crate::StoredThread;
 use crate::StoredThreadHistory;
@@ -673,6 +676,8 @@ struct InMemoryThreadStoreState {
     section_entered_at: HashMap<ThreadId, DateTime<Utc>>,
     names: HashMap<ThreadId, Option<String>>,
     rollout_paths: HashMap<PathBuf, ThreadId>,
+    /// Scripted checkpoint outcomes let cross-crate tests exercise commit classification.
+    segment_checkpoint_outcomes: VecDeque<SegmentCheckpointPersistenceOutcome>,
     #[cfg(test)]
     root_recency_touch_results: std::collections::VecDeque<RootRecencyTouchScript>,
 }
@@ -740,6 +745,18 @@ impl InMemoryThreadStore {
     /// Makes deletion fail before mutating `thread_id`. Intended for request-level failure tests.
     pub async fn fail_delete_thread(&self, thread_id: ThreadId) {
         self.state.lock().await.fail_delete_thread = Some(thread_id);
+    }
+
+    /// Scripts checkpoint publication results for tests that use the in-memory store.
+    pub async fn queue_segment_checkpoint_outcomes_for_testing(
+        &self,
+        outcomes: impl IntoIterator<Item = SegmentCheckpointPersistenceOutcome>,
+    ) {
+        self.state
+            .lock()
+            .await
+            .segment_checkpoint_outcomes
+            .extend(outcomes);
     }
 
     #[cfg(test)]
@@ -1166,6 +1183,27 @@ impl ThreadStore for InMemoryThreadStore {
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(InMemoryThreadStore::append_items(self, params))
+    }
+
+    fn persist_segment_checkpoint(
+        &self,
+        _thread_id: ThreadId,
+        _params: FreezeRolloutSegmentParams,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>,
+    > {
+        Box::pin(async move {
+            self.state
+                .lock()
+                .await
+                .segment_checkpoint_outcomes
+                .pop_front()
+                .unwrap_or_else(|| SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::Unsupported {
+                        operation: "persist_segment_checkpoint",
+                    },
+                })
+        })
     }
 
     fn persist_thread(

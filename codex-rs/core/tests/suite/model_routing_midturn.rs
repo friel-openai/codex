@@ -190,7 +190,7 @@ async fn parallel_tool_outputs_are_complete_before_midturn_reroute() -> Result<(
         ],
     )
     .await;
-    let test = build_routed_test(&server, false).await?;
+    let test = build_routed_test(&server, /*multi_agent_v2*/ false).await?;
 
     submit_prompt(&test, "run two tools").await?;
     let events = events_until_complete(&test).await;
@@ -239,7 +239,7 @@ async fn steering_during_tool_wait_is_recorded_once_before_midturn_reroute() -> 
         ],
     )
     .await;
-    let test = build_routed_test(&server, true).await?;
+    let test = build_routed_test(&server, /*multi_agent_v2*/ true).await?;
 
     submit_prompt(&test, INITIAL_PROMPT).await?;
     wait_for_event(&test.codex, |event| {

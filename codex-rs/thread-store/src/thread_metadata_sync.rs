@@ -460,7 +460,7 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
-            persistence_mode: Default::default(),
+            persistence_mode: crate::ThreadPersistenceMode::Durable,
             initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             metadata: ThreadPersistenceMetadata {

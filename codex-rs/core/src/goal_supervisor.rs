@@ -901,6 +901,7 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
                 parent_turn_id: None,
                 root_turn_id: None,
                 environments: None,
+                multi_agent_v2_usage_hints: None,
                 initial_task_message: None,
             },
         )
