@@ -127,6 +127,7 @@ pub enum SessionSelection {
     AgentsOverview,
     Resume(SessionTarget),
     Fork(SessionTarget),
+    Side(SessionTarget),
     Exit,
 }
 

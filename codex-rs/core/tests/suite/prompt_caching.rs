@@ -245,6 +245,7 @@ async fn prompt_tools_are_consistent_across_requests(
     }
     expected_tools_names.extend([
         "request_user_input",
+        "workspace",
         "apply_patch",
         "view_image",
         "tool_search",

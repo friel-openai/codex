@@ -26,8 +26,10 @@ impl ChatWidget {
                     self.app_event_tx.send(AppEvent::NewSession { name });
                 }
                 ManagedWorktreeMode::Fork => {
-                    self.app_event_tx
-                        .send(AppEvent::ForkCurrentSession { name });
+                    self.app_event_tx.send(AppEvent::ForkCurrentSession {
+                        name,
+                        placement: None,
+                    });
                 }
             }
             return;
@@ -54,6 +56,7 @@ impl ChatWidget {
                         ManagedWorktreeMode::Fork => {
                             tx.send(AppEvent::ForkCurrentSession {
                                 name: current_name.clone(),
+                                placement: None,
                             });
                         }
                     })],
