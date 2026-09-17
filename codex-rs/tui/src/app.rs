@@ -230,6 +230,7 @@ mod misalignment_policy;
 mod model_defaults;
 mod new_session;
 mod pending_interactive_replay;
+mod pending_thread_approvals;
 mod permission_shortcuts;
 mod pets;
 mod placed_side;
@@ -269,6 +270,7 @@ use self::side::SideParentStatus;
 use self::side::SideParentStatusChange;
 use self::side::SideThreadState;
 use self::startup_prompts::*;
+pub(crate) use self::thread_events::ThreadEventChannelIdentity;
 use self::thread_events::*;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -650,6 +652,7 @@ pub(crate) struct App {
     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
     /// Track title generation across thread switches and deduplicate automatic requests.
     pending_thread_titles: HashSet<(ThreadId, ThreadTitleDestination)>,
+    pending_thread_approval_labels: HashMap<ThreadId, String>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
     agent_navigation: AgentNavigationState,
     agents_overview: agents_overview::AgentsOverviewState,
