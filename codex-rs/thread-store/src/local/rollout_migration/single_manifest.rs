@@ -220,19 +220,21 @@ where
         if raw.len() > MAX_ROLLOUT_LINE_BYTES {
             continue;
         }
-        let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
+        let Ok(lines) = line_parser::parse_legacy_rollout_lines(raw.as_bytes()) else {
             continue;
         };
-        let planned = rollback_plan.apply(parsed_record_index, line)?;
-        parsed_record_index = parsed_record_index
-            .checked_add(1)
-            .ok_or_else(|| migration_error("legacy rollout record index overflow"))?;
-        let Some(line) = planned else {
-            canonicalizer.skip_source_line()?;
-            continue;
-        };
-        last_timestamp = line.timestamp.clone();
-        canonicalizer.process_line(line, writer).await?;
+        for line in lines {
+            let planned = rollback_plan.apply(parsed_record_index, line)?;
+            parsed_record_index = parsed_record_index
+                .checked_add(1)
+                .ok_or_else(|| migration_error("legacy rollout record index overflow"))?;
+            let Some(line) = planned else {
+                canonicalizer.skip_source_line()?;
+                continue;
+            };
+            last_timestamp = line.timestamp.clone();
+            canonicalizer.process_line(line, writer).await?;
+        }
     }
     if parsed_record_index != rollback_plan.record_count() {
         return Err(migration_error(
@@ -252,10 +254,12 @@ async fn build_rollback_plan(path: &Path) -> ThreadStoreResult<RollbackPlan> {
         if raw.len() > MAX_ROLLOUT_LINE_BYTES {
             continue;
         }
-        let Ok(Some(line)) = line_parser::parse_legacy_rollout_line(raw.as_bytes()) else {
+        let Ok(lines) = line_parser::parse_legacy_rollout_lines(raw.as_bytes()) else {
             continue;
         };
-        planner.observe(&line)?;
+        for line in lines {
+            planner.observe(&line)?;
+        }
     }
     Ok(planner.finish())
 }
