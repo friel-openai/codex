@@ -276,6 +276,8 @@ fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
         history_mode: ThreadHistoryMode::Legacy,
         history_base: None,
         subagent_history_start_ordinal: None,
+        persistence_mode: Default::default(),
+        initial_rollout_ordinal: 0,
         initial_window_id: uuid::Uuid::now_v7().to_string(),
         metadata: ThreadPersistenceMetadata {
             cwd: Some(std::env::current_dir().expect("cwd")),

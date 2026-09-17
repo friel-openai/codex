@@ -446,7 +446,7 @@ async fn run_compact_task_inner_impl(
             compaction_model_hash: turn_context.model_info().comp_hash.clone(),
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(&turn_context).await;
 
     if reporting.defers_lifecycle() {

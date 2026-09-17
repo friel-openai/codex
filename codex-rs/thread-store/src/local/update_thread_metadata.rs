@@ -73,7 +73,7 @@ pub(super) async fn update_thread_metadata(
     let has_explicit_metadata = patch.name.is_some() || requires_rollout_compat;
     let history_mode = if has_explicit_metadata {
         match live_writer::live_writer_parts(store, thread_id).await {
-            Ok((_recorder, _rollout_id, history_mode)) => Some(history_mode),
+            Ok((_recorder, _rollout_id, history_mode, _persistence_mode)) => Some(history_mode),
             Err(ThreadStoreError::ThreadNotFound { .. }) => Some(
                 read_thread::read_thread(
                     store,
@@ -1536,14 +1536,18 @@ mod tests {
                     git_info: Some(GitInfoPatch {
                         sha: Some(Some("abc123".to_string())),
                         branch: Some(Some("linked-branch".to_string())),
-                        origin_url: Some(Some("https://github.com/openai/codex".to_string())),
+                        origin_url: Some(Some(
+                            SanitizedGitUrl::try_from("https://github.com/openai/codex")
+                                .expect("valid git remote URL"),
+                        )),
                     }),
                     ..Default::default()
                 },
                 include_archived: false,
             })
             .await
-            .expect("set workspace metadata");
+            .expect("set workspace metadata")
+            .expect("local store returns updated thread");
 
         assert_eq!(thread.cwd, worktree_cwd);
         assert_eq!(

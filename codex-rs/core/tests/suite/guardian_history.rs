@@ -131,6 +131,7 @@ async fn guardian_history_survives_restart_and_user_fork(
                 /*reserved_thread_id*/ None,
             )
             .await?
+            .0
     } else {
         initial
             .thread_manager
