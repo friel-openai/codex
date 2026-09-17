@@ -104,6 +104,7 @@ mod thread_archive;
 mod thread_delete;
 mod thread_environments;
 mod thread_fork;
+mod thread_fork_handoff;
 mod thread_inject_items;
 mod thread_list;
 mod thread_list_current_agents;
