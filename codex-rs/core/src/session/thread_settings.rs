@@ -5,6 +5,7 @@ use super::session::Session;
 use super::session::SessionSettingsUpdate;
 use super::step_settings::StepSettingsUpdate;
 use crate::config::ConstraintResult;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::CodexErrorInfo;
 use codex_protocol::protocol::ErrorEvent;
 use codex_protocol::protocol::Event;
@@ -22,6 +23,7 @@ pub(super) async fn update(
     submission_id: String,
     overrides: ThreadSettingsOverrides,
 ) {
+    let previous_execution_settings = execution_settings(session).await;
     let updates = prepare_update(overrides);
     if let Err(error) = apply_update(session, submission_id.clone(), updates).await {
         session
@@ -34,7 +36,23 @@ pub(super) async fn update(
                 }),
             })
             .await;
+    } else if execution_settings(session).await != previous_execution_settings {
+        if let Some(active_turn) = session.active_turn.lock().await.as_mut() {
+            active_turn.execution_settings_refresh_requested = true;
+        }
+        crate::goal_supervisor::restart_active_helper_for_execution_settings_change(session).await;
     }
+}
+
+async fn execution_settings(
+    session: &Session,
+) -> (String, Option<ReasoningEffort>, Option<String>) {
+    let snapshot = session.thread_config_snapshot().await;
+    (
+        snapshot.model,
+        snapshot.reasoning_effort,
+        snapshot.service_tier,
+    )
 }
 
 /// Converts protocol overrides into the internal settings update shape.
