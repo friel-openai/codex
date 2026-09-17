@@ -270,6 +270,11 @@ async fn reserve_segment_writers(
         };
         let (source_path, live_recorder, allow_missing_source) = match live_source {
             Some((source_path, recorder, allow_missing_source)) => {
+                // Durable creation still defers the first file write. Materialize that header
+                // before discovering references; deferred threads remain buffered until freeze.
+                if !allow_missing_source {
+                    recorder.persist().await.map_err(thread_store_io_error)?;
+                }
                 (source_path, Some(recorder), allow_missing_source)
             }
             None => {
@@ -866,7 +871,11 @@ async fn freeze_thread_segment_reserved_with_publication(
     }
 
     if params.is_snapshot() {
-        let segment_id = snapshot_segment_id(source_lines.as_slice())?;
+        let segment_id = if matches!(history_mode, ThreadHistoryMode::Legacy) {
+            Some(snapshot_segment_id(source_lines.as_slice())?)
+        } else {
+            None
+        };
         let snapshot_rollout_id = if matches!(history_mode, ThreadHistoryMode::Paginated) {
             ThreadId::new()
         } else {
@@ -882,14 +891,14 @@ async fn freeze_thread_segment_reserved_with_publication(
             immutable_segment_path(
                 store.config.codex_home.as_path(),
                 thread_id,
-                Some(segment_id),
+                segment_id,
                 codex_rollout::plain_rollout_path(source_path.as_path()).as_path(),
             )?
         };
         install_snapshot_segment(
             source_lines.as_slice(),
             immutable_path.as_path(),
-            matches!(history_mode, ThreadHistoryMode::Legacy).then_some(segment_id),
+            segment_id,
         )
         .await?;
         return Ok(FrozenRolloutSegmentResult {
@@ -899,7 +908,7 @@ async fn freeze_thread_segment_reserved_with_publication(
                     rollout_path: immutable_path.clone(),
                     thread_id: Some(thread_id),
                     rollout_timestamp: rollout_timestamp_from_path(stable_path.as_path()),
-                    segment_id: Some(segment_id),
+                    segment_id,
                     max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
                     nth_user_message: None,
                     compacted_replacement_history_filter_texts: None,
@@ -1575,7 +1584,6 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
         )
         .await?;
     }
-    let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
     let snapshot_rollout_id = ThreadId::new();
     let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
@@ -1594,7 +1602,7 @@ async fn freeze_prepared_paginated_prefix_reserved_inner(
             rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
-            segment_id: Some(segment_id),
+            segment_id: None,
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
@@ -1634,17 +1642,7 @@ async fn freeze_paginated_prefix_reserved_inner(
     let (source_session_meta, _, _, _, _) =
         validate_source_rollout(source_rollout_path, source_thread_id).await?;
     let history_mode = source_session_meta.meta.history_mode;
-    if prefix_rollout_path != codex_rollout::plain_rollout_path(prefix_rollout_path) {
-        return Err(ThreadStoreError::Internal {
-            message: format!(
-                "prepared fork prefix {} was not materialized before freezing",
-                prefix_rollout_path.display()
-            ),
-        });
-    }
-    let prefix_bytes = fs::read(prefix_rollout_path)
-        .await
-        .map_err(thread_store_io_error)?;
+    let prefix_bytes = super::rollout_lineage::read_rollout_bytes(prefix_rollout_path).await?;
     let end_byte_offset =
         usize::try_from(end_byte_offset).map_err(|_| ThreadStoreError::Internal {
             message: format!("fork byte offset for {prefix_thread_id} exceeds addressable memory"),
@@ -1737,7 +1735,6 @@ async fn freeze_paginated_prefix_reserved_inner(
         )
         .await?;
     }
-    let segment_id = snapshot_segment_id(prefix_lines.as_slice())?;
     let snapshot_rollout_id = ThreadId::new();
     let immutable_path = native_history_segment_path(
         store.config.codex_home.as_path(),
@@ -1756,7 +1753,7 @@ async fn freeze_paginated_prefix_reserved_inner(
             rollout_path: immutable_path.clone(),
             thread_id: Some(prefix_thread_id),
             rollout_timestamp: rollout_timestamp_from_path(prefix_rollout_path),
-            segment_id: Some(segment_id),
+            segment_id: None,
             max_depth: DEFAULT_ROLLOUT_REFERENCE_DEPTH,
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,

@@ -480,6 +480,8 @@ impl AgentControl {
                     selection.config = EnvironmentConfigState::Ready(bounded_config);
                 }
             }
+            // The validated owner must override stale persisted child environments.
+            environment_selections.get_or_insert_with(|| parent_environments.to_selections());
             (
                 Some(parent_environments.clone()),
                 Some(Arc::clone(&parent.session.services.exec_policy)),
@@ -860,7 +862,7 @@ impl AgentControl {
         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
             .then_some(ThreadHistoryMode::Paginated);
 
-        let mut supervisor_continuity_history = None;
+        let mut supervisor_last_parent_message_at = None;
         let mut supervisor_model_history = None;
         let (
             selected_capability_roots,
@@ -869,11 +871,28 @@ impl AgentControl {
             source_reservation,
         ) = match fork_mode {
             SpawnAgentForkMode::FullHistory => {
-                let (reference_history, logical_history, model_history, source_reservation) = state
-                    .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
+                let materialization = if is_goal_supervisor_helper {
+                    crate::thread_manager::FullHistoryLogicalMaterialization::SupervisorContinuity
+                } else {
+                    crate::thread_manager::FullHistoryLogicalMaterialization::CompleteResponseHistory
+                };
+                let (
+                    reference_history,
+                    logical_history,
+                    model_history,
+                    last_parent_message_at,
+                    source_reservation,
+                ) = state
+                    .reference_backed_full_history(
+                        parent_thread_id,
+                        config.codex_home.as_path(),
+                        materialization,
+                    )
                     .await?;
                 let selected_capability_roots = logical_history
                     .iter()
+                    .chain(reference_history.get_rollout_items())
+                    .chain(model_history.iter())
                     .find_map(|item| match item {
                         RolloutItem::SessionMeta(meta_line) => {
                             Some(meta_line.meta.selected_capability_roots.clone())
@@ -882,7 +901,7 @@ impl AgentControl {
                     })
                     .unwrap_or_default();
                 if is_goal_supervisor_helper {
-                    supervisor_continuity_history = Some(logical_history.clone());
+                    supervisor_last_parent_message_at = last_parent_message_at;
                     supervisor_model_history = Some(model_history);
                 }
                 let reference_rollout_items = reference_history.get_rollout_items().to_vec();
@@ -923,7 +942,16 @@ impl AgentControl {
                 let mut forked_rollout_items =
                     truncate_rollout_to_last_n_fork_turns(parent_history, *last_n_turns);
                 if is_goal_supervisor_helper {
-                    supervisor_continuity_history = Some(forked_rollout_items.clone());
+                    supervisor_last_parent_message_at =
+                        forked_rollout_items
+                            .iter()
+                            .rev()
+                            .find_map(|item| match item {
+                                RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => {
+                                    event.completed_at
+                                }
+                                _ => None,
+                            });
                     supervisor_model_history = Some(forked_rollout_items.clone());
                 }
                 if let Some(source_session_meta) = source_session_meta {
@@ -1110,9 +1138,21 @@ impl AgentControl {
             });
             if let (Some(reference_rollout_items), Some(unsanitized_parent_history)) =
                 (reference_rollout_items, unsanitized_parent_history)
-                && serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history
             {
-                forked_rollout_items = reference_rollout_items;
+                if serde_json::to_value(&forked_rollout_items)? == unsanitized_parent_history {
+                    forked_rollout_items = reference_rollout_items;
+                } else {
+                    // Sanitized history is a self-contained copy. Keeping its source history_base
+                    // would restore the unsanitized ancestor and duplicate the copied model input.
+                    forked_rollout_items.retain_mut(|item| match item {
+                        RolloutItem::SessionMeta(meta) => {
+                            meta.meta.history_base = None;
+                            true
+                        }
+                        RolloutItem::RolloutReference(_) => false,
+                        _ => true,
+                    });
+                }
             }
         }
         // Full forks reuse the parent's reference context instead of rebuilding it. If that
@@ -1185,7 +1225,7 @@ impl AgentControl {
                         &parent_thread.session,
                         &goal_id,
                         &parent_goal,
-                        supervisor_continuity_history.as_deref().unwrap_or_default(),
+                        supervisor_last_parent_message_at,
                     )
                     .await,
                 );

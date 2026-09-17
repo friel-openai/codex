@@ -204,8 +204,14 @@ pub(super) async fn start_recording_app_server_with_history(
     thread_params_mode: crate::app_server_session::ThreadParamsMode,
     loader_overrides: LoaderOverrides,
 ) -> Result<RecordingAppServer> {
+    let mut config = config.clone();
+    if matches!(history_capabilities, HistoryCapabilities::LegacyOnly) {
+        config
+            .features
+            .disable(Feature::BackgroundPaginatedRolloutMigration)?;
+    }
     let state_db =
-        crate::init_state_db_for_app_server_target(config, &crate::AppServerTarget::Embedded)
+        crate::init_state_db_for_app_server_target(&config, &crate::AppServerTarget::Embedded)
             .await?;
     let embedded = crate::start_embedded_app_server(
         codex_arg0::Arg0DispatchPaths::default(),
@@ -475,7 +481,7 @@ pub(super) async fn start_recording_app_server_with_history(
     .await?;
 
     Ok((
-        AppServerSession::new(app_server, thread_params_mode).with_startup_config(config),
+        AppServerSession::new(app_server, thread_params_mode).with_startup_config(&config),
         requests,
         proxy,
     ))
@@ -499,6 +505,49 @@ fn create_history_rollout(
         /*git_info*/ None,
     )
     .map_err(|err| color_eyre::eyre::eyre!("failed to create history rollout: {err}"))?;
+    if history_mode == ThreadHistoryMode::Paginated {
+        let path = rollout_path(
+            config.codex_home.as_path(),
+            "2026-01-02T00-00-00",
+            &thread_id,
+        );
+        let mut records = std::fs::read_to_string(&path)?
+            .lines()
+            .map(serde_json::from_str::<serde_json::Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        let start = EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "fixture-turn".to_string(),
+            trace_id: None,
+            started_at: None,
+            model_context_window: None,
+            collaboration_mode_kind: Default::default(),
+        });
+        records.push(serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "ordinal": records.len(), "type": "event_msg", "payload": start}));
+        let event = EventMsg::ItemCompleted(codex_protocol::protocol::ItemCompletedEvent {
+            thread_id: ThreadId::from_string(&thread_id)?,
+            turn_id: "fixture-turn".to_string(),
+            item: TurnItem::UserMessage(UserMessageItem {
+                id: "fixture-user".to_string(),
+                client_id: None,
+                content: vec![CoreUserInput::Text {
+                    text: preview.to_string(),
+                    text_elements: Vec::new(),
+                }],
+            }),
+            started_at_ms: None,
+            completed_at_ms: 0,
+        });
+        records.push(serde_json::json!({"timestamp": "2026-01-02T00:00:00Z", "ordinal": records.len(), "type": "event_msg", "payload": event}));
+        std::fs::write(
+            path,
+            records
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+                + "\n",
+        )?;
+    }
     Ok(ThreadId::from_string(&thread_id)?)
 }
 
@@ -2222,6 +2271,79 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
     Ok(())
 }
 
+#[test]
+fn durable_fork_import_hydrates_bounded_history_and_keeps_parent_title() -> Result<()> {
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("durable-fork-import-history".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(
+                    durable_fork_import_hydrates_bounded_history_and_keeps_parent_title_inner(),
+                )
+        })?
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload))
+}
+
+async fn durable_fork_import_hydrates_bounded_history_and_keeps_parent_title_inner() -> Result<()> {
+    let (app, _codex_home) = make_history_test_app().await?;
+    let parent_thread_id = create_history_rollout(
+        &app.config,
+        ThreadHistoryMode::Paginated,
+        "durable fork import parent",
+    )?;
+    let mut source = crate::start_embedded_app_server_for_picker(&app.config).await?;
+    source
+        .resume_thread(
+            &app.local_settings,
+            app.config.clone(),
+            parent_thread_id,
+            crate::app_server_session::ResumeModelSettings::RestoreFromThread,
+        )
+        .await?;
+    source
+        .thread_set_name(parent_thread_id, "Durable fork parent".to_string())
+        .await?;
+    let handoff = source
+        .prepare_fork_handoff(app.config.clone(), parent_thread_id)
+        .await?;
+    let (mut receiver, requests, proxy) = start_recording_app_server(
+        &app.config,
+        /*blocked_thread_list*/ None,
+        /*failed_thread_name*/ None,
+    )
+    .await?;
+
+    let imported = receiver
+        .import_fork_handoff(app.config.clone(), handoff.as_path())
+        .await?;
+
+    assert_ne!(imported.session.thread_id, parent_thread_id);
+    assert_eq!(
+        imported.session.fork_parent_title.as_deref(),
+        Some("Durable fork parent")
+    );
+    assert!(!imported.turns.is_empty());
+    assert_eq!(recorded_params(&requests, "thread/fork/import").len(), 1);
+    assert_eq!(recorded_params(&requests, "thread/turns/list").len(), 1);
+    assert!(!recorded_params(&requests, "thread/items/list").is_empty());
+    let reads = recorded_params(&requests, "thread/read");
+    assert!(
+        reads.iter().all(|params| params["includeTurns"] != true),
+        "durable fork import requested full history: {reads:?}"
+    );
+
+    receiver.shutdown().await?;
+    source.shutdown().await?;
+    proxy.await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
     let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
@@ -2502,7 +2624,7 @@ async fn paginated_workflows_never_request_full_thread_history() -> Result<()> {
         .iter()
         .map(|params| params["includeTurns"].as_bool().unwrap_or(false))
         .collect::<Vec<_>>();
-    assert_eq!(legacy_include_turns, vec![false, true]);
+    assert_eq!(legacy_include_turns, vec![false]);
 
     app_server.shutdown().await?;
     proxy.await??;
@@ -2525,8 +2647,8 @@ async fn agents_overview_stop_uses_history_mode_for_turn_lookup() -> Result<()> 
                 ThreadHistoryMode::Legacy,
                 "legacy background task",
             )?,
-            vec![false, true],
-            0,
+            vec![false],
+            1,
         ),
     ];
     let (mut app_server, requests, proxy) = start_recording_app_server_with_history(
@@ -3607,7 +3729,12 @@ async fn changing_directory_preserves_project_trust_permissions_history_and_hook
     requests.lock().expect("request recorder lock").clear();
     app.change_working_directory(&mut tui, &mut server, untrusted.clone().abs())
         .await;
-    assert_eq!(app.config.active_project.trust_level, Some(T::Untrusted));
+    assert_eq!(
+        app.config.active_project.trust_level,
+        Some(T::Untrusted),
+        "{}",
+        history().join("")
+    );
     let approval = app.config.permissions.approval_policy.value();
     assert_eq!(approval, AskForApproval::UnlessTrusted.to_core());
     assert_eq!(rec(req, "thread/fork")[0]["approvalPolicy"], "untrusted");

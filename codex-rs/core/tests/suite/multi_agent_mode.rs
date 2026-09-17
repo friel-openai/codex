@@ -155,7 +155,7 @@ async fn frodex_default_delegation_is_proactive_at_every_effort(effort: &str) ->
             model_info
                 .supported_reasoning_levels
                 .push(ReasoningEffortPreset {
-                    effort: supported_effort.clone(),
+                    effort: supported_effort,
                     description: "Test effort".to_string(),
                 });
         })

@@ -56,8 +56,8 @@ const LEGACY_TO_PAGINATED_MIGRATION_ID: &str = "legacy_to_paginated_v1";
 const NATIVE_HISTORY_BASE_MIGRATION_ID: &str = "native_history_base_v2_mixed_rollback";
 const EMPTY_SKIP_REASON: &str = "empty";
 const FAILED_SKIP_REASON: &str = "failed";
-const MALFORMED_SESSION_META_SKIP_REASON: &str = "malformed_session_meta";
 const BUSY_SKIP_REASON: &str = "busy";
+const MALFORMED_SESSION_META_SKIP_REASON: &str = "malformed_session_meta";
 const NATIVE_OR_COMPATIBLE_REASON: &str = "native_or_compatible";
 const CURSOR_LOOKBACK_SECONDS: i64 = 48 * 60 * 60;
 const MAINTENANCE_RETRY_DELAY: Duration = Duration::from_secs(1);
@@ -220,14 +220,28 @@ pub(super) async fn await_thread_migration(
                 }
             }
         };
+        if matches!(
+            inspection,
+            StartupInspection::Legacy | StartupInspection::ReferenceBacked
+        ) && let Some(_migration_guard) =
+            codex_rollout::try_acquire_rollout_migration_dependency_lock(
+                &store.config.codex_home,
+                &[thread_id],
+            )
+            .map_err(migration_error)?
+        {
+            // With migration excluded for this task, a busy writer belongs to an active session,
+            // not a competing converter. Report that conflict instead of retrying indefinitely.
+            drop(store.writer_lock_coordinator.acquire(thread_id)?);
+        }
         let mut native_history_ready = match inspection {
             StartupInspection::Paginated => {
                 complete_native_root || store.has_history_projection(thread_id).await?
             }
             StartupInspection::Compatible => true,
             StartupInspection::Legacy
-            | StartupInspection::ReferenceBacked
             | StartupInspection::NeedsMigration
+            | StartupInspection::ReferenceBacked
             | StartupInspection::Skipped
             | StartupInspection::Unresolved => false,
         };
@@ -735,8 +749,22 @@ async fn migrate_all_rollouts(
         .cloned()
         .collect();
     let report = run_startup_migration(store, paths_to_migrate).await?;
+    let mut unresolved_lineage = false;
     for outcome in &report.outcomes {
+        if outcome.status == RolloutMigrationStatus::Failed
+            && codex_rollout::read_session_meta_line(&outcome.rollout_path)
+                .await
+                .is_ok_and(|meta| meta.meta.history_base.is_some())
+        {
+            // A missing or repaired ancestor can change eligibility without changing this file.
+            // Do not let a permanent skip or the creation cursor suppress that retry.
+            unresolved_lineage = true;
+            continue;
+        }
         update_skip_after_outcome(store, outcome).await?;
+    }
+    if unresolved_lineage {
+        return Ok(());
     }
     // Only mark the pre-migration snapshot; newer rollouts wait for the next startup check.
     advance_last_checked_thread(store, paths_before_migration.as_slice()).await

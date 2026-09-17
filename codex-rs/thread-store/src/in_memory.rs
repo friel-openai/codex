@@ -667,6 +667,8 @@ struct InMemoryThreadStoreState {
     calls: InMemoryThreadStoreCalls,
     fail_archive_thread: Option<ThreadId>,
     fail_delete_thread: Option<ThreadId>,
+    /// One pre-publication failure, used by cross-crate checkpoint recovery tests.
+    fail_next_checkpoint_thread: Option<ThreadId>,
     created_threads: HashMap<ThreadId, CreateThreadParams>,
     creation_times: HashMap<ThreadId, DateTime<Utc>>,
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
@@ -757,6 +759,11 @@ impl InMemoryThreadStore {
             .await
             .segment_checkpoint_outcomes
             .extend(outcomes);
+    }
+
+    /// Fails the next checkpoint before publication; later appends remain available.
+    pub async fn fail_next_checkpoint(&self, thread_id: ThreadId) {
+        self.state.lock().await.fail_next_checkpoint_thread = Some(thread_id);
     }
 
     #[cfg(test)]
@@ -1187,22 +1194,50 @@ impl ThreadStore for InMemoryThreadStore {
 
     fn persist_segment_checkpoint(
         &self,
-        _thread_id: ThreadId,
-        _params: FreezeRolloutSegmentParams,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
     ) -> std::pin::Pin<
         Box<dyn std::future::Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>,
     > {
         Box::pin(async move {
-            self.state
-                .lock()
-                .await
-                .segment_checkpoint_outcomes
-                .pop_front()
-                .unwrap_or_else(|| SegmentCheckpointPersistenceOutcome::NotCommitted {
-                    error: ThreadStoreError::Unsupported {
-                        operation: "persist_segment_checkpoint",
+            let mut state = self.state.lock().await;
+            if let Some(outcome) = state.segment_checkpoint_outcomes.pop_front() {
+                return outcome;
+            }
+            if params.is_snapshot() {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::InvalidRequest {
+                        message: "a segment-state checkpoint must replace the active rollout"
+                            .to_string(),
                     },
-                })
+                };
+            }
+            if let Err(error) = params.validate_checkpoint() {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::InvalidRequest {
+                        message: error.to_string(),
+                    },
+                };
+            }
+            if state.fail_next_checkpoint_thread == Some(thread_id) {
+                state.fail_next_checkpoint_thread = None;
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::Internal {
+                        message: format!("injected checkpoint failure for {thread_id}"),
+                    },
+                };
+            }
+            let history_mode = history_mode_from_state(&state, thread_id);
+            let items = persisted_rollout_items(params.initial_items(), history_mode);
+            let Some(history) = state.histories.get_mut(&thread_id) else {
+                return SegmentCheckpointPersistenceOutcome::NotCommitted {
+                    error: ThreadStoreError::ThreadNotFound { thread_id },
+                };
+            };
+            // Readers use the same mutex: the rollback marker and entire checkpoint become
+            // visible together, with no await or fallible operation after publication begins.
+            history.extend(items);
+            SegmentCheckpointPersistenceOutcome::Committed
         })
     }
 

@@ -311,8 +311,27 @@ fn only_active_writer_failures_offer_read_only_view() {
     ));
 }
 
-#[tokio::test]
-async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() -> Result<()> {
+#[test]
+fn migrated_resume_preserves_history_mode_after_picker_server_replacement() -> Result<()> {
+    const TEST_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+    std::thread::Builder::new()
+        .name("migrated-resume-history-mode".to_string())
+        .stack_size(TEST_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?
+                .block_on(
+                    migrated_resume_preserves_history_mode_after_picker_server_replacement_inner(),
+                )
+        })?
+        .join()
+        .map_err(|_| color_eyre::eyre::eyre!("migrated resume test thread panicked"))?
+}
+
+async fn migrated_resume_preserves_history_mode_after_picker_server_replacement_inner() -> Result<()>
+{
     let codex_home = tempfile::tempdir().expect("tempdir");
     let config = build_config(&codex_home).await;
     let thread_id = ThreadId::from_string(
@@ -331,6 +350,7 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
         .thread_read(thread_id, /*include_turns*/ false)
         .await?
         .history_mode;
+    assert_eq!(history_mode, ThreadHistoryMode::Paginated);
     picker_app_server.shutdown().await?;
 
     let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
@@ -345,7 +365,7 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
         )
         .await?;
 
-    assert_eq!(app_server.next_request_id, next_request_id + 2);
+    assert_eq!(app_server.next_request_id, next_request_id + 3);
     assert!(!resumed.turns.is_empty());
     app_server.shutdown().await?;
     Ok(())
@@ -503,7 +523,10 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
 #[tokio::test]
 async fn stale_legacy_history_mode_is_revalidated_before_resume() -> Result<()> {
     let codex_home = tempfile::tempdir().expect("tempdir");
-    let config = build_config(&codex_home).await;
+    let mut config = build_config(&codex_home).await;
+    config
+        .features
+        .disable(Feature::BackgroundPaginatedRolloutMigration)?;
     let thread_id = ThreadId::from_string(
         &create_fake_paginated_rollout(
             codex_home.path(),

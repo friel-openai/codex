@@ -1039,8 +1039,32 @@ async fn exec_fork_creates_distinct_threads_with_and_without_a_prompt() -> anyho
     )?;
     assert_eq!(fork_meta["payload"]["forked_from_id"], source_id);
     assert_eq!(fork_meta["payload"]["thread_source"], "fork_feature");
-    assert_eq!(fork_meta["payload"]["history_base"]["thread_id"], source_id);
-    assert!(!fork_contents.contains(&source_marker));
+    // history_base identifies an immutable snapshot, not the mutable logical parent.
+    let history_base = &fork_meta["payload"]["history_base"];
+    let snapshot_id = history_base["thread_id"].as_str().context("snapshot id")?;
+    Uuid::parse_str(snapshot_id)?;
+    assert_ne!(snapshot_id, source_id);
+    let end_ordinal = history_base["end_ordinal_exclusive"]
+        .as_u64()
+        .context("frozen ordinal")?;
+    assert!(end_ordinal > 0);
+    assert_eq!(
+        fork_meta["payload"]["forked_from_ordinal_exclusive"],
+        end_ordinal
+    );
+    // The inherited title may contain the source prompt; inherited message records
+    // stay in history_base rather than being copied into the child's active file.
+    let fork_records = fork_contents
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(!fork_records.iter().any(|record| {
+        record["type"] == "response_item"
+            && record["payload"]["type"] == "message"
+            && record["payload"]["content"]
+                .to_string()
+                .contains(&source_marker)
+    }));
     assert!(fork_contents.contains(&fork_marker));
     assert_eq!(std::fs::read_to_string(&source_path)?, original_source);
 

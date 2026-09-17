@@ -11,6 +11,9 @@
       ],
       "type": "string"
     },
+    "AgentPath": {
+      "type": "string"
+    },
     "AsyncUserInputQuestion": {
       "additionalProperties": false,
       "properties": {
@@ -485,6 +488,70 @@
         }
       ]
     },
+    "InterAgentCommunication": {
+      "properties": {
+        "author": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "content": {
+          "type": "string"
+        },
+        "encrypted_content": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "internal_chat_message_metadata_passthrough": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/InternalChatMessageMetadataPassthrough"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "other_recipients": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/AgentPath"
+          },
+          "type": "array"
+        },
+        "recipient": {
+          "$ref": "#/definitions/AgentPath"
+        },
+        "trigger_turn": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "author",
+        "content",
+        "recipient",
+        "trigger_turn"
+      ],
+      "type": "object"
+    },
+    "InternalChatMessageMetadataPassthrough": {
+      "description": "Internal Responses API passthrough metadata copied into underlying chat messages.\n\nResponses API strongly types this payload. Do not modify it without first getting API approval and making the corresponding Responses API change.",
+      "properties": {
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "LegacyAppPathString": {
       "type": "string"
     },
@@ -891,6 +958,30 @@
           "type": "object"
         },
         {
+          "properties": {
+            "communication": {
+              "$ref": "#/definitions/InterAgentCommunication"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "interAgentCommunication"
+              ],
+              "title": "InterAgentCommunicationThreadItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "communication",
+            "id",
+            "type"
+          ],
+          "title": "InterAgentCommunicationThreadItem",
+          "type": "object"
+        },
+        {
           "description": "EXPERIMENTAL - proposed plan item content. The completed plan item is authoritative and may not match the concatenation of `PlanDelta` text.",
           "properties": {
             "id": {
@@ -1267,6 +1358,20 @@
                 }
               ],
               "description": "Reasoning effort requested for the spawned agent, when applicable."
+            },
+            "receiverAgentNickname": {
+              "description": "Nickname for the single receiver agent when the source event reports one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "receiverAgentRole": {
+              "description": "Role for the single receiver agent when the source event reports one.",
+              "type": [
+                "string",
+                "null"
+              ]
             },
             "receiverThreadIds": {
               "description": "Thread ID of the receiving agent, when applicable. In case of spawn operation, this corresponds to the newly spawned agent.",

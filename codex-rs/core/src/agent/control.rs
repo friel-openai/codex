@@ -318,19 +318,14 @@ impl AgentControl {
         agent_id: ThreadId,
         state: &Arc<ThreadManagerState>,
         input: Vec<UserInput>,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let last_task_message = non_empty_task_message(render_input_preview(&input));
         let thread = state.get_thread(agent_id).await?;
         let result = match thread
             .io
             .submit_turn_input(
-                TurnInputRequest::user_input(input).on_start(TurnStartOptions {
-                    parent_turn_id,
-                    root_turn_id,
-                    ..Default::default()
-                }),
+                TurnInputRequest::user_input(input).on_start(start_options),
                 TurnInputMode::StartOrSteer,
             )
             .await

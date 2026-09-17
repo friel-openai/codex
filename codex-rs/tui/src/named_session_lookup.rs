@@ -10,6 +10,8 @@ use codex_app_server_protocol::ThreadListParams;
 use codex_app_server_protocol::ThreadSortKey;
 use codex_app_server_protocol::ThreadSourceKind;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use color_eyre::eyre::Result;
 use color_eyre::eyre::WrapErr;
 
@@ -56,6 +58,66 @@ pub(super) async fn lookup(
     if name.trim().is_empty() {
         return Ok(None);
     }
+
+    if app_server.uses_embedded_app_server() {
+        if let Some(thread) = lookup_from_server(
+            app_server,
+            codex_home,
+            name,
+            collections,
+            source_kind_filters,
+            model_provider,
+            /*use_state_db_only*/ true,
+            Some(name),
+        )
+        .await?
+        {
+            return Ok(Some(thread));
+        }
+
+        if let Some(thread) = lookup_legacy_index(
+            app_server,
+            codex_home,
+            name,
+            collections,
+            source_kind_filters,
+            model_provider,
+        )
+        .await?
+        {
+            return Ok(Some(thread));
+        }
+    }
+
+    lookup_from_server(
+        app_server,
+        codex_home,
+        name,
+        collections,
+        source_kind_filters,
+        model_provider,
+        /*use_state_db_only*/ false,
+        /*search_term*/ None,
+    )
+    .await
+}
+
+/// Resolve exact labels from one app-server listing mode.
+///
+/// Local lookup checks SQLite before consulting legacy metadata or allowing `thread/list` to scan
+/// rollout files. This preserves the bounded recovery behavior for names recorded only in the
+/// legacy index while retaining the app server's duplicate-label validation.
+#[allow(clippy::too_many_arguments)]
+async fn lookup_from_server(
+    app_server: &mut AppServerSession,
+    codex_home: &Path,
+    name: &str,
+    collections: &[SessionCollection],
+    source_kind_filters: &[Vec<ThreadSourceKind>],
+    model_provider: Option<&str>,
+    use_state_db_only: bool,
+    search_term: Option<&str>,
+) -> Result<Option<Thread>> {
     let mut matched: Option<Thread> = None;
     let mut paginated = false;
     for collection in collections {
@@ -82,8 +144,8 @@ pub(super) async fn lookup(
                         parent_thread_id: None,
                         ancestor_thread_id: None,
                         cwd: None,
-                        use_state_db_only: false,
-                        search_term: None,
+                        use_state_db_only,
+                        search_term: search_term.map(str::to_string),
                     })
                     .await
                     .wrap_err("failed to list sessions while resolving session label")?;
@@ -170,6 +232,111 @@ pub(super) async fn lookup(
         return Err(AmbiguousSessionName::Paginated(thread.id.clone()).into());
     }
     Ok(matched)
+}
+
+/// Recover an exact local name from `session_index.jsonl` without scanning unrelated rollouts.
+///
+/// SQLite remains authoritative when it contains a conflicting explicit name. Legacy threads may
+/// have no SQLite name because older writers persisted the name only in `session_index.jsonl`.
+async fn lookup_legacy_index(
+    app_server: &mut AppServerSession,
+    codex_home: &Path,
+    name: &str,
+    collections: &[SessionCollection],
+    source_kind_filters: &[Vec<ThreadSourceKind>],
+    model_provider: Option<&str>,
+) -> Result<Option<Thread>> {
+    let allowed_model_providers = model_provider
+        .map(|provider| vec![provider.to_string()])
+        .unwrap_or_default();
+    let candidates = codex_rollout::find_thread_meta_candidates_by_name_str(
+        codex_home,
+        name,
+        /*state_db_ctx*/ None,
+        /*allowed_sources*/ &[],
+        &allowed_model_providers,
+    )
+    .await?;
+    let mut matched: Option<Thread> = None;
+    for (path, session_meta) in candidates {
+        if !collections.iter().any(|collection| {
+            path.starts_with(codex_home.join(match collection {
+                SessionCollection::Active => codex_rollout::SESSIONS_SUBDIR,
+                SessionCollection::Archived => codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
+            }))
+        }) || !source_kind_filters
+            .iter()
+            .any(|filter| source_kind_matches(&session_meta.meta.source, filter))
+        {
+            continue;
+        }
+
+        let thread_id = session_meta.meta.id;
+        let mut current = app_server
+            .thread_read(thread_id, /*include_turns*/ false)
+            .await?;
+        if !current_name_is_compatible(&current, name) {
+            continue;
+        }
+        if current.name.as_deref() != Some(name) {
+            if let Err(err) = app_server
+                .thread_set_name(thread_id, name.to_string())
+                .await
+            {
+                tracing::warn!(
+                    %thread_id,
+                    %err,
+                    "failed to repair recovered thread name"
+                );
+            }
+            current.name = Some(name.to_string());
+        }
+        if let Some(previous) = matched.as_ref()
+            && previous.id != current.id
+        {
+            return Err(AmbiguousSessionName::Multiple {
+                name: name.to_string(),
+                first_id: previous.id.clone(),
+                second_id: current.id,
+            }
+            .into());
+        }
+        matched = Some(current);
+    }
+    Ok(matched)
+}
+
+/// A missing SQLite name is compatible only with a legacy-index recovery.
+fn current_name_is_compatible(thread: &Thread, name: &str) -> bool {
+    match thread.history_mode {
+        ThreadHistoryMode::Legacy => thread.name.as_deref().is_none_or(|current| current == name),
+        ThreadHistoryMode::Paginated => thread.name.as_deref() == Some(name),
+    }
+}
+
+fn source_kind_matches(source: &SessionSource, filter: &[ThreadSourceKind]) -> bool {
+    filter.is_empty()
+        || filter.iter().any(|kind| match kind {
+            ThreadSourceKind::Cli => matches!(source, SessionSource::Cli),
+            ThreadSourceKind::VsCode => matches!(source, SessionSource::VSCode),
+            ThreadSourceKind::Exec => matches!(source, SessionSource::Exec),
+            ThreadSourceKind::AppServer => matches!(source, SessionSource::Mcp),
+            ThreadSourceKind::SubAgent => matches!(source, SessionSource::SubAgent(_)),
+            ThreadSourceKind::SubAgentReview => {
+                matches!(source, SessionSource::SubAgent(SubAgentSource::Review))
+            }
+            ThreadSourceKind::SubAgentCompact => {
+                matches!(source, SessionSource::SubAgent(SubAgentSource::Compact))
+            }
+            ThreadSourceKind::SubAgentThreadSpawn => matches!(
+                source,
+                SessionSource::SubAgent(SubAgentSource::ThreadSpawn { .. })
+            ),
+            ThreadSourceKind::SubAgentOther => {
+                matches!(source, SessionSource::SubAgent(SubAgentSource::Other(_)))
+            }
+            ThreadSourceKind::Unknown => matches!(source, SessionSource::Unknown),
+        })
 }
 
 #[cfg(test)]

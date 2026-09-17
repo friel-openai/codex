@@ -48,9 +48,6 @@ use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_thread_store::LocalThreadStore;
 use codex_thread_store::LocalThreadStoreConfig;
-use codex_thread_store::RolloutMigrationMode;
-use codex_thread_store::RolloutMigrationOptions;
-use codex_thread_store::RolloutMigrationStatus;
 use codex_utils_absolute_path::test_support::PathExt;
 use core_test_support::responses;
 use pretty_assertions::assert_eq;
@@ -855,6 +852,8 @@ async fn large_unmarked_paginated_history_uses_compatibility_reader_and_restarts
                 replacement_history: Some(Vec::new()),
                 guardian_history: None,
                 retained_context: None,
+                compaction_response_id: None,
+                latest_token_usage_record: None,
                 mcp_resource_origins: None,
                 window_number: Some(1),
                 first_window_id: None,

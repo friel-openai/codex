@@ -591,7 +591,7 @@ async fn parallel_tool_finish_accounts_active_goal_progress_once() -> anyhow::Re
 }
 
 #[tokio::test]
-async fn spawned_descendant_usage_exhausts_root_goal_budget_once() -> anyhow::Result<()> {
+async fn spawned_descendant_usage_exhausts_legacy_root_goal_budget_once() -> anyhow::Result<()> {
     let runtime = test_runtime().await?;
     let thread_id = test_thread_id()?;
     seed_thread_metadata(runtime.as_ref(), thread_id).await?;
@@ -606,14 +606,13 @@ async fn spawned_descendant_usage_exhausts_root_goal_budget_once() -> anyhow::Re
     grandchild
         .start_turn("grandchild-turn", &TokenUsage::default())
         .await;
-    let tools = harness.tools();
-    tool_by_name(&tools, "create_goal")
-        .handle(tool_call(
-            "create_goal",
-            "call-create-goal",
-            json!({ "objective": "account for the entire agent tree", "token_budget": 62 }),
-        ))
-        .await?;
+    seed_legacy_budgeted_active_goal(
+        runtime.as_ref(),
+        &harness,
+        thread_id,
+        /*token_budget*/ 62,
+    )
+    .await?;
 
     harness
         .record_token_usage(

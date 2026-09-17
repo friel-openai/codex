@@ -855,6 +855,35 @@ impl McpConnectionLease {
         tool_plugin_provenance: Arc<crate::mcp::ToolPluginProvenance>,
         tool_timeout: Option<Duration>,
     ) -> Option<(McpPooledBindingClient, u64, Vec<ToolInfo>)> {
+        // Binding capture reads cached metadata, not the MCP protocol. Acquiring a request
+        // route here can deadlock a root turn behind a child's pending Guardian elicitation.
+        loop {
+            let connection = self.current().ok()?;
+            self.inner.slot.register_route(&route);
+            if route.is_closed() || connection.client.cancel_token.is_cancelled() {
+                return None;
+            }
+            let Some((managed, revision, tools)) = connection
+                .client
+                .capture_ready_binding_snapshot(tool_plugin_provenance.as_ref(), tool_timeout)
+                .await
+            else {
+                break;
+            };
+            if !Arc::ptr_eq(&self.inner.slot.current(), &connection) {
+                continue;
+            }
+            return Some((
+                McpPooledBindingClient {
+                    connection,
+                    lease: self.clone(),
+                    route,
+                    managed,
+                },
+                revision,
+                tools,
+            ));
+        }
         // A recoverable Apps startup has no ready client, and an active reconnect owns its
         // original session route. Do not queue a new publication merely to rediscover the known
         // failed initial client.
@@ -993,13 +1022,6 @@ impl McpConnectionLease {
         })
     }
 
-    pub(crate) async fn connection_status(&self) -> codex_protocol::mcp::McpServerConnectionStatus {
-        let Ok(connection) = self.current() else {
-            return codex_protocol::mcp::McpServerConnectionStatus::Cancelled;
-        };
-        connection.client.connection_status().await
-    }
-
     pub(crate) fn has_recoverable_failed_startup(&self) -> bool {
         self.current()
             .is_ok_and(|connection| connection.client.has_recoverable_failed_startup())
@@ -1029,6 +1051,14 @@ impl McpConnectionLease {
                 catalog: Arc::clone(&client.tool_catalog),
                 revision,
             },
+        }
+    }
+
+    /// Observe the current physical client without starting or reconnecting it.
+    pub(crate) async fn connection_status(&self) -> codex_protocol::mcp::McpServerConnectionStatus {
+        match self.current() {
+            Ok(connection) => connection.client.connection_status().await,
+            Err(_) => codex_protocol::mcp::McpServerConnectionStatus::Cancelled,
         }
     }
 

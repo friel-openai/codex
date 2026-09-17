@@ -29,25 +29,19 @@ impl AgentControl {
         agent_id: ThreadId,
         input: Vec<UserInput>,
         delivery: AgentInputDelivery,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.deliver_agent_input(
             config,
             agent_id,
             AgentDeliveryInput::UserInput(input),
             delivery,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
 
     /// Deliver a context-bearing communication to an addressable agent, reloading it if needed.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "delivery keeps the target, communication context, admission mode, and turn ancestry explicit"
-    )]
     pub(crate) async fn deliver_inter_agent_communication_to_agent(
         &self,
         config: Config,
@@ -55,8 +49,7 @@ impl AgentControl {
         communication: InterAgentCommunication,
         context: AgentCommunicationContext,
         delivery: AgentInputDelivery,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         self.deliver_agent_input(
             config,
@@ -66,8 +59,7 @@ impl AgentControl {
                 context,
             },
             delivery,
-            parent_turn_id,
-            root_turn_id,
+            start_options,
         )
         .await
     }
@@ -78,8 +70,7 @@ impl AgentControl {
         agent_id: ThreadId,
         input: AgentDeliveryInput,
         delivery: AgentInputDelivery,
-        parent_turn_id: Option<String>,
-        root_turn_id: Option<String>,
+        start_options: TurnStartOptions,
     ) -> CodexResult<String> {
         let metadata = self.ensure_agent_known(agent_id)?;
         let lifecycle = metadata.lifecycle;
@@ -124,8 +115,7 @@ impl AgentControl {
                         agent_id,
                         &state,
                         input.clone(),
-                        parent_turn_id.clone(),
-                        root_turn_id.clone(),
+                        start_options.clone(),
                     )
                     .await
                 }
@@ -138,11 +128,7 @@ impl AgentControl {
                         &state,
                         communication.as_ref().clone(),
                         context.clone(),
-                        TurnStartOptions {
-                            parent_turn_id: parent_turn_id.clone(),
-                            root_turn_id: root_turn_id.clone(),
-                            ..Default::default()
-                        },
+                        start_options.clone(),
                     )
                     .await
                 }

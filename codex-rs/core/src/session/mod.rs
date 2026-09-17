@@ -1003,13 +1003,20 @@ impl Session {
         }
         let configured_config = Arc::clone(&config);
         let configured_multi_agent_version = config.multi_agent_version_override();
-        let multi_agent_version = configured_or_persisted_multi_agent_version(
-            &conversation_history,
-            configured_multi_agent_version,
-        )
-        .or_else(|| {
-            resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
-        });
+        // Internal sessions must not gain agent tools from Frodex's default v2 setting.
+        let multi_agent_version = if inherited_multi_agent_version
+            == Some(MultiAgentVersion::Disabled)
+        {
+            Some(MultiAgentVersion::Disabled)
+        } else {
+            configured_or_persisted_multi_agent_version(
+                &conversation_history,
+                configured_multi_agent_version,
+            )
+            .or_else(|| {
+                resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
+            })
+        };
         let history_mode = conversation_history.get_history_mode(
             requested_history_mode.unwrap_or_else(|| thread_store.default_history_mode()),
         );
@@ -2790,6 +2797,10 @@ impl Session {
                     state.model_routing = Default::default();
                 }
             }
+            state
+                .session_configuration
+                .model_info_overrides
+                .custom_models = config.custom_models.clone();
             state.session_configuration.original_config_do_not_use = Arc::clone(&config);
             self.mark_mcp_runtime_dirty();
             let new_config = notify_config_contributors
@@ -5019,6 +5030,10 @@ impl Session {
         let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
         let mut separate_developer_sections = Vec::<RenderedFragment>::new();
         let mut context_window_hints = Vec::new();
+        let replaces_history = matches!(
+            &auto_compact_window,
+            InitialContextAutoCompactWindow::Prepared(_)
+        );
         let (session_source, auto_compact_window_ids, history) = {
             let state = self.state.lock().await;
             let auto_compact_window_ids = match auto_compact_window {
@@ -5033,7 +5048,10 @@ impl Session {
         };
         if let Some(role_prompt) =
             load_agent_role_prompt(&turn_context.config, &session_source).await
-            && !history_contains_developer_text(&history, &role_prompt)
+            // A prepared checkpoint replaces the old history only after durable
+            // publication. Its instructions must not be deduplicated against
+            // the old history that remains visible during preparation.
+            && (replaces_history || !history_contains_developer_text(&history, &role_prompt))
         {
             developer_sections.push(DeveloperInstructions::new(&role_prompt).render_fragment());
         }

@@ -1111,6 +1111,57 @@ fn replacement_becomes_preferred_without_revoking_old_lease() {
 }
 
 #[tokio::test]
+async fn ready_binding_capture_does_not_wait_for_a_sibling_request_route() -> anyhow::Result<()> {
+    let pool = McpConnectionPool::default();
+    let worker_route = route();
+    let root_route = route();
+    let managed = test_managed_client("shared").await?;
+    let lease = pool.acquire(
+        identity("server", "/one"),
+        McpConnectionPoolMode::Reuse,
+        &worker_route,
+        move |request_router| ready_client(request_router, managed.clone()),
+    );
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let worker = tokio::spawn({
+        let lease = lease.clone();
+        let entered = Arc::clone(&entered);
+        let release = Arc::clone(&release);
+        async move {
+            lease
+                .run(worker_route, move |client| async move {
+                    client.client().await.expect("ready worker client");
+                    entered.notify_one();
+                    release.notified().await;
+                })
+                .await
+        }
+    });
+    entered.notified().await;
+    let (binding, _, _) = tokio::time::timeout(
+        Duration::from_secs(1),
+        lease.capture_ready_client_and_tools(
+            root_route,
+            Arc::new(crate::mcp::ToolPluginProvenance::default()),
+            None,
+        ),
+    )
+    .await?
+    .expect("cached binding must not wait for the worker");
+    let request = binding.run(|_| async { Ok(()) });
+    tokio::pin!(request);
+    assert!(
+        futures::poll!(&mut request).is_pending(),
+        "actual requests still need the route"
+    );
+    release.notify_one();
+    worker.await??;
+    request.await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn captured_binding_retains_its_exact_generation_across_replacement() -> anyhow::Result<()> {
     let pool = McpConnectionPool::default();
     let session_route = route();

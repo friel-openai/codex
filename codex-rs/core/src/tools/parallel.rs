@@ -29,6 +29,11 @@ use codex_history::ResponseItemEnvelope;
 use codex_protocol::error::CodexErr;
 use codex_protocol::models::ResponseInputItem;
 
+/// A terminal tool may finish its turn without adding a model-visible response.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "ordinary tool results retain their by-value envelope without an extra allocation"
+)]
 #[derive(Debug, PartialEq)]
 pub(crate) enum ToolCallResponse {
     Response(ResponseItemEnvelope),

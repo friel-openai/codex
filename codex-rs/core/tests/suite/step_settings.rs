@@ -178,6 +178,89 @@ async fn submit_turn_settings(
     Ok(tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 10), outcome).await??)
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn turn_settings_after_model_reroute_reach_the_next_provider_request() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+    let server = start_mock_server().await;
+    let requests = mount_response_sequence(
+        &server,
+        vec![
+            sse_response(sse(vec![json!({
+                "type": "response.failed",
+                "response": {
+                    "id": "primary-failed", "status": "failed",
+                    "error": { "code": "server_is_overloaded", "message": "test overload" }
+                }
+            })])),
+            sse_response(paused_response("fallback-paused", "pause-fallback")),
+            sse_response(sse_completed("fallback-complete")),
+        ],
+    )
+    .await;
+    let test = step_settings_test()
+        .with_config(|config| {
+            config.model = Some("test-active-routing".to_string());
+            config.custom_models.insert(
+                "test-active-routing".to_string(),
+                codex_models_manager::CustomModelConfig {
+                    model: MODEL_A.to_string(),
+                    model_context_window: None,
+                    model_auto_compact_token_limit: None,
+                    trust_candidate_constraints: false,
+                    routing_profile: Some(codex_models_manager::ModelRoutingProfile {
+                        candidates: [MODEL_A, MODEL_B]
+                            .map(|model| codex_models_manager::ModelRoutingCandidate {
+                                model: model.to_string(),
+                                reasoning_effort: Some(ReasoningEffort::Low),
+                                service_tier: None,
+                            })
+                            .to_vec(),
+                    }),
+                },
+            );
+        })
+        .build_with_auto_env(&server)
+        .await?;
+    let future_settings = test.codex.thread_settings_snapshot().await;
+    let pause = start_paused_turn(&test.codex).await?;
+    assert_eq!(requests.requests().len(), 2);
+    assert_eq!(
+        submit_turn_settings(
+            &test.codex,
+            &pause.turn_id,
+            TurnSettingsUpdate {
+                summary: Some(ReasoningSummary::Detailed),
+                ..Default::default()
+            }
+        )
+        .await?,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    answer_paused_turn(&test.codex, &pause.turn_id).await?;
+    wait_for_event(&test.codex, |event| match event {
+        EventMsg::Error(error) => panic!("routed turn failed: {}", error.message),
+        EventMsg::TurnComplete(_) => true,
+        _ => false,
+    })
+    .await;
+    let bodies = requests
+        .requests()
+        .iter()
+        .map(ResponsesRequest::body_json)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bodies
+            .iter()
+            .map(|body| body["model"].as_str().expect("model"))
+            .collect::<Vec<_>>(),
+        vec![MODEL_A, MODEL_B, MODEL_B]
+    );
+    assert_eq!(bodies[1]["reasoning"]["summary"], "concise");
+    assert_eq!(bodies[2]["reasoning"]["summary"], "detailed");
+    assert_eq!(test.codex.thread_settings_snapshot().await, future_settings);
+    Ok(())
+}
+
 fn request_settings(request: &ResponsesRequest) -> Value {
     let body = request.body_json();
     json!({

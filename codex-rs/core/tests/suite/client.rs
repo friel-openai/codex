@@ -552,8 +552,10 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
             }),
         },
     ];
-    let tmpdir = TempDir::new()?;
-    let session_path = tmpdir.path().join("normalized-call-output-item-id.jsonl");
+    let codex_home = Arc::new(TempDir::new()?);
+    let sessions = codex_home.path().join("sessions");
+    std::fs::create_dir_all(&sessions)?;
+    let session_path = sessions.join(format!("rollout-2024-01-01T00-00-00-{thread_id}.jsonl"));
     let mut file = std::fs::File::create(&session_path)?;
     for line in rollout {
         writeln!(file, "{}", serde_json::to_string(&line)?)?;
@@ -568,7 +570,6 @@ async fn synthetic_call_output_id_is_stable_across_resumes() -> anyhow::Result<(
         ],
     )
     .await;
-    let codex_home = Arc::new(TempDir::new()?);
     let mut builder = test_codex();
     let first = builder
         .resume(&server, Arc::clone(&codex_home), session_path.clone())

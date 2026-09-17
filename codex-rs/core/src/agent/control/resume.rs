@@ -133,17 +133,19 @@ impl AgentControl {
         config.approvals_reviewer = runtime_approvals_reviewer;
         // Role configuration supplies the agent-specific defaults. Persisted execution settings
         // remain authoritative when a cold agent is loaded into a later root session.
-        config.model_provider = config
-            .model_providers
-            .get(&stored_thread.model_provider)
-            .cloned()
-            .ok_or_else(|| {
-                CodexErr::InvalidRequest(format!(
-                    "cannot restore agent {} because its original model provider `{}` is unavailable",
-                    thread_id, stored_thread.model_provider
-                ))
-            })?;
-        config.model_provider_id = stored_thread.model_provider.clone();
+        if config.model_provider_id != stored_thread.model_provider {
+            config.model_provider = config
+                .model_providers
+                .get(&stored_thread.model_provider)
+                .cloned()
+                .ok_or_else(|| {
+                    CodexErr::InvalidRequest(format!(
+                        "cannot restore agent {} because its original model provider `{}` is unavailable",
+                        thread_id, stored_thread.model_provider
+                    ))
+                })?;
+            config.model_provider_id = stored_thread.model_provider.clone();
+        }
         if let Some(model) = &stored_thread.model {
             config.model = Some(model.clone());
         }

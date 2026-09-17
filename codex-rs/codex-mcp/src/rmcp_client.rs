@@ -581,6 +581,25 @@ impl AsyncManagedClient {
         }
     }
 
+    /// Copies an already-ready binding without startup, reconnect, or protocol requests.
+    pub(crate) async fn capture_ready_binding_snapshot(
+        &self,
+        tool_plugin_provenance: &ToolPluginProvenance,
+        tool_timeout: Option<Duration>,
+    ) -> Option<(Arc<ManagedClient>, u64, Vec<ToolInfo>)> {
+        let mut managed = self.ready_client()?;
+        managed.tool_timeout = tool_timeout;
+        let (revision, tools) = managed
+            .tool_catalog
+            .read(|catalog| (catalog.revision, catalog.tools.clone()))
+            .await;
+        Some((
+            Arc::new(managed),
+            revision,
+            self.prepare_tools(tools, tool_plugin_provenance),
+        ))
+    }
+
     /// Captures one ready client and derives the tools advertised by that exact revision.
     pub(crate) async fn capture_ready_client_and_tools(
         &self,
