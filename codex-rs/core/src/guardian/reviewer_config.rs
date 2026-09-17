@@ -88,6 +88,7 @@ pub fn build_guardian_review_session_config(
     }
     for feature in [
         Feature::Collab,
+        Feature::AgentPromptInjection,
         Feature::MultiAgentV2,
         Feature::GuardianV2,
         Feature::CodexHooks,
