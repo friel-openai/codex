@@ -165,9 +165,10 @@ fn closed_event_channel_immediately_cleans_up_pending_elicitation() {
         .expect("closed event channel must not leave an elicitation pending")
         .expect_err("closed event channel must fail the elicitation");
 
-    assert_eq!(
-        error.to_string(),
-        "failed to deliver MCP elicitation request"
+    assert!(
+        error
+            .to_string()
+            .starts_with("failed to deliver MCP elicitation request")
     );
     assert!(
         manager

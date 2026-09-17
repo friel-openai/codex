@@ -23,7 +23,7 @@ use serde_json::Value as JsonValue;
 use crate::McpConfig;
 use crate::binding_clients::McpBindingClients;
 use crate::connection_manager::McpConnectionSet;
-use crate::rmcp_client::ManagedClient;
+use crate::connection_pool::McpPooledBindingClient;
 use crate::server::McpServerMetadata;
 use crate::tools::ToolInfo;
 
@@ -183,7 +183,7 @@ impl fmt::Debug for McpBinding {
 #[derive(Clone)]
 pub struct PreparedMcpCall {
     connections: Arc<McpConnectionSet>,
-    client: Arc<ManagedClient>,
+    client: McpPooledBindingClient,
     config: Arc<McpConfig>,
     catalog_revision: u64,
     tool_info: ToolInfo,
@@ -200,7 +200,7 @@ impl PreparedMcpCall {
     )]
     pub(crate) fn new(
         connections: Arc<McpConnectionSet>,
-        client: Arc<ManagedClient>,
+        client: McpPooledBindingClient,
         config: Arc<McpConfig>,
         catalog_revision: u64,
         tool_info: ToolInfo,
@@ -289,6 +289,11 @@ impl PreparedMcpCall {
             .map(std::num::NonZeroUsize::get)
     }
 
+    #[cfg(test)]
+    pub(crate) fn captured_tool_timeout(&self) -> Option<std::time::Duration> {
+        self.client.tool_timeout()
+    }
+
     pub fn plugin_id(&self) -> Option<&str> {
         self.plugin_id.as_deref()
     }
@@ -323,14 +328,16 @@ impl PreparedMcpCall {
         F: FnOnce() -> Fut,
         Fut: Future<Output = Result<(Option<JsonValue>, Option<JsonValue>)>>,
     {
-        let effective_timeout = match (self.client.tool_timeout, requested_timeout) {
+        let effective_timeout = match (self.client.tool_timeout(), requested_timeout) {
             (Some(server_timeout), Some(requested_timeout)) => {
                 Some(server_timeout.min(requested_timeout))
             }
             (server_timeout, requested_timeout) => server_timeout.or(requested_timeout),
         };
         let tool_name = self.tool_info.tool.name.to_string();
-        self.client
+        let tool_name_for_call = tool_name.clone();
+        let result = self
+            .client
             .tool_catalog
             .run_with_revision(self.catalog_revision, || async {
                 let (arguments, meta) = prepare().await?;
@@ -364,18 +371,32 @@ impl PreparedMcpCall {
                     }
                     None => None,
                 };
+                let server_name = self.server_name.clone();
                 self.client
-                    .client
-                    .call_tool(tool_name.clone(), arguments, meta, remaining_timeout)
+                    .run(move |client| async move {
+                        client
+                            .client
+                            .call_tool(
+                                tool_name_for_call.clone(),
+                                arguments,
+                                meta,
+                                remaining_timeout,
+                            )
+                            .await
+                            .with_context(|| {
+                                format!(
+                                    "tool call failed for `{server_name}/{tool_name_for_call}`"
+                                )
+                            })
+                    })
                     .await
-                    .with_context(|| format!("tool call failed for `{}/{tool_name}`", self.server_name))
             })
             .await
             .ok_or_else(|| anyhow::anyhow!(
                 "tool call rejected because the catalog changed after `{}/{tool_name}` was prepared",
                 self.server_name
-            ))?
-            .map(call_tool_result_from_rmcp)
+            ))??;
+        Ok(call_tool_result_from_rmcp(result))
     }
 }
 
