@@ -27,6 +27,7 @@ use super::build_core_tool_registry;
 use crate::config::AgentRoleConfig;
 use crate::session::step_context::StepContext;
 use crate::session::tests::make_session_and_context;
+use crate::session::tests::update_turn_settings_for_test;
 use crate::session::turn_context::TurnContext;
 use crate::tools::handlers::ToolSearchHandlerCache;
 use crate::tools::router::ToolRouter;
@@ -159,7 +160,9 @@ impl Scenario {
         }
         match self {
             Self::V1Deferred => {
-                Arc::make_mut(&mut turn.model_info).supports_search_tool = true;
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).supports_search_tool = true;
+                });
             }
             Self::V1DepthLimit => {
                 turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -184,7 +187,10 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).tool_mode =
+                        Some(ToolMode::CodeModeOnly);
+                });
             }
             Self::V2CodeModeOnlyDirectModel => {
                 config.multi_agent_v2.non_code_mode_only = true;
@@ -192,7 +198,10 @@ impl Scenario {
                     .features
                     .enable(Feature::CodeModeOnly)
                     .expect("CodeModeOnly should be configurable");
-                Arc::make_mut(&mut turn.model_info).tool_mode = Some(ToolMode::CodeModeOnly);
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).tool_mode =
+                        Some(ToolMode::CodeModeOnly);
+                });
             }
             Self::V2CustomNamespace => {
                 config.multi_agent_v2.tool_namespace = Some("agents".to_string());
@@ -229,12 +238,14 @@ impl Scenario {
                     agent_role: matches!(self, Self::V2GoalHelperUnsupported)
                         .then(|| "goal_supervisor".to_string()),
                 });
-                Arc::make_mut(&mut turn.model_info).multi_agent_version =
-                    Some(if matches!(self, Self::V2SubagentSupported) {
-                        MultiAgentVersion::V2
-                    } else {
-                        MultiAgentVersion::Disabled
-                    });
+                update_turn_settings_for_test(turn, |settings| {
+                    Arc::make_mut(&mut settings.model_info).multi_agent_version =
+                        Some(if matches!(self, Self::V2SubagentSupported) {
+                            MultiAgentVersion::V2
+                        } else {
+                            MultiAgentVersion::Disabled
+                        });
+                });
             }
             Self::V1Direct | Self::V2Root => {}
         }
@@ -342,6 +353,7 @@ async fn scenario_manifest_with(
     let step_context = StepContext::for_test(Arc::clone(&turn));
     let registry = build_core_tool_registry(
         step_context.turn.as_ref(),
+        &step_context.settings.model_info,
         &step_context.environments,
         step_context.mcp.as_ref(),
         /*tool_suggest_candidates*/ None,
@@ -363,6 +375,7 @@ async fn scenario_manifest_with(
         .collect::<Vec<_>>();
     let router = ToolRouter::from_registry(
         step_context.turn.as_ref(),
+        &step_context.settings.model_info,
         registry,
         Vec::new(),
         &ToolSearchHandlerCache::default(),

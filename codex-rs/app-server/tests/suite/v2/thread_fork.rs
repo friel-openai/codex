@@ -3493,7 +3493,6 @@ async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materializati
                 ancestor_thread_id: None,
                 section_id: None,
                 originators: None,
-                project_id: None,
             })
             .await?;
         let ThreadListResponse { data, .. } =

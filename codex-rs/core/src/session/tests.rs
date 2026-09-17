@@ -3041,6 +3041,123 @@ async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
 }
 
 #[tokio::test]
+async fn materialize_forked_history_expands_native_history_base() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let codex_home = session.codex_home().await;
+    let parent_thread_id = ThreadId::new();
+    let source_rollout_id = ThreadId::new();
+    let segment_dir = codex_home
+        .join(codex_rollout::SESSIONS_SUBDIR)
+        .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR)
+        .join("2026/09/17");
+    std::fs::create_dir_all(&segment_dir).expect("create native history segment directory");
+    let active_like_path = segment_dir.join(format!(
+        "rollout-2026-09-17T00-00-00-{parent_thread_id}.jsonl"
+    ));
+    let source_path =
+        codex_rollout::rollout_path_with_rollout_id(active_like_path.as_path(), source_rollout_id)
+            .expect("canonical native history segment path");
+    let source_items = [
+        RolloutLine {
+            timestamp: "2026-09-17T00:00:00Z".to_string(),
+            ordinal: Some(0),
+            item: RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    id: parent_thread_id,
+                    session_id: SessionId::from(parent_thread_id),
+                    history_mode: ThreadHistoryMode::Paginated,
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
+        },
+        RolloutLine {
+            timestamp: "2026-09-17T00:00:01Z".to_string(),
+            ordinal: Some(1),
+            item: RolloutItem::ResponseItem(
+                user_message("native history_base parent message").into(),
+            ),
+        },
+    ];
+    let source_bytes = format!(
+        "{}\n{}\n",
+        serde_json::to_string(&source_items[0]).expect("serialize source metadata"),
+        serde_json::to_string(&source_items[1]).expect("serialize source message"),
+    );
+    std::fs::write(&source_path, source_bytes.as_bytes()).expect("write native history segment");
+    let child_thread_id = ThreadId::new();
+    let materialized = session
+        .materialize_forked_history(
+            &[RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    id: child_thread_id,
+                    session_id: SessionId::from(child_thread_id),
+                    history_mode: ThreadHistoryMode::Paginated,
+                    history_base: Some(HistoryPosition {
+                        thread_id: source_rollout_id,
+                        end_ordinal_exclusive: 2,
+                        end_byte_offset: source_bytes.len() as u64,
+                    }),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            })],
+            ForkedHistoryMaterialization::ModelContext,
+        )
+        .await
+        .expect("materialize native history_base");
+
+    assert!(materialized.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::ResponseItem(ResponseItemEnvelope {
+                item: ResponseItem::Message { content, .. },
+                ..
+            }) if content.iter().any(|content| {
+                matches!(
+                    content,
+                    ContentItem::InputText { text }
+                        if text == "native history_base parent message"
+                )
+            })
+        )
+    }));
+}
+
+#[tokio::test]
+async fn materialize_resumed_history_does_not_expand_native_history_base_twice() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let child_thread_id = ThreadId::new();
+    let input = vec![
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                id: child_thread_id,
+                session_id: SessionId::from(child_thread_id),
+                history_mode: ThreadHistoryMode::Paginated,
+                history_base: Some(HistoryPosition {
+                    thread_id: ThreadId::new(),
+                    end_ordinal_exclusive: 2,
+                    end_byte_offset: 128,
+                }),
+                ..SessionMeta::default()
+            },
+            git: None,
+        }),
+        RolloutItem::ResponseItem(user_message("already reconstructed child message").into()),
+    ];
+
+    let materialized = session
+        .materialize_forked_history(&input, ForkedHistoryMaterialization::Recent)
+        .await
+        .expect("resumed native history does not reread history_base");
+
+    assert_eq!(
+        serde_json::to_value(materialized).expect("serialize materialized history"),
+        serde_json::to_value(input).expect("serialize resumed history")
+    );
+}
+
+#[tokio::test]
 async fn record_initial_history_new_defers_initial_context_until_first_turn() {
     let (session, _turn_context) = make_session_and_context().await;
 
@@ -3164,6 +3281,7 @@ async fn record_initial_history_seeds_token_info_from_rollout() {
     let rate_limits = RateLimitSnapshot {
         limit_id: Some("codex".to_string()),
         limit_name: Some("Codex".to_string()),
+        normal_model_slug: None,
         primary: None,
         secondary: None,
         credits: None,
@@ -3238,6 +3356,7 @@ fn latest_token_usage_record_stops_at_compaction_checkpoint() {
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record,
+            segment_state_checkpoint: None,
         })
     };
 
@@ -3938,6 +4057,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
     let authoritative_rate_limits = RateLimitSnapshot {
         limit_id: Some("authoritative-parent-limit".to_string()),
         limit_name: Some("Authoritative parent limit".to_string()),
+        normal_model_slug: None,
         primary: None,
         secondary: None,
         credits: None,
@@ -3949,6 +4069,7 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
     let stale_rate_limits = RateLimitSnapshot {
         limit_id: Some("stale-rollout-limit".to_string()),
         limit_name: Some("Stale rollout limit".to_string()),
+        normal_model_slug: None,
         primary: None,
         secondary: None,
         credits: None,
@@ -5139,16 +5260,12 @@ async fn assert_failed_thread_rollback_preserves_runtime_state(
         .insert(crate::context::NodeReplReviewEvidence::default());
 
     let (mut guardian_session, _guardian_turn) = make_session_and_context().await;
-    let guardian_rollout_path = attach_thread_persistence(
-        Arc::get_mut(&mut guardian_session)
-            .expect("guardian session should not have additional references"),
-    )
-    .await;
+    let guardian_rollout_path = attach_thread_persistence(&mut guardian_session).await;
     let (guardian_tx_sub, _guardian_rx_sub) = async_channel::bounded(1);
     let (_guardian_tx_event, guardian_rx_event) = async_channel::unbounded();
     sess.guardian_review_session
         .cache_for_test(
-            guardian_session,
+            Arc::new(guardian_session),
             SessionIo {
                 tx_sub: guardian_tx_sub,
                 rx_event: guardian_rx_event,
@@ -7546,7 +7663,9 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     assert_ne!(committed, restored);
     drop(refresh_guard);
     update.await.expect("accepted settings update");
-    checkpoint.await;
+    checkpoint
+        .await
+        .expect("compaction checkpoint should commit");
 
     session.flush_rollout().await.expect("flush checkpoint");
     let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
@@ -9490,6 +9609,69 @@ async fn queued_thread_settings_fail_after_checkpoint_becomes_indeterminate() {
         saw_restart_error,
         "settings rejection must explain the restart requirement"
     );
+}
+
+#[tokio::test]
+async fn queued_client_info_update_succeeds_after_compacted_checkpoint_commits() {
+    let (mut session, turn_context, _) = make_session_and_context_with_rx().await;
+    attach_thread_persistence(
+        Arc::get_mut(&mut session).expect("session should be uniquely owned"),
+    )
+    .await;
+    let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
+    let checkpoint_session = Arc::clone(&session);
+    let checkpoint_turn_context = Arc::clone(&turn_context);
+    let checkpoint = tokio::spawn(async move {
+        checkpoint_session
+            .replace_compacted_history(
+                &checkpoint_turn_context,
+                vec![ResponseItemEnvelope::new(user_message(
+                    "replacement history",
+                ))],
+                /*reference_context_item*/ None,
+                /*world_state_baseline*/ None,
+                CompactedHistoryMetadata {
+                    message: "compacted summary".to_string(),
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    prepared_window_advance,
+                },
+            )
+            .await
+    });
+
+    while !session.persistence_restart_required() {
+        assert!(
+            !checkpoint.is_finished(),
+            "checkpoint must arm the restart fence before it commits"
+        );
+        tokio::task::yield_now().await;
+    }
+
+    let update_session = Arc::clone(&session);
+    let update = tokio::spawn(async move {
+        update_session
+            .set_app_server_client_info(
+                Some("codex-tui".to_string()),
+                Some("test-version".to_string()),
+                /*mcp_elicitations_auto_deny*/ false,
+            )
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !update.is_finished(),
+        "client metadata update must wait for checkpoint classification"
+    );
+
+    checkpoint
+        .await
+        .expect("checkpoint task should finish")
+        .expect("checkpoint should commit");
+    update
+        .await
+        .expect("client metadata task should finish")
+        .expect("committed checkpoint must admit queued client metadata");
 }
 
 #[tokio::test]

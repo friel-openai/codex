@@ -7,6 +7,7 @@ use pretty_assertions::assert_eq;
 fn stored_root(config: &Config) -> StoredThread {
     let now = chrono::Utc::now();
     StoredThread {
+        originator: None,
         thread_id: ThreadId::new(),
         extra_config: None,
         rollout_path: Some(
@@ -26,6 +27,7 @@ fn stored_root(config: &Config) -> StoredThread {
         updated_at: now,
         recency_at: now,
         archived_at: None,
+        daybreak_enabled: None,
         section: None,
         section_position: None,
         section_entered_at: None,

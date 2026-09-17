@@ -247,7 +247,9 @@ fn case_insensitive_literal_regex(search_term: impl AsRef<str>) -> io::Result<Re
 }
 
 fn content_match_snippet(jsonl_line: &str, search_term: &Regex) -> Option<String> {
-    let rollout_line = crate::parse_rollout_line(jsonl_line.trim()).ok()?;
+    let rollout_line =
+        crate::recorder::RolloutRecorder::parse_rollout_line_bytes(jsonl_line.trim().as_bytes())
+            .ok()??;
     let text = conversation_text_from_item(&rollout_line.item)?;
     excerpt_around_match(text.as_str(), search_term)
 }

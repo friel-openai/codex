@@ -989,6 +989,7 @@ async fn known_thread_started_preserves_session_without_reading_unmaterialized_r
             updated_at: 2,
             recency_at: Some(2),
             status: codex_app_server_protocol::ThreadStatus::Idle,
+            agent_status: None,
             path: Some(temp_dir.path().join("not-yet-materialized.jsonl")),
             cwd: session.cwd.clone(),
             cli_version: "0.0.0".to_string(),

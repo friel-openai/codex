@@ -521,12 +521,9 @@ pub fn thread_store_from_config(
                 state_db,
             ));
             if has_state_db && background_migration_enabled {
-                let startup_store = Arc::clone(&store);
+                store.start_automatic_rollout_migration();
                 let codex_home = config.codex_home.to_path_buf();
                 tokio::spawn(async move {
-                    if let Err(err) = startup_store.migrate_rollouts_on_startup().await {
-                        warn!("failed to migrate legacy rollouts on startup: {err}");
-                    }
                     if compression_enabled {
                         codex_rollout::spawn_rollout_compression_worker(codex_home);
                     }
@@ -2095,6 +2092,7 @@ impl ThreadManagerState {
     ) -> CodexResult<(
         InitialHistory,
         Vec<RolloutItem>,
+        Vec<RolloutItem>,
         FullHistorySourceReservation,
     )> {
         let history_mode = self
@@ -2119,26 +2117,28 @@ impl ThreadManagerState {
                     .await?;
                 require_self_contained_paginated_segment(&frozen).await?;
                 let reference_history = full_history_from_frozen_segment(frozen);
-                let logical_history = materialize_recent_rollout_lines_from(
-                    codex_home,
-                    reference_history
-                        .get_rollout_items()
-                        .iter()
-                        .cloned()
-                        .map(|item| RolloutLine {
-                            timestamp: String::new(),
-                            ordinal: None,
-                            item,
-                        })
-                        .collect(),
-                )
-                .await?
-                .into_iter()
-                .map(|line| line.item)
-                .collect();
+                let lines = reference_history
+                    .get_rollout_items()
+                    .iter()
+                    .cloned()
+                    .map(|item| RolloutLine {
+                        timestamp: String::new(),
+                        ordinal: None,
+                        item,
+                    })
+                    .collect::<Vec<_>>();
+                let logical_history =
+                    materialize_recent_rollout_lines_from(codex_home, lines.clone())
+                        .await?
+                        .into_iter()
+                        .map(|line| line.item)
+                        .collect::<Vec<_>>();
+                let model_history =
+                    materialize_model_context_rollout_items_from(codex_home, lines).await?;
                 return Ok((
                     reference_history,
                     logical_history,
+                    model_history,
                     FullHistorySourceReservation::Referenced {
                         _reservation: reservation,
                     },
@@ -2157,9 +2157,11 @@ impl ThreadManagerState {
                 })?;
             if let Some(copied_history) = &prepared.copied_history {
                 let logical_history = copied_history.as_ref().clone();
+                let model_history = prepared.model_context.as_ref().clone();
                 return Ok((
                     InitialHistory::Forked(logical_history.clone()),
                     logical_history,
+                    model_history,
                     FullHistorySourceReservation::Prepared {
                         _prepared: Box::new(prepared),
                     },
@@ -2172,6 +2174,7 @@ impl ThreadManagerState {
                     )
                 })?,
             );
+            let model_history = prepared.model_context.as_ref().clone();
             let logical_history = materialize_recent_rollout_lines_from(
                 codex_home,
                 reference_history
@@ -2192,6 +2195,7 @@ impl ThreadManagerState {
             return Ok((
                 reference_history,
                 logical_history,
+                model_history,
                 FullHistorySourceReservation::Prepared {
                     _prepared: Box::new(prepared),
                 },
@@ -2215,6 +2219,7 @@ impl ThreadManagerState {
             materialize_model_context_rollout_items_from(codex_home, lines).await?;
         Ok((
             reference_history,
+            logical_history.clone(),
             logical_history,
             FullHistorySourceReservation::Referenced {
                 _reservation: reservation,

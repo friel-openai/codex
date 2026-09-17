@@ -4114,17 +4114,16 @@ impl ThreadRequestProcessor {
         let mut turn_cursor = None;
         let mut descending_items = Vec::new();
         let mut has_older_turns;
+        let mut requested_turn_loaded = false;
 
         loop {
             let Some(page) = self
                 .unprojected_paginated_thread_turns_list_response(
                     thread_id,
                     turn_cursor.as_deref(),
-                    Some(if turn_id.is_some() {
-                        1
-                    } else {
-                        page_size.min(THREAD_TURNS_MAX_LIMIT) as u32
-                    }),
+                    Some(
+                        page_size.clamp(THREAD_TURNS_DEFAULT_LIMIT, THREAD_TURNS_MAX_LIMIT) as u32,
+                    ),
                     SortDirection::Desc,
                     TurnItemsView::Full,
                 )
@@ -4136,18 +4135,25 @@ impl ThreadRequestProcessor {
             let next_turn_cursor = page.next_cursor;
             has_older_turns = next_turn_cursor.is_some();
             for turn in page.data {
-                if turn_id.is_some_and(|requested_turn_id| turn.id != requested_turn_id) {
-                    continue;
-                }
+                requested_turn_loaded |= turn_id == Some(turn.id.as_str());
                 descending_items.extend(turn.items.into_iter().rev().map(|item| ThreadItemEntry {
                     turn_id: turn.id.clone(),
                     item,
                 }));
             }
 
-            if turn_id.is_some() && !descending_items.is_empty() {
+            // The cursor may name an item in another turn. Once both that anchor and the
+            // requested complete turn are loaded, older turns cannot add matching items.
+            if requested_turn_loaded
+                && item_cursor.as_ref().is_none_or(|anchor| {
+                    descending_items.iter().any(|entry| {
+                        entry.turn_id == anchor.turn_id && entry.item.id() == anchor.item_id
+                    })
+                })
+            {
                 break;
             }
+
             if matches!(sort_direction, SortDirection::Desc) {
                 let available_items = match item_cursor.as_ref() {
                     Some(anchor) => descending_items
@@ -4157,11 +4163,18 @@ impl ThreadRequestProcessor {
                         })
                         .map(|position| {
                             descending_items
-                                .len()
-                                .saturating_sub(position + usize::from(!anchor.include_anchor))
+                                .iter()
+                                .skip(position + usize::from(!anchor.include_anchor))
+                                .filter(|entry| {
+                                    turn_id.is_none_or(|turn_id| entry.turn_id == turn_id)
+                                })
+                                .count()
                         })
                         .unwrap_or(0),
-                    None => descending_items.len(),
+                    None => descending_items
+                        .iter()
+                        .filter(|entry| turn_id.is_none_or(|turn_id| entry.turn_id == turn_id))
+                        .count(),
                 };
                 if available_items > page_size {
                     break;
@@ -4195,13 +4208,23 @@ impl ThreadRequestProcessor {
             }
             None => 0,
         };
-        let has_more_items = descending_items.len().saturating_sub(start) > page_size
+        let available_items = descending_items
+            .iter()
+            .skip(start)
+            .filter(|entry| turn_id.is_none_or(|turn_id| entry.turn_id == turn_id))
+            .count();
+        let has_more_items = available_items > page_size
             || (turn_id.is_none()
                 && matches!(sort_direction, SortDirection::Desc)
                 && has_older_turns);
         let data = descending_items
             .into_iter()
             .skip(start)
+            .filter(|entry| {
+                turn_id
+                    .as_ref()
+                    .is_none_or(|turn_id| &entry.turn_id == turn_id)
+            })
             .take(page_size)
             .collect::<Vec<_>>();
         let backwards_cursor = data
@@ -4573,15 +4596,16 @@ impl ThreadRequestProcessor {
             .unwrap_or(THREAD_ITEMS_DEFAULT_LIMIT)
             .clamp(1, THREAD_ITEMS_MAX_LIMIT);
         let sort_direction = sort_direction.unwrap_or(SortDirection::Asc);
-        let use_unprojected_history = self
-            .unprojected_paginated_history_threads
-            .lock()
-            .await
-            .contains(&thread_id)
-            || match cursor.as_deref() {
-                Some(cursor) => parse_thread_items_cursor(cursor).is_ok(),
-                None => !self.has_paginated_history_projection(thread_id).await?,
-            };
+        let use_unprojected_history = match cursor.as_deref() {
+            Some(cursor) => parse_thread_items_cursor(cursor).is_ok(),
+            None => {
+                self.unprojected_paginated_history_threads
+                    .lock()
+                    .await
+                    .contains(&thread_id)
+                    || !self.has_paginated_history_projection(thread_id).await?
+            }
+        };
         if use_unprojected_history
             && let Some(response) = self
                 .unprojected_paginated_thread_items_list_response(

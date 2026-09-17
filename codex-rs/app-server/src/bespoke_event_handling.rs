@@ -1618,6 +1618,7 @@ fn inter_agent_message_item(item: &codex_protocol::models::ResponseItem) -> Opti
         phase: Some(MessagePhase::Commentary),
         memory_citation: None,
         delivery: None,
+        questions: None,
     })
 }
 
@@ -2294,6 +2295,7 @@ mod tests {
     use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::GuardianAssessmentEvent;
     use codex_protocol::protocol::GuardianAssessmentStatus;
+    use codex_protocol::protocol::InterAgentCommunication;
     use codex_protocol::protocol::ItemCompletedEvent;
     use codex_protocol::protocol::ItemStartedEvent;
     use codex_protocol::protocol::RateLimitSnapshot;
@@ -4208,6 +4210,7 @@ mod tests {
                     text,
                     phase,
                     memory_citation,
+                    ..
                 } = notification.item
                 else {
                     bail!("unexpected item");

@@ -138,8 +138,11 @@ impl AgentControl {
                         &state,
                         communication.as_ref().clone(),
                         context.clone(),
-                        parent_turn_id.clone(),
-                        root_turn_id.clone(),
+                        TurnStartOptions {
+                            parent_turn_id: parent_turn_id.clone(),
+                            root_turn_id: root_turn_id.clone(),
+                            ..Default::default()
+                        },
                     )
                     .await
                 }
@@ -267,8 +270,7 @@ impl AgentControl {
                             parent_thread_id,
                             communication,
                             context,
-                            /*parent_turn_id*/ None,
-                            /*root_turn_id*/ None,
+                            TurnStartOptions::default(),
                         )
                         .await;
                     return;

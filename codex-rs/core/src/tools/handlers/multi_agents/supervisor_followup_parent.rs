@@ -23,7 +23,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_supervisor_tools_namespace(vec![create_supervisor_followup_parent_tool()])
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             handle_followup_parent(invocation)
                 .await
@@ -81,8 +84,12 @@ async fn handle_followup_parent(
             parent_thread_id,
             communication.clone(),
             context,
-            Some(turn.sub_id.clone()),
-            turn.turn_metadata_state.root_turn_id(),
+            crate::TurnStartOptions {
+                parent_turn_id: Some(turn.sub_id.clone()),
+                root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                cyber_access_program: turn.cyber_access_program,
+                ..Default::default()
+            },
         )
         .await
         .map_err(|err| collab_agent_error(parent_thread_id, err))?;
@@ -162,7 +169,7 @@ struct SupervisorFollowupParentResult {
 }
 
 impl ToolOutput for SupervisorFollowupParentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "followup_parent")
     }
 

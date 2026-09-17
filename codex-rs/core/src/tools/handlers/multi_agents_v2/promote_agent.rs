@@ -14,7 +14,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_promote_agent_tool()
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             handle_promote_agent(invocation)
                 .await
@@ -68,7 +71,7 @@ struct PromoteAgentResult {
 }
 
 impl ToolOutput for PromoteAgentResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "promote_agent")
     }
 

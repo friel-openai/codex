@@ -31,6 +31,7 @@ use super::confined_publication::ConfinedMutationOutcome;
 use super::confined_publication::ConfinedRootIdentity;
 use super::confined_publication::confined_entry_exists_under_root;
 use super::confined_publication::confined_root_identity;
+use super::confined_publication::confined_staged_entries_exist_under_root;
 use super::confined_publication::ensure_confined_directory_under_root;
 use super::confined_publication::install_confined_file_under_root;
 use super::confined_publication::read_confined_file_under_root;
@@ -113,6 +114,7 @@ pub(crate) struct HistoryRepairMaintenanceLease {
     _guard: codex_rollout::RolloutMaintenanceGuard,
 }
 
+#[cfg(test)]
 pub(crate) async fn reserve_history_repair_maintenance(
     store: &LocalThreadStore,
 ) -> ThreadStoreResult<Option<HistoryRepairMaintenanceLease>> {
@@ -130,6 +132,26 @@ pub(crate) async fn reserve_history_repair_maintenance(
         canonical_home,
         _guard: guard,
     }))
+}
+
+pub(crate) async fn acquire_history_repair_maintenance(
+    store: &LocalThreadStore,
+) -> ThreadStoreResult<HistoryRepairMaintenanceLease> {
+    let canonical_home = fs::canonicalize(store.config.codex_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let root_identity = confined_root_identity(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    let guard = codex_rollout::acquire_rollout_maintenance_lock(canonical_home.as_path())
+        .await
+        .map_err(thread_store_io_error)?;
+    Ok(HistoryRepairMaintenanceLease {
+        store_identity: store_identity(store),
+        root_identity,
+        canonical_home,
+        _guard: guard,
+    })
 }
 
 pub(crate) async fn reserve_history_repair_lifecycle(
@@ -534,7 +556,7 @@ fn validate_segment_identity(
 ) -> ThreadStoreResult<()> {
     let mut saw_meta = false;
     for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<RolloutLine>(physical_line) else {
+        let Some(line) = parse_physical_rollout_line(physical_line) else {
             continue;
         };
         let RolloutItem::SessionMeta(meta) = line.item else {
@@ -848,6 +870,42 @@ pub(crate) async fn recover_history_repair_publication(
 ) -> ThreadStoreResult<()> {
     recover_history_repair_publication_authorized(writer, codex_home, thread_id, selected_path)
         .await
+}
+
+/// A clean reader may inspect names, but only an exclusive repair owner may clean up a
+/// displaced source or resolve ambiguous plain/compressed representations.
+pub(crate) async fn history_repair_publication_needs_exclusive(
+    codex_home: &Path,
+    selected_path: &Path,
+) -> ThreadStoreResult<bool> {
+    let authority = ConfinedRepairAuthority::bind(codex_home).await?;
+    let selected_path = authority.bind_path(selected_path)?;
+    let selected_path =
+        validate_mutable_repair_source(authority.canonical_home.as_path(), selected_path.as_path())
+            .await?;
+    let plain_path = codex_rollout::plain_rollout_path(&selected_path);
+    let sibling = if plain_path == selected_path {
+        compressed_sibling(&plain_path)
+    } else {
+        plain_path
+    };
+    if confined_entry_exists_under_root(
+        &authority.canonical_home,
+        &sibling,
+        &authority.root_identity,
+    )
+    .await
+    .map_err(thread_store_io_error)?
+    {
+        return Ok(true);
+    }
+    confined_staged_entries_exist_under_root(
+        &authority.canonical_home,
+        &selected_path,
+        &authority.root_identity,
+    )
+    .await
+    .map_err(thread_store_io_error)
 }
 
 async fn recover_history_repair_publication_authorized(
@@ -1198,7 +1256,7 @@ fn validate_mutable_rollout_identity(
     path: &Path,
 ) -> ThreadStoreResult<(ThreadId, Option<SegmentId>)> {
     for physical_line in source.split_inclusive(|byte| *byte == b'\n') {
-        let Ok(line) = serde_json::from_slice::<RolloutLine>(physical_line) else {
+        let Some(line) = parse_physical_rollout_line(physical_line) else {
             continue;
         };
         let RolloutItem::SessionMeta(meta) = line.item else {
@@ -1227,8 +1285,8 @@ fn validate_replacement_semantics(
     let replacement_records = physical_records(replacement);
     let mut replacement_segment_id = None;
     let session_index = source_records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     });
     let equivalent = source_records.len() == replacement_records.len()
         && source_records
@@ -1237,10 +1295,10 @@ fn validate_replacement_semantics(
             .enumerate()
             .all(|(index, (source_record, replacement_record))| {
                 match (
-                    serde_json::from_slice::<RolloutLine>(source_record),
-                    serde_json::from_slice::<RolloutLine>(replacement_record),
+                    parse_physical_rollout_line(source_record),
+                    parse_physical_rollout_line(replacement_record),
                 ) {
-                    (Ok(source_line), Ok(replacement_line)) => {
+                    (Some(source_line), Some(replacement_line)) => {
                         let identity_matches = match (&source_line.item, &replacement_line.item) {
                             (
                                 RolloutItem::SessionMeta(source_meta),
@@ -1276,7 +1334,7 @@ fn validate_replacement_semantics(
                                     &replacement_line,
                                 )
                     }
-                    (Err(_), Err(_)) => source_record == replacement_record,
+                    (None, None) => source_record == replacement_record,
                     _ => false,
                 }
             });
@@ -1303,6 +1361,12 @@ fn physical_records(source: &[u8]) -> Vec<&[u8]> {
     source.split_inclusive(|byte| *byte == b'\n').collect()
 }
 
+fn parse_physical_rollout_line(record: &[u8]) -> Option<RolloutLine> {
+    codex_rollout::RolloutRecorder::parse_rollout_line_bytes(record)
+        .ok()
+        .flatten()
+}
+
 fn identity_cleared_preimage(
     bytes: &[u8],
     thread_id: ThreadId,
@@ -1310,20 +1374,19 @@ fn identity_cleared_preimage(
 ) -> ThreadStoreResult<Vec<u8>> {
     let records = physical_records(bytes);
     let Some(session_index) = records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     }) else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment contains no session metadata".to_string(),
         });
     };
     let session_record = records[session_index];
-    let first_line = serde_json::from_slice::<RolloutLine>(session_record).map_err(|_| {
-        ThreadStoreError::Conflict {
+    let first_line =
+        parse_physical_rollout_line(session_record).ok_or_else(|| ThreadStoreError::Conflict {
             message: "immutable history repair segment does not start with session metadata"
                 .to_string(),
-        }
-    })?;
+        })?;
     let RolloutItem::SessionMeta(meta) = &first_line.item else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment does not start with session metadata"
@@ -1355,8 +1418,8 @@ fn rewrite_physical_segment_id(
 ) -> ThreadStoreResult<Vec<u8>> {
     let records = physical_records(bytes);
     let Some(session_index) = records.iter().position(|record| {
-        serde_json::from_slice::<RolloutLine>(record)
-            .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
+        parse_physical_rollout_line(record)
+            .is_some_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
     }) else {
         return Err(ThreadStoreError::Conflict {
             message: "immutable history repair segment contains no session metadata".to_string(),

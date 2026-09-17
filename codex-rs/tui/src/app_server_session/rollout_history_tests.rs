@@ -6,12 +6,19 @@ use crate::legacy_core::config::Config;
 use crate::legacy_core::config::ConfigBuilder;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
+use app_test_support::rollout_path;
 use codex_app_server_protocol::ThreadHistoryMode;
 use codex_features::Feature;
+use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::models::AgentMessageInputContent;
+use codex_protocol::models::InternalChatMessageMetadataPassthrough;
+use codex_protocol::models::ResponseItem;
+use codex_rollout::RolloutItem;
+use codex_rollout::RolloutLine;
 use color_eyre::eyre::Result;
-use futures::FutureExt;
 use pretty_assertions::assert_eq;
+use std::time::Duration;
 use tempfile::TempDir;
 
 async fn build_config(temp_dir: &TempDir) -> Config {
@@ -20,6 +27,70 @@ async fn build_config(temp_dir: &TempDir) -> Config {
         .build()
         .await
         .expect("config should build")
+}
+
+fn poison_legacy_rollout_for_goal_supervisor_repair(
+    codex_home: &std::path::Path,
+    filename_ts: &str,
+    thread_id: ThreadId,
+) -> Result<()> {
+    let path = rollout_path(codex_home, filename_ts, thread_id.to_string().as_str());
+    let mut lines = std::fs::read_to_string(path.as_path())?
+        .lines()
+        .map(codex_rollout::parse_rollout_line)
+        .collect::<Result<Vec<_>, _>>()?;
+    let RolloutItem::SessionMeta(session_meta) = &mut lines[0].item else {
+        panic!("expected session metadata");
+    };
+    session_meta.meta.segment_id = Some(SegmentId::new());
+    session_meta.meta.cli_version = "0.148.0-alpha.6+frodex.0".to_string();
+    for (ordinal, line) in lines.iter_mut().enumerate() {
+        line.ordinal = Some(ordinal as u64);
+    }
+    let delivery_ordinal = lines.len() as u64;
+    lines.push(RolloutLine {
+        timestamp: "2026-08-17T08:00:01Z".to_string(),
+        ordinal: Some(delivery_ordinal),
+        item: RolloutItem::InterAgentCommunicationMetadata { trigger_turn: true },
+    });
+    lines.push(RolloutLine {
+        timestamp: "2026-08-17T08:00:02Z".to_string(),
+        ordinal: Some(delivery_ordinal + 1),
+        item: RolloutItem::ResponseItem(
+            ResponseItem::AgentMessage {
+                id: Some(codex_protocol::ResponseItemId::from_server(
+                    "amsg_01900000-0000-7000-8000-000000000017".to_string(),
+                )),
+                author: "/root/goal_supervisor".to_string(),
+                recipient: "/root".to_string(),
+                content: vec![
+                    AgentMessageInputContent::InputText {
+                        text: "Message Type: NEW_TASK\nTask name: /root\nSender: /root/goal_supervisor\nPayload:\n"
+                            .to_string(),
+                    },
+                    AgentMessageInputContent::EncryptedContent {
+                        encrypted_content: "synthetic poisoned supervisor instruction".to_string(),
+                    },
+                ],
+                internal_chat_message_metadata_passthrough: Some(
+                    InternalChatMessageMetadataPassthrough {
+                        turn_id: Some(
+                            "01900000-0000-7000-8000-000000000018".to_string(),
+                        ),
+                        ..Default::default()
+                    },
+                ),
+            }
+            .into(),
+        ),
+    });
+    let mut bytes = Vec::new();
+    for line in lines {
+        serde_json::to_writer(&mut bytes, &line)?;
+        bytes.push(b'\n');
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
 }
 
 #[tokio::test]
@@ -281,7 +352,46 @@ async fn legacy_resume_preserves_history_mode_after_picker_server_replacement() 
 }
 
 #[tokio::test]
-async fn cached_legacy_resume_revalidates_history_across_migration_settings() -> Result<()> {
+async fn embedded_legacy_resume_does_not_reenter_rollout_maintenance_lock() -> Result<()> {
+    let codex_home = tempfile::tempdir().expect("tempdir");
+    let config = build_config(&codex_home).await;
+    let filename_ts = "2026-08-17T08-00-00";
+    let thread_id = ThreadId::from_string(
+        &create_fake_rollout(
+            codex_home.path(),
+            filename_ts,
+            "2026-08-17T08:00:00Z",
+            "Saved user message",
+            Some(config.model_provider_id.as_str()),
+            /*git_info*/ None,
+        )
+        .expect("create source rollout"),
+    )?;
+    poison_legacy_rollout_for_goal_supervisor_repair(codex_home.path(), filename_ts, thread_id)?;
+    let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
+    app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);
+    let local_settings = crate::local_settings::LocalSettings::from(&config);
+
+    let resumed = tokio::time::timeout(
+        Duration::from_secs(10),
+        app_server.resume_thread(
+            &local_settings,
+            config,
+            thread_id,
+            ResumeModelSettings::RestoreFromThread,
+        ),
+    )
+    .await
+    .expect("embedded resume must not wait for its own maintenance lock")?;
+
+    assert_eq!(resumed.session.thread_id, thread_id);
+    assert!(!resumed.turns.is_empty());
+    app_server.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_migration_disables_cached_legacy_resume_shortcut() -> Result<()> {
     for (startup_enabled, workspace_enabled) in
         [(false, false), (false, true), (true, false), (true, true)]
     {
@@ -304,38 +414,37 @@ async fn cached_legacy_resume_revalidates_history_across_migration_settings() ->
                 .features
                 .enable(Feature::BackgroundPaginatedRolloutMigration)?;
         }
-        let mut resume_config = config;
+        let mut resume_config = config.clone();
         if workspace_enabled {
             resume_config
                 .features
                 .enable(Feature::BackgroundPaginatedRolloutMigration)?;
         }
-        // Keep the real startup worker from migrating the legacy fixture before selection.
-        let maintenance_guard =
-            codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?
-                .expect("acquire rollout maintenance lock");
-        let mut app_server = crate::start_embedded_app_server_for_picker(&startup_config).await?;
+        // Start the fixture with migration disabled, then model the cached startup policy
+        // independently from the workspace policy used for resume.
+        let mut app_server = crate::start_embedded_app_server_for_picker(&config)
+            .await?
+            .with_startup_config(&startup_config);
         app_server.remember_thread_history_mode(legacy_thread_id, ThreadHistoryMode::Legacy);
         let local_settings = crate::local_settings::LocalSettings::from(&resume_config);
         let next_request_id = app_server.next_request_id;
-        let legacy = {
-            let resume = app_server.resume_thread(
+        let legacy = app_server
+            .resume_thread(
                 &local_settings,
                 resume_config.clone(),
                 legacy_thread_id,
                 ResumeModelSettings::RestoreFromThread,
-            );
-            tokio::pin!(resume);
-            drop(maintenance_guard);
-            // This current-thread test polls resume before yielding to the startup worker.
-            // Resume must acquire its guard before waiting for metadata revalidation.
-            assert!(resume.as_mut().now_or_never().is_none());
-            assert!(
-                codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?.is_none()
-            );
-            resume.await?
+            )
+            .await?;
+        let expected_requests = if startup_enabled || workspace_enabled {
+            3
+        } else {
+            2
         };
-        assert_eq!(app_server.next_request_id, next_request_id + 2);
+        assert_eq!(
+            app_server.next_request_id,
+            next_request_id + expected_requests
+        );
         assert!(!legacy.turns.is_empty());
         app_server.shutdown().await?;
     }
@@ -359,9 +468,12 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
     )?;
     let mut app_server = crate::start_embedded_app_server_for_picker(&config).await?;
     app_server.remember_thread_history_mode(thread_id, ThreadHistoryMode::Legacy);
-    let _maintenance_guard =
-        codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?
-            .expect("acquire rollout maintenance lock");
+    let maintenance_guard = codex_rollout::try_acquire_rollout_maintenance_lock(codex_home.path())?
+        .expect("acquire rollout maintenance lock");
+    let release_maintenance = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        drop(maintenance_guard);
+    });
     let next_request_id = app_server.next_request_id;
 
     let resumed = app_server
@@ -372,6 +484,7 @@ async fn rollout_maintenance_contention_disables_cached_legacy_resume_shortcut()
             ResumeModelSettings::RestoreFromThread,
         )
         .await?;
+    release_maintenance.await.expect("release maintenance lock");
 
     assert_eq!(app_server.next_request_id, next_request_id + 3);
     assert_eq!(resumed.session.thread_id, thread_id);

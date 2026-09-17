@@ -243,7 +243,8 @@ async fn reconnect_daemon_command_center_after_socket_replacement_without_a_conv
             session
                 .thread_loaded_list(ThreadLoadedListParams {
                     cursor: None,
-                    limit: Some(100)
+                    limit: Some(100),
+                    ancestor_thread_id: None,
                 })
                 .await
                 .is_err()

@@ -6,6 +6,7 @@ use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_app_server_protocol::ThreadHistoryChangeSet;
 use codex_app_server_protocol::project_rollout_line;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_rollout::RolloutItem;
 use tokio::io::AsyncBufReadExt;
@@ -29,10 +30,29 @@ pub(super) async fn materialize_to_sqlite(
     thread_id: ThreadId,
     rollout_path: &Path,
 ) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(store, thread_id, rollout_path, /*end*/ None).await
+}
+
+/// Project an authenticated decoded prefix without consuming a fork ancestor's later records.
+pub(super) async fn materialize_prefix_to_sqlite(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    end: HistoryPosition,
+) -> ThreadStoreResult<()> {
+    materialize_to_sqlite_inner(store, thread_id, rollout_path, Some(end)).await
+}
+
+async fn materialize_to_sqlite_inner(
+    store: &LocalThreadStore,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    end: Option<HistoryPosition>,
+) -> ThreadStoreResult<()> {
     if store.state_db.is_none() {
         return Ok(());
     }
-    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout_path).await;
+    let result = materialize_to_sqlite_with_state_db(store, thread_id, rollout_path, end).await;
     record_projection_outcome(&result);
     result
 }
@@ -41,6 +61,7 @@ async fn materialize_to_sqlite_with_state_db(
     store: &LocalThreadStore,
     thread_id: ThreadId,
     rollout_path: &Path,
+    end: Option<HistoryPosition>,
 ) -> ThreadStoreResult<()> {
     let projection_state = super::thread_history::projection_state(store, thread_id).await?;
     let mut start_offset = projection_state
@@ -98,14 +119,25 @@ async fn materialize_to_sqlite_with_state_db(
     let mut file = open_projection_reader(rollout_path)
         .await
         .map_err(thread_store_io_error)?;
-    let end_offset = file.metadata().await.map_err(thread_store_io_error)?.len();
+    let file_len = file.metadata().await.map_err(thread_store_io_error)?.len();
+    let end_offset = end.map_or(file_len, |end| end.end_byte_offset);
+    if end_offset > file_len {
+        return Err(thread_history_error(format!(
+            "rollout {} ends at byte {file_len}, before selected byte {end_offset}",
+            rollout_path.display()
+        )));
+    }
     let byte_count =
         end_offset
             .checked_sub(start_offset)
             .ok_or_else(|| ThreadStoreError::Internal {
-                message: "durable rollout shrank before projection".to_string(),
+                message: format!(
+                    "durable rollout shrank before projection: {} ends at selected byte \
+                     {end_offset}, before checkpoint byte {start_offset}",
+                    rollout_path.display()
+                ),
             })?;
-    if byte_count == 0 {
+    if byte_count == 0 && end.is_none() {
         return Ok(());
     }
 
@@ -272,6 +304,19 @@ async fn materialize_to_sqlite_with_state_db(
         let changes = if is_inherited_subagent_history {
             ThreadHistoryChangeSet::default()
         } else {
+            // Older files can claim Paginated while retaining legacy-only presentation events.
+            // The stateless projector ignores those events; blessing its checkpoint would hide
+            // their history, even if canonical ItemCompleted records were appended afterward.
+            if codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
+                && !codex_rollout::is_persisted_rollout_item(
+                    &line.item,
+                    ThreadHistoryMode::Paginated,
+                )
+            {
+                return Err(ThreadStoreError::Unsupported {
+                    operation: "materialize_paginated_legacy_event",
+                });
+            }
             project_rollout_line(&line)
         };
         let fallback_created_at_ms = if changes
@@ -367,6 +412,16 @@ async fn materialize_to_sqlite_with_state_db(
         }
     }
 
+    if let Some(end) = end
+        && (next_offset != end.end_byte_offset || next_ordinal != end.end_ordinal_exclusive)
+    {
+        return Err(thread_history_error(format!(
+            "rollout {} projected through byte {next_offset}, ordinal {next_ordinal}; expected byte {}, ordinal {}",
+            rollout_path.display(),
+            end.end_byte_offset,
+            end.end_ordinal_exclusive
+        )));
+    }
     if pending_rejected_line_count == 0 {
         apply_paginated_projection_batch(
             store,
@@ -509,8 +564,8 @@ async fn materialize_legacy_to_sqlite_inner(
             })?;
 
         if !line_bytes.iter().all(u8::is_ascii_whitespace) {
-            match codex_rollout::parse_rollout_line_bytes(&line_bytes) {
-                Ok(line) => {
+            match codex_rollout::RolloutRecorder::parse_rollout_line_bytes(&line_bytes) {
+                Ok(Some(line)) => {
                     let created_at_ms = DateTime::parse_from_rfc3339(line.timestamp.as_str())
                         .map(|timestamp| timestamp.timestamp_millis())
                         .map_err(thread_history_error)?;
@@ -547,6 +602,7 @@ async fn materialize_legacy_to_sqlite_inner(
                             }
                         })?;
                 }
+                Ok(None) => {}
                 Err(err) => {
                     warn!(
                         "skipping rejected legacy rollout line while projecting {rollout_path:?}: {err}"
@@ -600,9 +656,8 @@ async fn first_rollout_ordinal(rollout_path: &Path) -> ThreadStoreResult<Option<
         if line.trim().is_empty() {
             continue;
         }
-        let line =
-            codex_rollout::parse_rollout_line(line.as_str()).map_err(thread_history_error)?;
-        return Ok(line.ordinal);
+        return codex_rollout::rollout_ordinal_from_slice(line.as_bytes())
+            .map_err(thread_history_error);
     }
     Ok(None)
 }
