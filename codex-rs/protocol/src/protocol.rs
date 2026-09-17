@@ -16,7 +16,9 @@ use strum_macros::EnumIter;
 
 use crate::AgentPath;
 use crate::ResponseItemId;
+use crate::RolloutId;
 use crate::SanitizedGitUrl;
+use crate::SegmentId;
 use crate::SessionId;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
@@ -66,6 +68,7 @@ use crate::turn_input::TurnInputSubmission;
 use crate::turn_input::TurnStartOptions;
 use codex_extension_items::image_generation::ImageGenerationFailure;
 use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::LegacyAppPathString;
 use codex_utils_path_uri::PathUri;
 use schemars::JsonSchema;
 use serde::Deserialize;
@@ -3041,6 +3044,8 @@ pub struct SessionMeta {
     /// session_id is equal to the root thread's ID.
     pub session_id: SessionId,
     pub id: ThreadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forked_from_id: Option<ThreadId>,
     /// Exclusive ordinal inherited from the logical fork parent, independent of `history_base`.
@@ -3107,6 +3112,7 @@ impl Default for SessionMeta {
         SessionMeta {
             session_id: id.into(),
             id,
+            segment_id: None,
             forked_from_id: None,
             forked_from_ordinal_exclusive: None,
             parent_thread_id: None,
@@ -3170,6 +3176,33 @@ impl<'de> Deserialize<'de> for SessionMetaLine {
     }
 }
 
+pub const DEFAULT_ROLLOUT_REFERENCE_DEPTH: usize = 2;
+
+/// A compact pointer to an immutable rollout segment inherited by this thread.
+#[derive(Serialize, Deserialize, Debug, Clone, JsonSchema, TS)]
+pub struct RolloutReferenceItem {
+    pub rollout_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<ThreadId>,
+    /// Concrete rollout file identity. Older references used `thread_id` for both identities.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_id: Option<RolloutId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollout_timestamp: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub segment_id: Option<SegmentId>,
+    #[serde(default = "default_rollout_reference_depth")]
+    pub max_depth: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nth_user_message: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compacted_replacement_history_filter_texts: Option<Vec<String>>,
+}
+
+fn default_rollout_reference_depth() -> usize {
+    DEFAULT_ROLLOUT_REFERENCE_DEPTH
+}
+
 /// Persisted comparison state used to resume model-visible world-state diffing.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema, TS)]
 pub struct WorldStateItem {
@@ -3206,6 +3239,7 @@ pub struct TurnContextItem {
     /// Only set for subagent turns; persisted so resume keeps the scope frozen at turn start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_turn_id: Option<String>,
+    #[serde(deserialize_with = "deserialize_turn_context_cwd")]
     pub cwd: AbsolutePathBuf,
     /// Effective workspace roots used to materialize symbolic
     /// `:workspace_roots` filesystem permissions in `permission_profile`.
@@ -3260,6 +3294,26 @@ pub struct TurnContextItem {
     // read by context reconstruction and should be removed in a future schema
     // cleanup.
     pub summary: ReasoningSummaryConfig,
+}
+
+/// Accepts the short-lived file-URI representation without changing current serialization.
+fn deserialize_turn_context_cwd<'de, D>(deserializer: D) -> Result<AbsolutePathBuf, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let serialized = String::deserialize(deserializer)?;
+    if serialized.starts_with("file:") {
+        let cwd = PathUri::parse(&serialized).map_err(D::Error::custom)?;
+        return cwd.to_abs_path().map_err(D::Error::custom);
+    }
+
+    let path = PathBuf::from(serialized);
+    if !path.is_absolute() {
+        return Err(D::Error::custom(
+            "AbsolutePathBuf deserialized without a base path",
+        ));
+    }
+    AbsolutePathBuf::from_absolute_path(path).map_err(D::Error::custom)
 }
 
 impl TurnContextItem {
@@ -3486,6 +3540,7 @@ pub struct ExecCommandBeginEvent {
     /// The command to be executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3520,6 +3575,7 @@ pub struct ExecCommandEndEvent {
     /// The command that was executed.
     pub command: Vec<String>,
     /// The command's working directory if not the default cwd for the agent.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub cwd: PathUri,
     pub parsed_cmd: Vec<ParsedCommand>,
     /// Where the command originated. Defaults to Agent for backward compatibility.
@@ -3548,6 +3604,20 @@ pub struct ExecCommandEndEvent {
     pub status: ExecCommandStatus,
 }
 
+/// Accepts the native absolute paths used by older persisted events.
+pub(crate) fn deserialize_path_uri_or_legacy_absolute_path<'de, D>(
+    deserializer: D,
+) -> Result<PathUri, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let path = LegacyAppPathString::deserialize(deserializer)?;
+    if let Ok(path_uri) = PathUri::parse(path.as_str()) {
+        return Ok(path_uri);
+    }
+    path.try_into().map_err(D::Error::custom)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
 pub struct ViewImageToolCallEvent {
     /// Identifier for the originating tool call.
@@ -3556,6 +3626,7 @@ pub struct ViewImageToolCallEvent {
     ///
     /// This core event is not exposed directly in the app-server API. App-server
     /// converts the path to `LegacyAppPathString` when building its public item.
+    #[serde(deserialize_with = "deserialize_path_uri_or_legacy_absolute_path")]
     pub path: PathUri,
 }
 

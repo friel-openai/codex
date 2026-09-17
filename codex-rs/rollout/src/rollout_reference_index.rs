@@ -10,8 +10,11 @@ use std::path::PathBuf;
 use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
+use codex_protocol::protocol::RolloutReferenceItem;
+use codex_protocol::protocol::SessionMetaLine;
 
 use crate::ARCHIVED_SESSIONS_SUBDIR;
+use crate::RolloutItem;
 use crate::SESSIONS_SUBDIR;
 use crate::compression::RolloutFile;
 use crate::rollout_file_name::RolloutFileName;
@@ -23,6 +26,7 @@ use crate::rollout_file_name::RolloutFileName;
 #[derive(Debug, Default)]
 pub struct RolloutReferenceIndex {
     rollouts_by_id: HashMap<RolloutId, IndexedRollout>,
+    direct_references_by_rollout: HashMap<RolloutId, HashSet<RolloutId>>,
     reference_counts_by_rollout: HashMap<RolloutId, usize>,
 }
 
@@ -76,6 +80,7 @@ impl RolloutReferenceIndex {
         thread_ids: Option<&HashSet<ThreadId>>,
     ) -> io::Result<Self> {
         let mut rollouts_by_id = HashMap::new();
+        let mut direct_references_by_rollout = HashMap::new();
         while let Some(directory) = stack.pop() {
             let mut entries = match tokio::fs::read_dir(directory.as_path()).await {
                 Ok(entries) => entries,
@@ -95,43 +100,68 @@ impl RolloutReferenceIndex {
                 if !file_type.is_file() {
                     continue;
                 }
-                let Some(rollout_file) = RolloutFile::from_path(path) else {
+                let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
                     continue;
                 };
-                let Some(file_name) = RolloutFileName::parse(rollout_file.plain_file_name()) else {
+                let Some(plain_file_name) = crate::compression::parse_rollout_file_name(file_name)
+                else {
+                    continue;
+                };
+                let Some(file_name) = RolloutFileName::parse(plain_file_name) else {
                     continue;
                 };
                 if thread_ids.is_some_and(|ids| !ids.contains(&file_name.thread_id())) {
                     continue;
                 }
                 let rollout_id = file_name.rollout_id();
-                let Ok(meta) = crate::read_session_meta_line(rollout_file.path()).await else {
+                let Ok((meta, leading_reference)) = read_direct_reference_metadata(&path).await
+                else {
                     continue;
                 };
-                if let Entry::Vacant(entry) = rollouts_by_id.entry(rollout_id) {
+                let history_base = meta.meta.history_base;
+                if let Some(history_base) = history_base {
+                    direct_references_by_rollout
+                        .entry(rollout_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(history_base.thread_id);
+                }
+                if let Some(reference) = leading_reference
+                    && let Some(referenced_rollout_id) =
+                        reference.rollout_id.or(reference.thread_id)
+                {
+                    direct_references_by_rollout
+                        .entry(rollout_id)
+                        .or_insert_with(HashSet::new)
+                        .insert(referenced_rollout_id);
+                }
+                // Every physical sibling contributes reference edges, but RolloutFile retains
+                // plain-file precedence for the selected rollout body.
+                if let Some(rollout_file) = RolloutFile::from_path(path)
+                    && let Entry::Vacant(entry) = rollouts_by_id.entry(rollout_id)
+                {
                     entry.insert(IndexedRollout {
                         thread_id: meta.meta.id,
                         path: rollout_file.into_path(),
-                        history_base: meta.meta.history_base,
+                        history_base,
                     });
                 }
             }
         }
 
         let mut reference_counts_by_rollout = HashMap::new();
-        for (rollout_id, rollout) in &rollouts_by_id {
-            let Some(history_base) = rollout.history_base else {
-                continue;
-            };
-            if history_base.thread_id == *rollout_id {
-                continue;
+        for (rollout_id, direct_references) in &direct_references_by_rollout {
+            for referenced_rollout_id in direct_references {
+                if referenced_rollout_id == rollout_id {
+                    continue;
+                }
+                *reference_counts_by_rollout
+                    .entry(*referenced_rollout_id)
+                    .or_default() += 1;
             }
-            *reference_counts_by_rollout
-                .entry(history_base.thread_id)
-                .or_default() += 1;
         }
         Ok(Self {
             rollouts_by_id,
+            direct_references_by_rollout,
             reference_counts_by_rollout,
         })
     }
@@ -142,6 +172,11 @@ impl RolloutReferenceIndex {
             .get(&rollout_id)
             .copied()
             .unwrap_or_default()
+    }
+
+    /// Returns both history-base and leading legacy-reference edges for this rollout.
+    pub fn direct_references(&self, rollout_id: RolloutId) -> Option<&HashSet<RolloutId>> {
+        self.direct_references_by_rollout.get(&rollout_id)
     }
 
     /// Returns the direct history-base edge for `rollout_id`, if one was discovered.
@@ -161,6 +196,38 @@ impl RolloutReferenceIndex {
             .filter(move |(_, rollout)| rollout.thread_id == thread_id)
             .map(|(rollout_id, rollout)| (*rollout_id, rollout.path.as_path()))
     }
+}
+
+async fn read_direct_reference_metadata(
+    path: &Path,
+) -> io::Result<(SessionMetaLine, Option<RolloutReferenceItem>)> {
+    let mut reader = crate::compression::open_rollout_line_reader_exact(path).await?;
+    let mut session_meta = None;
+    let mut leading_reference = None;
+    while let Some(line) = reader.next_line().await? {
+        let Ok(line) = crate::parse_rollout_line(line.trim()) else {
+            continue;
+        };
+        match line.item {
+            RolloutItem::SessionMeta(meta) if session_meta.is_none() => {
+                session_meta = Some(meta);
+            }
+            RolloutItem::RolloutReference(reference) if session_meta.is_some() => {
+                leading_reference = Some(reference);
+                break;
+            }
+            _ if session_meta.is_some() => break,
+            _ => {}
+        }
+    }
+    session_meta
+        .map(|meta| (meta, leading_reference))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "rollout {} has no session metadata",
+                path.display()
+            ))
+        })
 }
 
 #[cfg(test)]

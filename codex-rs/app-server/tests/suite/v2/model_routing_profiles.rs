@@ -374,6 +374,8 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
             text: String::new(),
             phase: None,
             memory_citation: None,
+            delivery: None,
+            questions: None,
         }]
     );
     assert_eq!(partial_deltas, vec!["partial ", "answer"]);
@@ -384,6 +386,8 @@ async fn routed_profile_balances_partial_message_before_falling_back() -> Result
             text: PARTIAL_TEXT.to_string(),
             phase: None,
             memory_citation: None,
+            delivery: None,
+            questions: None,
         }]
     );
     assert_eq!(

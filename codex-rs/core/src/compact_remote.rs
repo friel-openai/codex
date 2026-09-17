@@ -318,7 +318,7 @@ async fn run_remote_compact_task_inner_impl(
             compaction_model_hash: compaction_turn_context.model_info().comp_hash.clone(),
         },
     )
-    .await;
+    .await?;
     sess.recompute_token_usage(compaction_turn_context).await;
 
     if reporting.defers_lifecycle() {

@@ -85,7 +85,7 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
             boundary: ForkBoundary::Latest,
         })
         .await?;
-    let child = test
+    let (child, _) = test
         .thread_manager
         .fork_prepared_thread(
             test.config.clone(),
