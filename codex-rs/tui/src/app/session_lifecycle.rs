@@ -1056,6 +1056,7 @@ impl App {
             .thread_loaded_list(ThreadLoadedListParams {
                 cursor: None,
                 limit: None,
+                ancestor_thread_id: None,
             })
             .await
         {
