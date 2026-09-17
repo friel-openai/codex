@@ -29,6 +29,7 @@ use crate::context::ManagedDeveloperInstructions;
 use crate::context::ModelSwitchInstructions;
 use crate::context::MultiAgentRoleInstructions;
 use crate::context::NetworkRuleSaved;
+use crate::context::NodeReplReviewEvidence;
 use crate::context::RecommendedPluginsInstructions;
 use crate::context::world_state::WorldState;
 use crate::current_time::TimeProvider;
@@ -190,7 +191,7 @@ use futures::prelude::*;
 use rmcp::model::RequestId;
 use serde_json::Value;
 use tokio::sync::Mutex;
-use tokio::sync::MutexGuard;
+use tokio::sync::OwnedMutexGuard;
 use tokio::sync::RwLock;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -2059,14 +2060,15 @@ impl Session {
                 shared_model_response_items.is_some(),
             )
             .await;
-        let mut state = self.state.lock().await;
-        let previous_turn_settings = Self::install_rollout_reconstruction_in_state(
-            &mut state,
-            reconstruction,
-            shared_model_response_items,
-            shared_model_state,
-        );
-        drop(state);
+        let previous_turn_settings = {
+            let mut state = self.state.lock().await;
+            Self::install_rollout_reconstruction_in_state(
+                &mut state,
+                reconstruction,
+                shared_model_response_items,
+                shared_model_state,
+            )
+        };
         let prefix_tokens = if matches!(
             turn_context.config.model_auto_compact_token_limit_scope,
             AutoCompactTokenLimitScope::BodyAfterPrefix
@@ -2220,7 +2222,9 @@ impl Session {
             return;
         }
 
-        let _checkpoint_admission = self.checkpoint_admission_lock.lock().await;
+        let _checkpoint_admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
         if self.persistence_restart_required() {
             self.deliver_event_raw(Event {
                 id: turn_context.sub_id.clone(),
@@ -2261,6 +2265,10 @@ impl Session {
                 drop(state);
                 self.persistence_restart_required
                     .store(false, Ordering::Release);
+                self.services
+                    .thread_extension_data
+                    .remove::<NodeReplReviewEvidence>();
+                self.guardian_review_session.invalidate().await;
                 self.services
                     .agent_control
                     .rollout_budget()
@@ -2623,7 +2631,7 @@ impl Session {
 
     pub(crate) async fn effective_session_config(&self) -> Config {
         let state = self.state.lock().await;
-        Self::build_effective_session_config(&state.session_configuration)
+        self.build_effective_session_config(&state.session_configuration)
     }
 
     pub(crate) async fn session_source(&self) -> SessionSource {
@@ -4830,8 +4838,10 @@ impl Session {
     pub(crate) async fn lock_checkpoint_admission(
         &self,
         operation: &str,
-    ) -> anyhow::Result<MutexGuard<'_, ()>> {
-        let admission = self.checkpoint_admission_lock.lock().await;
+    ) -> anyhow::Result<OwnedMutexGuard<()>> {
+        let admission = Arc::clone(&self.checkpoint_admission_lock)
+            .lock_owned()
+            .await;
         if self.persistence_restart_required() {
             anyhow::bail!(
                 "Checkpoint persistence is indeterminate; restart this thread before attempting to {operation}."
@@ -5555,6 +5565,7 @@ impl Session {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn recompute_token_usage(&self, turn_context: &TurnContext) {
         let token_count = {
             let mut state = self.state.lock().await;

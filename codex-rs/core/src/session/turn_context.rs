@@ -1066,7 +1066,7 @@ impl Session {
             options,
             TurnMultiAgentRuntime::ResolveAndStore,
             self.git_enrichment_policy,
-            true,
+            /*resolve_model_routing*/ true,
         )
         .await
     }
@@ -1082,7 +1082,7 @@ impl Session {
             NewTurnContextOptions::default(),
             TurnMultiAgentRuntime::Preview,
             GitEnrichmentPolicy::Skip,
-            true,
+            /*resolve_model_routing*/ true,
         )
         .await
     }
@@ -1332,7 +1332,7 @@ impl Session {
                 },
                 TurnMultiAgentRuntime::ResolveAndStore,
                 self.git_enrichment_policy,
-                false,
+                /*resolve_model_routing*/ false,
             )
             .await;
         let mut refreshed = Arc::try_unwrap(refreshed)

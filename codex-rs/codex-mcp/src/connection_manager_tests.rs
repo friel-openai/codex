@@ -120,7 +120,6 @@ impl McpConnectionSet {
             servers: HashMap::new(),
             event_stream_connection: None,
             disabled_servers: Vec::new(),
-            protocol_mode: crate::McpProtocolMode::Legacy,
             required_servers: Vec::new(),
             optional_startup_deadline: OnceLock::new(),
             tool_plugin_provenance: Arc::new(ToolPluginProvenance::default()),

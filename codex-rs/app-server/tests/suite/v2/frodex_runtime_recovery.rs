@@ -112,7 +112,7 @@ fn prepare_poisoned_rollout(codex_home: &Path) -> Result<(ThreadId, SegmentId, P
         "2026-08-13T00:00:00Z",
         "synthetic release acceptance history",
         Some("openai"),
-        None,
+        /*git_info*/ None,
     )?;
     let path = rollout_path(codex_home, filename_timestamp, &thread_id);
     let mut lines = std::fs::read(path.as_path())?
@@ -129,13 +129,13 @@ fn prepare_poisoned_rollout(codex_home: &Path) -> Result<(ThreadId, SegmentId, P
     meta.meta.segment_id = Some(segment_id);
     append_delivery(
         &mut lines,
-        3,
+        /*ordinal*/ 3,
         "amsg_01900000-0000-7000-8000-000000000004",
         POISON_PAYLOAD,
     );
     append_delivery(
         &mut lines,
-        5,
+        /*ordinal*/ 5,
         "amsg_01900000-0000-7000-8000-000000000006",
         FERNET_PAYLOAD,
     );
@@ -170,6 +170,7 @@ fn find_agent_message<'a>(lines: &'a [RolloutLine], message_id: &str) -> &'a Res
             | RolloutItem::EventMsg(_)
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::WorldState(_)
+            | RolloutItem::SecurityRiskScore(_)
             | RolloutItem::RolloutReference(_) => None,
         })
         .expect("agent message must remain in repaired rollout")

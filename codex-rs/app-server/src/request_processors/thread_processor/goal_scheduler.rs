@@ -30,17 +30,16 @@ impl ThreadRequestProcessor {
             )));
         }
 
-        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await {
-            if let Ok(thread) = self.thread_manager.get_thread(thread_id).await
-                && Arc::ptr_eq(&observed_thread, &thread)
-            {
-                self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
-                    .await?;
-                thread
-                    .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
-                    .await;
-                return Ok(());
-            }
+        if let Ok(observed_thread) = self.thread_manager.get_thread(thread_id).await
+            && let Ok(thread) = self.thread_manager.get_thread(thread_id).await
+            && Arc::ptr_eq(&observed_thread, &thread)
+        {
+            self.ensure_background_listener_for_thread(thread_id, Arc::clone(&thread))
+                .await?;
+            thread
+                .emit_thread_idle_lifecycle_if_idle(ThreadIdleCause::Completed)
+                .await;
+            return Ok(());
         }
 
         let thread_id_string = thread_id.to_string();

@@ -1547,7 +1547,7 @@ mod tests {
             })
             .await
             .expect("set workspace metadata")
-            .expect("local store returns updated thread");
+            .expect("workspace metadata update should return the thread");
 
         assert_eq!(thread.cwd, worktree_cwd);
         assert_eq!(

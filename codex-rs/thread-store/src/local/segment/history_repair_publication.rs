@@ -303,7 +303,7 @@ impl ConfinedRepairAuthority {
         #[cfg(all(test, unix))]
         if let Some(target) = CODEX_HOME_RETARGETS
             .lock()
-            .expect("CODEX_HOME retarget mutex")
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(codex_home)
         {
             use std::os::unix::fs::symlink;
@@ -356,7 +356,7 @@ pub(crate) fn clear_history_repair_segment_id(
     bytes: &[u8],
     segment_id: SegmentId,
 ) -> ThreadStoreResult<Vec<u8>> {
-    rewrite_physical_segment_id(bytes, segment_id, None)
+    rewrite_physical_segment_id(bytes, segment_id, /*replacement_segment_id*/ None)
 }
 
 /// Replaces the fixed-width persisted segment identity without changing any other byte.
@@ -495,7 +495,7 @@ async fn install_history_repair_segment_bytes(
         destination.as_path(),
         bytes,
         permissions,
-        None,
+        /*modified*/ None,
         &authority.root_identity,
     )
     .await;
@@ -1394,7 +1394,11 @@ fn clear_physical_segment_id(
     session_record: &[u8],
     segment_id: SegmentId,
 ) -> ThreadStoreResult<Vec<u8>> {
-    rewrite_physical_segment_id_record(session_record, segment_id, None)
+    rewrite_physical_segment_id_record(
+        session_record,
+        segment_id,
+        /*replacement_segment_id*/ None,
+    )
 }
 
 fn rewrite_physical_segment_id_record(

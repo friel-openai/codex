@@ -64,8 +64,6 @@ pub(crate) struct AgentMetadata {
     pub(crate) agent_path: Option<AgentPath>,
     pub(crate) agent_nickname: Option<String>,
     pub(crate) agent_role: Option<String>,
-    /// Whether this identity belongs to an ephemeral thread with no persisted ownership edge.
-    pub(crate) ephemeral: bool,
     pub(crate) last_task_message: Option<String>,
     /// Serializes loaded/cold transitions for this addressable agent. The lock lives with the
     /// registry entry so unloading the heavy `CodexThread` does not permit concurrent reloads.
@@ -242,41 +240,6 @@ impl AgentRegistry {
         subtree
     }
 
-    /// Return registered ephemeral descendants whose parent chain stays within `owned_thread_ids`.
-    pub(crate) fn registered_ephemeral_descendants_within(
-        &self,
-        owned_thread_ids: &HashSet<ThreadId>,
-    ) -> Vec<ThreadId> {
-        let active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut included = owned_thread_ids.clone();
-        let mut descendants = Vec::new();
-        loop {
-            let mut changed = false;
-            for metadata in active_agents.agent_tree.values() {
-                let (Some(thread_id), Some(parent_thread_id)) =
-                    (metadata.agent_id, metadata.parent_thread_id)
-                else {
-                    continue;
-                };
-                if metadata.ephemeral
-                    && included.contains(&parent_thread_id)
-                    && included.insert(thread_id)
-                {
-                    descendants.push(thread_id);
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        descendants.sort_by_key(ToString::to_string);
-        descendants
-    }
-
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
         max_threads: Option<usize>,
@@ -408,26 +371,6 @@ impl AgentRegistry {
         if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
             agent.evicted_environments = None;
         }
-    }
-
-    pub(crate) fn registered_path_prefix_thread_ids(
-        &self,
-        agent_path: &AgentPath,
-    ) -> Vec<ThreadId> {
-        let active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active_agents
-            .agent_tree
-            .iter()
-            .filter_map(|(registered_path, metadata)| {
-                let suffix = agent_path.as_str().strip_prefix(registered_path)?;
-                (suffix.is_empty() || suffix.starts_with('/'))
-                    .then_some(metadata.agent_id)
-                    .flatten()
-            })
-            .collect()
     }
 
     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {

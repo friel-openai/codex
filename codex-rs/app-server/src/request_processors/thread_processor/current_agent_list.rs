@@ -186,7 +186,7 @@ impl ThreadRequestProcessor {
                     sort_key,
                     sort_direction,
                     entry,
-                    false,
+                    /*inclusive*/ false,
                 )
             })
             .transpose()?;
@@ -199,7 +199,7 @@ impl ThreadRequestProcessor {
                     sort_key,
                     opposite_sort_direction(sort_direction),
                     entry,
-                    true,
+                    /*inclusive*/ true,
                 )
             })
             .transpose()?;

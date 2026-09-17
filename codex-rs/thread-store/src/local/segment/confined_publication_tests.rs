@@ -5,8 +5,8 @@ use tempfile::TempDir;
 
 use super::*;
 
-async fn reset_crash_injection() -> tokio::sync::MutexGuard<'static, ()> {
-    let guard = CRASH_TEST_LOCK.lock().await;
+async fn reset_crash_injection() -> tokio::sync::OwnedMutexGuard<()> {
+    let guard = std::sync::Arc::clone(&CRASH_TEST_LOCK).lock_owned().await;
     CRASH_BOUNDARIES
         .lock()
         .expect("confined crash boundary mutex")
@@ -156,7 +156,7 @@ async fn immutable_install_never_replaces_different_bytes_and_reuses_equal_bytes
             path.as_path(),
             b"bytes",
             permissions.clone(),
-            None,
+            /*modified*/ None,
         )
         .await
         .expect("install"),
@@ -168,15 +168,21 @@ async fn immutable_install_never_replaces_different_bytes_and_reuses_equal_bytes
             path.as_path(),
             b"bytes",
             permissions.clone(),
-            None,
+            /*modified*/ None,
         )
         .await
         .expect("reuse"),
         ConfinedInstallOutcome::Reused
     );
-    let error = install_confined_file(home.path(), path.as_path(), b"other", permissions, None)
-        .await
-        .expect_err("different existing bytes");
+    let error = install_confined_file(
+        home.path(),
+        path.as_path(),
+        b"other",
+        permissions,
+        /*modified*/ None,
+    )
+    .await
+    .expect_err("different existing bytes");
     assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
     assert_eq!(tokio::fs::read(path).await.expect("bytes"), b"bytes");
 }
@@ -203,7 +209,7 @@ async fn immutable_reuse_does_not_mutate_a_hard_link_target() {
         destination.as_path(),
         b"bytes",
         Permissions::from_mode(0o640),
-        None,
+        /*modified*/ None,
     )
     .await
     .expect("reuse equal hard-linked bytes without mutation");
@@ -249,7 +255,8 @@ async fn read_removes_a_crash_left_staged_entry_before_returning() {
     tokio::fs::write(path.as_path(), b"source")
         .await
         .expect("write source");
-    let confined = ConfinedParent::open(home.path(), path.as_path(), None).expect("open parent");
+    let confined = ConfinedParent::open(home.path(), path.as_path(), /*expected_root*/ None)
+        .expect("open parent");
     let staged = confined
         .create_stale_staged_for_test(b"stale repair")
         .expect("stage repair");
@@ -279,8 +286,18 @@ async fn staged_cleanup_is_scoped_to_one_destination() {
     tokio::fs::write(second_path.as_path(), b"second")
         .await
         .unwrap();
-    let first = ConfinedParent::open(home.path(), first_path.as_path(), None).unwrap();
-    let second = ConfinedParent::open(home.path(), second_path.as_path(), None).unwrap();
+    let first = ConfinedParent::open(
+        home.path(),
+        first_path.as_path(),
+        /*expected_root*/ None,
+    )
+    .unwrap();
+    let second = ConfinedParent::open(
+        home.path(),
+        second_path.as_path(),
+        /*expected_root*/ None,
+    )
+    .unwrap();
     let first_staged = first.create_stale_staged_for_test(b"first repair").unwrap();
     let second_staged = second
         .create_stale_staged_for_test(b"second repair")
