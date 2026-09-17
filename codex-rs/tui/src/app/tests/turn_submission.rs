@@ -283,7 +283,10 @@ async fn misalignment_policy_blocks_queued_turns_and_goal_resumption() -> Result
             parent_thread_id: thread_id,
             user_message: Some("Do not fork this stopped thread".into()),
         },
-        AppEvent::ForkCurrentSession { name: None },
+        AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        },
         AppEvent::StartManagedWorktree {
             mode: crate::app_event::ManagedWorktreeMode::Fork,
             name: None,

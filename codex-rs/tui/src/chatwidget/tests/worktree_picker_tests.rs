@@ -15,7 +15,10 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.dispatch_command(SlashCommand::Fork);
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::ForkCurrentSession { name: None })
+        Ok(AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        })
     );
     chat.dispatch_command(SlashCommand::New);
     assert_matches!(rx.try_recv(), Ok(AppEvent::NewSession { name: None }));
@@ -52,7 +55,10 @@ async fn slash_new_and_fork_offer_checkout_choices_inside_local_git_repository()
     chat.dispatch_command(SlashCommand::Fork);
     assert_matches!(
         rx.try_recv(),
-        Ok(AppEvent::ForkCurrentSession { name: None })
+        Ok(AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        })
     );
     for (available, snapshot) in [
         (false, "worktrees_command_remote"),

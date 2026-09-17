@@ -116,7 +116,7 @@ pub(super) async fn emit_applied(
 }
 
 /// Builds a current thread-owned snapshot for fork and compaction persistence.
-pub(super) async fn applied_event(session: &Session) -> EventMsg {
+pub(crate) async fn applied_event(session: &Session) -> EventMsg {
     EventMsg::ThreadSettingsApplied(ThreadSettingsAppliedEvent {
         thread_id: Some(session.thread_id()),
         thread_settings: session.thread_settings_snapshot().await,
