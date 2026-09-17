@@ -6460,14 +6460,33 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
 
 #[tokio::test]
 async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
+    assert_compacted_history_freezes_the_previous_rollout_segment(false).await;
+}
+
+#[tokio::test]
+async fn replace_compacted_history_freezes_the_previous_rollout_segment_with_thread_owned_guardian()
+{
+    assert_compacted_history_freezes_the_previous_rollout_segment(true).await;
+}
+
+async fn assert_compacted_history_freezes_the_previous_rollout_segment(
+    thread_owned_guardian: bool,
+) {
     let (mut session, turn_context, _) = make_session_and_context_with_auth_and_config_and_rx(
         CodexAuth::from_api_key("Test API Key"),
         Vec::new(),
         |config| {
-            config
-                .features
-                .enable(Feature::GuardianThreadContext)
-                .expect("enable thread-owned Guardian context");
+            if thread_owned_guardian {
+                config
+                    .features
+                    .enable(Feature::GuardianThreadContext)
+                    .expect("enable thread-owned Guardian context");
+            } else {
+                config
+                    .features
+                    .disable(Feature::GuardianThreadContext)
+                    .expect("disable thread-owned Guardian context");
+            }
         },
     )
     .await;
@@ -6475,37 +6494,55 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
     let expected_world_state = world_state.snapshot();
     let session = Arc::get_mut(&mut session).expect("session should have one owner");
     let stable_path = attach_thread_persistence(session).await;
+    let retained_answer = codex_history::RetainedContextEvent::VerifiedAnswer {
+        answer: codex_history::VerifiedAnswer {
+            turn_id: "retained-turn".to_owned(),
+            call_id: "ask-before-compaction".to_owned(),
+            questions: vec![codex_history::VerifiedQuestionAnswer {
+                question: "Publish?".to_owned(),
+                answer: "Only privately.".to_owned(),
+            }],
+        },
+        acceptance_order: Some(1),
+    };
     session
-        .record_retained_context(codex_history::RetainedContextEvent::VerifiedAnswer {
-            answer: codex_history::VerifiedAnswer {
-                turn_id: "retained-turn".to_owned(),
-                call_id: "ask-before-compaction".to_owned(),
-                questions: vec![codex_history::VerifiedQuestionAnswer {
-                    question: "Publish?".to_owned(),
-                    answer: "Only privately.".to_owned(),
-                }],
-            },
-            acceptance_order: Some(1),
-        })
+        .record_retained_context(retained_answer.clone())
         .await;
-    let expected_retained_context = session
-        .state
-        .lock()
-        .await
-        .history
-        .retained_context()
-        .clone();
+    let user_item_id = ResponseItemId::with_suffix("msg", "before-compaction");
+    let mut user_item = user_message("before compaction");
+    user_item.set_id(Some(user_item_id.clone()));
+    let mut expected_retained_context = codex_history::RetainedContext::default();
+    expected_retained_context.record(&retained_answer);
+    if thread_owned_guardian {
+        expected_retained_context.record_user_message(
+            codex_history::RetainedUserMessage {
+                turn_id: turn_context.sub_id.clone(),
+                message_id: Some(user_item_id.as_str().to_owned()),
+                text: "before compaction".to_owned(),
+                complete: false,
+            },
+            codex_history::RetainedInputSource::Local(None),
+        );
+    } else {
+        expected_retained_context.mark_user_messages_incomplete();
+    }
     session
         .record_conversation_items(
             turn_context.as_ref(),
-            &[
-                user_message("before compaction"),
-                assistant_message("before compaction answer"),
-            ],
+            &[user_item, assistant_message("before compaction answer")],
         )
         .await;
-    let guardian_checkpoint =
-        codex_history::GuardianHistoryCheckpoint(raw_history_items(&session.clone_history().await));
+    assert_eq!(
+        session.state.lock().await.history.retained_context(),
+        &expected_retained_context,
+    );
+    let guardian_checkpoint = if thread_owned_guardian {
+        None
+    } else {
+        Some(codex_history::GuardianHistoryCheckpoint(raw_history_items(
+            &session.clone_history().await,
+        )))
+    };
     session
         .flush_rollout()
         .await
@@ -6570,7 +6607,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         RolloutItem::Compacted(item) => item.guardian_history.clone(),
         _ => None,
     });
-    assert_eq!(persisted_guardian, Some(guardian_checkpoint.clone()));
+    assert_eq!(persisted_guardian, guardian_checkpoint.clone());
     assert!(replacement_items.iter().any(|item| {
         matches!(
             item,
@@ -6603,7 +6640,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
                         .metadata
                         .as_ref()
                         .and_then(|metadata| metadata.compaction_model_hash.as_deref())
-                        == Some("test-compaction-model-hash")
+                        == thread_owned_guardian.then_some("test-compaction-model-hash")
             })
     );
     assert!(replacement_items.iter().any(|item| {
@@ -6677,7 +6714,7 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         Some(expected_world_state)
     );
     assert_eq!(reconstructed.retained_context, expected_retained_context);
-    assert_eq!(reconstructed.guardian_history, Some(guardian_checkpoint));
+    assert_eq!(reconstructed.guardian_history, guardian_checkpoint);
 }
 
 #[tokio::test]

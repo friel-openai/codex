@@ -17,7 +17,6 @@ use crate::session::turn_input;
 use crate::config::Config;
 use crate::context::ContextualUserFragment;
 use crate::context::GuardianApprovedAction;
-use crate::context::NodeReplReviewEvidence;
 use crate::review_prompts::resolve_review_request;
 use crate::session::spawn_review_thread;
 use crate::tasks::CompactTask;
@@ -333,14 +332,6 @@ pub async fn thread_rollback(sess: &Arc<Session>, sub_id: String, num_turns: u32
         .into_iter()
         .chain(std::iter::once(RolloutItem::EventMsg(rollback_msg.clone())))
         .collect::<Vec<_>>();
-    sess.services
-        .thread_extension_data
-        .remove::<NodeReplReviewEvidence>();
-    sess.guardian_review_session.invalidate().await;
-    sess.services
-        .agent_control
-        .rollout_budget()
-        .rearm_reminder(sess.thread_id());
     sess.complete_thread_rollback(
         turn_context,
         replay_items,
