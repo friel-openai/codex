@@ -1150,6 +1150,7 @@ impl RolloutRecorder {
         trace!("Resuming rollout from {path:?}");
         let mut lines: Vec<RolloutLine> = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
+        let mut history_mode: Option<ThreadHistoryMode> = None;
         let mut parse_errors = 0usize;
         let mut reader = compression::open_rollout_line_reader(path).await?;
         let mut saw_non_empty_line = false;
@@ -1161,7 +1162,27 @@ impl RolloutRecorder {
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(e) => {
-                    warn!("failed to parse line as JSON: {line:?}, error: {e}");
+                    if history_mode == Some(ThreadHistoryMode::Legacy)
+                        && let Some(recovered) = crate::recover_legacy_jsonl_suffix(line.as_bytes())
+                    {
+                        let recovered_record_count = recovered.values.len();
+                        let recovered_lines = recovered
+                            .values
+                            .into_iter()
+                            .map(Self::parse_rollout_line_value)
+                            .collect::<Result<Vec<_>, _>>();
+                        if let Ok(recovered_lines) = recovered_lines {
+                            warn!(
+                                path = %path.display(),
+                                discarded_prefix_bytes = recovered.discarded_prefix_bytes,
+                                recovered_record_count,
+                                "recovered complete legacy rollout records after an invalid JSON prefix"
+                            );
+                            lines.extend(recovered_lines.into_iter().flatten());
+                            continue;
+                        }
+                    }
+                    warn!(path = %path.display(), error = %e, "failed to parse rollout line as JSON");
                     parse_errors = parse_errors.saturating_add(1);
                     continue;
                 }
@@ -1202,6 +1223,7 @@ impl RolloutRecorder {
                 && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
             {
                 thread_id = Some(session_meta_line.meta.id);
+                history_mode = Some(session_meta_line.meta.history_mode);
             }
             lines.push(rollout_line);
         }
