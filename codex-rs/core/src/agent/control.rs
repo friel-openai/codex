@@ -30,6 +30,7 @@ use arc_swap::ArcSwapOption;
 use codex_history::InitialHistory;
 use codex_history::ResumedHistory;
 use codex_history::RolloutItem;
+use codex_mcp::McpConnectionPool;
 use codex_protocol::AgentPath;
 use codex_protocol::SessionId;
 use codex_protocol::ThreadId;
@@ -181,6 +182,8 @@ pub(crate) struct AgentControl {
     pub(super) state: Arc<AgentRegistry>,
     agent_residency: Arc<AgentResidency>,
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
+    /// MCP processes shared by the root agent and descendants with compatible startup inputs.
+    mcp_connection_pool: McpConnectionPool,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
     /// The user-selected root routing tier, shared by the entire agent tree.
@@ -250,6 +253,7 @@ impl AgentControl {
             state: Arc::default(),
             agent_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
+            mcp_connection_pool: McpConnectionPool::default(),
             rollout_budget: Arc::default(),
             root_service_tier: Arc::new(ArcSwapOption::from(None)),
         };
@@ -275,6 +279,10 @@ impl AgentControl {
 
     pub(crate) fn rollout_budget(&self) -> &RolloutBudget {
         self.rollout_budget.as_ref()
+    }
+
+    pub(crate) fn mcp_connection_pool(&self) -> &McpConnectionPool {
+        &self.mcp_connection_pool
     }
 
     /// Send rich user input items to an existing agent thread.
@@ -696,10 +704,8 @@ impl AgentControl {
                 .as_ref()
                 .map(|agent_path| agent_path.name().to_string())
                 .unwrap_or_else(|| member.thread_id.to_string());
-            let line = format_subagent_context_line(
-                reference.as_str(),
-                member.agent_nickname.as_deref(),
-            );
+            let line =
+                format_subagent_context_line(reference.as_str(), member.agent_nickname.as_deref());
             let next_count = rendered_count.saturating_add(1);
             let remaining_count = total_count.saturating_sub(next_count);
             let separator_bytes = usize::from(!rendered.is_empty());

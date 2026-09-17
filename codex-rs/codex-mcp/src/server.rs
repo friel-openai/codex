@@ -96,6 +96,7 @@ pub(crate) fn has_explicit_http_authorization(config: &McpServerConfig) -> bool 
 #[derive(Clone)]
 pub(crate) struct McpServerConnectionIdentity {
     auth: McpServerAuth,
+    server_name: String,
     transport: McpServerTransportConfig,
     environment_id: String,
     host_plugin_root: Option<PathUri>,
@@ -111,7 +112,9 @@ pub(crate) struct McpServerConnectionIdentity {
     codex_apps_cache_identity: Option<(PathBuf, ConnectorRuntimeContextKey)>,
     client_elicitation_capability: ElicitationCapability,
     client_mcp_extensions: ClientMcpExtensions,
+    effective_protocol_mode: Option<crate::McpProtocolMode>,
     agent_plugin: bool,
+    catalog_item_limit: usize,
 }
 
 impl McpServerConnectionIdentity {
@@ -131,6 +134,8 @@ impl McpServerConnectionIdentity {
         client_elicitation_capability: ElicitationCapability,
         client_mcp_extensions: ClientMcpExtensions,
         previous_identity: Option<&Self>,
+        effective_protocol_mode: Option<crate::McpProtocolMode>,
+        catalog_item_limit: usize,
     ) -> Self {
         let config = server.config();
         let valid_http_header_value = |value: &str| {
@@ -214,6 +219,7 @@ impl McpServerConnectionIdentity {
 
         Self {
             auth: config.auth.clone(),
+            server_name: server_name.to_string(),
             transport: config.transport.clone(),
             environment_id: config.environment_id.clone(),
             host_plugin_root: host_plugin_root.cloned(),
@@ -231,7 +237,9 @@ impl McpServerConnectionIdentity {
             codex_apps_cache_identity,
             client_elicitation_capability,
             client_mcp_extensions,
+            effective_protocol_mode,
             agent_plugin: server.is_agent_plugin(),
+            catalog_item_limit,
         }
     }
 
@@ -250,6 +258,7 @@ impl McpServerConnectionIdentity {
             (Some(_), None) | (None, Some(_)) => false,
         };
         self.auth == other.auth
+            && self.server_name == other.server_name
             && self.transport == other.transport
             && self.environment_id == other.environment_id
             && self.host_plugin_root == other.host_plugin_root
@@ -263,7 +272,9 @@ impl McpServerConnectionIdentity {
             && self.codex_apps_cache_identity == other.codex_apps_cache_identity
             && self.client_elicitation_capability == other.client_elicitation_capability
             && self.client_mcp_extensions == other.client_mcp_extensions
+            && self.effective_protocol_mode == other.effective_protocol_mode
             && self.agent_plugin == other.agent_plugin
+            && self.catalog_item_limit == other.catalog_item_limit
     }
 
     pub(crate) fn oauth_credentials(&self) -> Result<Option<&StoredOAuthTokens>, &String> {

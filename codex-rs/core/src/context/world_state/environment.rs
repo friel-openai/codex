@@ -430,7 +430,10 @@ pub(crate) struct EnvironmentsSnapshot {
     network: Option<String>,
     filesystem: Option<String>,
     subagents: Option<String>,
-    #[serde(default, skip_serializing_if = "EnvironmentSubagentsFormat::is_escaped_text")]
+    #[serde(
+        default,
+        skip_serializing_if = "EnvironmentSubagentsFormat::is_escaped_text"
+    )]
     subagents_format: EnvironmentSubagentsFormat,
 }
 

@@ -4,7 +4,7 @@ use super::*;
 
 pub(super) async fn route(
     router: ElicitationRequestRouter,
-    events: Option<Sender<Event>>,
+    send_event: Option<SendEvent>,
     authority: Arc<StdMutex<Option<ElicitationAuthority>>>,
     server_name: String,
     request: ElicitationRequest,
@@ -13,7 +13,7 @@ pub(super) async fn route(
         .lock()
         .ok()
         .and_then(|authority| authority.clone());
-    let Some(events) = events.filter(|_| !router.auto_deny()) else {
+    let Some(send_event) = send_event.filter(|_| !router.auto_deny()) else {
         return Ok(ElicitationResponse {
             action: ElicitationAction::Cancel,
             content: None,
@@ -36,18 +36,17 @@ pub(super) async fn route(
         .as_ref()
         .and_then(|authority| authority.lifecycle.as_ref())
         .map(ElicitationLifecycle::start);
-    events
-        .send(Event {
-            id: "mcp_elicitation_request".to_string(),
-            msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
-                turn_id: None,
-                server_name,
-                id: ProtocolRequestId::String(id),
-                request,
-            }),
-        })
-        .await
-        .context("failed to deliver user-verification request")?;
+    send_event(Event {
+        id: "mcp_elicitation_request".to_string(),
+        msg: EventMsg::ElicitationRequest(ElicitationRequestEvent {
+            turn_id: None,
+            server_name,
+            id: ProtocolRequestId::String(id),
+            request,
+        }),
+    })
+    .await
+    .context("failed to deliver user-verification request")?;
     receiver
         .await
         .context("user-verification response channel closed")

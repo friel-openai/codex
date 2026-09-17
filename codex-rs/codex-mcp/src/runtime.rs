@@ -10,6 +10,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::Weak;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -46,14 +47,17 @@ use tokio_util::sync::CancellationToken;
 
 use crate::McpConfig;
 use crate::binding::McpBinding;
-use crate::client_tool_catalog::ClientToolCatalogRevision;
 use crate::client_tool_catalog::CodexAppsToolSnapshot;
 use crate::connection_manager::McpConnectionSet;
+use crate::connection_manager::StableMcpBindingIdentity;
+use crate::connection_pool::McpConnectionPool;
+use crate::connection_pool::McpConnectionPoolMode;
 use crate::elicitation::ElicitationLifecycle;
 use crate::elicitation::ElicitationRequestRouter;
 use crate::elicitation::ElicitationReviewerHandle;
 use crate::event_stream::McpEventStreamOpener;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
+use crate::request_router::McpSessionRoute;
 use crate::resource_origin::ResourceOrigins;
 use crate::server::EffectiveMcpServer;
 use crate::tool_catalog_cache::McpToolCatalogCache;
@@ -78,6 +82,8 @@ pub struct McpRuntimeInput {
     pub submit_id: String,
     pub tx_event: Option<Sender<Event>>,
     pub startup_cancellation_token: CancellationToken,
+    pub connection_pool: McpConnectionPool,
+    pub connection_pool_mode: McpConnectionPoolMode,
     pub runtime_context: McpRuntimeContext,
     pub codex_apps_tools_cache: ConnectorRuntimeManager<ToolInfo>,
     pub tool_catalog_cache: McpToolCatalogCache,
@@ -99,6 +105,42 @@ pub struct McpRuntime {
     reconnect_pending: AtomicBool,
     elicitation_router: ElicitationRequestRouter,
     resource_origins: Mutex<ResourceOrigins>,
+    session_routes: Mutex<McpRuntimeRouteRegistry>,
+}
+
+/// Tracks every immutable session route published by one thread runtime.
+///
+/// Refreshes preserve prior routes so in-flight calls keep their original event and elicitation
+/// attribution. Thread shutdown closes all retained routes before retiring physical connections.
+struct McpRuntimeRouteRegistry {
+    shutting_down: bool,
+    live: Vec<Weak<McpSessionRoute>>,
+}
+
+impl McpRuntimeRouteRegistry {
+    fn new(initial: &Arc<McpSessionRoute>) -> Self {
+        Self {
+            shutting_down: false,
+            live: vec![Arc::downgrade(initial)],
+        }
+    }
+
+    fn register(&mut self, route: &Arc<McpSessionRoute>) -> bool {
+        self.live.retain(|route| route.upgrade().is_some());
+        if self.shutting_down {
+            route.close();
+            return false;
+        }
+        self.live.push(Arc::downgrade(route));
+        true
+    }
+
+    fn begin_shutdown(&mut self) -> Vec<Arc<McpSessionRoute>> {
+        self.shutting_down = true;
+        let routes = self.live.iter().filter_map(Weak::upgrade).collect();
+        self.live.clear();
+        routes
+    }
 }
 
 struct EventStreamCancellation {
@@ -115,11 +157,13 @@ struct PublishedMcpRuntime {
     plugins_available: bool,
     ready_selected_capability_roots: Vec<SelectedCapabilityRoot>,
     selected_environments: HashMap<String, Arc<Environment>>,
+    /// Prevents shutdown from racing with runtime-owned binding cache updates.
+    shutting_down: AtomicBool,
     cached_binding: Mutex<Option<CachedMcpBinding>>,
 }
 
 struct CachedMcpBinding {
-    catalog_revisions: HashMap<String, ClientToolCatalogRevision>,
+    identity: StableMcpBindingIdentity,
     binding: Arc<McpBinding>,
 }
 
@@ -177,15 +221,18 @@ impl McpRuntime {
     /// This is useful while constructing a thread that must publish a stable
     /// runtime handle before its full MCP inputs are available.
     pub fn empty(prefix_mcp_tool_names: bool) -> Self {
+        let connections = Arc::new(McpConnectionSet::empty(prefix_mcp_tool_names));
+        let session_route = connections.session_route();
         Self {
             current: ArcSwap::from_pointee(PublishedMcpRuntime {
-                connections: Arc::new(McpConnectionSet::empty(prefix_mcp_tool_names)),
+                connections,
                 config: None,
                 auth: None,
                 auth_token: None,
                 plugins_available: false,
                 ready_selected_capability_roots: Vec::new(),
                 selected_environments: HashMap::new(),
+                shutting_down: AtomicBool::new(false),
                 cached_binding: Mutex::new(None),
             }),
             event_stream_cancellation: Mutex::new(EventStreamCancellation {
@@ -196,6 +243,7 @@ impl McpRuntime {
             reconnect_pending: AtomicBool::new(false),
             elicitation_router: ElicitationRequestRouter::default(),
             resource_origins: Mutex::default(),
+            session_routes: Mutex::new(McpRuntimeRouteRegistry::new(&session_route)),
         }
     }
 
@@ -259,12 +307,15 @@ impl McpRuntime {
     }
 
     /// Reconciles configured servers and publishes their immutable runtime snapshot.
-    pub async fn replace(&self, input: McpRuntimeInput) {
+    pub async fn replace(&self, mut input: McpRuntimeInput) {
         let current = self.current.load_full();
         let mut reconnect = McpReconnectGuard {
             pending: &self.reconnect_pending,
             claimed: self.reconnect_pending.swap(false, Ordering::AcqRel),
         };
+        if reconnect.claimed {
+            input.connection_pool_mode = McpConnectionPoolMode::Replace;
+        }
         self.publish(
             input,
             (!reconnect.claimed).then_some(current.connections.as_ref()),
@@ -274,7 +325,8 @@ impl McpRuntime {
     }
 
     /// Starts fresh connections and returns their complete, refreshed Apps catalog.
-    pub async fn replace_fresh(&self, input: McpRuntimeInput) -> anyhow::Result<Vec<ToolInfo>> {
+    pub async fn replace_fresh(&self, mut input: McpRuntimeInput) -> anyhow::Result<Vec<ToolInfo>> {
+        input.connection_pool_mode = McpConnectionPoolMode::Replace;
         self.publish(input, /*previous*/ None).await;
         self.latest_hard_refresh_codex_apps_tools_cache().await
     }
@@ -287,6 +339,10 @@ impl McpRuntime {
         let plugins_available = input.plugins_available;
         let ready_selected_capability_roots = input.ready_selected_capability_roots.clone();
         let selected_environments = input.runtime_context.selected_environments.clone();
+        let previous = match input.connection_pool_mode {
+            McpConnectionPoolMode::Reuse => previous,
+            McpConnectionPoolMode::Replace => None,
+        };
         let connections = Arc::new(
             McpConnectionSet::new(
                 previous,
@@ -305,11 +361,7 @@ impl McpRuntime {
                         .source()
                         .is_host_owned_apps(CODEX_APPS_MCP_SERVER_NAME, registration.config())
                 });
-        let mut cancellation = self
-            .event_stream_cancellation
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        self.current.store(Arc::new(PublishedMcpRuntime {
+        let published = Arc::new(PublishedMcpRuntime {
             connections,
             config: Some(config),
             auth,
@@ -317,17 +369,38 @@ impl McpRuntime {
             plugins_available,
             ready_selected_capability_roots,
             selected_environments,
+            shutting_down: AtomicBool::new(false),
             cached_binding: Mutex::new(None),
-        }));
-        let _ = publish.send(true);
-        cancellation.event_server_available = hosted_event_server_retained;
-        if !hosted_event_server_retained {
-            cancellation
-                .cancel_event_streams_on_server_removal
-                .send_replace(());
-            if let Some(retained) = &cancellation.retained_subscription_cancellation {
-                retained.send_replace(());
+        });
+        let should_publish = {
+            let mut cancellation = self
+                .event_stream_cancellation
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut session_routes = self
+                .session_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if session_routes.register(&published.connections.session_route()) {
+                self.current.store(Arc::clone(&published));
+                let _ = publish.send(true);
+                cancellation.event_server_available = hosted_event_server_retained;
+                if !hosted_event_server_retained {
+                    cancellation
+                        .cancel_event_streams_on_server_removal
+                        .send_replace(());
+                    if let Some(retained) = &cancellation.retained_subscription_cancellation {
+                        retained.send_replace(());
+                    }
+                }
+                true
+            } else {
+                false
             }
+        };
+        if !should_publish {
+            published.connections.shutdown().await;
+            return;
         }
     }
 
@@ -362,17 +435,31 @@ impl McpRuntime {
         required_servers: &[String],
         required_plugins: &HashSet<String>,
     ) -> Option<Arc<McpBinding>> {
+        if current.shutting_down.load(Ordering::Acquire) {
+            return None;
+        }
         let config = Arc::clone(current.config.as_ref()?);
-        let stable_catalog_revisions = current.connections.stable_catalog_revisions().await;
-        if let Some(catalog_revisions) = &stable_catalog_revisions {
-            let cached = current
-                .cached_binding
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(cached) = cached.as_ref()
-                && &cached.catalog_revisions == catalog_revisions
+        let stable_identity = current.connections.stable_binding_identity().await;
+        if let Some(identity) = stable_identity.as_ref() {
+            let cached_binding = {
+                let cached = current
+                    .cached_binding
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if current.shutting_down.load(Ordering::Acquire) {
+                    None
+                } else {
+                    cached
+                        .as_ref()
+                        .filter(|cached| cached.identity == *identity)
+                        .map(|cached| Arc::clone(&cached.binding))
+                }
+            };
+            if let Some(cached_binding) = cached_binding
+                && current.connections.stable_binding_identity().await == Some(identity.clone())
+                && !current.shutting_down.load(Ordering::Acquire)
             {
-                return Some(Arc::clone(&cached.binding));
+                return Some(cached_binding);
             }
         }
 
@@ -387,25 +474,23 @@ impl McpRuntime {
                 )
                 .await,
         );
-        if let Some(catalog_revisions) = stable_catalog_revisions
-            && current
-                .connections
-                .stable_catalog_revisions()
-                .await
-                .as_ref()
-                == Some(&catalog_revisions)
+        if let Some(identity) = stable_identity
+            && current.connections.stable_binding_identity().await == Some(identity.clone())
         {
             let mut cached = current
                 .cached_binding
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if current.shutting_down.load(Ordering::Acquire) {
+                return Some(binding);
+            }
             if let Some(cached) = cached.as_ref()
-                && cached.catalog_revisions == catalog_revisions
+                && cached.identity == identity
             {
                 return Some(Arc::clone(&cached.binding));
             }
             *cached = Some(CachedMcpBinding {
-                catalog_revisions,
+                identity,
                 binding: Arc::clone(&binding),
             });
         }
@@ -690,7 +775,28 @@ impl McpRuntime {
     }
 
     pub async fn shutdown(&self) {
-        self.latest_connections().shutdown().await;
+        let (current, session_routes) = {
+            let mut registry = self
+                .session_routes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let current = self.current.load_full();
+            let session_routes = registry.begin_shutdown();
+            (current, session_routes)
+        };
+        current.shutting_down.store(true, Ordering::Release);
+        for session_route in session_routes {
+            session_route.close();
+        }
+        let cached_binding = current
+            .cached_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // A cached binding owns pooled connection leases, including retired generations.
+        // Release the runtime-owned binding before waiting for connection shutdown.
+        drop(cached_binding);
+        current.connections.shutdown().await;
     }
 }
 
@@ -900,6 +1006,45 @@ mod tests {
         assert!(!gate.wait().await);
     }
 
+    #[test]
+    fn runtime_route_registry_preserves_refreshes_and_closes_every_route_at_shutdown() {
+        let elicitation_requests = crate::elicitation::ElicitationRequestManager::new(
+            Arc::new(crate::mcp::tests::test_mcp_config(std::env::temp_dir())),
+            /*reviewer*/ None,
+            /*lifecycle*/ None,
+            crate::elicitation::ElicitationRequestRouter::default(),
+        );
+        let first = Arc::new(McpSessionRoute::new(
+            "first".to_string(),
+            elicitation_requests.clone(),
+            /*tx_event*/ None,
+        ));
+        let second = Arc::new(McpSessionRoute::new(
+            "second".to_string(),
+            elicitation_requests.clone(),
+            /*tx_event*/ None,
+        ));
+        let mut registry = McpRuntimeRouteRegistry::new(&first);
+
+        assert!(registry.register(&second));
+        assert!(!first.is_closed());
+        assert!(!second.is_closed());
+
+        for route in registry.begin_shutdown() {
+            route.close();
+        }
+        assert!(first.is_closed());
+        assert!(second.is_closed());
+
+        let late = Arc::new(McpSessionRoute::new(
+            "late".to_string(),
+            elicitation_requests,
+            /*tx_event*/ None,
+        ));
+        assert!(!registry.register(&late));
+        assert!(late.is_closed());
+    }
+
     #[tokio::test]
     async fn cached_bindings_follow_the_clients_catalog_revision() -> anyhow::Result<()> {
         let codex_home = tempfile::tempdir()?;
@@ -932,6 +1077,7 @@ mod tests {
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             selected_environments: HashMap::new(),
+            shutting_down: AtomicBool::new(false),
             cached_binding: Mutex::new(None),
         });
         let before = McpRuntime::binding_from_published_runtime(
@@ -997,6 +1143,7 @@ mod tests {
             plugins_available: false,
             ready_selected_capability_roots: Vec::new(),
             selected_environments: HashMap::new(),
+            shutting_down: AtomicBool::new(false),
             cached_binding: Mutex::new(None),
         });
         let first = McpRuntime::binding_from_published_runtime(
@@ -1017,6 +1164,7 @@ mod tests {
 
         let previous = Arc::into_inner(published).expect("published runtime has no other owners");
         let republished = Arc::new(PublishedMcpRuntime {
+            shutting_down: AtomicBool::new(false),
             cached_binding: Mutex::new(None),
             ..previous
         });
@@ -1028,6 +1176,102 @@ mod tests {
         .await
         .expect("republished binding");
         assert!(!Arc::ptr_eq(&first, &refreshed));
+    }
+
+    #[tokio::test]
+    async fn cached_binding_is_rebuilt_when_physical_identity_changes() {
+        let published = Arc::new(PublishedMcpRuntime {
+            connections: Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true)),
+            config: Some(Arc::new(crate::mcp::tests::test_mcp_config(
+                std::env::temp_dir(),
+            ))),
+            auth: None,
+            auth_token: None,
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            selected_environments: HashMap::new(),
+            shutting_down: AtomicBool::new(false),
+            cached_binding: Mutex::new(None),
+        });
+        let first = McpRuntime::binding_from_published_runtime(
+            Arc::clone(&published),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
+        )
+        .await
+        .expect("first binding");
+        published
+            .cached_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_mut()
+            .expect("first binding should be cached")
+            .identity = StableMcpBindingIdentity::for_test(vec![("server".to_string(), 1)]);
+
+        let replacement = McpRuntime::binding_from_published_runtime(
+            Arc::clone(&published),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
+        )
+        .await
+        .expect("replacement binding");
+        assert!(!Arc::ptr_eq(&first, &replacement));
+        let repeated = McpRuntime::binding_from_published_runtime(
+            published,
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
+        )
+        .await
+        .expect("repeated replacement binding");
+        assert!(Arc::ptr_eq(&replacement, &repeated));
+    }
+
+    #[tokio::test]
+    async fn shutting_down_runtime_does_not_return_or_cache_bindings() {
+        let published = Arc::new(PublishedMcpRuntime {
+            connections: Arc::new(McpConnectionSet::empty(/*prefix_mcp_tool_names*/ true)),
+            config: Some(Arc::new(crate::mcp::tests::test_mcp_config(
+                std::env::temp_dir(),
+            ))),
+            auth: None,
+            auth_token: None,
+            plugins_available: false,
+            ready_selected_capability_roots: Vec::new(),
+            selected_environments: HashMap::new(),
+            shutting_down: AtomicBool::new(false),
+            cached_binding: Mutex::new(None),
+        });
+        McpRuntime::binding_from_published_runtime(
+            Arc::clone(&published),
+            /*required_servers*/ &[],
+            /*required_plugins*/ &HashSet::new(),
+        )
+        .await
+        .expect("initial binding");
+
+        published.shutting_down.store(true, Ordering::Release);
+        published
+            .cached_binding
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+
+        assert!(
+            McpRuntime::binding_from_published_runtime(
+                Arc::clone(&published),
+                /*required_servers*/ &[],
+                /*required_plugins*/ &HashSet::new(),
+            )
+            .await
+            .is_none()
+        );
+        assert!(
+            published
+                .cached_binding
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
     }
 
     fn http_server(environment_id: &str) -> McpServerConfig {

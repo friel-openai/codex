@@ -3838,6 +3838,7 @@ dependencies = [
  "codex-utils-path-uri",
  "codex-utils-plugins",
  "futures",
+ "http 1.4.0",
  "insta",
  "lru",
  "pretty_assertions",
