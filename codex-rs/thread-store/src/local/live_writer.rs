@@ -184,6 +184,7 @@ pub(super) async fn resume_thread(
     } else {
         store.writer_lock_coordinator.acquire(params.thread_id)?
     };
+    super::segment::cleanup_stale_staged_rollouts(rollout_path.as_path()).await?;
     let cwd = params
         .metadata
         .cwd
@@ -784,10 +785,7 @@ pub(super) async fn sync_materialized_rollout_path(
         Ok(())
     }
     .await;
-    if let Err(err) = result {
-        warn!("failed to sync materialized rollout path for thread {thread_id}: {err}");
-    }
-    Ok(())
+    result
 }
 
 fn thread_store_io_error(err: std::io::Error) -> ThreadStoreError {
