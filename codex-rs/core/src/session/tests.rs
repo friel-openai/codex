@@ -1786,6 +1786,39 @@ exclude = ["SECRET_*", 17]
 }
 
 #[tokio::test]
+async fn refresh_runtime_config_resolves_updated_alias_without_mutating_captured_turn() {
+    let (session, _) = make_session_and_context().await;
+    let alias = codex_models_manager::CustomModelConfig {
+        model: "gpt-5.2".to_string(),
+        routing_profile: None,
+        model_context_window: Some(128_000),
+        model_auto_compact_token_limit: Some(100_000),
+        trust_candidate_constraints: false,
+    };
+    let mut config = (*session.get_config().await).clone();
+    config
+        .custom_models
+        .insert("local-alias".to_string(), alias);
+    session.refresh_runtime_config(config.clone()).await;
+    {
+        let mut state = session.state.lock().await;
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode =
+            settings
+                .collaboration_mode
+                .with_updates(Some("local-alias".to_string()), None, None);
+    }
+    let captured = session.new_default_turn().await;
+    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
+    config.custom_models.get_mut("local-alias").unwrap().model = "gpt-5.4".to_string();
+    session.refresh_runtime_config(config).await;
+    let refreshed = session.new_default_turn().await;
+    assert_eq!(refreshed.model_info().request_model_slug(), "gpt-5.4");
+    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
+    assert_eq!(refreshed.model_info().context_window, Some(128_000));
+}
+
+#[tokio::test]
 async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_health() {
     let (session, _turn_context) = make_session_and_context().await;
     let primary = codex_models_manager::ModelRoutingCandidate {
@@ -3209,12 +3242,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only() 
     let history_before_seed = session.state.lock().await.clone_history();
     assert_eq!(expected, raw_history_items(&history_before_seed));
 
+    // Rendering after persistence would deduplicate the newly inserted role
+    // prompt and would no longer describe this first context update.
+    let initial_context = build_initial_context(&session, &turn_context).await;
     let step_context = StepContext::for_test(Arc::clone(&turn_context));
     session
         .record_context_updates_and_set_reference_context_item(&step_context)
         .await
         .expect("world state should build");
-    let initial_context = build_initial_context(&session, &turn_context).await;
     expected.extend(initial_context);
     let history_after_seed = session.clone_history().await;
     assert_eq!(
@@ -3894,7 +3929,8 @@ disabled_tools = [
 
 #[tokio::test]
 async fn record_initial_history_reconstructs_forked_transcript() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let (rollout_items, expected) = sample_rollout(&session, &turn_context).await;
 
     session
@@ -4009,6 +4045,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
     let (mut child, _child_turn) = make_session_and_context().await;
     attach_thread_persistence(&mut child).await;
 
+    let guardian_checkpoint = codex_history::GuardianHistoryCheckpoint(vec![user_message(
+        "parent authorization retained outside model context",
+    )]);
+
     let source_turn = Arc::new(source_turn);
     let world_state = build_world_state_from_turn_context(&source, &source_turn).await;
     let source_response_items = Arc::new(vec![ResponseItemEnvelope {
@@ -4094,11 +4134,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             Arc::clone(&source_response_items),
             Some(reference_context_item.clone()),
         );
-        state.replace_shared_history(
-            Arc::clone(&source_response_items),
-            Some(reference_context_item.clone()),
-        );
         state.set_token_info(Some(authoritative_tokens.clone()));
+        state
+            .history
+            .restore_review_context(/*retained_context*/ None, Some(&guardian_checkpoint));
         state.set_rate_limits(authoritative_rate_limits.clone());
         state
             .history
@@ -4154,6 +4193,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         assert_eq!(child_state.auto_compact_window_number(), 7);
         assert_eq!(child_state.auto_compact_window_ids(), window_ids);
         assert_eq!(child_state.history.history_version(), 1);
+        assert_eq!(
+            child_state.history.guardian_history_checkpoint(),
+            Some(guardian_checkpoint.clone())
+        );
         assert!(
             child_state
                 .history
@@ -4173,6 +4216,14 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
+    let persisted_guardian = child_rollout_items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(item) => item.guardian_history.clone(),
+            _ => None,
+        });
+    assert_eq!(persisted_guardian, Some(guardian_checkpoint));
     assert!(child_rollout_items.iter().any(|item| {
         matches!(
             item,
@@ -4411,12 +4462,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
-    assert_eq!(
-        child_rollout_items
+    assert!(
+        matches!(child_rollout_items.first(), Some(RolloutItem::SessionMeta(meta))
+        if meta.meta.history_base.is_some())
+    );
+    assert!(
+        !child_rollout_items
             .iter()
-            .filter(|item| matches!(item, RolloutItem::RolloutReference(_)))
-            .count(),
-        1
+            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
     );
     let child_response_items = child_rollout_items
         .iter()
@@ -4667,7 +4720,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
     assert!(
         child_rollout_items
             .iter()
-            .any(|line| matches!(line.item, RolloutItem::RolloutReference(_)))
+            .any(|line| matches!(&line.item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some()))
     );
     assert!(
         child_rollout_items
@@ -4918,6 +4971,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
     let mut builder = test_codex().with_config(|config| {
         config.update_plan_enabled = true;
+        config
+            .features
+            .disable(Feature::AgentPromptInjection)
+            .unwrap();
+        config.features.disable(Feature::MultiAgentV2).unwrap();
+        config.features.disable(Feature::Collab).unwrap();
         config.permissions.approval_policy =
             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
     });
@@ -5010,7 +5069,8 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
 #[tokio::test]
 async fn record_initial_history_forked_hydrates_previous_turn_settings() {
-    let (session, turn_context) = make_session_and_context().await;
+    let (mut session, turn_context) = make_session_and_context().await;
+    attach_thread_persistence(&mut session).await;
     let previous_model = "forked-rollout-model";
     let previous_context_item = TurnContextItem {
         turn_id: Some(turn_context.sub_id.clone()),
@@ -6436,11 +6496,16 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         .retained_context()
         .clone();
     session
-        .persist_rollout_items(&[
-            RolloutItem::ResponseItem(user_message("before compaction").into()),
-            RolloutItem::ResponseItem(assistant_message("before compaction answer").into()),
-        ])
+        .record_conversation_items(
+            turn_context.as_ref(),
+            &[
+                user_message("before compaction"),
+                assistant_message("before compaction answer"),
+            ],
+        )
         .await;
+    let guardian_checkpoint =
+        codex_history::GuardianHistoryCheckpoint(raw_history_items(&session.clone_history().await));
     session
         .flush_rollout()
         .await
@@ -6501,6 +6566,11 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
             .expect("load replacement rollout");
     assert_eq!(replacement_thread_id, Some(session.thread_id));
     assert_eq!(parse_errors, 0);
+    let persisted_guardian = replacement_items.iter().rev().find_map(|item| match item {
+        RolloutItem::Compacted(item) => item.guardian_history.clone(),
+        _ => None,
+    });
+    assert_eq!(persisted_guardian, Some(guardian_checkpoint.clone()));
     assert!(replacement_items.iter().any(|item| {
         matches!(
             item,
@@ -6607,13 +6677,14 @@ async fn replace_compacted_history_freezes_the_previous_rollout_segment() {
         Some(expected_world_state)
     );
     assert_eq!(reconstructed.retained_context, expected_retained_context);
+    assert_eq!(reconstructed.guardian_history, Some(guardian_checkpoint));
 }
 
 #[tokio::test]
 async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
     let (mut session, turn_context, _) = make_session_and_context_with_rx().await;
     let session = Arc::get_mut(&mut session).expect("session should have one owner");
-    attach_in_memory_thread_store(session).await;
+    let store = attach_in_memory_thread_store(session).await;
     session
         .record_conversation_items(
             turn_context.as_ref(),
@@ -6625,7 +6696,22 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
         .await
         .expect("flush initial history");
     let state_before_compaction = session.state.lock().await.checkpoint_mutation_snapshot();
+    let guardian_before_compaction = session
+        .state
+        .lock()
+        .await
+        .history
+        .guardian_history_checkpoint();
     let prepared_window_advance = session.prepare_auto_compact_window_advance().await;
+    let history_params = codex_thread_store::LoadThreadHistoryParams {
+        thread_id: session.thread_id,
+        include_archived: false,
+    };
+    let stored_before = store
+        .load_history(history_params.clone())
+        .await
+        .expect("read initial storage");
+    store.fail_next_checkpoint(session.thread_id).await;
 
     session
         .replace_compacted_history(
@@ -6643,7 +6729,18 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
             },
         )
         .await
-        .expect_err("unsupported checkpoint persistence must not commit");
+        .expect_err("failed checkpoint persistence must not commit");
+    assert_eq!(
+        serde_json::to_value(
+            store
+                .load_history(history_params)
+                .await
+                .expect("read unchanged storage")
+        )
+        .unwrap(),
+        serde_json::to_value(stored_before).unwrap(),
+        "NotCommitted must leave every persisted record unchanged",
+    );
     assert!(
         session
             .state
@@ -6651,6 +6748,16 @@ async fn failed_compaction_restores_state_and_allows_persisted_continuation() {
             .await
             .has_same_checkpoint_mutation_state(&state_before_compaction),
         "NotCommitted must restore history, token state, settings, and window identity"
+    );
+    assert_eq!(
+        session
+            .state
+            .lock()
+            .await
+            .history
+            .guardian_history_checkpoint(),
+        guardian_before_compaction,
+        "failed first compaction must not create durable Guardian history"
     );
     assert!(!session.persistence_restart_required());
 
@@ -7669,12 +7776,13 @@ async fn compaction_checkpoint_waits_for_accepted_settings_persistence() {
     update.await.expect("accepted settings update");
     checkpoint
         .await
-        .expect("compaction checkpoint should commit");
+        .expect("checkpoint persists accepted settings");
 
     session.flush_rollout().await.expect("flush checkpoint");
-    let (items, _, _) = RolloutRecorder::load_rollout_items(&rollout_path)
-        .await
-        .expect("read persisted settings");
+    let items =
+        codex_rollout::materialize_rollout_items(&turn_context.config.codex_home, &rollout_path)
+            .await
+            .expect("read persisted settings");
     let snapshots = items
         .into_iter()
         .filter_map(|item| match item {
@@ -9635,8 +9743,8 @@ async fn queued_client_info_update_succeeds_after_compacted_checkpoint_commits()
                 /*reference_context_item*/ None,
                 /*world_state_baseline*/ None,
                 CompactedHistoryMetadata {
-                    message: "compacted summary".to_string(),
                     compaction_response_id: None,
+                    message: "compacted summary".to_string(),
                     compaction_model_hash: None,
                     prepared_window_advance,
                 },
@@ -13597,6 +13705,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
     assert!(rx.try_recv().is_err());
 }
 
+#[path = "late_steer_tests.rs"]
+mod late_steer_tests;
+
 async fn submit_steer_only(
     sess: &Arc<Session>,
     input: Vec<UserInput>,
@@ -14194,9 +14305,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
     );
 }
 
+#[test_case::test_case(MultiAgentVersion::V1, "user", TurnAborted::INTERRUPTED_GUIDANCE; "v1")]
+#[test_case::test_case(MultiAgentVersion::V2, "developer", TurnAborted::INTERRUPTED_DEVELOPER_GUIDANCE; "v2")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
-    let (sess, tc, rx) = make_session_and_context_with_rx().await;
+async fn abort_review_task_emits_exited_then_aborted_and_records_history(
+    version: MultiAgentVersion,
+    expected_role: &str,
+    expected_guidance: &str,
+) {
+    let (sess, mut tc, rx) = make_session_and_context_with_rx().await;
+    Arc::get_mut(&mut tc)
+        .expect("unshared test turn")
+        .multi_agent_version = version;
     let input = vec![TurnInput::UserInput {
         acceptance_order: None,
         content: vec![UserInput::Text {
@@ -14258,14 +14378,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
             let ResponseItem::Message { role, content, .. } = item else {
                 return false;
             };
-            if role != "user" {
+            if role != expected_role {
                 return false;
             }
             content.iter().any(|content_item| {
                 let ContentItem::InputText { text } = content_item else {
                     return false;
                 };
-                TurnAborted::matches_text(text)
+                TurnAborted::matches_text(text) && text.contains(expected_guidance)
             })
         }),
         "expected a model-visible turn aborted marker in history after interrupt"

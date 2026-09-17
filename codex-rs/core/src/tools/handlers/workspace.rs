@@ -658,6 +658,8 @@ mod tests {
                 history_mode: Default::default(),
                 subagent_history_start_ordinal: None,
                 history_base: None,
+                persistence_mode: Default::default(),
+                initial_rollout_ordinal: 0,
                 initial_window_id: "workspace-test-window".to_string(),
                 metadata: ThreadPersistenceMetadata {
                     cwd: Some(fixture.primary.as_path().to_path_buf()),

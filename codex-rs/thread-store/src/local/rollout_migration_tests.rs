@@ -1123,6 +1123,46 @@ async fn migration_skips_non_selected_reverted_rollout_and_projects_selected_rol
 }
 
 #[tokio::test]
+async fn migration_name_promotion_reuses_a_completed_batch_lookup() {
+    for batch_lookup_completed in [false, true] {
+        let home = TempDir::new().expect("create Codex home");
+        let thread_id = ThreadId::new();
+        write_rollout(
+            home.path(),
+            thread_id,
+            SessionSource::Cli,
+            vec![user_message("question")],
+        );
+        let store = indexed_store(home.path()).await;
+        let names = std::collections::HashMap::new();
+        codex_rollout::append_thread_name(home.path(), thread_id, "indexed name")
+            .await
+            .expect("append name after batch lookup");
+
+        store
+            .promote_legacy_name(thread_id, batch_lookup_completed.then_some(&names))
+            .await
+            .expect("promote legacy name");
+
+        let metadata = store
+            .state_db
+            .as_ref()
+            .expect("state db")
+            .get_thread(thread_id)
+            .await
+            .expect("read metadata")
+            .expect("thread");
+        assert_eq!(
+            (metadata.history_mode, metadata.name),
+            (
+                ThreadHistoryMode::Paginated,
+                (!batch_lookup_completed).then(|| "indexed name".to_string()),
+            ),
+        );
+    }
+}
+
+#[tokio::test]
 async fn migration_attributes_corrupt_reverted_filename_to_stable_thread_id() {
     let home = TempDir::new().expect("create Codex home");
     let thread_id = ThreadId::new();
@@ -6357,14 +6397,34 @@ async fn migration_preserves_filtered_cross_thread_immutable_reference() {
         .join(parent_id.to_string())
         .join(parent_segment_id.to_string())
         .join(format!("rollout-2025-01-03T11-00-00-{parent_id}.jsonl"));
+    let version_context = bounded_subagent_items(home.path())
+        .into_iter()
+        .find_map(|item| {
+            if let RolloutItem::TurnContext(mut context) = item {
+                context.multi_agent_version = Some(codex_protocol::protocol::MultiAgentVersion::V1);
+                Some(RolloutItem::TurnContext(context))
+            } else {
+                None
+            }
+        })
+        .expect("version context");
     write_legacy_segment(
         parent_path.as_path(),
         home.path(),
         parent_id,
         parent_segment_id,
         vec![
+            version_context,
             user_message("excluded parent marker"),
             user_message("included parent marker"),
+            RolloutItem::SessionMeta(SessionMetaLine {
+                meta: SessionMeta {
+                    id: parent_id,
+                    multi_agent_version: Some(codex_protocol::protocol::MultiAgentVersion::V2),
+                    ..SessionMeta::default()
+                },
+                git: None,
+            }),
         ],
     );
     let child_id = ThreadId::new();
@@ -6422,6 +6482,31 @@ async fn migration_preserves_filtered_cross_thread_immutable_reference() {
     assert!(json.contains("excluded parent marker"));
     assert!(!json.contains("included parent marker"), "{json}");
     assert!(json.contains("child marker"));
+    let items = materialized
+        .into_iter()
+        .map(|line| line.item)
+        .collect::<Vec<_>>();
+    let metadata = items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::SessionMeta(meta) => Some((meta.meta.id, meta.meta.multi_agent_version)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(metadata, vec![(child_id, None)]);
+    // Folding the parent's later V2 update into its migrated header must not
+    // change the child's V1 context selected before the fork cutoff.
+    let context_versions = items
+        .iter()
+        .filter_map(|item| match item {
+            RolloutItem::TurnContext(context) => Some(context.multi_agent_version),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        context_versions,
+        vec![Some(codex_protocol::protocol::MultiAgentVersion::V1)]
+    );
     assert_eq!(
         [
             fs::read(parent_path).expect("reread parent source"),

@@ -369,6 +369,8 @@ fn merge_current_agent_live_thread(
     thread.session_id.clone_from(&fallback_thread.session_id);
     thread.ephemeral = fallback_thread.ephemeral;
     thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
+    thread.model = fallback_thread.model;
+    thread.reasoning_effort = fallback_thread.reasoning_effort;
     thread
 }
 

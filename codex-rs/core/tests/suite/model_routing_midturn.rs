@@ -281,8 +281,30 @@ async fn steering_during_tool_wait_is_recorded_once_before_midturn_reroute() -> 
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -> Result<()> {
+#[test]
+fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -> Result<()> {
+    // `codex_arg0::arg0_dispatch_or_else` gives the top-level future and Tokio workers this
+    // stack budget. This integration test bypasses that entry point, so reproduce its runtime.
+    let test_thread = std::thread::Builder::new()
+        .name("steering-required-mcp-midturn-reroute".to_string())
+        .stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES)
+                .enable_all()
+                .build()?
+                .block_on(
+                    steering_required_mcp_survives_precaptured_step_and_midturn_reroute_inner(),
+                )
+        })?;
+    match test_thread.join() {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute_inner() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     const CALL_ID: &str = "routing-required-mcp-wait";

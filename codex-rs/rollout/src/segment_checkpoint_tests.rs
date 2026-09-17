@@ -28,6 +28,9 @@ use super::validated_segment_state_checkpoint;
 
 fn compacted() -> CompactedItem {
     CompactedItem {
+        compaction_response_id: None,
+        guardian_history: None,
+        latest_token_usage_record: None,
         message: "checkpoint".to_string(),
         replacement_history: Some(vec![ResponseItemEnvelope::new(ResponseItem::Message {
             id: None,

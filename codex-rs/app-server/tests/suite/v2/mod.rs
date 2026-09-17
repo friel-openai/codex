@@ -115,6 +115,7 @@ mod thread_membership_reconciliation;
 mod thread_memory_mode_set;
 mod thread_metadata_update;
 mod thread_name_websocket;
+mod thread_ownership_restoration;
 mod thread_queue;
 mod thread_read;
 mod thread_resume;

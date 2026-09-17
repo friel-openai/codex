@@ -381,7 +381,9 @@ async fn thread_list_relation_scopes_nested_ancestors_without_siblings() -> Resu
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri())
         .with_model("gpt-5.6-sol")
-        .with_extra_config("[features.multi_agent_v2]\nenabled = true")
+        .with_extra_config(
+            "[features.multi_agent_v2]\nenabled = true\nmax_concurrent_threads_per_session = 13",
+        )
         .write(codex_home.path())?;
     write_models_cache(codex_home.path())?;
     let mut mcp = TestAppServer::builder()

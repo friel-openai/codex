@@ -445,15 +445,13 @@ where
     }
     canonicalizer.reset_output_position();
     let start_ordinal = canonicalizer.next_ordinal();
-    let session_meta = codex_rollout::read_session_meta_line(source.path.as_path())
-        .await
-        .map_err(migration_error)?;
+    let metadata = super::session_metadata::canonical_session_meta(source.path.as_path()).await?;
     canonicalizer
         .write_segment_head_session_meta(
             RolloutLine {
                 timestamp: source.timestamp.clone(),
                 ordinal: None,
-                item: RolloutItem::SessionMeta(session_meta),
+                item: metadata.item,
             },
             history_base,
             target.segment_id,

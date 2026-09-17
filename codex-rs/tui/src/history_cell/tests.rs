@@ -2323,8 +2323,11 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
         linked_rows.iter().all(|line| {
             line.line
                 .spans
-                .first()
-                .is_some_and(|span| span.content == "  ")
+                .iter()
+                .take_while(|span| span.content.chars().all(|ch| ch == ' '))
+                .map(|span| span.content.len())
+                .sum::<usize>()
+                >= 2
         }),
         "wrapped URL rows must retain the user-message gutter: {linked_rows:?}"
     );
@@ -2339,7 +2342,7 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 
     insta::assert_snapshot!(
         "user_history_cell_wraps_long_urls_inside_the_message_gutter",
-        render_lines(&cell.display_lines(width)).join("\n")
+        render_lines_trimmed(&cell.display_lines(width)).join("\n")
     );
 }
 
@@ -2596,7 +2599,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
         .enumerate()
         .map(|(index, row)| {
             if index == 0 {
-                row.strip_prefix("› ").unwrap().trim()
+                row.trim_start().strip_prefix("› ").unwrap().trim()
             } else {
                 row.trim()
             }

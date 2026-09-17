@@ -306,6 +306,8 @@ struct LastResponse {
 
 #[derive(Debug, Clone)]
 pub(crate) struct ResponseContinuation {
+    // A previous response cannot be reused by a different Responses endpoint.
+    endpoint: ResponsesEndpoint,
     request: ResponsesApiRequest,
     last_response: LastResponse,
 }
@@ -402,7 +404,7 @@ impl WebsocketSession {
         let _ = tx_last_response.send(continuation.last_response);
         Self {
             connection: None,
-            endpoint: None,
+            endpoint: Some(continuation.endpoint),
             last_request: Some(continuation.request),
             last_response_rx: Some(rx_last_response),
             last_response_from_untraced_warmup: false,
@@ -1618,7 +1620,8 @@ impl ModelClientSession {
             } else if self.websocket_session.last_response_rx.is_none() {
                 self.websocket_session.last_request = None;
             }
-            self.websocket_session.last_response_rx = None;
+            // A new connection to the same endpoint may inherit a fork's completed response.
+            // Clearing its receiver here loses previous_response_id before the first request.
             self.websocket_session.last_response_from_untraced_warmup = false;
             let new_conn = match self
                 .client
@@ -2051,7 +2054,10 @@ impl ModelClientSession {
                 inference_trace_attempt,
                 Arc::clone(&self.client.state.provider),
                 Some(Arc::clone(&self.client.state)),
-                self.websocket_session.last_request.clone(),
+                self.websocket_session
+                    .last_request
+                    .clone()
+                    .map(|request| (endpoint, request)),
             );
             self.websocket_session.last_response_rx = Some(last_request_rx);
             return Ok(WebsocketStreamOutcome::Stream(stream));
@@ -2286,7 +2292,7 @@ fn map_response_stream(
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
     client_state: Option<Arc<ModelClientState>>,
-    request: Option<ResponsesApiRequest>,
+    request: Option<(ResponsesEndpoint, ResponsesApiRequest)>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>) {
     let codex_api::ResponseStream {
         rx_event,
@@ -2314,7 +2320,7 @@ fn map_response_events<S>(
     inference_trace_attempt: InferenceTraceAttempt,
     provider: SharedModelProvider,
     client_state: Option<Arc<ModelClientState>>,
-    request: Option<ResponsesApiRequest>,
+    request: Option<(ResponsesEndpoint, ResponsesApiRequest)>,
 ) -> (ResponseStream, oneshot::Receiver<LastResponse>)
 where
     S: futures::Stream<Item = std::result::Result<ResponseEvent, ApiError>>
@@ -2389,7 +2395,8 @@ where
                         response_id: response_id.clone(),
                         items_added: std::mem::take(&mut items_added),
                     };
-                    if let (Some(client_state), Some(request)) = (&client_state, &request)
+                    if let (Some(client_state), Some((endpoint, request))) =
+                        (&client_state, &request)
                         && !last_response.response_id.is_empty()
                     {
                         *client_state
@@ -2397,6 +2404,7 @@ where
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner) =
                             Some(ResponseContinuation {
+                                endpoint: *endpoint,
                                 request: request.clone(),
                                 last_response: last_response.clone(),
                             });

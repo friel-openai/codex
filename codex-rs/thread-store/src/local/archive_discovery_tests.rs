@@ -125,6 +125,118 @@ async fn archive_preserves_selected_alias_and_moves_owned_physical_rollouts_only
 }
 
 #[tokio::test]
+async fn archive_leaves_matching_filename_with_malformed_session_meta_untouched() {
+    let home = TempDir::new().expect("home");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+    let id = Uuid::from_u128(304);
+    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
+    let selected = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T12-00-00",
+        id,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("selected");
+    let selected_bytes = fs::read(&selected).expect("selected bytes");
+    let malformed_candidate =
+        codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
+            .expect("matching candidate path");
+    let malformed_bytes = br#"{"timestamp":"2025-01-03T11:59:59Z","type":"session_meta""#;
+    fs::write(&malformed_candidate, malformed_bytes).expect("malformed candidate");
+
+    store
+        .archive_thread(ArchiveThreadParams { thread_id })
+        .await
+        .expect("archive selected rollout");
+
+    let archived = home.path().join(ARCHIVED_SESSIONS_SUBDIR);
+    assert_eq!(
+        fs::read(archived.join(selected.file_name().expect("selected filename")))
+            .expect("archived selected bytes"),
+        selected_bytes
+    );
+    assert_eq!(
+        fs::read(&malformed_candidate).expect("unchanged malformed candidate"),
+        malformed_bytes
+    );
+    assert!(
+        !archived
+            .join(
+                malformed_candidate
+                    .file_name()
+                    .expect("malformed candidate filename")
+            )
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn archive_moves_sqlite_selected_damaged_alias_byte_for_byte() {
+    let home = TempDir::new().expect("home");
+    let config = test_config(home.path());
+    let state = codex_state::StateRuntime::init(
+        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
+        config.default_model_provider_id.clone(),
+    )
+    .await
+    .expect("state");
+    state
+        .mark_backfill_complete(/*last_watermark*/ None)
+        .await
+        .expect("backfill");
+    let store = LocalThreadStore::new(config.clone(), Some(state.clone()));
+    let id = Uuid::from_u128(305);
+    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
+    let selected = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T12-00-00",
+        id,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("selected");
+    let alias = selected.with_file_name(format!(
+        "rollout-2025-01-03T12-00-00-{}.jsonl",
+        ThreadId::new(),
+    ));
+    fs::rename(&selected, &alias).expect("alias selected rollout");
+    let damaged_bytes = br#"{"timestamp":"2025-01-03T12:00:00Z","type":"session_meta","payload":"#;
+    fs::write(&alias, damaged_bytes).expect("damage selected alias");
+    let metadata = codex_state::ThreadMetadataBuilder::new(
+        thread_id,
+        alias.clone(),
+        Utc::now(),
+        SessionSource::Cli,
+    )
+    .build(&config.default_model_provider_id);
+    state
+        .upsert_thread(&metadata)
+        .await
+        .expect("selected metadata");
+
+    store
+        .archive_thread(ArchiveThreadParams { thread_id })
+        .await
+        .expect("archive damaged selected alias");
+
+    let archived_path = home
+        .path()
+        .join(ARCHIVED_SESSIONS_SUBDIR)
+        .join(alias.file_name().expect("alias filename"));
+    assert!(!alias.exists());
+    assert_eq!(
+        fs::read(&archived_path).expect("archived damaged bytes"),
+        damaged_bytes
+    );
+    let updated = state
+        .get_thread(thread_id)
+        .await
+        .expect("metadata")
+        .expect("thread");
+    assert_eq!(updated.rollout_path, archived_path);
+    assert!(updated.archived_at.is_some());
+}
+
+#[tokio::test]
 async fn archive_restores_already_moved_rollouts_after_rename_failure() {
     let home = TempDir::new().expect("home");
     let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);

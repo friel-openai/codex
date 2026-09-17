@@ -191,7 +191,7 @@ impl ThreadRequestProcessor {
             .get_thread(source.thread_id)
             .await
             .map_err(handoff_error)?;
-        let settings = parent.config_snapshot().await;
+        let settings = parent.thread_settings_snapshot().await;
         let reservation: Box<dyn std::fmt::Debug + Send> = if params.ephemeral {
             // Context-only imports have no dependency on a source file, even if the source exits.
             prepared.history_base = None;

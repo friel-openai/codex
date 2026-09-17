@@ -656,13 +656,18 @@ fn reasoning_item(id: &str, text: &str) -> ResponseItem {
     }
 }
 
-#[test]
-fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() {
+#[test_case::test_case(ResponsesEndpoint::Responses)]
+#[test_case::test_case(ResponsesEndpoint::Guardian)]
+#[test_case::test_case(ResponsesEndpoint::GuardianClassifier)]
+fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest(
+    endpoint: ResponsesEndpoint,
+) {
     let user_message = user_message_item("hello");
     let old_reasoning = reasoning_item("rs-old", "old analysis");
     let latest_reasoning = reasoning_item("rs-latest", "latest analysis");
     let latest_message = output_message("msg-latest", "assistant output");
     let response_continuation = ResponseContinuation {
+        endpoint,
         request: ResponsesApiRequest {
             model: "gpt-test".to_string(),
             instructions: "base instructions".to_string(),
@@ -699,6 +704,19 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() 
         response_continuation.last_response.items_added,
         vec![latest_reasoning, latest_message]
     );
+    let mut websocket = super::WebsocketSession::from_response_continuation(response_continuation);
+    assert_eq!(websocket.endpoint, Some(endpoint));
+    assert!(websocket.connection.is_none());
+    assert_eq!(
+        websocket
+            .last_response_rx
+            .as_mut()
+            .expect("inherited response receiver")
+            .try_recv()
+            .expect("completed response")
+            .response_id,
+        "parent-resp"
+    );
 }
 
 #[test]
@@ -723,6 +741,7 @@ fn model_reroute_reset_discards_provider_route_segment_state() {
         access_programs: None,
     };
     let continuation = ResponseContinuation {
+        endpoint: codex_api::ResponsesEndpoint::Responses,
         request: request.clone(),
         last_response: LastResponse {
             response_id: "test-response".to_string(),

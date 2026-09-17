@@ -238,6 +238,120 @@ async fn reconstruct_history_uses_established_segment_state_checkpoint() {
     assert_eq!(reconstructed.window_number, 8);
 }
 
+#[test_case(false; "matching Guardian boundary")]
+#[test_case(true; "missing Guardian boundary clears evidence")]
+#[tokio::test]
+async fn checkpoint_only_rollback_preserves_model_history_without_removed_authorization(
+    missing_guardian_boundary: bool,
+) {
+    let (session, turn_context) = make_session_and_context().await;
+    let retained = vec![user_message("keep"), assistant_message("kept")];
+    let mut replacement = retained.clone();
+    replacement.extend([user_message("remove"), assistant_message("removed")]);
+    let mut guardian = retained.clone();
+    if !missing_guardian_boundary {
+        guardian.push(user_message("remove"));
+    }
+    guardian.push(assistant_message("authorization belonging to removed turn"));
+    let mut compacted = checkpoint_compacted(replacement);
+    compacted.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(guardian));
+    let mut items = CertifiedSegmentStateCheckpoint::new(
+        compacted,
+        None,
+        None,
+        None,
+        complete_thread_settings(),
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid cleared checkpoint")
+    .into_items();
+    items.insert(
+        0,
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                history_mode: ThreadHistoryMode::Paginated,
+                ..Default::default()
+            },
+            git: None,
+        }),
+    );
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(reconstructed.history, annotated(retained.clone()));
+    assert_eq!(
+        reconstructed.guardian_history,
+        Some(codex_history::GuardianHistoryCheckpoint(
+            if missing_guardian_boundary {
+                Vec::new()
+            } else {
+                retained
+            }
+        ))
+    );
+}
+
+#[tokio::test]
+async fn complete_history_rollback_does_not_restore_removed_checkpoint_authorization() {
+    let (session, turn_context) = make_session_and_context().await;
+    let retained = vec![
+        user_message("keep original"),
+        assistant_message("original answer"),
+    ];
+    let mut items = completed_user_turn_rollout(
+        turn_context.to_turn_context_item(),
+        retained
+            .iter()
+            .cloned()
+            .map(|item| RolloutItem::ResponseItem(item.into()))
+            .collect(),
+    );
+    let mut context = turn_context.to_turn_context_item();
+    context.turn_id = Some("removed-turn".to_string());
+    let mut compacted = checkpoint_compacted(vec![
+        user_message("rewritten retained turn"),
+        assistant_message("rewritten answer"),
+        user_message("remove"),
+        assistant_message("removed"),
+    ]);
+    compacted.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(vec![
+        assistant_message("authorization belonging only to removed checkpoint"),
+    ]));
+    let mut removed_items = vec![RolloutItem::ResponseItem(user_message("remove").into())];
+    removed_items.extend(
+        CertifiedSegmentStateCheckpoint::new(
+            compacted,
+            None,
+            None,
+            None,
+            complete_thread_settings(),
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+            },
+        )
+        .expect("valid cleared checkpoint")
+        .into_items(),
+    );
+    items.extend(completed_user_turn_rollout(context, removed_items));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(reconstructed.history, annotated(retained));
+    assert_eq!(reconstructed.guardian_history, None);
+}
+
 #[tokio::test]
 async fn cleared_segment_state_checkpoint_blocks_older_resume_metadata() {
     let (session, turn_context) = make_session_and_context().await;
@@ -1604,8 +1718,11 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
         .find_map(|(index, item)| {
             matches!(scan.push(item.clone()), ModelContextScanProgress::Complete).then_some(index)
         });
-    assert_eq!(cutoff, Some(latest_wake_start));
+    // Unmarked compactions still scan older records for sticky settings and usage, while
+    // discarding older model items once the replacement history has a complete baseline.
+    assert_eq!(cutoff, None);
     let bounded_items = scan.finish(session_meta);
+    assert!(bounded_items.len() <= rollout_items.len() - latest_wake_start + 1);
     let full = session
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;

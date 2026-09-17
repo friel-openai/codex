@@ -1,3 +1,4 @@
+use rmcp::model::ReadResourceRequestParams;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs;
@@ -66,6 +67,10 @@ fn configure_mcp_with_env_and_timeout(
     extra_env: HashMap<String, String>,
     tool_timeout_sec: Option<Duration>,
 ) {
+    config
+        .features
+        .disable(Feature::MultiAgentV2)
+        .expect("the default fixture calls multi_agent_v1 tools");
     config
         .features
         .enable(Feature::Collab)
@@ -286,9 +291,17 @@ async fn root_and_child_share_one_mcp_server_process() -> Result<()> {
 
     test.submit_turn(ROOT_PROMPT).await?;
 
-    assert_eq!(
-        process_label(&child_response, "child"),
-        process_label(&root_response, "root")
+    let child_labels = process_labels(&child_response, "child");
+    let root_labels = process_labels(&root_response, "root");
+    assert!(!child_labels.is_empty() && !root_labels.is_empty());
+    // The mock records before evaluating its route predicate, so concurrent
+    // requests may appear in both captures. They must all name one MCP process.
+    assert!(
+        child_labels
+            .iter()
+            .chain(&root_labels)
+            .all(|label| label == &root_labels[0]),
+        "child={child_labels:?}, root={root_labels:?}"
     );
     Ok(())
 }
@@ -1425,9 +1438,17 @@ async fn shared_server_lives_until_the_last_agent_shuts_down() -> Result<()> {
         .expect("child thread should be created")?;
     let child_thread = test.thread_manager.get_thread(child_thread_id).await?;
     let pid = wait_for_pid_file(&pid_file).await?;
-    assert_eq!(
-        process_label(&child_response, "child"),
-        process_label(&root_response, "root")
+    let child_labels = process_labels(&child_response, "child");
+    let root_labels = process_labels(&root_response, "root");
+    assert!(!child_labels.is_empty() && !root_labels.is_empty());
+    // Match recording happens before the route predicate, so concurrent requests can appear in
+    // both captures. Every observed request must still use the same physical MCP server.
+    assert!(
+        child_labels
+            .iter()
+            .chain(&root_labels)
+            .all(|label| label == &root_labels[0]),
+        "child={child_labels:?}, root={root_labels:?}"
     );
 
     child_thread.shutdown_and_wait().await?;

@@ -800,6 +800,15 @@ async fn record_snooze_action(session: &Arc<Session>, goal_id: &str, snoozed_sec
     .await;
 }
 
+#[cfg(test)]
+pub(crate) async fn record_snooze_action_for_test(
+    session: &Arc<Session>,
+    goal_id: &str,
+    snoozed_seconds: u64,
+) {
+    record_snooze_action(session, goal_id, snoozed_seconds).await;
+}
+
 async fn record_action(session: &Arc<Session>, action: SupervisorActionRecord) {
     reset_failure_backoff(session).await;
     *session.goal_supervisor_runtime.last_action.lock().await = Some(action);
@@ -917,6 +926,7 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
             }],
             Some(session_source),
             SpawnAgentOptions {
+                cyber_access_program: None,
                 fork_parent_spawn_call_id: None,
                 fork_mode: Some(SpawnAgentForkMode::FullHistory),
                 parent_thread_id: Some(session.thread_id),
@@ -924,7 +934,6 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
                 root_turn_id: None,
                 environments: None,
                 multi_agent_v2_usage_hints: None,
-                cyber_access_program: None,
                 initial_task_message: None,
             },
         )
@@ -952,7 +961,7 @@ pub(crate) async fn supervisor_continuity_context_item(
     session: &Arc<Session>,
     goal_id: &str,
     goal: &ThreadGoal,
-    source_items: &[RolloutItem],
+    last_parent_message_at: Option<i64>,
 ) -> RolloutItem {
     let previous_supervisor_action = session
         .goal_supervisor_runtime
@@ -961,10 +970,6 @@ pub(crate) async fn supervisor_continuity_context_item(
         .await
         .clone()
         .filter(|action| action.goal_id.as_deref() == Some(goal_id));
-    let last_parent_message_at = source_items.iter().rev().find_map(|item| match item {
-        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
-        _ => None,
-    });
     let snooze_records = session
         .goal_supervisor_runtime
         .snooze_records

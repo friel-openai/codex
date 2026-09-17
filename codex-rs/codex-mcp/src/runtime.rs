@@ -400,7 +400,6 @@ impl McpRuntime {
         };
         if !should_publish {
             published.connections.shutdown().await;
-            return;
         }
     }
 

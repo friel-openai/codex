@@ -56,9 +56,7 @@ pub(super) async fn update(
             })
             .await;
     } else if execution_settings(session).await != previous_execution_settings {
-        if let Some(active_turn) = session.active_turn.lock().await.as_mut() {
-            active_turn.execution_settings_refresh_requested = true;
-        }
+        // Persistent settings affect future turns. Active steps have a separate settings owner.
         crate::goal_supervisor::restart_active_helper_for_execution_settings_change(session).await;
     }
 }

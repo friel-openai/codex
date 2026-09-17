@@ -104,6 +104,8 @@ mod persisted_resume_approval_policy_tests {
 
     fn turn_context_item(turn_id: &str, approval_policy: AskForApproval) -> RolloutItem {
         RolloutItem::TurnContext(TurnContextItem {
+            root_turn_id: None,
+            cyber_access_program: None,
             turn_id: Some(turn_id.to_string()),
             root_turn_id: None,
             cwd: cwd(),

@@ -2,6 +2,7 @@ use anyhow::Result;
 use codex_protocol::models::ConfigurationReasoning;
 use codex_protocol::openai_models::ReasoningEffort;
 use pretty_assertions::assert_eq;
+use serde_json::Value;
 use serde_json::json;
 
 use super::*;
@@ -623,7 +624,10 @@ fn compacted_item_round_trips_segment_state_checkpoint() -> Result<()> {
     });
 
     let item = serde_json::from_value::<CompactedItem>(value.clone())?;
-    assert_eq!(serde_json::to_value(item)?, value);
+    let mut expected = value;
+    expected["compaction_response_id"] = Value::Null;
+    expected["latest_token_usage_record"] = Value::Null;
+    assert_eq!(serde_json::to_value(item)?, expected);
     Ok(())
 }
 

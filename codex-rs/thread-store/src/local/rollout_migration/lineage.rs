@@ -10,7 +10,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 
-use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_protocol::RolloutId;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
@@ -558,29 +557,29 @@ async fn initial_legacy_replay_positions(
         .await
         .map_err(migration_error)?;
     let timestamp = session_meta.meta.timestamp.clone();
-    let prefix = codex_rollout::materialize_rollout_lines_from(
-        codex_home,
-        vec![
-            RolloutLine {
-                timestamp: timestamp.clone(),
-                ordinal: None,
-                item: RolloutItem::SessionMeta(session_meta),
-            },
-            RolloutLine {
-                timestamp,
-                ordinal: None,
-                item: RolloutItem::RolloutReference(reference.clone()),
-            },
-        ],
-    )
-    .await
-    .map_err(migration_error)?;
-    let mut builder = ThreadHistoryBuilder::new();
-    for line in prefix {
-        if codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy) {
-            builder.handle_rollout_item(&line.item);
-        }
-    }
+    let prefix = codex_rollout::BoundedRolloutMaterializer::new(codex_home, &source.path)
+        .retaining_source_metadata()
+        .materialize_from(
+            vec![
+                RolloutLine {
+                    timestamp: timestamp.clone(),
+                    ordinal: None,
+                    item: RolloutItem::SessionMeta(session_meta),
+                },
+                RolloutLine {
+                    timestamp,
+                    ordinal: None,
+                    item: RolloutItem::RolloutReference(reference.clone()),
+                },
+            ],
+            /*ordinary_reference_limit*/ usize::MAX,
+        )
+        .await
+        .map_err(migration_error)?;
+    let builder = super::lineage_compatibility::replay_materialized_history(
+        prefix.lines.iter().map(|line| &line.item),
+        ThreadHistoryMode::Legacy,
+    );
     let source_line_index = u64::try_from(builder.next_legacy_rollout_index())
         .map_err(|_| migration_error("materialized reference prefix is too large"))?;
     let next_item_index = u64::try_from(builder.next_synthetic_item_index())

@@ -132,7 +132,9 @@ async fn thread_rollback_drops_last_turns_and_persists_to_rollout() -> Result<()
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(codex_features::Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())

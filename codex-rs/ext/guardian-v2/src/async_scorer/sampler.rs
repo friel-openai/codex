@@ -242,11 +242,9 @@ impl LunaSampler {
                 | ApiError::QuotaExceeded
                 | ApiError::UsageLimitReached(_)
                 | ApiError::UsageNotIncluded
-                | ApiError::UsageLimitReached(_)
                 | ApiError::RateLimit(_)
                 | ApiError::ModelUnavailable { .. }
                 | ApiError::InvalidRequest { .. }
-                | ApiError::ModelUnavailable { .. }
                 | ApiError::MisalignmentPolicyViolation { .. }
                 | ApiError::CyberPolicy { .. },
             ) => false,

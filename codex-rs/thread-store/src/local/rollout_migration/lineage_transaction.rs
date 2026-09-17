@@ -483,14 +483,8 @@ impl LocalThreadStore {
                     message: "selected rollout changed during lineage migration".to_string(),
                 });
             }
-            let legacy_name = super::super::helpers::distinct_thread_metadata_title(&current);
-            if !state_db
-                .mark_thread_paginated(journal.selected_thread_id, legacy_name.as_deref())
-                .await
-                .map_err(migration_error)?
-            {
-                return Err(migration_error("selected lineage thread is missing"));
-            }
+            self.promote_legacy_name(journal.selected_thread_id, None)
+                .await?;
             journal.advance(LineageMigrationPhase::Selected)?;
             write_lineage_migration_journal(journal_path, &journal).await?;
             tracing::info!(thread_id = %plan.selected_thread_id, phase = "publish_targets", elapsed_ms = started.elapsed().as_millis() as u64, "rollout migration phase complete");

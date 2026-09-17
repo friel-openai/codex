@@ -174,6 +174,25 @@ fn write_rollout(
     Ok(rollout_path.to_path_buf())
 }
 
+async fn add_scan_sentinel(config: &Config, search_term: &str) -> color_eyre::Result<ThreadId> {
+    let thread_id = ThreadId::new();
+    write_rollout(
+        config,
+        thread_id,
+        "2025-02-01T11:00:00Z",
+        "scan sentinel",
+        SessionSource::Cli,
+        ThreadHistoryMode::Legacy,
+    )?;
+    codex_rollout::append_thread_name(
+        config.codex_home.as_path(),
+        thread_id,
+        &format!("{search_term}-scan-sentinel"),
+    )
+    .await?;
+    Ok(thread_id)
+}
+
 #[tokio::test]
 async fn resolves_name_and_preview_from_server_list() -> color_eyre::Result<()> {
     let temp_dir = TempDir::new()?;
@@ -343,6 +362,77 @@ async fn rejects_duplicate_labels_across_server_pages() -> color_eyre::Result<()
             "Cannot verify a unique session label across server pages; matching session UUID: {}. Use it only if this is the session you want.",
             relevant_ids[1]
         )
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn recovers_legacy_index_name_without_requiring_sidecar_rewrite() -> color_eyre::Result<()> {
+    let temp_dir = TempDir::new()?;
+    let config = build_config(&temp_dir).await?;
+    let runtime = state_runtime(&config).await?;
+    let stale_id = ThreadId::new();
+    upsert_thread(
+        &runtime,
+        thread_metadata(
+            &config,
+            stale_id,
+            config
+                .codex_home
+                .join("missing-rollout.jsonl")
+                .to_path_buf(),
+            "saved-session",
+        ),
+    )
+    .await?;
+
+    let thread_id = ThreadId::new();
+    let rollout_path = write_rollout(
+        &config,
+        thread_id,
+        "2025-02-01T11:00:00Z",
+        "preview",
+        SessionSource::Cli,
+        ThreadHistoryMode::Legacy,
+    )?;
+    codex_rollout::append_thread_name(config.codex_home.as_path(), thread_id, "saved-session")
+        .await?;
+    let scan_sentinel_id = add_scan_sentinel(&config, "saved-session").await?;
+
+    let index_path = config.codex_home.join("session_index.jsonl");
+    let original_permissions = std::fs::metadata(&index_path)?.permissions();
+    let mut read_only_permissions = original_permissions.clone();
+    read_only_permissions.set_readonly(true);
+    std::fs::set_permissions(&index_path, read_only_permissions)?;
+    let target = lookup_name(
+        &config,
+        "saved-session",
+        &[SessionCollection::Active],
+        ThreadParamsMode::Embedded,
+        Some(&config.model_provider_id),
+    )
+    .await;
+    std::fs::set_permissions(&index_path, original_permissions)?;
+    let target = target?;
+
+    assert_eq!(
+        (
+            target.map(|thread| (thread.path, thread.id)),
+            runtime
+                .get_thread(thread_id)
+                .await
+                .map_err(std::io::Error::other)?
+                .map(|metadata| metadata.name.unwrap_or(metadata.title)),
+            runtime
+                .get_thread(scan_sentinel_id)
+                .await
+                .map_err(std::io::Error::other)?,
+        ),
+        (
+            Some((Some(rollout_path), thread_id.to_string())),
+            Some("saved-session".to_string()),
+            None,
+        ),
     );
     Ok(())
 }

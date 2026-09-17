@@ -69,6 +69,7 @@ mod reference_header_tests;
 mod rollback;
 mod rollback_plan;
 mod rollback_replay;
+mod session_metadata;
 mod single_manifest;
 mod startup;
 mod subagent;
@@ -264,6 +265,12 @@ impl RolloutMigrationFailure {
     }
 }
 
+impl From<ThreadStoreError> for RolloutMigrationFailure {
+    fn from(error: ThreadStoreError) -> Self {
+        Self::new(RolloutMigrationFailureReason::Unknown, error)
+    }
+}
+
 type ClassifiedMigrationResult<T> = Result<T, RolloutMigrationFailure>;
 
 fn with_failure_reason<T>(
@@ -388,7 +395,7 @@ impl LocalThreadStore {
                 .migrate_rollout_path(
                     path.clone(),
                     &options,
-                    &HashMap::new(),
+                    None,
                     &mut limiter,
                     admission,
                     Some(guard),
@@ -532,7 +539,7 @@ impl LocalThreadStore {
                 .migrate_rollout_path(
                     path,
                     &options,
-                    &legacy_names,
+                    Some(&legacy_names),
                     &mut limiter,
                     &mut MigrationAdmission::Manual,
                     job_guard,
@@ -556,7 +563,7 @@ impl LocalThreadStore {
         &self,
         mut path: PathBuf,
         options: &RolloutMigrationOptions,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
         admission: &mut MigrationAdmission,
         job_guard: Option<codex_rollout::RolloutMaintenanceJobGuard>,
@@ -657,6 +664,7 @@ impl LocalThreadStore {
                 .map_err(migration_error)?
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             // A stable thread can retain older physical rollouts after a revert. Migrating one of
             // those files would overwrite the selected thread's history mode and migration journal.
@@ -934,6 +942,7 @@ impl LocalThreadStore {
                 .map_err(migration_error)?
             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                 != codex_rollout::plain_rollout_path(path.as_path())
+            && !same_rollout_moved(&selected.rollout_path, &path).await
         {
             return Ok(None);
         }
@@ -1084,7 +1093,7 @@ impl LocalThreadStore {
         rollout_path: &Path,
         journal_path: &Path,
         kind: RolloutMigrationKind,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ClassifiedMigrationResult<()> {
         if let Some(state_db) = &self.state_db
@@ -1164,36 +1173,11 @@ impl LocalThreadStore {
         } else {
             rollout_path
         };
-        let source_file = with_failure_reason(
-            File::open(source_path).await.map_err(migration_error),
-            RolloutMigrationFailureReason::RolloutReadFailed,
+        let canonical_session_meta = with_failure_reason(
+            session_metadata::canonical_session_meta(source_path).await,
+            RolloutMigrationFailureReason::InvalidSessionMetadata,
         )?;
-        let mut source = BufReader::with_capacity(PROJECTION_BATCH_BYTES as usize, source_file);
-        let mut bytes = Vec::new();
-
-        // Paginated rollouts always keep their canonical SessionMeta at ordinal zero. Legacy
-        // readers tolerate a pre-header prefix, so find that metadata before replaying the source
-        // instead of buffering the prefix in memory.
-        let canonical_session_meta = loop {
-            let record = with_failure_reason(
-                read_rollout_record(&mut source, &mut bytes).await,
-                RolloutMigrationFailureReason::RolloutReadFailed,
-            )?
-            .ok_or_else(|| {
-                RolloutMigrationFailure::new(
-                    RolloutMigrationFailureReason::InvalidSessionMetadata,
-                    migration_error("rollout contains no session metadata"),
-                )
-            })?;
-            limiter.account(record.byte_count).await;
-            let Some(line) = record.line else {
-                continue;
-            };
-            if matches!(&line.item, RolloutItem::SessionMeta(_)) {
-                break line;
-            }
-        };
-        drop(source);
+        limiter.account(source_metadata.len()).await;
 
         let canonicalization_source = CanonicalizationSource {
             thread_id,
@@ -1502,7 +1486,7 @@ impl LocalThreadStore {
         thread_id: ThreadId,
         rollout_path: &Path,
         journal_path: &Path,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
         limiter: &mut RolloutMigrationRateLimiter,
     ) -> ThreadStoreResult<PathBuf> {
         let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
@@ -1616,7 +1600,7 @@ impl LocalThreadStore {
         &self,
         thread_id: ThreadId,
         journal_path: &Path,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
     ) -> ThreadStoreResult<()> {
         self.promote_legacy_name(thread_id, legacy_names).await?;
         tokio::fs::remove_file(journal_path)
@@ -1628,7 +1612,7 @@ impl LocalThreadStore {
     async fn promote_legacy_name(
         &self,
         thread_id: ThreadId,
-        legacy_names: &HashMap<ThreadId, String>,
+        legacy_names: Option<&HashMap<ThreadId, String>>,
     ) -> ThreadStoreResult<()> {
         if let Some(state_db) = &self.state_db {
             let metadata = state_db
@@ -1646,9 +1630,26 @@ impl LocalThreadStore {
             {
                 return Ok(());
             }
-            let legacy_name = distinct_thread_metadata_title(&metadata)
-                .or_else(|| legacy_names.get(&thread_id).cloned())
+            let mut legacy_name = distinct_thread_metadata_title(&metadata)
+                .or_else(|| {
+                    legacy_names
+                        .and_then(|names| names.get(&thread_id))
+                        .cloned()
+                })
                 .filter(|name| !name.trim().is_empty());
+            // A supplied batch already searched the index, including IDs without names.
+            if legacy_name.is_none()
+                && metadata
+                    .name
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty())
+                && legacy_names.is_none()
+            {
+                legacy_name =
+                    codex_rollout::find_thread_name_by_id(&self.config.codex_home, &thread_id)
+                        .await
+                        .map_err(migration_error)?;
+            }
             if !state_db
                 .mark_thread_paginated(thread_id, legacy_name.as_deref())
                 .await
@@ -1957,6 +1958,16 @@ async fn find_current_rollout_path(
         .find(|candidate| {
             codex_rollout::plain_rollout_path(candidate).file_name() == Some(file_name)
         }))
+}
+
+// Archiving changes the directory but not physical rollout identity. A still-present selected
+// file or a different filename means this is an older rollout, not the selected file moving.
+async fn same_rollout_moved(selected: &Path, candidate: &Path) -> bool {
+    codex_rollout::plain_rollout_path(selected).file_name()
+        == codex_rollout::plain_rollout_path(candidate).file_name()
+        && codex_rollout::existing_rollout_path(selected)
+            .await
+            .is_none()
 }
 
 fn matches_selection(selected: &[ThreadId], actual: Option<ThreadId>) -> bool {
