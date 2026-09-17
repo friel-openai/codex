@@ -62,6 +62,7 @@ use crate::tasks::emit_compact_metric;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
 use crate::tools::handlers::is_set_workspace_cwd_tool;
+use crate::tools::parallel::ToolCallResponse;
 use crate::tools::parallel::ToolCallRuntime;
 use crate::tools::registry::ToolArgumentDiffConsumer;
 use crate::tools::router::ToolSuggestCandidates;
@@ -2876,10 +2877,11 @@ async fn drain_in_flight(
     in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
     sess: Arc<Session>,
     turn_context: Arc<TurnContext>,
-) -> CodexResult<()> {
+) -> CodexResult<bool> {
+    let mut terminal_no_response = false;
     while let Some(res) = in_flight.next().await {
         match res {
-            Ok(envelope) => {
+            Ok(ToolCallResponse::Response(envelope)) => {
                 mark_thread_memory_mode_polluted_if_external_context(
                     sess.as_ref(),
                     turn_context.as_ref(),
@@ -2889,13 +2891,16 @@ async fn drain_in_flight(
                 sess.record_annotated_conversation_items(&turn_context, vec![envelope])
                     .await;
             }
+            Ok(ToolCallResponse::TerminalNoResponse) => {
+                terminal_no_response = true;
+            }
             Err(err) => {
                 error_or_panic(format!("in-flight tool future failed during drain: {err}"));
                 return Err(err);
             }
         }
     }
-    Ok(())
+    Ok(terminal_no_response)
 }
 
 fn assign_missing_streamed_response_item_id(
@@ -3744,10 +3749,14 @@ async fn try_run_sampling_request(
     if workspace_cwd_call_seen && tool_call_count != 1 {
         step_context.reject_context_transition_mixed_with_sibling_tool();
     }
-    if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await {
-        reroute_safe.store(false, Ordering::Relaxed);
-        return Err(err);
-    }
+    let terminal_no_response =
+        match drain_in_flight(&mut in_flight, sess.clone(), turn_context.clone()).await {
+            Ok(terminal_no_response) => terminal_no_response,
+            Err(err) => {
+                reroute_safe.store(false, Ordering::Relaxed);
+                return Err(err);
+            }
+        };
     drop(tool_blocking_timing_guard);
 
     if should_emit_token_count {
@@ -3756,6 +3765,10 @@ async fn try_run_sampling_request(
         // turn is waiting on the user. This also needs to happen before returning cancellation so
         // token usage already recorded from the completed response is still persisted.
         sess.send_token_count_event(&turn_context).await;
+    }
+
+    if terminal_no_response {
+        return Err(CodexErr::TurnAborted);
     }
 
     if cancellation_token.is_cancelled() {
