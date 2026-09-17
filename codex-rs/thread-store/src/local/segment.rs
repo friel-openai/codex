@@ -2024,23 +2024,21 @@ fn is_immutable_segment_path(
     thread_id: ThreadId,
     segment_id: Option<SegmentId>,
 ) -> bool {
-    if path.starts_with(
-        codex_home
-            .join(codex_rollout::SESSIONS_SUBDIR)
-            .join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR),
-    ) {
-        return true;
-    }
-    path.starts_with(
-        codex_home
-            .join(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
-            .join(thread_id.to_string())
-            .join(
-                segment_id
-                    .map(|segment_id| segment_id.to_string())
-                    .unwrap_or_else(|| "initial".to_string()),
-            ),
-    )
+    let native_directory =
+        Path::new(codex_rollout::SESSIONS_SUBDIR).join(codex_rollout::ROLLOUT_SEGMENTS_SUBDIR);
+    let rotated_directory = Path::new(codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR)
+        .join(thread_id.to_string())
+        .join(
+            segment_id
+                .map(|segment_id| segment_id.to_string())
+                .unwrap_or_else(|| "initial".to_string()),
+        );
+    let is_immutable = |home: &Path| {
+        path.starts_with(home.join(&native_directory))
+            || path.starts_with(home.join(&rotated_directory))
+    };
+    is_immutable(codex_home)
+        || std::fs::canonicalize(codex_home).is_ok_and(|home| is_immutable(&home))
 }
 
 fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenceItem) -> bool {
