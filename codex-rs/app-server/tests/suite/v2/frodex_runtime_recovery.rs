@@ -118,7 +118,7 @@ fn prepare_poisoned_rollout(codex_home: &Path) -> Result<(ThreadId, SegmentId, P
     let mut lines = std::fs::read(path.as_path())?
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line_bytes)
         .collect::<Result<Vec<_>, _>>()?;
     let segment_id = SegmentId::new();
     let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
@@ -171,6 +171,9 @@ fn find_agent_message<'a>(lines: &'a [RolloutLine], message_id: &str) -> &'a Res
             | RolloutItem::InterAgentCommunicationMetadata { .. }
             | RolloutItem::WorldState(_)
             | RolloutItem::SecurityRiskScore(_)
+            | RolloutItem::TokenUsageRecord(_)
+            | RolloutItem::RetainedContext(_)
+            | RolloutItem::RealtimeItem(_)
             | RolloutItem::RolloutReference(_) => None,
         })
         .expect("agent message must remain in repaired rollout")
@@ -180,7 +183,7 @@ fn parse_rollout(path: &Path) -> Result<Vec<RolloutLine>> {
     Ok(std::fs::read(path)?
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
-        .map(serde_json::from_slice::<RolloutLine>)
+        .map(codex_rollout::parse_rollout_line_bytes)
         .collect::<Result<Vec<_>, _>>()?)
 }
 

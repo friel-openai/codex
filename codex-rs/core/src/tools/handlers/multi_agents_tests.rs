@@ -425,7 +425,7 @@ async fn spawn_agent_service_tier_uses_root_preference_when_root_model_cannot_su
     let mut config = (*turn.config).clone();
     config.model = Some("gpt-5.4-mini".to_string());
     config.service_tier = Some(ServiceTier::Fast.request_value().to_string());
-    let manager = thread_manager();
+    let manager = thread_manager(&turn);
     let root = manager
         .start_thread(StartThreadOptions::new(config.clone()))
         .await
@@ -1661,7 +1661,7 @@ async fn multi_agent_v2_parent_target_prefers_an_owned_child_named_parent() {
         *thread_id == named_parent_thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.recipient == named_parent_path
             )
     }));
@@ -1845,7 +1845,7 @@ async fn multi_agent_v2_goal_supervisor_uses_separate_followup_contract_inner(
         *thread_id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == helper_path
                         && communication.recipient == AgentPath::root()
                         && communication.encrypted_content.is_none()
@@ -1885,7 +1885,7 @@ async fn multi_agent_v2_goal_supervisor_uses_separate_followup_contract_inner(
         *thread_id == root.thread_id
             && matches!(
                 op,
-                Op::InterAgentCommunication { communication }
+                Op::InterAgentCommunication { communication, .. }
                     if communication.author == helper_path
                         && communication.recipient == AgentPath::root()
                         && communication.encrypted_content.is_some()

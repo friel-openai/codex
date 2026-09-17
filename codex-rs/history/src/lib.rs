@@ -260,8 +260,12 @@ impl From<CompactedItem> for ResponseItem {
 
 /// One persisted rollout JSONL record.
 ///
-/// This intentionally does not implement Deserialize: JSONL readers must use
-/// codex_rollout's canonical parser so nested decimal values survive the flattened envelope.
+/// This type intentionally does not implement [`Deserialize`]. With
+/// `serde_json/arbitrary_precision`, Serde's buffering for the flattened `item` field can present
+/// decimal payload values as private number maps, which then fail with errors such as
+/// `invalid type: map, expected f64`. JSONL readers must use codex_rollout's canonical
+/// compatibility decoder, which removes the record envelope before decoding `item`.
+/// Do not add a derived or manual `Deserialize` implementation here.
 #[derive(Serialize, Clone, JsonSchema)]
 pub struct RolloutLine {
     pub timestamp: String,

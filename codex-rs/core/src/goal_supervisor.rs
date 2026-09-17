@@ -718,7 +718,10 @@ pub(crate) async fn snooze_supervisor_helper(
         /*trigger_turn*/ false,
     );
     let turn_context = session
-        .new_default_turn_with_sub_id(format!("goal-supervisor-snooze-{helper_thread_id}"))
+        .new_turn_with_default_settings(
+            format!("goal-supervisor-snooze-{helper_thread_id}"),
+            Default::default(),
+        )
         .await;
     let response_item: ResponseItem = communication.to_response_input_item().into();
     session
@@ -921,6 +924,7 @@ async fn spawn_supervisor_helper(session: &Session, goal: &ThreadGoal) -> anyhow
                 root_turn_id: None,
                 environments: None,
                 multi_agent_v2_usage_hints: None,
+                cyber_access_program: None,
                 initial_task_message: None,
             },
         )

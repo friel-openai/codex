@@ -475,8 +475,7 @@ pub(super) async fn start_recording_app_server_with_history(
     .await?;
 
     Ok((
-        AppServerSession::new(app_server, thread_params_mode)
-            .with_local_codex_home(&config.codex_home),
+        AppServerSession::new(app_server, thread_params_mode).with_startup_config(config),
         requests,
         proxy,
     ))

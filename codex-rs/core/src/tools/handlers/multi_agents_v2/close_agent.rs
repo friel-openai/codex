@@ -15,7 +15,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_close_agent_tool_v2()
     }
 
-    fn handle(&self, mut invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, mut invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move {
             let arguments = function_arguments(invocation.payload.clone())?;
             let args: CloseAgentArgs = parse_arguments(&arguments)?;

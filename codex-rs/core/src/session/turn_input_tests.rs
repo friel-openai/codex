@@ -854,8 +854,7 @@ async fn start_only_rejects_queue_only_mail_that_wakes_durable_sleep() {
                 "queued update".to_string(),
                 /*trigger_turn*/ false,
             ),
-            /*parent_turn_id*/ None,
-            /*root_turn_id*/ None,
+            TurnStartOptions::default(),
         )
         .await;
 

@@ -1340,6 +1340,7 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                segment_state_checkpoint: None,
             }),
         ],
     };
@@ -1563,6 +1564,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
                     window_id: Some(window_ids[window_number].to_string()),
                     compaction_response_id: None,
                     latest_token_usage_record: None,
+                    segment_state_checkpoint: None,
                 }),
                 RolloutItem::WorldState(WorldStateItem::full(object!({
                     "environment": {"window": window_number, "status": "starting"}

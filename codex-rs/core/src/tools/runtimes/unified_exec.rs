@@ -299,8 +299,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                     if routes_approval_policy_to_guardian(
                         ctx.step_context.settings.approval_policy(),
                         ctx.step_context.settings.approvals_reviewer(),
-                    )
-                        && network.remote_policy_decider().is_some()
+                    ) && network.remote_policy_decider().is_some()
                     {
                         let timeout = ctx
                             .session

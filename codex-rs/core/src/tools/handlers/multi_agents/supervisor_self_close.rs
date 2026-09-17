@@ -18,7 +18,10 @@ impl ToolExecutor<ToolInvocation> for Handler {
         create_supervisor_tools_namespace(vec![create_supervisor_close_self_tool()])
     }
 
-    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
+    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
+    where
+        ToolInvocation: 'a,
+    {
         Box::pin(async move { handle_close_self(invocation).await.map(boxed_tool_output) })
     }
 }
@@ -99,8 +102,12 @@ async fn handle_close_self(
                 parent_thread_id,
                 communication,
                 context,
-                Some(turn.sub_id.clone()),
-                turn.turn_metadata_state.root_turn_id(),
+                crate::TurnStartOptions {
+                    parent_turn_id: Some(turn.sub_id.clone()),
+                    root_turn_id: turn.turn_metadata_state.root_turn_id(),
+                    cyber_access_program: turn.cyber_access_program,
+                    ..Default::default()
+                },
             )
             .await
             .map_err(|err| collab_agent_error(parent_thread_id, err))?;
@@ -127,7 +134,7 @@ pub(crate) struct SupervisorSelfCloseResult {
 }
 
 impl ToolOutput for SupervisorSelfCloseResult {
-    fn log_preview(&self) -> String {
+    fn log_output(&self) -> String {
         tool_output_json_text(self, "close_self")
     }
 

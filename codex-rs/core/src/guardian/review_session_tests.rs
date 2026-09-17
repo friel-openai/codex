@@ -100,7 +100,8 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
                 prepared_window_advance,
             },
         )
-        .await;
+        .await
+        .expect("replacement checkpoint should persist");
     drop(gate);
 
     let ((outcome, _), submitted_text) = tokio::join!(review, async {

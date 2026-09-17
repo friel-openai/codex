@@ -35,6 +35,7 @@ pub(super) async fn update(
                     msg: EventMsg::Error(ErrorEvent {
                         message: error.to_string(),
                         codex_error_info: Some(CodexErrorInfo::Other),
+                        misalignment: None,
                     }),
                 })
                 .await;

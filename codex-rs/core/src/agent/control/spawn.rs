@@ -618,7 +618,8 @@ impl AgentControl {
             options.environments = inheritance
                 .environments
                 .as_ref()
-                .map(TurnEnvironmentSnapshot::to_spawn_selections);
+                .map(TurnEnvironmentSnapshot::to_spawn_selections)
+                .transpose()?;
         }
         let (session_source, mut agent_metadata) = match session_source {
             Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
@@ -860,6 +861,7 @@ impl AgentControl {
             .then_some(ThreadHistoryMode::Paginated);
 
         let mut supervisor_continuity_history = None;
+        let mut supervisor_model_history = None;
         let (
             selected_capability_roots,
             mut forked_rollout_items,
@@ -867,7 +869,7 @@ impl AgentControl {
             source_reservation,
         ) = match fork_mode {
             SpawnAgentForkMode::FullHistory => {
-                let (reference_history, logical_history, source_reservation) = state
+                let (reference_history, logical_history, model_history, source_reservation) = state
                     .reference_backed_full_history(parent_thread_id, config.codex_home.as_path())
                     .await?;
                 let selected_capability_roots = logical_history
@@ -881,6 +883,7 @@ impl AgentControl {
                     .unwrap_or_default();
                 if is_goal_supervisor_helper {
                     supervisor_continuity_history = Some(logical_history.clone());
+                    supervisor_model_history = Some(model_history);
                 }
                 let reference_rollout_items = reference_history.get_rollout_items().to_vec();
                 (
@@ -921,6 +924,7 @@ impl AgentControl {
                     truncate_rollout_to_last_n_fork_turns(parent_history, *last_n_turns);
                 if is_goal_supervisor_helper {
                     supervisor_continuity_history = Some(forked_rollout_items.clone());
+                    supervisor_model_history = Some(forked_rollout_items.clone());
                 }
                 if let Some(source_session_meta) = source_session_meta {
                     forked_rollout_items.insert(0, RolloutItem::SessionMeta(source_session_meta));
@@ -1159,11 +1163,12 @@ impl AgentControl {
                 forked_rollout_items.push(RolloutItem::ResponseItem(assignment.into()));
             }
         }
+        let mut supervisor_suffix = Vec::new();
         if is_goal_supervisor_helper {
             if let Some(role_prompt) =
                 crate::session::load_agent_role_prompt(&config, &session_source).await
             {
-                forked_rollout_items.push(RolloutItem::ResponseItem(
+                supervisor_suffix.push(RolloutItem::ResponseItem(
                     role_prompt_item(role_prompt).into(),
                 ));
             }
@@ -1175,7 +1180,7 @@ impl AgentControl {
             {
                 let goal_id = parent_goal.goal_id.clone();
                 let parent_goal = crate::goal_supervisor::protocol_goal_from_state(parent_goal);
-                forked_rollout_items.push(
+                supervisor_suffix.push(
                     crate::goal_supervisor::supervisor_continuity_context_item(
                         &parent_thread.session,
                         &goal_id,
@@ -1185,10 +1190,15 @@ impl AgentControl {
                     .await,
                 );
             }
-            forked_rollout_items.extend(
+            supervisor_suffix.extend(
                 self.supervisor_boot_context_items(state, parent_thread_id)
                     .await,
             );
+            forked_rollout_items.extend(supervisor_suffix.iter().cloned());
+            supervisor_model_history
+                .as_mut()
+                .expect("goal supervisor full-history forks retain a model history")
+                .append(&mut supervisor_suffix);
         }
         let mut thread_extension_init = ExtensionDataInit::new();
         thread_extension_init.insert(selected_capability_roots);
@@ -1205,11 +1215,20 @@ impl AgentControl {
             )
             .build();
 
+        let fork_startup_items = match supervisor_model_history {
+            Some(model_history) => {
+                crate::session::ForkStartupItems::with_model_history_override_and_tail(
+                    model_history,
+                    deferred_child_tail_items,
+                )
+            }
+            None => crate::session::ForkStartupItems::new(Vec::new(), deferred_child_tail_items),
+        };
         let result = state
             .fork_thread_with_source(
                 config.clone(),
                 InitialHistory::Forked(forked_rollout_items),
-                crate::session::ForkStartupItems::new(Vec::new(), deferred_child_tail_items),
+                fork_startup_items,
                 destination_history_mode,
                 self.clone(),
                 session_source,

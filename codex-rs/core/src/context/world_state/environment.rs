@@ -90,7 +90,9 @@ impl EnvironmentsState {
         multi_agent_version: MultiAgentVersion,
     ) -> Self {
         let format = match multi_agent_version {
-            MultiAgentVersion::V1 => EnvironmentSubagentsFormat::EscapedText,
+            MultiAgentVersion::Disabled | MultiAgentVersion::V1 => {
+                EnvironmentSubagentsFormat::EscapedText
+            }
             MultiAgentVersion::V2 => EnvironmentSubagentsFormat::TrustedAgentXml,
         };
         self.set_subagents(subagents, format);

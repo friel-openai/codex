@@ -1200,7 +1200,6 @@ async fn thread_start_system_ephemeral_stays_unpersisted_with_debug_materializat
                 ancestor_thread_id: None,
                 section_id: None,
                 originators: None,
-                project_id: None,
             })
             .await?;
         let ThreadListResponse { data, .. } =

@@ -1303,7 +1303,10 @@ async fn timed_out_child_resource_request_recovers_tree_without_late_elicitation
     let old_pid = wait_for_pid_file(&pid_file).await?;
 
     let error = child_thread
-        .read_mcp_resource(MCP_SERVER_NAME, MEMO_URI)
+        .read_mcp_resource(
+            MCP_SERVER_NAME,
+            codex_mcp::ReadResourceRequestParams::new(MEMO_URI),
+        )
         .await
         .expect_err("the delayed resource request should exceed its configured timeout");
     let error_chain = format!("{error:#}");

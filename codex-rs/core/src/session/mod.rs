@@ -609,6 +609,18 @@ impl ForkStartupItems {
         }
     }
 
+    /// Reuses a frozen parent model prefix while retaining child-owned startup items.
+    pub(crate) fn with_model_history_override_and_tail(
+        model_history_override: Vec<RolloutItem>,
+        tail: Vec<ResponseItem>,
+    ) -> Self {
+        Self {
+            tail,
+            model_history_override: Some(model_history_override),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn has_model_history_override(&self) -> bool {
         self.model_history_override.is_some()
     }
@@ -1989,10 +2001,13 @@ impl Session {
         rollout_items: &[RolloutItem],
         materialization: ForkedHistoryMaterialization,
     ) -> CodexResult<Vec<RolloutItem>> {
-        if !rollout_items
-            .iter()
-            .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
-        {
+        // Native full-history forks carry a history_base pointer, but resumed native history
+        // has already been reconstructed by the store. Only forks need native expansion here.
+        if !rollout_items.iter().any(|item| {
+            matches!(item, RolloutItem::RolloutReference(_))
+                || matches!(materialization, ForkedHistoryMaterialization::ModelContext)
+                    && matches!(item, RolloutItem::SessionMeta(meta) if meta.meta.history_base.is_some())
+        }) {
             return Ok(rollout_items.to_vec());
         }
         let (codex_home, history_mode) = {
@@ -2239,6 +2254,7 @@ impl Session {
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                    misalignment: None,
                 }),
             })
             .await;
@@ -2255,6 +2271,7 @@ impl Session {
                     message: "Thread persistence is in an indeterminate state. Restart this thread before rolling it back."
                         .to_string(),
                     codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                    misalignment: None,
                 }),
             })
             .await;
@@ -2322,6 +2339,7 @@ impl Session {
                             "The rollback was not applied because its current-state checkpoint could not be persisted. The original thread state was restored: {error}"
                         ),
                         codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        misalignment: None,
                     }),
                 })
                 .await;
@@ -2337,6 +2355,7 @@ impl Session {
                             "The rollback checkpoint may have committed, but Codex could not verify it. Restart this thread before continuing: {error}"
                         ),
                         codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        misalignment: None,
                     }),
                 })
                 .await;
@@ -2420,7 +2439,7 @@ impl Session {
                 .map(|snapshot| WorldStateItem::full(snapshot.into_object())),
             state.reference_context_item(),
             ThreadSettingsAppliedEvent {
-                thread_id: self.conversation_id,
+                thread_id: Some(self.thread_id()),
                 thread_settings: state
                     .session_configuration
                     .thread_settings_snapshot(&self.services.turn_environments.selections()),
@@ -4770,7 +4789,7 @@ impl Session {
                     realtime_active: settings.realtime_active,
                 });
         let thread_settings = ThreadSettingsAppliedEvent {
-            thread_id: self.conversation_id,
+            thread_id: Some(self.thread_id()),
             thread_settings: state
                 .session_configuration
                 .thread_settings_snapshot(&self.services.turn_environments.selections()),
@@ -4833,11 +4852,13 @@ impl Session {
             None => self.persist_rollout_items(&replacement_items).await,
         }
         state.queue_pending_session_start_source(codex_hooks::SessionStartSource::Compact);
-        drop(state);
         if persisted_checkpoint {
+            // A settings update queued behind `state` must not observe the restart fence after
+            // checkpoint publication has committed. Clear the fence before releasing `state`.
             self.persistence_restart_required
                 .store(false, Ordering::Release);
         }
+        drop(state);
         if let Some(token_count) = recomputed_token_count {
             self.send_event_raw_with_persistence(
                 Event {
