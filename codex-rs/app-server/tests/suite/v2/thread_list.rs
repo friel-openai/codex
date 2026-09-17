@@ -1043,7 +1043,6 @@ sqlite = true
     Ok(())
 }
 
-
 #[tokio::test]
 async fn thread_list_relation_filters_reject_invalid_requests() -> Result<()> {
     let codex_home = TempDir::new()?;
