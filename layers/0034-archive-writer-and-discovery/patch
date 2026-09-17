@@ -1,15 +1,15 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 802045196f7a5eda667c77b6817b840c6582405e..8579bff1eb44794ae25a7effd6d1619ca2472a9b 100644
+index fa9f3082ccfcc96e75279e4298e4d9396247b48c..bfaf8d66bca7580ecc83e5903b2bc80fff2dba83 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -97,6 +97,7 @@ mod session_end;
+@@ -101,6 +101,7 @@ mod session_end;
  mod skills_list;
  mod sleep;
  mod thread_archive;
 +mod thread_archive_discovery;
  mod thread_delete;
+ mod thread_environments;
  mod thread_fork;
- mod thread_fork_compatibility;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive_discovery.rs b/codex-rs/app-server/tests/suite/v2/thread_archive_discovery.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e59f8e0d3
@@ -511,7 +511,7 @@ index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd2
 +    assert!(!path.exists());
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
-index c1ac4a7946cb9cf8db6d3e65b63670a8ffcd8cbe..364891437d2d2344f331806e798d6d9bd406856d 100644
+index 075a0a873f8098066dc72c94558dff3da0feb9a4..364891437d2d2344f331806e798d6d9bd406856d 100644
 --- a/codex-rs/thread-store/src/local/archive_thread.rs
 +++ b/codex-rs/thread-store/src/local/archive_thread.rs
 @@ -1,5 +1,4 @@
@@ -530,16 +530,19 @@ index c1ac4a7946cb9cf8db6d3e65b63670a8ffcd8cbe..364891437d2d2344f331806e798d6d9b
  use tracing::warn;
 
  use super::thread_rollout_resolver;
-@@ -39,18 +39,23 @@ pub(super) async fn archive_threads(
+@@ -39,21 +39,23 @@ pub(super) async fn archive_threads(
          }
      }
      let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
--    // Already-archived rollouts need no move. Avoid reading the entire archive on every request.
--    let reference_index = RolloutReferenceIndex::scan_unarchived(store.config.codex_home.as_path())
--        .await
--        .map_err(|err| ThreadStoreError::Internal {
--            message: format!("failed to scan thread rollout files: {err}"),
--        })?;
+-    // Only inspect active files whose names belong to the threads being archived.
+-    let reference_index = RolloutReferenceIndex::scan_unarchived_threads(
+-        store.config.codex_home.as_path(),
+-        &thread_ids,
+-    )
+-    .await
+-    .map_err(|err| ThreadStoreError::Internal {
+-        message: format!("failed to scan thread rollout files: {err}"),
+-    })?;
 -
      let parent_thread_id = thread_ids[0];
      let mut archived_thread_ids = Vec::new();
@@ -563,7 +566,7 @@ index c1ac4a7946cb9cf8db6d3e65b63670a8ffcd8cbe..364891437d2d2344f331806e798d6d9b
              Ok(()) => archived_thread_ids.push(thread_id),
              Err(err) if archived_thread_ids.is_empty() => return Err(err),
              Err(err) => warn!(
-@@ -95,6 +100,15 @@ async fn archive_thread_with_paths(
+@@ -98,6 +100,15 @@ async fn archive_thread_with_paths(
              rollout_path.as_path(),
              "sessions",
          )?;
@@ -579,7 +582,7 @@ index c1ac4a7946cb9cf8db6d3e65b63670a8ffcd8cbe..364891437d2d2344f331806e798d6d9b
          let file_name =
              validated_rollout_file_name(canonical_rollout_path.as_path(), rollout_path.as_path())?;
          let destination = archive_folder.join(&file_name);
-@@ -146,6 +160,14 @@ async fn archive_thread_with_paths(
+@@ -149,6 +160,14 @@ async fn archive_thread_with_paths(
      Ok(())
  }
 

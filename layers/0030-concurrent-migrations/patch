@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca7039948fb2959 100644
+index fda87bdb36b3b0eb83d019439765803d33958010..2c2575754b189c4778e46a4aeb8d1f1df4b6344c 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -30,6 +30,8 @@ use codex_protocol::protocol::ThreadHistoryMode;
@@ -10,8 +10,8 @@ index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca70399
 +use std::collections::HashMap;
  use std::collections::VecDeque;
  use std::fs::File;
- use std::sync::LazyLock;
-@@ -2005,36 +2007,41 @@ impl ThreadRequestProcessor {
+ use std::ops::ControlFlow;
+@@ -2023,36 +2025,41 @@ impl ThreadRequestProcessor {
              })?;
          let subtree_thread_ids = current_agent_membership.candidate_thread_ids().to_vec();
 
@@ -78,7 +78,7 @@ index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca70399
                  Ok(thread) => {
                      if thread.archived_at.is_some() {
                          already_archived_thread_ids.push(descendant_thread_id);
-@@ -2042,6 +2049,9 @@ impl ThreadRequestProcessor {
+@@ -2060,6 +2067,9 @@ impl ThreadRequestProcessor {
                          archive_thread_ids.push(descendant_thread_id);
                      }
                  }
@@ -88,7 +88,7 @@ index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca70399
                  Err(ThreadStoreError::ThreadNotFound { .. }) => {}
                  Err(err) => {
                      warn!(
-@@ -5098,13 +5108,30 @@ impl ThreadRequestProcessor {
+@@ -5134,13 +5144,30 @@ impl ThreadRequestProcessor {
          let redact_resume_payloads =
              should_redact_thread_resume_payloads(app_server_client_name.as_deref());
 
@@ -97,7 +97,7 @@ index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca70399
              Ok(permit) => permit,
              Err(error) => {
                  self.outgoing.send_error(request_id, error).await;
-                 return Ok(());
+                 return Ok(ControlFlow::Break(()));
              }
          };
 +        if let Ok(thread_id) = ThreadId::from_string(&params.thread_id)
@@ -115,12 +115,12 @@ index 94bfadc99f214ef4f3041631c6ae830f7cccc51f..6ee95e98e0c158e4661aee211ca70399
 +                    )),
 +                )
 +                .await;
-+            return Ok(());
++            return Ok(ControlFlow::Break(()));
 +        }
          let stored_thread_from_running_probe = match self
              .resume_running_thread(
                  &request_id,
-@@ -8509,6 +8536,7 @@ fn build_thread_from_loaded_snapshot(
+@@ -8597,6 +8624,7 @@ fn build_thread_from_loaded_snapshot(
  }
 
  mod goal_scheduler;
@@ -236,7 +236,7 @@ index 0000000000000000000000000000000000000000..7b48a4b2e8b6d97d788a5dfc7cea9105
 +    }
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-index 7c6296ec4bad6b6cafd1a10dce9ef30094ff1946..3b3e1db7ddea6badf4c9da8ae10e28f787da4ca1 100644
+index e4bf92ed5a867bc55c4b319de266a5814378a459..02bdfcef707779b9d79119bd63701f953b7000d9 100644
 --- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 +++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 @@ -79,8 +79,21 @@ struct LegacyMigrationFixture {
@@ -510,13 +510,14 @@ index 760afdaf708f5c316a8202d1c8f7f90451bda6e4..ff43b49d8d060e4bbbb8d5121cd6d8c8
                  agent_role: Some(ref agent_role),
 diff --git a/codex-rs/core/src/agent/control_metadata_tests.rs b/codex-rs/core/src/agent/control_metadata_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..9d89a3f30a8242cc4083c1eee6885413e465193d
+index 0000000000000000000000000000000000000000..2e59047e45e9ca45cabb3db0780edac757881a2a
 --- /dev/null
 +++ b/codex-rs/core/src/agent/control_metadata_tests.rs
-@@ -0,0 +1,140 @@
+@@ -0,0 +1,142 @@
 +use super::*;
 +use codex_protocol::protocol::SessionMeta;
 +use codex_protocol::protocol::SessionMetaLine;
++use codex_rollout::RolloutLine;
 +use pretty_assertions::assert_eq;
 +
 +#[test]
@@ -542,6 +543,7 @@ index 0000000000000000000000000000000000000000..9d89a3f30a8242cc4083c1eee6885413
 +                empty_extension_registry(),
 +                Arc::new(crate::test_support::EmptyUserInstructionsProvider),
 +                /*analytics_events_client*/ None,
++                crate::thread_manager::passthrough_image_store(),
 +                store,
 +                crate::thread_manager::local_agent_graph_store_from_state_db(Some(&state_db)),
 +                uuid::Uuid::new_v4().to_string(),
@@ -655,7 +657,7 @@ index 0000000000000000000000000000000000000000..9d89a3f30a8242cc4083c1eee6885413
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 8fc53ce76838029602f7d788c5c08248ac72dd3b..7851ed7b37af2bf6b8d9f52083e741cdfdd55549 100644
+index 7a53e9643f9acbb584731510b331fa82f1fc0360..a7cda6c0ade68e00d28a83f9c765a67ecb534be3 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -110,6 +110,9 @@ use tokio::time::sleep;
@@ -669,10 +671,10 @@ index 8fc53ce76838029602f7d788c5c08248ac72dd3b..7851ed7b37af2bf6b8d9f52083e741cd
      mut cli_overrides: Vec<(String, TomlValue)>,
  ) -> (TempDir, Config) {
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index ebdbbffe52c249372d4e78c3921b7c48024b1be1..207167a8f83a3de310fcd76f228d4b5ae4845375 100644
+index 6122e18540c911a58deb1cce728f097fbeecd7f0..8d0bb15f2fffac4d7f6158ccefd327b1fd503915 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
-@@ -106,15 +106,19 @@ pub use list::read_session_meta_line_exact;
+@@ -140,15 +140,19 @@ pub use list::read_session_meta_line_exact;
  pub use list::read_thread_item_from_rollout;
  pub use list::read_thread_item_from_rollout_with_indexed_preview;
  pub use list::rollout_date_parts;
@@ -693,7 +695,7 @@ index ebdbbffe52c249372d4e78c3921b7c48024b1be1..207167a8f83a3de310fcd76f228d4b5a
  pub use metadata::forked_from_ordinal_exclusive;
  pub use metadata::history_rollout_path_with_rollout_id;
 diff --git a/codex-rs/rollout/src/maintenance.rs b/codex-rs/rollout/src/maintenance.rs
-index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add9915edc4 100644
+index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..342256609fada339b36fa7d672fd9712949fecef 100644
 --- a/codex-rs/rollout/src/maintenance.rs
 +++ b/codex-rs/rollout/src/maintenance.rs
 @@ -1,12 +1,14 @@
@@ -729,7 +731,7 @@ index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add
  /// Holds exclusive ownership of operations that replace local rollout files.
  pub struct RolloutMaintenanceGuard {
      _file: File,
-@@ -28,11 +38,80 @@ pub struct RolloutMaintenanceReadGuard {
+@@ -28,11 +38,121 @@ pub struct RolloutMaintenanceReadGuard {
      _file: File,
  }
 
@@ -742,6 +744,47 @@ index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add
 +    /// Stable lock files are never unlinked: otherwise another process could lock a new inode.
 +    _dependencies: Vec<File>,
 +    _slot: Option<File>,
++}
++
++// `File` descriptors are close-on-exec, but a child created by fork inherits the open file
++// description until exec. Explicit unlock keeps that interval from retaining maintenance locks
++// after the owning guard is dropped. Independently opened guards use different descriptions and
++// remain locked.
++fn unlock_on_drop(file: &File, name: &str) {
++    if let Err(error) = file.unlock() {
++        tracing::warn!(lock = name, %error, "failed to release rollout maintenance lock");
++    }
++}
++
++impl Drop for RolloutMaintenanceIntentGuard {
++    fn drop(&mut self) {
++        unlock_on_drop(&self._file, "foreground intent");
++    }
++}
++
++impl Drop for RolloutMaintenanceGuard {
++    fn drop(&mut self) {
++        unlock_on_drop(&self._file, "exclusive maintenance");
++    }
++}
++
++impl Drop for RolloutMaintenanceReadGuard {
++    fn drop(&mut self) {
++        unlock_on_drop(&self._file, "maintenance reader");
++    }
++}
++
++impl Drop for RolloutMaintenanceJobGuard {
++    fn drop(&mut self) {
++        unlock_on_drop(&self._job, "maintenance job");
++        unlock_on_drop(&self._foreground, "maintenance foreground");
++        for dependency in &self._dependencies {
++            unlock_on_drop(dependency, "migration dependency");
++        }
++        if let Some(slot) = &self._slot {
++            unlock_on_drop(slot, "migration slot");
++        }
++    }
 +}
 +
 +pub async fn acquire_rollout_maintenance_intent(
@@ -811,7 +854,20 @@ index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add
  }
 
  /// Retains compression's original exclusive protocol while foreground waiters ask it to stop.
-@@ -166,6 +245,8 @@ fn try_acquire_foreground_job(
+@@ -46,6 +166,12 @@ pub(crate) struct RolloutCompressionMaintenanceGuard {
+     foreground_check: std::sync::Mutex<()>,
+ }
+
++impl Drop for RolloutCompressionMaintenanceGuard {
++    fn drop(&mut self) {
++        unlock_on_drop(&self._job, "compression job");
++    }
++}
++
+ impl RolloutCompressionMaintenanceGuard {
+     pub(crate) fn should_yield(&self) -> io::Result<bool> {
+         use std::sync::atomic::Ordering;
+@@ -166,6 +292,8 @@ fn try_acquire_foreground_job(
          _job: job,
          _compatibility: compatibility,
          _foreground: foreground,
@@ -821,7 +877,7 @@ index 64e45ea1be6327fb0ffaacc3bbdbaebd2a63c132..db5d05d017e1e4edfcee4e9f77504add
  }
 
 diff --git a/codex-rs/rollout/src/maintenance_tests.rs b/codex-rs/rollout/src/maintenance_tests.rs
-index 68f8ded83c88bd3f614da884f7b99a109532c83d..68862baaceb868e00f96e5da81aa405d29cc9760 100644
+index 68f8ded83c88bd3f614da884f7b99a109532c83d..923826280a0c8ad498a29e312062fc112568b0aa 100644
 --- a/codex-rs/rollout/src/maintenance_tests.rs
 +++ b/codex-rs/rollout/src/maintenance_tests.rs
 @@ -1,5 +1,113 @@
@@ -937,6 +993,36 @@ index 68f8ded83c88bd3f614da884f7b99a109532c83d..68862baaceb868e00f96e5da81aa405d
 +
  #[test]
  fn jobs_allow_readers_but_exclude_other_jobs_and_legacy_maintenance() -> std::io::Result<()> {
+     let home = tempfile::tempdir()?;
+@@ -18,6 +126,29 @@ fn jobs_allow_readers_but_exclude_other_jobs_and_legacy_maintenance() -> std::io
+     Ok(())
+ }
+
++#[test]
++fn maintenance_release_does_not_wait_for_inherited_file_descriptors() -> std::io::Result<()> {
++    let home = tempfile::tempdir()?;
++    let job = try_acquire_rollout_maintenance_job_lock(home.path())?.expect("job");
++    // `try_clone` models the open file descriptions inherited between fork and exec.
++    let inherited_job = job._job.try_clone()?;
++    let inherited_reader = job._compatibility._file.try_clone()?;
++    let inherited_foreground = job._foreground.try_clone()?;
++    drop(job);
++
++    let next_job = try_acquire_rollout_maintenance_job_lock(home.path())?
++        .expect("job release must not wait for inherited descriptors");
++    drop(next_job);
++    let exclusive = try_acquire_rollout_maintenance_lock(home.path())?
++        .expect("reader release must not wait for inherited descriptors");
++    drop(exclusive);
++
++    drop(inherited_job);
++    drop(inherited_reader);
++    drop(inherited_foreground);
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn waiting_readers_and_migrations_request_compression_yield() -> std::io::Result<()> {
      let home = tempfile::tempdir()?;
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
 index bf4fe909bceba61e4e5e9487c76fc3b9d69ae693..c7a365482e9423066d821018950ff54bcfa9937a 100644
@@ -1076,10 +1162,10 @@ index 0000000000000000000000000000000000000000..dae0f8783bf201f60e9874202c03d327
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 40f50d09a6149a62bd10e3db3d02a2a7fa6d1bb1..eff698847643a8323cecdab5514a8718c67d7910 100644
+index 5263fbd7c4bf4fb20110b391f80c2d3d73dd4d9c..40b12b98f1af0146a4178ddf00528d2a1ca1cd6d 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -414,8 +414,18 @@ impl LocalThreadStore {
+@@ -417,8 +417,18 @@ impl LocalThreadStore {
          {
              return Ok(false);
          }
@@ -1101,7 +1187,7 @@ index 40f50d09a6149a62bd10e3db3d02a2a7fa6d1bb1..eff698847643a8323cecdab5514a8718
      }
 
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c65b170cc4 100644
+index afb19bb9164c5462b6e939d57942d857ab2efaa7..1b62530835dd74449105d6dabc8e5908e64bbeff 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
 @@ -46,6 +46,7 @@ use crate::ThreadStoreResult;
@@ -1120,7 +1206,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
  use lineage::LegacyLineageMigrationPlan;
  use lineage::contains_convertible_rollout_reference;
  use lineage::plan_legacy_lineage;
-@@ -333,19 +335,63 @@ impl LocalThreadStore {
+@@ -333,19 +335,70 @@ impl LocalThreadStore {
      async fn migrate_rollout_path_on_demand(
          &self,
          path: PathBuf,
@@ -1136,7 +1222,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
              max_mib_per_second: None,
          };
          let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
--        self.migrate_rollout_path(path, &options, &mut limiter)
+-        self.migrate_rollout_path(path, &options, &HashMap::new(), &mut limiter)
 -            .await
 +        loop {
 +            let guard = match admission {
@@ -1180,7 +1266,14 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
 +                );
 +            }
 +            let result = self
-+                .migrate_rollout_path(path.clone(), &options, &mut limiter, admission, Some(guard))
++                .migrate_rollout_path(
++                    path.clone(),
++                    &options,
++                    &HashMap::new(),
++                    &mut limiter,
++                    admission,
++                    Some(guard),
++                )
 +                .await;
 +            if matches!(admission, MigrationAdmission::RequiresExclusive) {
 +                continue;
@@ -1190,7 +1283,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
      }
 
      /// Inspect or migrate eligible legacy rollout files beneath active and archived sessions.
-@@ -399,7 +445,7 @@ impl LocalThreadStore {
+@@ -399,7 +452,7 @@ impl LocalThreadStore {
          paths: RolloutMigrationPaths,
      ) -> ThreadStoreResult<RolloutMigrationReport> {
          let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
@@ -1199,7 +1292,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
              RolloutMigrationMode::DryRun => None,
              RolloutMigrationMode::Apply => Some(
                  codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
-@@ -450,6 +496,7 @@ impl LocalThreadStore {
+@@ -450,6 +503,7 @@ impl LocalThreadStore {
                  !thread_id.is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
              });
          }
@@ -1207,7 +1300,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
          // The name index is global, so read it once before either migrating or repairing names.
          let legacy_names = if options.mode == RolloutMigrationMode::Apply {
              let thread_ids = paths
-@@ -466,8 +513,23 @@ impl LocalThreadStore {
+@@ -466,8 +520,23 @@ impl LocalThreadStore {
          let mut report = RolloutMigrationReport::default();
 
          for (index, path) in paths.into_iter().enumerate() {
@@ -1232,7 +1325,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
                  .await?;
              let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
              if let Some(outcome) = outcome {
-@@ -489,6 +551,8 @@ impl LocalThreadStore {
+@@ -489,6 +558,8 @@ impl LocalThreadStore {
          options: &RolloutMigrationOptions,
          legacy_names: &HashMap<ThreadId, String>,
          limiter: &mut RolloutMigrationRateLimiter,
@@ -1241,7 +1334,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
      ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
          let mut retried_moved_path = false;
          let metadata = loop {
-@@ -562,6 +626,19 @@ impl LocalThreadStore {
+@@ -563,6 +634,19 @@ impl LocalThreadStore {
              }));
          };
          let thread_id = metadata.meta.id;
@@ -1261,7 +1354,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
          if !matches_selection(&options.thread_ids, Some(thread_id)) {
              return Ok(None);
          }
-@@ -620,8 +697,12 @@ impl LocalThreadStore {
+@@ -621,8 +705,12 @@ impl LocalThreadStore {
                      .len()
                      > 0;
                  let recovery = if lineage_journal {
@@ -1274,9 +1367,9 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
 +                        Err(error) => Err(error),
 +                    }
                  } else {
-                     self.recover_published_migration(thread_id, &path, &journal_path, legacy_names, limiter)
-                         .await
-@@ -651,6 +732,9 @@ impl LocalThreadStore {
+                     self.recover_published_migration(
+                         thread_id,
+@@ -658,6 +746,9 @@ impl LocalThreadStore {
                  }
                  Ok(RolloutMigrationStatus::AlreadyPaginated)
              };
@@ -1286,7 +1379,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
              let result = match result {
                  Ok(RolloutMigrationStatus::Migrated) => self
                      .ensure_complete_migrated_projection(thread_id)
-@@ -750,7 +834,19 @@ impl LocalThreadStore {
+@@ -791,7 +882,19 @@ impl LocalThreadStore {
              ));
          }
 
@@ -1307,7 +1400,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
          let _writer_guard = match self.writer_lock_coordinator.acquire(thread_id) {
              Ok(guard) => guard,
              Err(ThreadStoreError::Conflict { message }) => {
-@@ -817,6 +913,10 @@ impl LocalThreadStore {
+@@ -859,6 +962,10 @@ impl LocalThreadStore {
          let lineage_plan = match lineage_plan {
              Ok(plan) => plan,
              Err(error) => {
@@ -1318,7 +1411,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
                  return Ok(Some(migration_outcome(
                      thread_id,
                      path,
-@@ -826,6 +926,12 @@ impl LocalThreadStore {
+@@ -871,6 +978,12 @@ impl LocalThreadStore {
              }
          };
          if let Some(plan) = lineage_plan {
@@ -1331,7 +1424,7 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
              let bytes_before = limiter.bytes_processed;
              let result = self
                  .migrate_legacy_lineage(&path, &journal_path, plan, limiter)
-@@ -844,6 +950,7 @@ impl LocalThreadStore {
+@@ -889,6 +1002,7 @@ impl LocalThreadStore {
              };
              drop(_writer_guard);
              drop(_live_writer_guard);
@@ -1339,31 +1432,26 @@ index ca290bcf08f4db4b46e72849b4d93a95f4059735..3f57bafbddfcefff0068c8c1e4b3c5c6
              let result = match result {
                  Ok(selected_path) => {
                      path = selected_path;
-@@ -956,10 +1063,21 @@ impl LocalThreadStore {
+@@ -1010,6 +1124,19 @@ impl LocalThreadStore {
              RolloutMigrationFailureReason::RolloutPublishFailed,
          )?;
 
--        let source_metadata = with_failure_reason(
--            tokio::fs::metadata(rollout_path)
 +        #[cfg(test)]
 +        {
 +            let barrier = self
 +                .rollout_migration_coordinator
 +                .journal_barriers
 +                .lock()
-                 .await
--                .map_err(migration_error),
++                .await
 +                .remove(&thread_id);
 +            if let Some(barrier) = barrier {
 +                barrier.wait().await;
 +            }
 +        }
 +
-+        let source_metadata = with_failure_reason(
-+            tokio::fs::metadata(rollout_path).await.map_err(migration_error),
-             RolloutMigrationFailureReason::RolloutReadFailed,
-         )?;
-         let source_modified = source_metadata.modified().ok();
+         let source_metadata = with_failure_reason(
+             tokio::fs::metadata(rollout_path)
+                 .await
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/concurrency_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/concurrency_tests.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..5c47858865323b2c7c7178f1a577a9d0c921edc6
@@ -2172,18 +2260,18 @@ index 0000000000000000000000000000000000000000..7c1595f795e91fae77bdebd2a1bdd6f1
 +    .unwrap_or(false)
 +}
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup.rs b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
-index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a53545b37 100644
+index 43f7d5c444c7c892ba3cead790093744713174f2..464468d87c83b91465628d04dca2ad60328f7939 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/startup.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/startup.rs
 @@ -16,6 +16,7 @@ use std::collections::VecDeque;
- use std::io::ErrorKind;
+ use std::ffi::OsString;
  use std::path::Path;
  use std::path::PathBuf;
 +use std::sync::Arc;
  use std::sync::atomic::AtomicBool;
  use std::sync::atomic::Ordering;
- use std::time::SystemTime;
-@@ -27,6 +28,7 @@ use codex_rollout::StateDbHandle;
+ use std::time::Duration;
+@@ -28,6 +29,7 @@ use codex_rollout::StateDbHandle;
  use codex_state::RolloutMigrationCursor;
  use codex_state::RolloutMigrationSkippedRollout;
  use tokio::sync::Mutex;
@@ -2191,16 +2279,16 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
  use tokio::sync::watch;
  use tracing::warn;
 
-@@ -35,6 +37,8 @@ use super::RolloutMigrationMode;
+@@ -36,6 +38,8 @@ use super::RolloutMigrationMode;
  use super::RolloutMigrationOptions;
  use super::RolloutMigrationReport;
  use super::RolloutMigrationStatus;
 +use super::dependencies::MigrationAdmission;
 +use super::dependencies::discover_dependencies;
- use super::find_rollout_paths;
+ use super::find_all_rollout_paths;
  use super::lineage::contains_convertible_rollout_reference;
  use super::lineage::has_leading_filtered_rollout_reference;
-@@ -57,20 +61,30 @@ const NATIVE_OR_COMPATIBLE_REASON: &str = "native_or_compatible";
+@@ -58,20 +62,30 @@ const NATIVE_OR_COMPATIBLE_REASON: &str = "native_or_compatible";
  const CURSOR_LOOKBACK_SECONDS: i64 = 48 * 60 * 60;
  const MAINTENANCE_RETRY_DELAY: Duration = Duration::from_secs(1);
 
@@ -2233,7 +2321,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
  }
 
  struct MigrationEntry {
-@@ -80,6 +94,8 @@ struct MigrationEntry {
+@@ -81,6 +95,8 @@ struct MigrationEntry {
      modified_at: SystemTime,
      status: MigrationEntryStatus,
      completion: watch::Sender<MigrationCompletion>,
@@ -2242,15 +2330,15 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
  }
 
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -100,6 +116,7 @@ struct MigrationWork {
+@@ -101,6 +117,7 @@ struct MigrationWork {
      path: PathBuf,
      rollout_id: codex_protocol::RolloutId,
      source_fingerprint: RolloutFingerprint,
 +    admission: MigrationAdmission,
  }
 
- #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -147,6 +164,9 @@ pub(super) async fn await_thread_migration(
+ #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+@@ -148,6 +165,9 @@ pub(super) async fn await_thread_migration(
      let mut receiver = if let Some(receiver) = existing_receiver {
          receiver
      } else {
@@ -2260,7 +2348,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
          let Some(mut resolved) =
              thread_rollout_resolver::resolve_current_including_archived(store, thread_id).await?
          else {
-@@ -233,14 +253,14 @@ pub(super) async fn await_thread_migration(
+@@ -235,14 +255,14 @@ pub(super) async fn await_thread_migration(
                      native_history_ready = store.has_history_projection(thread_id).await?;
                  }
                  result => {
@@ -2282,7 +2370,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
                      if native_history_ready && let Err(error) = result {
                          warn!(
                              thread_id = %thread_id,
-@@ -265,6 +285,14 @@ pub(super) async fn await_thread_migration(
+@@ -267,6 +287,14 @@ pub(super) async fn await_thread_migration(
                      current.rollout_id == resolved.rollout_id && current.path == resolved.path
                  });
          let modified_at = rollout_modified_at(resolved.path.as_path()).await?;
@@ -2297,7 +2385,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
          let mut state = store.rollout_migration_coordinator.state.lock().await;
          if let Some(receiver) = subscribe_to_existing(&mut state, thread_id) {
              receiver
-@@ -282,13 +310,15 @@ pub(super) async fn await_thread_migration(
+@@ -284,13 +312,15 @@ pub(super) async fn await_thread_migration(
                      modified_at,
                      status: MigrationEntryStatus::Pending,
                      completion,
@@ -2314,7 +2402,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
 
      loop {
          let completion = receiver.borrow().clone();
-@@ -328,25 +358,38 @@ async fn rollout_modified_at(path: &Path) -> ThreadStoreResult<SystemTime> {
+@@ -330,25 +360,38 @@ async fn rollout_modified_at(path: &Path) -> ThreadStoreResult<SystemTime> {
          .map_err(migration_error)
  }
 
@@ -2362,7 +2450,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
              return;
          };
          #[cfg(test)]
-@@ -357,7 +400,7 @@ async fn run_worker(store: LocalThreadStore) {
+@@ -359,7 +402,7 @@ async fn run_worker(store: LocalThreadStore) {
              .await
              .push(work.thread_id);
          let result = store
@@ -2371,7 +2459,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
              .await;
          let result = match result {
              Ok(Some(outcome)) if outcome.status == RolloutMigrationStatus::Failed => {
-@@ -367,7 +410,15 @@ async fn run_worker(store: LocalThreadStore) {
+@@ -369,7 +412,15 @@ async fn run_worker(store: LocalThreadStore) {
                          work.path.display()
                      )
                  });
@@ -2388,7 +2476,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
                      Ok(true) => {
                          warn!(
                              thread_id = %work.thread_id,
-@@ -401,110 +452,146 @@ async fn run_worker(store: LocalThreadStore) {
+@@ -403,110 +454,146 @@ async fn run_worker(store: LocalThreadStore) {
                  "failed to record automatic rollout migration fingerprint: {error}"
              );
          }
@@ -2592,7 +2680,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
  }
 
  fn finish_entry(entry: &mut MigrationEntry, result: Result<(), String>) {
-@@ -546,7 +633,7 @@ pub(super) async fn processed_thread_ids(store: &LocalThreadStore) -> Vec<Thread
+@@ -548,7 +635,7 @@ pub(super) async fn processed_thread_ids(store: &LocalThreadStore) -> Vec<Thread
  #[cfg(test)]
  pub(super) async fn automatic_migration_idle(store: &LocalThreadStore) -> bool {
      let state = store.rollout_migration_coordinator.state.lock().await;
@@ -2602,7 +2690,7 @@ index 03e1ef1422afc1781a00640eaf2f6393cd03b548..dc62c08e9990f9fae938254f74c4306a
              !matches!(
                  entry.status,
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
-index 52a84c0bb51d17d1c161aa1886fef54978e90719..83060807cdcdfaae6ec8b97fb55a23b3d521fa69 100644
+index 3d1cfdd8900895eb2f0597e903cc6f7365765590..b1590ffde55c92d01926e908b5cf4cfec066ee45 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/startup_tests.rs
 @@ -38,6 +38,9 @@ use crate::local::test_support::test_config;
@@ -2645,19 +2733,19 @@ index 52a84c0bb51d17d1c161aa1886fef54978e90719..83060807cdcdfaae6ec8b97fb55a23b3
      assert_eq!(
          codex_rollout::read_session_meta_line(&oldest_path)
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c02740b40abb6 100644
+index 0e9c5a8f23baee96587297126d59ebe2033ff9f2..f5a306285d47b1654a1d7b0e137805a8493e6052 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -38,6 +38,8 @@ use codex_protocol::protocol::SessionSource;
- use codex_protocol::protocol::SubAgentSource;
+@@ -44,6 +44,8 @@ use codex_protocol::protocol::SubAgentSource;
  use codex_protocol::protocol::ThreadHistoryMode;
  use codex_protocol::protocol::ThreadRolledBackEvent;
+ use codex_protocol::protocol::TokenCountEvent;
 +use codex_protocol::protocol::TurnAbortReason;
 +use codex_protocol::protocol::TurnAbortedEvent;
  use codex_protocol::protocol::TurnCompleteEvent;
  use codex_protocol::protocol::TurnContextItem;
  use codex_protocol::protocol::TurnStartedEvent;
-@@ -2360,16 +2362,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+@@ -2424,16 +2426,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
                  predecessor_segment_id,
              ));
          }
@@ -2698,7 +2786,7 @@ index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c0274
          next_ordinal = write_paginated_segment(
              path.as_path(),
              home.path(),
-@@ -2414,7 +2430,7 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+@@ -2478,7 +2494,7 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
          .await
          .expect("materialize deep native lineage");
      let materialized = serde_json::to_string(&materialized).expect("serialize native lineage");
@@ -2707,7 +2795,7 @@ index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c0274
          assert_eq!(
              materialized
                  .matches(format!("question-{index}").as_str())
-@@ -2444,6 +2460,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
+@@ -2508,6 +2524,30 @@ async fn migration_rewrites_paginated_reference_lineage_deeper_than_desktop_boun
          .await
          .expect("read first migrated lineage page");
      assert_eq!(first_page.turns.len(), 2);
@@ -2738,7 +2826,7 @@ index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c0274
      let second_page = store
          .list_turns(ListTurnsParams {
              thread_id,
-@@ -5037,18 +5077,109 @@ async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
+@@ -5101,18 +5141,109 @@ async fn migration_recovers_same_thread_lineage_from_every_durable_phase() {
          drop(store);
 
          let restarted = indexed_store(home.path()).await;
@@ -2856,7 +2944,7 @@ index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c0274
          let selected = restarted
              .state_db
              .as_ref()
-@@ -8666,10 +8797,39 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
+@@ -9011,10 +9142,39 @@ async fn migration_recovers_a_published_rollout_with_missing_projection() {
          .expect("defer busy journal-less repair");
      assert_eq!(busy.outcomes[0].status, RolloutMigrationStatus::SkippedBusy);
      drop(writer);
@@ -2901,17 +2989,17 @@ index d2de605cf6b1bfff174c18ea69cdb48f047e74b3..3a154ad53a08e8738c66765be58c0274
          repaired.outcomes[0].status,
          RolloutMigrationStatus::AlreadyPaginated,
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 5c57c7126ba896e26315591ae76652e339394c2d..05f531e978a640419673100d123542563cc44e6b 100644
+index 5c57c7126ba896e26315591ae76652e339394c2d..271a1116671777be29c351ddf6f2276a7d751eb4 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
-@@ -25,6 +25,7 @@ pub(super) use read::list_segmented_legacy_items;
+@@ -24,6 +24,7 @@ pub(super) use read::list_items;
+ pub(super) use read::list_segmented_legacy_items;
  pub(super) use read::list_segmented_legacy_turns;
  pub(super) use read::list_turns;
- pub(super) use realtime::list_timeline;
 +pub(super) use read::validate_thread_for_paginated_reads;
+ pub(super) use realtime::list_timeline;
  pub(super) use search::search_thread_occurrences;
  pub(super) use turn_lookup::find_projected_turn;
- pub(super) use turn_lookup::find_source_turn;
 diff --git a/codex-rs/thread-store/src/local/thread_history/read.rs b/codex-rs/thread-store/src/local/thread_history/read.rs
 index 526c6e2e0dde8b44bde0ec61c4dcd30f922ea116..c5afe16eceec59e2c54baf3a0bcd661e8915129a 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read.rs
@@ -2926,10 +3014,10 @@ index 526c6e2e0dde8b44bde0ec61c4dcd30f922ea116..c5afe16eceec59e2c54baf3a0bcd661e
      thread_id: ThreadId,
      include_archived: bool,
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 421bedd24da770990a0b9a3d7b8ea9d1ffbdd706..467692949a12afb5302eca2543f74c32843a3b60 100644
+index beec713742781542df35b47b40cdbce87ea8ae7d..5433078d7efd37ae8c8bbcd95c631f8cc6cce3c4 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-@@ -153,6 +153,48 @@ async fn indexed_paginated_reads_trust_current_projection_for_immutable_predeces
+@@ -153,6 +153,53 @@ async fn indexed_paginated_reads_trust_current_projection_for_immutable_predeces
      .await;
  }
 
@@ -2966,7 +3054,12 @@ index 421bedd24da770990a0b9a3d7b8ea9d1ffbdd706..467692949a12afb5302eca2543f74c32
 +    .execute(history_db(&store).await)
 +    .await
 +    .expect("seed complete projection checkpoint");
-+    assert!(store.has_history_projection(thread_id).await.expect("valid ancestry"));
++    assert!(
++        store
++            .has_history_projection(thread_id)
++            .await
++            .expect("valid ancestry")
++    );
 +
 +    fs::remove_file(predecessor).expect("remove required predecessor");
 +    store

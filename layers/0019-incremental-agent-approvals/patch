@@ -1,16 +1,16 @@
 diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
-index a3ebc258e8964390ecb8aeb3182d1c03f8ad41c9..0e078729936a05d66b30bc9fb44b19d12bb76632 100644
+index 73aee8b94c4261d5423a58a8f2b9dbff0e55fb45..7c1a1f33b882d25f9759b8e546976caa738b1096 100644
 --- a/codex-rs/tui/src/app.rs
 +++ b/codex-rs/tui/src/app.rs
-@@ -225,6 +225,7 @@ mod input;
- mod loaded_threads;
+@@ -230,6 +230,7 @@ mod misalignment_policy;
+ mod model_defaults;
+ mod new_session;
  mod pending_interactive_replay;
- mod permission_shortcuts;
 +mod pending_thread_approvals;
+ mod permission_shortcuts;
  mod pets;
  mod placed_side;
- mod platform_actions;
-@@ -261,6 +262,7 @@ use self::side::SideParentStatus;
+@@ -269,6 +270,7 @@ use self::side::SideParentStatus;
  use self::side::SideParentStatusChange;
  use self::side::SideThreadState;
  use self::startup_prompts::*;
@@ -18,19 +18,19 @@ index a3ebc258e8964390ecb8aeb3182d1c03f8ad41c9..0e078729936a05d66b30bc9fb44b19d1
  use self::thread_events::*;
 
  const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
-@@ -636,6 +638,7 @@ pub(crate) struct App {
-
-     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
+@@ -650,6 +652,7 @@ pub(crate) struct App {
      temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+     /// Track title generation across thread switches and deduplicate automatic requests.
+     pending_thread_titles: HashSet<(ThreadId, ThreadTitleDestination)>,
 +    pending_thread_approval_labels: HashMap<ThreadId, String>,
      thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
      agent_navigation: AgentNavigationState,
      agents_overview: agents_overview::AgentsOverviewState,
 diff --git a/codex-rs/tui/src/app/background_requests.rs b/codex-rs/tui/src/app/background_requests.rs
-index c39f5c6375d4965a9819ce0acc99f2e1d137545d..7bcbcfa7775e78ef7d382028f800472adaf73add 100644
+index b48aa9c01b820982125efa790b90ba745a162970..25744122fe80301d223b90fd29e4793d742aa98e 100644
 --- a/codex-rs/tui/src/app/background_requests.rs
 +++ b/codex-rs/tui/src/app/background_requests.rs
-@@ -664,10 +664,10 @@ impl App {
+@@ -667,10 +667,10 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -43,7 +43,7 @@ index c39f5c6375d4965a9819ce0acc99f2e1d137545d..7bcbcfa7775e78ef7d382028f800472a
          };
 
          if should_send {
-@@ -685,6 +685,7 @@ impl App {
+@@ -688,6 +688,7 @@ impl App {
                  }
              }
          }
@@ -52,10 +52,10 @@ index c39f5c6375d4965a9819ce0acc99f2e1d137545d..7bcbcfa7775e78ef7d382028f800472a
 
      pub(super) async fn handle_feedback_submitted(
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 98e2a5f7902cfd1a334004b29c71addeb45a6dc3..ec1a1f8bf47ead0d7d72ff34d0cc719e2ade26e8 100644
+index 323a48645db2d5cbd1970df4a4c877fcf34114a4..3246a0031675c5b6135cbe269cace022c1b55aa0 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -941,6 +941,20 @@ impl App {
+@@ -1007,6 +1007,20 @@ impl App {
              AppEvent::SubmitThreadOp { thread_id, op } => {
                  self.submit_thread_op(app_server, thread_id, op).await?;
              }
@@ -161,10 +161,10 @@ index 0000000000000000000000000000000000000000..bf0d534940a8a03e21f4d8d0393790a7
 +    }
 +}
 diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
-index a3c3d6b9712c33bff5f329fe8b43001802f8e31d..e69bb2a590beb09bc2406108318a149e2137e56b 100644
+index 1c539035b8c8b02ad442e8c0ac046ce61e8036d7..da778501a961cbb2cd7961ce89fd2018ed7e1059 100644
 --- a/codex-rs/tui/src/app/session_lifecycle.rs
 +++ b/codex-rs/tui/src/app/session_lifecycle.rs
-@@ -281,6 +281,7 @@ impl App {
+@@ -282,6 +282,7 @@ impl App {
          self.agent_navigation
              .upsert(thread_id, agent_nickname, agent_role, is_closed);
          self.sync_active_agent_label();
@@ -172,67 +172,67 @@ index a3c3d6b9712c33bff5f329fe8b43001802f8e31d..e69bb2a590beb09bc2406108318a149e
      }
 
      /// Persists the app-server's authoritative ownership flag and updates the active composer.
-@@ -719,6 +720,7 @@ impl App {
-     pub(super) fn reset_thread_event_state(&mut self) {
-         self.abort_all_thread_event_listeners();
+@@ -771,6 +772,7 @@ impl App {
          self.thread_event_channels.clear();
+         self.pending_server_profiles.clear();
+         self.agents_overview.activity.clear();
 +        self.pending_thread_approval_labels.clear();
          self.agent_navigation.clear();
          self.side_threads.clear();
          self.active_thread_id = None;
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index 3cb15dae7d44fe4e8e1243b15a9e6fe74cabdae7..a0aeca1166df5a99f19a240743624ce8f718be5d 100644
+index 9f9894b780890ed28a4276990c1c550db8b075ef..fa59cab77bd31f949f11af59806a4db6b2a2eb7e 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -570,6 +570,7 @@ See the Codex keymap documentation for supported actions and examples."
-             windows_sandbox: WindowsSandboxState::default(),
+@@ -757,6 +757,7 @@ See the Codex keymap documentation for supported actions and examples."
              thread_event_channels: HashMap::new(),
              temporary_structured_requests: HashMap::new(),
+             pending_thread_titles: HashSet::new(),
 +            pending_thread_approval_labels: HashMap::new(),
              thread_event_listener_tasks: HashMap::new(),
              agent_navigation: AgentNavigationState::default(),
              agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
-index 1715fc421339468c03a05bc23c6f1e01207120d6..0ef14f9ad0ae61b556665da3191029380e363401 100644
+index dcfd7790d916bbc8005bd0f0786b47dbcb089183..e614720c7f7547ab4b49b094c5410129d094a778 100644
 --- a/codex-rs/tui/src/app/test_support.rs
 +++ b/codex-rs/tui/src/app/test_support.rs
-@@ -62,6 +62,7 @@ pub(super) async fn make_test_app() -> App {
-         windows_sandbox: WindowsSandboxState::default(),
+@@ -66,6 +66,7 @@ pub(super) async fn make_test_app() -> App {
          thread_event_channels: HashMap::new(),
          temporary_structured_requests: HashMap::new(),
+         pending_thread_titles: HashSet::new(),
 +        pending_thread_approval_labels: HashMap::new(),
          thread_event_listener_tasks: HashMap::new(),
          agent_navigation: AgentNavigationState::default(),
          agents_overview: Default::default(),
 diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
-index f52bfb22f8c7b906f0ff098432609ca2816ebc65..f406e3e5de86147136a1605207388911324ec29e 100644
+index a4c516137f08a27f5581ec4cca837d65ff41a05d..d5e33540c6b2ded4ae1aea8c301fc6c5fa72cfa2 100644
 --- a/codex-rs/tui/src/app/tests.rs
 +++ b/codex-rs/tui/src/app/tests.rs
-@@ -10,6 +10,8 @@ mod backend_banner_fallback_tests;
- mod backend_banner_recovery_tests;
- #[path = "tests/backend_banner_startup_tests.rs"]
- mod backend_banner_startup_tests;
+@@ -7,6 +7,8 @@ mod daybreak_tests;
+ mod advanced_reasoning_tests;
+ #[path = "tests/agents_navigation_tests.rs"]
+ mod agents_navigation_tests;
 +#[path = "tests/approval_routing_tests.rs"]
 +mod approval_routing;
- #[path = "tests/background_exit_tests.rs"]
- mod background_exit_tests;
- #[path = "tests/connector_policy.rs"]
-@@ -5654,6 +5656,7 @@ async fn make_test_app() -> App {
-         thread_event_channels: HashMap::new(),
+ #[path = "tests/backend_banner_fallback_tests.rs"]
+ mod backend_banner_fallback_tests;
+ #[path = "tests/backend_banner_recovery_tests.rs"]
+@@ -6032,6 +6034,7 @@ async fn make_test_app() -> App {
          temporary_structured_requests: HashMap::new(),
+         pending_thread_titles: HashSet::new(),
          thread_event_listener_tasks: HashMap::new(),
 +        pending_thread_approval_labels: HashMap::new(),
          agent_navigation: AgentNavigationState::default(),
+         pending_server_profiles: HashMap::new(),
          agents_overview: Default::default(),
-         side_threads: HashMap::new(),
-@@ -5738,6 +5741,7 @@ async fn make_test_app_with_channels() -> (
-             thread_event_channels: HashMap::new(),
+@@ -6127,6 +6130,7 @@ pub(super) async fn make_test_app_with_channels() -> (
              temporary_structured_requests: HashMap::new(),
+             pending_thread_titles: HashSet::new(),
              thread_event_listener_tasks: HashMap::new(),
-+        pending_thread_approval_labels: HashMap::new(),
++            pending_thread_approval_labels: HashMap::new(),
              agent_navigation: AgentNavigationState::default(),
+             pending_server_profiles: HashMap::new(),
              agents_overview: Default::default(),
-             side_threads: HashMap::new(),
 diff --git a/codex-rs/tui/src/app/tests/approval_routing_tests.rs b/codex-rs/tui/src/app/tests/approval_routing_tests.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..776af68513d197d1fb05657bc97350882348d428
@@ -519,10 +519,10 @@ index 0000000000000000000000000000000000000000..776af68513d197d1fb05657bc9735088
 +    Ok(())
 +}
 diff --git a/codex-rs/tui/src/app/thread_events.rs b/codex-rs/tui/src/app/thread_events.rs
-index 32e2d9f368eef21b2524f288017ea0c685c195f6..2ec9bbf8faa33ef0b5028055d1e782b8a4d88818 100644
+index e192656dad7d5a6d1d457acfd3e1ef0832482248..e6cf15c131265edd21fe0d73c73130b0fd2c0d00 100644
 --- a/codex-rs/tui/src/app/thread_events.rs
 +++ b/codex-rs/tui/src/app/thread_events.rs
-@@ -327,6 +327,21 @@ fn file_change_item_changes(
+@@ -364,6 +364,21 @@ fn file_change_item_changes(
      }
  }
 
@@ -544,7 +544,7 @@ index 32e2d9f368eef21b2524f288017ea0c685c195f6..2ec9bbf8faa33ef0b5028055d1e782b8
  #[derive(Debug)]
  pub(super) struct ThreadEventChannel {
      pub(super) sender: mpsc::Sender<ThreadBufferedEvent>,
-@@ -336,6 +351,10 @@ pub(super) struct ThreadEventChannel {
+@@ -373,6 +388,10 @@ pub(super) struct ThreadEventChannel {
  }
 
  impl ThreadEventChannel {
@@ -556,10 +556,10 @@ index 32e2d9f368eef21b2524f288017ea0c685c195f6..2ec9bbf8faa33ef0b5028055d1e782b8
          let (sender, receiver) = mpsc::channel(capacity);
          Self {
 diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
-index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb212296f52 100644
+index f19eb77da57ab437f13278cfb799488e3ebe58af..abb7ec5bfd33ed2985a930d7ba91a0d35363b006 100644
 --- a/codex-rs/tui/src/app/thread_routing.rs
 +++ b/codex-rs/tui/src/app/thread_routing.rs
-@@ -593,9 +593,9 @@ impl App {
+@@ -610,9 +610,9 @@ impl App {
                      .active_turn_id_for_thread(thread_id)
                      .await
                      .unwrap_or_default();
@@ -571,7 +571,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
                  };
                  self.reset_backtrack_state();
                  if !turn_id.is_empty() {
-@@ -607,6 +607,7 @@ impl App {
+@@ -624,6 +624,7 @@ impl App {
                  }
                  let request_handle = app_server.request_handle();
                  let request_ids = [app_server.next_request_id(), app_server.next_request_id()];
@@ -579,7 +579,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
                  tokio::spawn(async move {
                      for (attempt, request_id) in request_ids.into_iter().enumerate() {
                          let result = request_handle
-@@ -637,20 +638,11 @@ impl App {
+@@ -654,20 +655,11 @@ impl App {
                                          thread_id: Some(thread_id.to_string()),
                                          message: format!("Failed to interrupt turn: {error}"),
                                      });
@@ -605,7 +605,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
                                  break;
                              }
                          }
-@@ -915,37 +907,6 @@ impl App {
+@@ -970,37 +962,6 @@ impl App {
          }
      }
 
@@ -643,13 +643,13 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
      pub(super) async fn refresh_side_parent_status_from_store(&mut self, thread_id: ThreadId) {
          let Some(channel) = self.thread_event_channels.get(&thread_id) else {
              return;
-@@ -1042,7 +1003,13 @@ impl App {
+@@ -1118,7 +1079,13 @@ impl App {
              let channel = self.ensure_thread_channel(thread_id);
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
--        let (notification, previous_pending_status, pending_status, turn_stopped) = {
+-        let (mut notification, previous_pending_status, pending_status, turn_stopped) = {
 +        let (
-+            notification,
++            mut notification,
 +            previous_pending_status,
 +            pending_status,
 +            turn_stopped,
@@ -658,7 +658,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
              let mut guard = store.lock().await;
              if guard.session.is_none()
                  && let Some(session) = inferred_session
-@@ -1063,11 +1030,13 @@ impl App {
+@@ -1139,11 +1106,13 @@ impl App {
                  guard.push_notification(notification);
                  None
              };
@@ -672,7 +672,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
              )
          };
          if is_turn_started {
-@@ -1100,7 +1069,7 @@ impl App {
+@@ -1189,7 +1158,7 @@ impl App {
          } else if previous_pending_status.is_some() {
              self.clear_side_parent_action_status(thread_id);
          }
@@ -681,7 +681,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
          Ok(())
      }
 
-@@ -1202,10 +1171,14 @@ impl App {
+@@ -1289,10 +1258,14 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -698,7 +698,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
          };
          let request_status = SideParentStatus::for_request(&request);
 
-@@ -1231,7 +1204,7 @@ impl App {
+@@ -1318,7 +1291,7 @@ impl App {
          if let Some(status) = pending_status.or(request_status) {
              self.set_side_parent_status(thread_id, Some(status));
          }
@@ -707,7 +707,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
          Ok(())
      }
 
-@@ -1245,7 +1218,7 @@ impl App {
+@@ -1332,7 +1305,7 @@ impl App {
              (channel.sender.clone(), Arc::clone(&channel.store))
          };
 
@@ -716,7 +716,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
              let mut guard = store.lock().await;
              let should_send = guard.active;
              // Active batch responses remain queued in the receiver across a concurrent detach, so
-@@ -1254,7 +1227,7 @@ impl App {
+@@ -1341,7 +1314,7 @@ impl App {
              if !should_send || !matches!(&event, HistoryLookupResponse::Batch { .. }) {
                  guard.push_buffered_event(ThreadBufferedEvent::HistoryEntryResponse(event.clone()));
              }
@@ -725,7 +725,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
          };
 
          if should_send {
-@@ -1272,6 +1245,7 @@ impl App {
+@@ -1359,6 +1332,7 @@ impl App {
                  }
              }
          }
@@ -734,7 +734,7 @@ index ba49b2fe7ca11abcd68a84c40d3d7deeabd2220d..c37f9863061f5545b752e9542d8bfcb2
      }
 
 diff --git a/codex-rs/tui/src/app_event.rs b/codex-rs/tui/src/app_event.rs
-index 78e3505d24cb173bc09d8a93785abd6b1f16668b..eec887edd74b52ce85dc7d79666cab50adde6e55 100644
+index 7941b0caba2b22af9c884c06ef3b06cd09740a15..18f8e0e3d9d73318f755b3c17dc3ab49e3c13f0b 100644
 --- a/codex-rs/tui/src/app_event.rs
 +++ b/codex-rs/tui/src/app_event.rs
 @@ -31,6 +31,7 @@ use codex_app_server_protocol::PluginReadParams;
@@ -753,7 +753,7 @@ index 78e3505d24cb173bc09d8a93785abd6b1f16668b..eec887edd74b52ce85dc7d79666cab50
  use crate::app_command::AppCommand;
  use crate::app_server_session::AppServerStartedThread;
  use crate::bottom_pane::ApprovalRequest;
-@@ -315,6 +317,13 @@ pub(crate) enum AppEvent {
+@@ -364,6 +366,13 @@ pub(crate) enum AppEvent {
          prompt: UserMessage,
      },
 

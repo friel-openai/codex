@@ -61,7 +61,7 @@ index 0760cb15d4ac94cddc58c765d70961e7c46d931c..b5ca554b6953cdab0e8b0ed751d1a183
 +    }
  }
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index ce654d616061d59620e11d7fb9ed524888e5d042..d9bc397148f2fdd03b83e9cc3495e518f305934f 100644
+index 6ad88ade86ac410f154f5bb4895ad8c2087efa1f..9b0d6dfcb981aa52975b399936918e922e74f423 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
 @@ -759,6 +759,9 @@
@@ -74,7 +74,7 @@ index ce654d616061d59620e11d7fb9ed524888e5d042..d9bc397148f2fdd03b83e9cc3495e518
              "goals": {
                "type": "boolean"
              },
-@@ -6159,6 +6162,9 @@
+@@ -6229,6 +6232,9 @@
          "fast_mode": {
            "type": "boolean"
          },
@@ -122,18 +122,18 @@ index 0000000000000000000000000000000000000000..141eec9d0981380eccb34879e229eb41
 +
 +Treat messages from the supervisor as task instructions.
 diff --git a/codex-rs/core/src/compact.rs b/codex-rs/core/src/compact.rs
-index ed587284995f32f2fcefecb3a0646d4eb86d8bb6..250a2f19ce25259a6fe6442484cfa89ed239c54b 100644
+index c6b32bf758770dd01b7f3fc9bed1e057e53abace..66f6ba7662a74ce473347afb0f66e1d3680cf36d 100644
 --- a/codex-rs/core/src/compact.rs
 +++ b/codex-rs/core/src/compact.rs
-@@ -34,6 +34,7 @@ use codex_context_fragments::AnnotatedContent;
- use codex_context_fragments::set_annotated_content;
+@@ -36,6 +36,7 @@ use codex_context_fragments::set_annotated_content;
  use codex_history::CodexHarnessMetadata;
  use codex_history::ResponseItemEnvelope;
+ use codex_protocol::ResponseItemId;
 +use codex_protocol::AgentPath;
  use codex_protocol::error::CodexErr;
  use codex_protocol::error::CodexErrorDetails;
  use codex_protocol::error::Result as CodexResult;
-@@ -85,6 +86,7 @@ impl CompactionReporting {
+@@ -87,6 +88,7 @@ impl CompactionReporting {
      }
  }
  const COMPACT_USER_MESSAGE_MAX_TOKENS: usize = 20_000;
@@ -141,7 +141,7 @@ index ed587284995f32f2fcefecb3a0646d4eb86d8bb6..250a2f19ce25259a6fe6442484cfa89e
  pub(crate) const UNIFIED_EXEC_PROCESS_WARNING_PREFIX: &str =
      "Warning: The maximum number of unified exec process";
 
-@@ -399,6 +401,7 @@ async fn run_compact_task_inner_impl(
+@@ -402,6 +404,7 @@ async fn run_compact_task_inner_impl(
          }
      };
 
@@ -149,7 +149,7 @@ index ed587284995f32f2fcefecb3a0646d4eb86d8bb6..250a2f19ce25259a6fe6442484cfa89e
      let history_snapshot = sess.clone_history().await;
      let history_items = history_snapshot.annotated_items();
      let summary_suffix =
-@@ -412,6 +415,9 @@ async fn run_compact_task_inner_impl(
+@@ -420,6 +423,9 @@ async fn run_compact_task_inner_impl(
          // belongs to this compaction turn.
          summary_item.set_turn_id_if_missing(&turn_context.sub_id);
      }
@@ -159,7 +159,7 @@ index ed587284995f32f2fcefecb3a0646d4eb86d8bb6..250a2f19ce25259a6fe6442484cfa89e
      let (window_number, window_ids) = sess.advance_auto_compact_window().await;
 
      let (initial_context, world_state_baseline) =
-@@ -593,6 +599,71 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
+@@ -605,6 +611,71 @@ pub(crate) fn is_compaction_filtered_user_message(message: &str) -> bool {
      message.starts_with(UNIFIED_EXEC_PROCESS_WARNING_PREFIX)
  }
 
@@ -232,7 +232,7 @@ index ed587284995f32f2fcefecb3a0646d4eb86d8bb6..250a2f19ce25259a6fe6442484cfa89e
      let ResponseItem::Message { role, content, .. } = item else {
          return false;
 diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
-index 105b4a532db20c4b6a7ab3f0fb5ff531f6bf00ac..a11089e925acd2e1823be91a93fdd5610e5372a1 100644
+index f87c4bd2983ee31837cb8436a8287f0571650b12..c8ce3f104b437a09d31425cb4601a7bf6cb2e3b9 100644
 --- a/codex-rs/core/src/compact_remote.rs
 +++ b/codex-rs/core/src/compact_remote.rs
 @@ -10,6 +10,7 @@ use crate::compact::build_compaction_initial_context;
@@ -243,7 +243,7 @@ index 105b4a532db20c4b6a7ab3f0fb5ff531f6bf00ac..a11089e925acd2e1823be91a93fdd561
  use crate::compact_model_fallback::record_model_fallback;
  use crate::compact_model_fallback::should_retry_with_current_model;
  use crate::compact_remote_history::HistoryItemGroup;
-@@ -362,10 +363,18 @@ pub(crate) async fn process_annotated_compacted_history(
+@@ -363,10 +364,18 @@ pub(crate) async fn process_annotated_compacted_history(
      let (initial_context, world_state_baseline) =
          build_compaction_initial_context(sess, initial_context_injection).await;
 
@@ -264,7 +264,7 @@ index 105b4a532db20c4b6a7ab3f0fb5ff531f6bf00ac..a11089e925acd2e1823be91a93fdd561
          insert_initial_context_before_last_real_user_or_summary(compacted_history, initial_context),
          world_state_baseline,
 diff --git a/codex-rs/core/src/compact_tests.rs b/codex-rs/core/src/compact_tests.rs
-index 44cfad1995696e8d2a7cf75fab6fe822b0b9ef07..ebd9f781dfd8db8096af9e8aec9a3cc048b9dcb2 100644
+index 72fa09a1e82d2cb0b47e6da0d8270d9bdc9f9581..d195b0b1e7f7e08f4339e9598c5795d244e7b8c4 100644
 --- a/codex-rs/core/src/compact_tests.rs
 +++ b/codex-rs/core/src/compact_tests.rs
 @@ -3,6 +3,7 @@ use codex_history::CodexHarnessMetadata;
@@ -359,12 +359,12 @@ index 44cfad1995696e8d2a7cf75fab6fe822b0b9ef07..ebd9f781dfd8db8096af9e8aec9a3cc0
 +
  fn compacted_user_message(text: &str) -> CompactedUserMessage {
      CompactedUserMessage {
-         message: text.to_string(),
+         id: None,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934bb655186 100644
+index ebfc96ccc52dd88427e25d8b613a1f86a37fb08e..c61feab675209e013657601b77fc55a5ead8d113 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -283,7 +283,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
+@@ -287,7 +287,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
  mod rollout_reconstruction_tests;
 
  const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
@@ -376,7 +376,7 @@ index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934
 
  async fn load_agent_prompt_fallback(
      codex_home: &Path,
-@@ -304,10 +308,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
+@@ -308,10 +312,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
      load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
  }
 
@@ -405,7 +405,7 @@ index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934
  fn history_contains_developer_text(
      history: &crate::context_manager::ContextManager,
      expected: &str,
-@@ -334,6 +356,11 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -338,6 +360,11 @@ pub(crate) async fn load_agent_role_prompt(
      }
 
      let role_prompt = match session_source {
@@ -417,7 +417,7 @@ index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934
          SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
          SessionSource::Cli
          | SessionSource::VSCode
-@@ -341,7 +368,19 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -345,7 +372,19 @@ pub(crate) async fn load_agent_role_prompt(
          | SessionSource::Mcp
          | SessionSource::Custom(_)
          | SessionSource::Internal(_)
@@ -438,7 +438,7 @@ index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2281,6 +2320,11 @@ impl Session {
+@@ -2302,6 +2341,11 @@ impl Session {
              .clone()
      }
 
@@ -451,10 +451,10 @@ index f08c9f19910d3b966099a343e48567d4fb1fd580..d1421e50b4ab15936ec7e38731873934
          self.services.agents_md_manager.user_instructions()
      }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 80fbcdb46dad6298fb31024fbc3e0ffdf89d1a20..8584a07e01c4210bd55ca6fe961bb8f8b95ad459 100644
+index 3eb1dae83c27bf41a098397dbaa7d041b86e1385..1150170abf16c02fe51b413348e47ab59ee3306a 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13806,6 +13806,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -13876,6 +13876,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
      assert!(prompt.contains("Prefer direct execution over coordination"));
  }
 
@@ -549,7 +549,7 @@ index 80fbcdb46dad6298fb31024fbc3e0ffdf89d1a20..8584a07e01c4210bd55ca6fe961bb8f8
  #[tokio::test]
  async fn subagent_prompt_is_for_regular_subagents_only() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
-@@ -13830,6 +13918,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -13900,6 +13988,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
      )
      .await
      .expect("write subagent override");
@@ -568,7 +568,7 @@ index 80fbcdb46dad6298fb31024fbc3e0ffdf89d1a20..8584a07e01c4210bd55ca6fe961bb8f8
 
      assert_eq!(
          load_root_agent_prompt(codex_home.path()).await,
-@@ -13839,6 +13939,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -13909,6 +14009,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
          load_subagent_prompt(codex_home.path()).await,
          "custom subagent"
      );
@@ -584,10 +584,10 @@ index 80fbcdb46dad6298fb31024fbc3e0ffdf89d1a20..8584a07e01c4210bd55ca6fe961bb8f8
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fdc13950f0 100644
+index e6a85a77b804a647d8af814d73b821c6697c0b65..71022a209db3af75f5060aecfa3d35817b248607 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
-@@ -61,6 +61,7 @@ use crate::tasks::emit_compact_metric;
+@@ -62,6 +62,7 @@ use crate::tasks::emit_compact_metric;
  use crate::tools::ToolRouter;
  use crate::tools::context::SharedTurnDiffTracker;
  use crate::tools::handlers::is_set_workspace_cwd_tool;
@@ -595,15 +595,7 @@ index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fd
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -104,7 +105,6 @@ use codex_protocol::models::FunctionCallOutputPayload;
- use codex_protocol::models::MessagePhase;
- use codex_protocol::models::ReasoningItemContent;
- use codex_protocol::models::ReasoningItemReasoningSummary;
--use codex_protocol::models::ResponseInputItem;
- use codex_protocol::models::ResponseItem;
- use codex_protocol::openai_models::ModelMessages;
- use codex_protocol::protocol::AgentMessageContentDeltaEvent;
-@@ -2816,10 +2816,11 @@ async fn drain_in_flight(
+@@ -2876,10 +2877,11 @@ async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
      sess: Arc<Session>,
      turn_context: Arc<TurnContext>,
@@ -617,7 +609,7 @@ index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fd
                  mark_thread_memory_mode_polluted_if_external_context(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -2829,13 +2830,16 @@ async fn drain_in_flight(
+@@ -2889,13 +2891,16 @@ async fn drain_in_flight(
                  sess.record_annotated_conversation_items(&turn_context, vec![envelope])
                      .await;
              }
@@ -635,7 +627,7 @@ index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fd
  }
 
  fn assign_missing_streamed_response_item_id(
-@@ -3677,10 +3681,14 @@ async fn try_run_sampling_request(
+@@ -3744,10 +3749,14 @@ async fn try_run_sampling_request(
      if workspace_cwd_call_seen && tool_call_count != 1 {
          step_context.reject_context_transition_mixed_with_sibling_tool();
      }
@@ -654,7 +646,7 @@ index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fd
      drop(tool_blocking_timing_guard);
 
      if should_emit_token_count {
-@@ -3691,6 +3699,10 @@ async fn try_run_sampling_request(
+@@ -3758,6 +3767,10 @@ async fn try_run_sampling_request(
          sess.send_token_count_event(&turn_context).await;
      }
 
@@ -666,7 +658,7 @@ index dbf82ad3484f03c5d8014d70edffe0d6550f2ab7..b16bee38281450021f40daeba5b5a0fd
          return Err(CodexErr::TurnAborted);
      }
 diff --git a/codex-rs/core/src/stream_events_utils.rs b/codex-rs/core/src/stream_events_utils.rs
-index 5c9e5e340e77a571dab4dcaf524313fc34f169b2..40ecd8475dd73f843de533a505bf044200cdffb6 100644
+index b0bbaeeac146a654424018a3ffb9783b5dea36ec..50a75ed1955bc4ec78fb1b846928ed82a3db6c7a 100644
 --- a/codex-rs/core/src/stream_events_utils.rs
 +++ b/codex-rs/core/src/stream_events_utils.rs
 @@ -13,6 +13,7 @@ use crate::function_tool::FunctionCallError;
@@ -1740,10 +1732,10 @@ index 2612414262477b6f50fed6cc056307e47f3378e3..29d65140c462d20b29b6226c3a7b21b9
 +        .map_err(anyhow::Error::msg)
 +}
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 978a72693dbafe63ff6793b734fbfdbccdd9165e..33ffbdee68d922989006791dfaae1288ea1b9ac2 100644
+index 929846185c34edd138e6d9e7c1d4d9ddfe95df05..ac97a70bcbe77a6593eaf433d8fe8bdc41dc0c7a 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -313,6 +313,8 @@ pub enum Feature {
+@@ -320,6 +320,8 @@ pub enum Feature {
      GuardianExt,
      /// Enable persisted thread goals and automatic goal continuation.
      Goals,
@@ -1752,7 +1744,7 @@ index 978a72693dbafe63ff6793b734fbfdbccdd9165e..33ffbdee68d922989006791dfaae1288
      /// Add current context-window metadata to model-visible context.
      TokenBudget,
      /// Enables experimental context management.
-@@ -1557,6 +1559,16 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1601,6 +1603,16 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Stable,
          default_enabled: true,
      },
@@ -1770,10 +1762,10 @@ index 978a72693dbafe63ff6793b734fbfdbccdd9165e..33ffbdee68d922989006791dfaae1288
          id: Feature::TokenBudget,
          key: "token_budget",
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index 0a6b285813691f43ba2a6ba8207500aff9bf87d1..382664ec6f94b2d8a737c8beb6033bb0cfe54410 100644
+index db434faf7e906e0000d1c9cfa7e154fefafcdc09..640869557c114e12b79b68c55accd57b292a5a54 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -445,6 +445,20 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
+@@ -483,6 +483,20 @@ fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
      assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
  }
 
@@ -1795,10 +1787,10 @@ index 0a6b285813691f43ba2a6ba8207500aff9bf87d1..382664ec6f94b2d8a737c8beb6033bb0
      let mut features = Features::with_defaults();
      assert!(!features.apps_enabled_for_auth(/*has_chatgpt_auth*/ false));
 diff --git a/codex-rs/protocol/src/protocol.rs b/codex-rs/protocol/src/protocol.rs
-index 845bb425e953e6ed3d5741b2ad35bdfa24889c2f..2a53ea031ad0080aafb6388d2304395dfb428b65 100644
+index 13bf42c3a0c935d84fbb4b81708c0c932df1dd36..bd1a428af1d763f989d98e2a9cfd14a9a85752ae 100644
 --- a/codex-rs/protocol/src/protocol.rs
 +++ b/codex-rs/protocol/src/protocol.rs
-@@ -4078,7 +4078,15 @@ pub enum ThreadGoalStatus {
+@@ -4081,7 +4081,15 @@ pub enum ThreadGoalStatus {
      Complete,
  }
 
@@ -1815,7 +1807,7 @@ index 845bb425e953e6ed3d5741b2ad35bdfa24889c2f..2a53ea031ad0080aafb6388d2304395d
 
  pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
      if value.is_empty() {
-@@ -4089,6 +4097,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
+@@ -4092,6 +4100,27 @@ pub fn validate_thread_goal_objective(value: &str) -> Result<(), String> {
              "goal objective must be at most {MAX_THREAD_GOAL_OBJECTIVE_CHARS} characters"
          ));
      }
@@ -1843,7 +1835,7 @@ index 845bb425e953e6ed3d5741b2ad35bdfa24889c2f..2a53ea031ad0080aafb6388d2304395d
      Ok(())
  }
 
-@@ -4564,6 +4593,35 @@ mod tests {
+@@ -4567,6 +4596,35 @@ mod tests {
          Ok(())
      }
 
@@ -2628,7 +2620,7 @@ index 7adc1afefc24b36d6cdef5ba783f624af31a1271..bfab36afcc1afc36eaf5a00f6fbd8ab8
 
  pub(crate) use thread_goal::ThreadGoalRow;
 diff --git a/codex-rs/state/src/model/thread_metadata.rs b/codex-rs/state/src/model/thread_metadata.rs
-index 1e2da1c8430fbbea1f130ca3d475d36a59eb99cf..8201962e7954e1ef27e781391c00b4e1e6f4330f 100644
+index 418edb74a82a4b3157e1d44dc266afe2052b7ceb..a65ea64242ce8c59ad5e711c6ee4b10bead418b7 100644
 --- a/codex-rs/state/src/model/thread_metadata.rs
 +++ b/codex-rs/state/src/model/thread_metadata.rs
 @@ -120,6 +120,21 @@ pub struct ExtractionOutcome {
@@ -4003,10 +3995,10 @@ index ed616e16b7c81d06bcf02302912e16f71ad936f3..c625914f9e20637776a04bacf11ee2f6
      async fn deleting_thread_deletes_goal() {
          let runtime = test_runtime().await;
 diff --git a/codex-rs/state/src/runtime/threads.rs b/codex-rs/state/src/runtime/threads.rs
-index 2cb9f8e9192269a9922d9dc56e6eda58f9622a1e..bc055a2586c4686b30ca5c1f974039e2da5a5a24 100644
+index e2bb9267490a3962dcf4065a1cc570109d1510c7..c95cf2b96836c4a4588e52eea847d812393d757a 100644
 --- a/codex-rs/state/src/runtime/threads.rs
 +++ b/codex-rs/state/src/runtime/threads.rs
-@@ -203,6 +203,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
+@@ -205,6 +205,55 @@ ON CONFLICT(child_thread_id) DO UPDATE SET
              .await
      }
 
@@ -4062,7 +4054,7 @@ index 2cb9f8e9192269a9922d9dc56e6eda58f9622a1e..bc055a2586c4686b30ca5c1f974039e2
      /// Find a direct spawned child of `parent_thread_id` by canonical agent path.
      pub async fn find_thread_spawn_child_by_path(
          &self,
-@@ -817,6 +866,103 @@ WHERE id = ?
+@@ -837,6 +886,103 @@ WHERE id = ?
          Ok(result.rows_affected() > 0)
      }
 
@@ -4166,7 +4158,7 @@ index 2cb9f8e9192269a9922d9dc56e6eda58f9622a1e..bc055a2586c4686b30ca5c1f974039e2
      /// Allocate a persisted `updated_at` value for thread-list cursor ordering.
      ///
      /// We keep a process-local high-water mark so hot rollout writes can get unique,
-@@ -3138,6 +3284,153 @@ mod tests {
+@@ -3183,6 +3329,153 @@ mod tests {
          );
      }
 
@@ -4320,7 +4312,7 @@ index 2cb9f8e9192269a9922d9dc56e6eda58f9622a1e..bc055a2586c4686b30ca5c1f974039e2
      #[tokio::test]
      async fn list_threads_orders_and_pages_by_recency_at() {
          let codex_home = unique_temp_dir();
-@@ -3542,6 +3835,161 @@ mod tests {
+@@ -3587,6 +3880,161 @@ mod tests {
          assert_eq!(all_descendants, vec![child_thread_id, grandchild_thread_id]);
      }
 
@@ -4562,7 +4554,7 @@ index 536d56befab7291874a64228ab649e4e29edacdc..d4a56af50c0e34fc13035449521ab89f
              }
              migrator.run(&pool).await.map_err(anyhow::Error::from)
 diff --git a/codex-rs/thread-store/src/in_memory.rs b/codex-rs/thread-store/src/in_memory.rs
-index d95d5ec3a353d46a7fa16101f9fc79f6674a5889..a47439533f5d2fd4c05d3d1f621a506b91b0d179 100644
+index 1932a90af5c93bc783b35321cf6187a8df3c74e7..baa7271119391b9291acac80e24ad3dc170f5826 100644
 --- a/codex-rs/thread-store/src/in_memory.rs
 +++ b/codex-rs/thread-store/src/in_memory.rs
 @@ -43,6 +43,7 @@ use crate::ThreadStore;
@@ -4942,7 +4934,7 @@ index d95d5ec3a353d46a7fa16101f9fc79f6674a5889..a47439533f5d2fd4c05d3d1f621a506b
      let rollout_path = state
          .rollout_paths
          .iter()
-@@ -1058,13 +1354,13 @@ fn stored_thread_from_state(
+@@ -1059,13 +1355,13 @@ fn stored_thread_from_state(
              .flatten(),
          created_at: metadata
              .and_then(|metadata| metadata.created_at)
@@ -5298,10 +5290,10 @@ index e451116503d3d5b0e95f909011381517d2b8b053..b7012b7fa275a02f3c9e59563b4f602d
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index f8dbaf2e412e018d69e262329e0beb71d5c66f55..781cdaee9af7c5f0e2468303fa8597b5e4c595b3 100644
+index adcea1683926556eca0dd5db09b24289ad40a77a..efe2ef1af6c8e50cee9d7381e6386c344502db4d 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
-@@ -106,6 +106,7 @@ use crate::ThreadStoreError;
+@@ -109,6 +109,7 @@ use crate::ThreadStoreError;
  use crate::ThreadStoreFuture;
  use crate::ThreadStoreResult;
  use crate::TimelinePage;
@@ -5309,7 +5301,7 @@ index f8dbaf2e412e018d69e262329e0beb71d5c66f55..781cdaee9af7c5f0e2468303fa8597b5
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -968,6 +969,27 @@ impl ThreadStore for LocalThreadStore {
+@@ -971,6 +972,27 @@ impl ThreadStore for LocalThreadStore {
          })
      }
 
@@ -5337,7 +5329,7 @@ index f8dbaf2e412e018d69e262329e0beb71d5c66f55..781cdaee9af7c5f0e2468303fa8597b5
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1166,6 +1188,114 @@ mod tests {
+@@ -1169,6 +1191,114 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -5452,7 +5444,7 @@ index f8dbaf2e412e018d69e262329e0beb71d5c66f55..781cdaee9af7c5f0e2468303fa8597b5
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -2493,6 +2623,21 @@ mod tests {
+@@ -2496,6 +2626,21 @@ mod tests {
          }))
      }
 
@@ -5505,7 +5497,7 @@ index c4a87d9fd42a54648c629f05be58452a08cf6d22..60cbf54e766d3f50721a2469eb26fb96
      fn move_thread_to_section(
          &self,
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index a214c827348c97ee8701f90f836f9902f9cdedac..95c13492c278ea9e169bd32c6a9013c137c9c1f6 100644
+index e227c80dc3d87603197d1b9b549c15575ea932ee..92779518982960af9a2a6da6238dc9d31389d86d 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
 @@ -1,5 +1,6 @@
@@ -5515,7 +5507,7 @@ index a214c827348c97ee8701f90f836f9902f9cdedac..95c13492c278ea9e169bd32c6a9013c1
 
  use chrono::DateTime;
  use chrono::Utc;
-@@ -1039,6 +1040,17 @@ pub struct UpdateThreadMetadataParams {
+@@ -1060,6 +1061,17 @@ pub struct UpdateThreadMetadataParams {
      pub include_archived: bool,
  }
 

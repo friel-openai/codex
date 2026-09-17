@@ -4,6 +4,7 @@ Combine the existing implementation and corrections:
 
 - Keep unrelated resume and metadata reads outside rollout migration waits
 - Reserve bounded concurrent migration jobs across processes
+- Release maintenance locks before inherited descriptors close
 - Serialize history schema initialization across app-server processes
 - Schedule independent rollout migrations using bounded dependency reservations
 - Cover migration overlap, dependency changes, retry and recovery isolation

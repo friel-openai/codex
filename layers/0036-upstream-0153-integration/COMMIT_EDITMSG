@@ -1,1 +1,5 @@
-Adapt Frodex features to upstream 0.153.4
+Adapt Frodex features to upstream 0.154.0
+
+Preserve the exact parent request prefix for goal-supervisor helpers resumed from native history_base, including discovered AGENTS.md instructions, request metadata, the prompt-cache key, and the MCP snapshot.
+
+Retain rejected and unknown SQLite projection tails for valid retries, restore bounded legacy named-session lookup, and adapt the existing test harnesses and generated artifacts to public Codex 0.154.0.
