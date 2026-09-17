@@ -2274,7 +2274,6 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
         agent_nickname: None,
         agent_role: None,
     });
-
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
@@ -2566,6 +2565,78 @@ async fn send_input_accepts_structured_items() {
     .await;
 
     let _ = thread
+        .thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+}
+
+#[tokio::test]
+async fn send_input_from_subagent_message_uses_inter_agent_communication() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let config = turn.config.as_ref().clone();
+    let parent = manager
+        .start_thread(StartThreadOptions::new(config))
+        .await
+        .expect("start parent");
+    let parent_thread_id = parent.thread_id;
+    session
+        .services
+        .agent_control
+        .register_session_root(parent_thread_id, /*current_parent_thread_id*/ None);
+    let sender_path = AgentPath::try_from("/root/worker").expect("valid sender path");
+    turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+        parent_thread_id,
+        depth: 1,
+        agent_path: Some(sender_path.clone()),
+        agent_nickname: Some("Worker".to_string()),
+        agent_role: None,
+    });
+    let expected_parent_turn_id = turn.sub_id.clone();
+    let expected_root_turn_id = turn.turn_metadata_state.root_turn_id();
+    let expected_cyber_access_program = turn.cyber_access_program;
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "send_input",
+        function_payload(json!({
+            "target": parent_thread_id.to_string(),
+            "message": "ready for review"
+        })),
+    );
+    SendInputHandler
+        .handle(invocation)
+        .await
+        .expect("send_input should succeed");
+
+    let expected = InterAgentCommunication::new(
+        sender_path,
+        AgentPath::root(),
+        Vec::new(),
+        "ready for review".to_string(),
+        /*trigger_turn*/ true,
+    );
+    assert!(manager.captured_ops().iter().any(|(id, op)| {
+        *id == parent_thread_id
+            && matches!(
+                op,
+                Op::InterAgentCommunication {
+                    communication,
+                    start_options,
+                }
+                    if communication == &expected
+                        && start_options.parent_turn_id.as_deref()
+                            == Some(expected_parent_turn_id.as_str())
+                        && start_options.root_turn_id.as_deref()
+                            == expected_root_turn_id.as_deref()
+                        && start_options.cyber_access_program == expected_cyber_access_program
+            )
+    }));
+
+    let _ = parent
         .thread
         .submit(Op::Shutdown {})
         .await
