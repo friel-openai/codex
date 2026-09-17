@@ -12,8 +12,8 @@ use codex_extension_api::ThreadLifecycleContributor;
 use codex_features::Feature;
 use codex_history::RolloutItem;
 use codex_login::CodexAuth;
-use codex_models_manager::bundled_models_response;
 use codex_models_manager::CustomModelConfig;
+use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::RefreshStrategy;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationMode;
@@ -957,6 +957,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
         "frontier-local".to_string(),
         CustomModelConfig {
             model: "gpt-real-preview".to_string(),
+            routing_profile: None,
             model_context_window: Some(123_456),
             model_auto_compact_token_limit: Some(100_000),
         },

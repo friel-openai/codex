@@ -33,6 +33,8 @@ use codex_protocol::protocol::TokenUsage;
 pub(crate) struct ActiveTurn {
     pub(crate) task: Option<RunningTask>,
     pub(crate) turn_state: Arc<Mutex<TurnState>>,
+    /// Whether changed model execution settings must be applied before this turn's next request.
+    pub(crate) execution_settings_refresh_requested: bool,
 }
 
 /// Whether mailbox deliveries should still be folded into the current turn.
@@ -61,6 +63,7 @@ impl Default for ActiveTurn {
         Self {
             task: None,
             turn_state: Arc::new(Mutex::new(TurnState::default())),
+            execution_settings_refresh_requested: false,
         }
     }
 }

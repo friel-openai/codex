@@ -17,6 +17,7 @@ use codex_config::RequirementSource;
 use codex_config::Sourced;
 use codex_http_client::HttpClientFactory;
 use codex_login::AuthManager;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::ModelsManagerConfig;
 use codex_models_manager::bundled_models_response;
 use codex_models_manager::manager::ModelsManager;
@@ -40,6 +41,7 @@ use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnAbortReason;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::time::Duration;
 use test_case::test_case;
@@ -109,6 +111,14 @@ impl GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.inner.custom_models_snapshot()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.inner.replace_custom_models(custom_models);
+    }
+
     fn raw_model_catalog(
         &self,
         strategy: RefreshStrategy,
