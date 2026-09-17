@@ -1,0 +1,71 @@
+[
+  {
+    "arguments": {},
+    "call_id": "list-success",
+    "output": "{\"agents\":[{\"agent_name\":\"/root\",\"agent_status\":\"running\"}]}",
+    "success": null,
+    "tool": "list_agents"
+  },
+  {
+    "arguments": {
+      "cursor": "x"
+    },
+    "call_id": "list-error",
+    "output": "failed to parse function arguments: unknown field `cursor`, expected `path_prefix` at line 1 column 9",
+    "success": null,
+    "tool": "list_agents"
+  },
+  {
+    "arguments": {
+      "message": "x",
+      "task_name": "x",
+      "unexpected": true
+    },
+    "call_id": "spawn-error",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected one of `message`, `task_name`, `agent_type`, `model`, `reasoning_effort`, `service_tier`, `fork_turns`, `fork_context` at line 1 column 43",
+    "success": null,
+    "tool": "spawn_agent"
+  },
+  {
+    "arguments": {
+      "message": "x",
+      "target": "x",
+      "unexpected": true
+    },
+    "call_id": "send-error",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected `target` or `message` at line 1 column 40",
+    "success": null,
+    "tool": "send_message"
+  },
+  {
+    "arguments": {
+      "message": "x",
+      "target": "x",
+      "unexpected": true
+    },
+    "call_id": "followup-error",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected `target` or `message` at line 1 column 40",
+    "success": null,
+    "tool": "followup_task"
+  },
+  {
+    "arguments": {
+      "timeout_ms": 1,
+      "unexpected": true
+    },
+    "call_id": "wait-error",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected `timeout_ms` at line 1 column 28",
+    "success": null,
+    "tool": "wait_agent"
+  },
+  {
+    "arguments": {
+      "target": "x",
+      "unexpected": true
+    },
+    "call_id": "interrupt-error",
+    "output": "failed to parse function arguments: unknown field `unexpected`, expected `target` at line 1 column 26",
+    "success": null,
+    "tool": "interrupt_agent"
+  }
+]
