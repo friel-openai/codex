@@ -42,6 +42,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
 use codex_model_provider_info::ModelProviderInfo;
 use codex_model_provider_info::WireApi;
 use codex_model_provider_info::create_oss_provider_with_base_url;
+use codex_models_manager::CustomModelConfig;
 use codex_models_manager::manager::SharedModelsManager;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -72,6 +73,7 @@ use futures::StreamExt;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -683,6 +685,7 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() 
             prompt_cache_key: Some(ThreadId::new().to_string()),
             text: None,
             client_metadata: None,
+            access_programs: None,
         },
         last_response: LastResponse {
             response_id: "parent-resp".to_string(),
@@ -696,6 +699,77 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest() 
         response_continuation.last_response.items_added,
         vec![latest_reasoning, latest_message]
     );
+}
+
+#[test]
+fn model_reroute_reset_discards_provider_route_segment_state() {
+    let client = test_model_client(SessionSource::Cli);
+    let request = ResponsesApiRequest {
+        model: "test-primary".to_string(),
+        instructions: "test instructions".to_string(),
+        input: vec![user_message_item("test input")],
+        tools: None,
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: Some("test-tier".to_string()),
+        prompt_cache_key: Some(ThreadId::new().to_string()),
+        text: None,
+        client_metadata: None,
+        access_programs: None,
+    };
+    let continuation = ResponseContinuation {
+        request: request.clone(),
+        last_response: LastResponse {
+            response_id: "test-response".to_string(),
+            items_added: vec![output_message("test-message", "test output")],
+        },
+    };
+    *client
+        .state
+        .latest_response_continuation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(continuation);
+
+    let mut session = client.new_session();
+    session.websocket_session.last_request = Some(request);
+    let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    session.websocket_session.last_response_rx = Some(last_response_rx);
+    session.websocket_session.last_response_from_untraced_warmup = true;
+    session
+        .turn_state
+        .set("test-route-state".to_string())
+        .expect("turn state should be unset");
+    let previous_turn_state = session.turn_state();
+
+    session.reset_for_model_reroute();
+
+    assert!(session.websocket_session.connection.is_none());
+    assert!(session.websocket_session.last_request.is_none());
+    assert!(session.websocket_session.last_response_rx.is_none());
+    assert!(!session.websocket_session.last_response_from_untraced_warmup);
+    assert!(!session.websocket_session.connection_reused());
+    assert!(session.turn_state.get().is_none());
+    assert!(!Arc::ptr_eq(&previous_turn_state, &session.turn_state));
+    assert!(
+        client
+            .state
+            .latest_response_continuation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    );
+    assert!(!client.state.disable_websockets.load(Ordering::Relaxed));
+
+    drop(session);
+    let next_session = client.new_session();
+    assert!(next_session.websocket_session.last_request.is_none());
+    assert!(next_session.websocket_session.last_response_rx.is_none());
+    assert!(next_session.turn_state.get().is_none());
 }
 
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
@@ -1042,8 +1116,10 @@ impl ModelProvider for TestRecoveryProvider {
         &self,
         codex_home: PathBuf,
         config_model_catalog: Option<ModelsResponse>,
+        custom_models: HashMap<String, CustomModelConfig>,
     ) -> SharedModelsManager {
-        self.inner.models_manager(codex_home, config_model_catalog)
+        self.inner
+            .models_manager(codex_home, config_model_catalog, custom_models)
     }
 }
 

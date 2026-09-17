@@ -2142,8 +2142,8 @@ while True:
     );
     parent
         .thread
-        .inject_user_message_without_turn("parent seed".to_string())
-        .await;
+        .inject_response_items(vec![user_message("parent seed")])
+        .await?;
     parent
         .thread
         .session

@@ -44,9 +44,11 @@ pub(super) fn sampler_failure_reason(error: &LunaSamplerError) -> &'static str {
             ApiError::ContextWindowExceeded => "context_window_exceeded",
             ApiError::QuotaExceeded => "quota_exceeded",
             ApiError::UsageNotIncluded => "usage_not_included",
+            ApiError::UsageLimitReached(_) => "usage_limit_reached",
             ApiError::Retryable { .. } => "retryable_api_error",
             ApiError::RateLimitExceeded { .. } | ApiError::RateLimit(_) => "rate_limit",
             ApiError::InvalidRequest { .. } => "invalid_request",
+            ApiError::ModelUnavailable { .. } => "model_unavailable",
             ApiError::CyberPolicy { .. } | ApiError::MisalignmentPolicyViolation { .. } => {
                 "policy_error"
             }
