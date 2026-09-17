@@ -46,6 +46,7 @@ use crate::ThreadStoreResult;
 
 mod canonical_projection;
 mod canonicalizer;
+mod dependencies;
 mod jsonl_spans;
 mod legacy_event;
 mod line_parser;
@@ -90,6 +91,7 @@ mod lineage_benchmark_tests;
 mod lineage_projection_tests;
 
 use canonicalizer::LegacyRolloutCanonicalizer;
+use dependencies::MigrationAdmission;
 use lineage::LegacyLineageMigrationPlan;
 use lineage::contains_convertible_rollout_reference;
 use lineage::plan_legacy_lineage;
@@ -333,19 +335,70 @@ impl LocalThreadStore {
     async fn migrate_rollout_path_on_demand(
         &self,
         path: PathBuf,
+        admission: &mut MigrationAdmission,
     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
-        let _maintenance_guard =
-            codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
-                .await
-                .map_err(migration_error)?;
         let options = RolloutMigrationOptions {
             mode: RolloutMigrationMode::Apply,
             thread_ids: Vec::new(),
             max_mib_per_second: None,
         };
         let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
-        self.migrate_rollout_path(path, &options, &HashMap::new(), &mut limiter)
-            .await
+        loop {
+            let guard = match admission {
+                MigrationAdmission::Shared(dependencies) => {
+                    codex_rollout::try_acquire_rollout_migration_dependency_lock(
+                        &self.config.codex_home,
+                        &dependencies.thread_ids,
+                    )
+                }
+                MigrationAdmission::Manual
+                | MigrationAdmission::Exclusive
+                | MigrationAdmission::RequiresExclusive => {
+                    *admission = MigrationAdmission::Exclusive;
+                    codex_rollout::try_acquire_rollout_maintenance_job_lock(&self.config.codex_home)
+                }
+            }
+            .map_err(migration_error)?;
+            let Some(guard) = guard else {
+                return Err(ThreadStoreError::Conflict {
+                    message: "rollout migration dependencies or capacity are busy".to_string(),
+                });
+            };
+            if let MigrationAdmission::Shared(dependencies) = admission {
+                let journal = migration_journal_path(
+                    &self.config.codex_home,
+                    dependencies.selected_thread_id(),
+                );
+                if tokio::fs::try_exists(journal)
+                    .await
+                    .map_err(migration_error)?
+                    || !dependencies.unchanged().await.unwrap_or(false)
+                {
+                    *admission = MigrationAdmission::RequiresExclusive;
+                    drop(guard);
+                    continue;
+                }
+                tracing::debug!(
+                    dependency_count = dependencies.thread_ids.len(),
+                    bytes_read = dependencies.bytes_read,
+                    "admitted independent rollout migration"
+                );
+            }
+            let result = self
+                .migrate_rollout_path(
+                    path.clone(),
+                    &options,
+                    &HashMap::new(),
+                    &mut limiter,
+                    admission,
+                    Some(guard),
+                )
+                .await;
+            if matches!(admission, MigrationAdmission::RequiresExclusive) {
+                continue;
+            }
+            return result;
+        }
     }
 
     /// Inspect or migrate eligible legacy rollout files beneath active and archived sessions.
@@ -399,7 +452,7 @@ impl LocalThreadStore {
         paths: RolloutMigrationPaths,
     ) -> ThreadStoreResult<RolloutMigrationReport> {
         let mut limiter = RolloutMigrationRateLimiter::new(options.max_mib_per_second)?;
-        let _maintenance_guard = match options.mode {
+        let inventory_guard = match options.mode {
             RolloutMigrationMode::DryRun => None,
             RolloutMigrationMode::Apply => Some(
                 codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
@@ -450,6 +503,7 @@ impl LocalThreadStore {
                 !thread_id.is_some_and(|thread_id| pending_thread_ids.contains(&thread_id))
             });
         }
+        drop(inventory_guard);
         // The name index is global, so read it once before either migrating or repairing names.
         let legacy_names = if options.mode == RolloutMigrationMode::Apply {
             let thread_ids = paths
@@ -466,8 +520,23 @@ impl LocalThreadStore {
         let mut report = RolloutMigrationReport::default();
 
         for (index, path) in paths.into_iter().enumerate() {
+            let job_guard = match options.mode {
+                RolloutMigrationMode::DryRun => None,
+                RolloutMigrationMode::Apply => Some(
+                    codex_rollout::acquire_rollout_maintenance_job_lock(&self.config.codex_home)
+                        .await
+                        .map_err(migration_error)?,
+                ),
+            };
             let outcome = self
-                .migrate_rollout_path(path, &options, &legacy_names, &mut limiter)
+                .migrate_rollout_path(
+                    path,
+                    &options,
+                    &legacy_names,
+                    &mut limiter,
+                    &mut MigrationAdmission::Manual,
+                    job_guard,
+                )
                 .await?;
             let outcome_status = outcome.as_ref().map(|outcome| outcome.status);
             if let Some(outcome) = outcome {
@@ -489,6 +558,8 @@ impl LocalThreadStore {
         options: &RolloutMigrationOptions,
         legacy_names: &HashMap<ThreadId, String>,
         limiter: &mut RolloutMigrationRateLimiter,
+        admission: &mut MigrationAdmission,
+        job_guard: Option<codex_rollout::RolloutMaintenanceJobGuard>,
     ) -> ThreadStoreResult<Option<RolloutMigrationOutcome>> {
         let mut retried_moved_path = false;
         let metadata = loop {
@@ -563,6 +634,19 @@ impl LocalThreadStore {
             }));
         };
         let thread_id = metadata.meta.id;
+        if let MigrationAdmission::Shared(dependencies) = admission
+            && (thread_id != dependencies.selected_thread_id()
+                || metadata.meta.history_mode != ThreadHistoryMode::Legacy
+                || tokio::fs::try_exists(migration_journal_path(
+                    &self.config.codex_home,
+                    thread_id,
+                ))
+                .await
+                .map_err(migration_error)?)
+        {
+            *admission = MigrationAdmission::RequiresExclusive;
+            return Ok(None);
+        }
         if !matches_selection(&options.thread_ids, Some(thread_id)) {
             return Ok(None);
         }
@@ -621,8 +705,12 @@ impl LocalThreadStore {
                     .len()
                     > 0;
                 let recovery = if lineage_journal {
-                    let _writer_guard = self.writer_lock_coordinator.acquire(thread_id)?;
-                    self.recover_legacy_lineage(&journal_path, limiter).await
+                    match self.writer_lock_coordinator.acquire(thread_id) {
+                        Ok(_writer_guard) => {
+                            self.recover_legacy_lineage(&journal_path, limiter).await
+                        }
+                        Err(error) => Err(error),
+                    }
                 } else {
                     self.recover_published_migration(
                         thread_id,
@@ -658,6 +746,9 @@ impl LocalThreadStore {
                 }
                 Ok(RolloutMigrationStatus::AlreadyPaginated)
             };
+            // Repair takes lifecycle before exclusive maintenance. A job's shared maintenance
+            // lease must not survive into projection's lifecycle wait behind a queued writer.
+            drop(job_guard);
             let result = match result {
                 Ok(RolloutMigrationStatus::Migrated) => self
                     .ensure_complete_migrated_projection(thread_id)
@@ -791,7 +882,19 @@ impl LocalThreadStore {
             ));
         }
 
-        let _live_writer_guard = self.live_writer_locks.lock(thread_id).await;
+        let _live_writer_guard = if matches!(admission, MigrationAdmission::Manual) {
+            self.live_writer_locks.lock(thread_id).await
+        } else {
+            match self.live_writer_locks.try_lock(thread_id).await {
+                Ok(guard) => guard,
+                Err(ThreadStoreError::Conflict { message }) => {
+                    return Ok(Some(skipped_busy_outcome(
+                        thread_id, path, message, /*bytes_processed*/ 0,
+                    )));
+                }
+                Err(error) => return Err(error),
+            }
+        };
         let _writer_guard = match self.writer_lock_coordinator.acquire(thread_id) {
             Ok(guard) => guard,
             Err(ThreadStoreError::Conflict { message }) => {
@@ -859,6 +962,10 @@ impl LocalThreadStore {
         let lineage_plan = match lineage_plan {
             Ok(plan) => plan,
             Err(error) => {
+                if matches!(admission, MigrationAdmission::Shared(_)) {
+                    *admission = MigrationAdmission::RequiresExclusive;
+                    return Err(error);
+                }
                 return Ok(Some(migration_outcome(
                     thread_id,
                     path,
@@ -871,6 +978,12 @@ impl LocalThreadStore {
             }
         };
         if let Some(plan) = lineage_plan {
+            if let MigrationAdmission::Shared(dependencies) = admission
+                && !dependencies.covers_plan(&plan).await
+            {
+                *admission = MigrationAdmission::RequiresExclusive;
+                return Ok(None);
+            }
             let bytes_before = limiter.bytes_processed;
             let result = self
                 .migrate_legacy_lineage(&path, &journal_path, plan, limiter)
@@ -889,6 +1002,7 @@ impl LocalThreadStore {
             };
             drop(_writer_guard);
             drop(_live_writer_guard);
+            drop(job_guard);
             let result = match result {
                 Ok(selected_path) => {
                     path = selected_path;
@@ -1009,6 +1123,19 @@ impl LocalThreadStore {
             write_migration_journal(journal_path).await,
             RolloutMigrationFailureReason::RolloutPublishFailed,
         )?;
+
+        #[cfg(test)]
+        {
+            let barrier = self
+                .rollout_migration_coordinator
+                .journal_barriers
+                .lock()
+                .await
+                .remove(&thread_id);
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
+        }
 
         let source_metadata = with_failure_reason(
             tokio::fs::metadata(rollout_path)
