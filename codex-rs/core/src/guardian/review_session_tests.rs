@@ -247,6 +247,7 @@ async fn test_review_params() -> GuardianReviewSessionParams {
         },
         reasons: ApprovalRequestReasons::default(),
         schema: super::super::guardian_output_schema(),
+        analytics_model: model.clone(),
         model,
         compaction_model_hash: None,
         reasoning_effort,
