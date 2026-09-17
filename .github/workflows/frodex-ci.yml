@@ -24,7 +24,6 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          # Three-way layer application needs preimages from historical Frodex tags.
           fetch-depth: 0
           persist-credentials: false
 
@@ -56,9 +55,17 @@ jobs:
           ' upstream.json)
           IFS=$'\t' read -r codex_tag codex_commit <<<"${upstream}"
 
-          # Fetch only the configured release boundary, then verify that its
-          # tag and commit still identify the same upstream source tree.
-          git fetch --no-tags --depth=1 https://github.com/openai/codex.git \
+          # Do not let checkout's historical Frodex tags satisfy patch preimages.
+          # Only canonical definition history and public upstream may be present.
+          definition_path="${RUNNER_TEMP}/frodex-definition"
+          git init "${definition_path}"
+          git -C "${definition_path}" fetch --no-tags "${GITHUB_WORKSPACE}" \
+            HEAD:refs/heads/ci
+          git -C "${definition_path}" switch ci
+          cd "${definition_path}"
+
+          # Keep public upstream history complete while fetching only its configured tag.
+          git fetch --no-tags https://github.com/openai/codex.git \
             "+refs/tags/${codex_tag}:refs/tags/${codex_tag}"
           actual_codex_commit=$(git rev-parse "${codex_tag}^{commit}")
           [[ "${actual_codex_commit}" == "${codex_commit}" ]] || {
