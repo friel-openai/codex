@@ -86,18 +86,18 @@ async fn run_review_preserves_evidence_during_parent_compaction() {
         "type": "compaction", "id": "cmp_new", "encrypted_content": "new-checkpoint"
     }))
     .unwrap();
-    let (window_number, window_ids) = parent.advance_auto_compact_window().await;
+    let prepared_window_advance = parent.prepare_auto_compact_window_advance().await;
     parent
         .replace_compacted_history(
+            &turn,
             vec![checkpoint.into()],
             /*reference_context_item*/ None,
             /*world_state_baseline*/ None,
             crate::compact::CompactedHistoryMetadata {
                 message: String::new(),
-                window_number,
-                window_ids,
                 compaction_response_id: None,
                 compaction_model_hash: Some("matching".to_owned()),
+                prepared_window_advance,
             },
         )
         .await;
