@@ -128,6 +128,56 @@ async fn submit_turn(
     Ok(())
 }
 
+#[test_case("none")]
+#[test_case("minimal")]
+#[test_case("low")]
+#[test_case("medium")]
+#[test_case("high")]
+#[test_case("xhigh")]
+#[test_case("max")]
+#[test_case("ultra")]
+#[test_case("persistent")]
+#[test_case("future-effort")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn frodex_default_delegation_is_proactive_at_every_effort(effort: &str) -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let effort: ReasoningEffort = serde_json::from_value(json!(effort))?;
+    let supported_effort = effort.clone();
+    let server = start_mock_server().await;
+    let response = mount_sse_once(
+        &server,
+        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
+    )
+    .await;
+    let test = test_codex()
+        .with_model_info_override("gpt-5.4", move |model_info| {
+            model_info
+                .supported_reasoning_levels
+                .push(ReasoningEffortPreset {
+                    effort: supported_effort.clone(),
+                    description: "Test effort".to_string(),
+                });
+        })
+        .with_config(configure_multi_agent_v2)
+        .build_with_auto_env(&server)
+        .await?;
+
+    submit_turn(&test.codex, "hello", Some(effort)).await?;
+    let input = response.single_request().input();
+    let texts = developer_texts(&input);
+    assert_eq!(
+        (
+            count_containing(&texts, PROACTIVE_TEXT),
+            count_containing(&texts, NO_SPAWN_TEXT),
+            count_containing(&texts, "There are 257 available concurrency slots"),
+        ),
+        (1, 0, 1)
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ultra_reasoning_uses_highest_non_ultra_and_proactive_mode() -> Result<()> {
     skip_if_no_network!(Ok(()));
@@ -229,12 +279,13 @@ async fn mode_hints_override_reasoning_effort(source: ModeHintSource) -> Result<
 }
 
 #[test_case(ReasoningEffort::Ultra, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_PROACTIVE_TEXT); "ultra uses proactive override")]
-#[test_case(ReasoningEffort::High, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_EXPLICIT_TEXT); "non ultra ignores proactive override")]
+#[test_case(ReasoningEffort::High, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_PROACTIVE_TEXT); "high uses proactive override")]
 #[test_case(ReasoningEffort::Ultra, None, Some(PROACTIVE_TEXT); "ultra falls back to built in")]
 #[test_case(ReasoningEffort::Ultra, Some(""), None; "empty proactive suppresses ultra mode")]
-#[test_case(ReasoningEffort::High, Some(""), Some(CATALOG_EXPLICIT_TEXT); "empty proactive leaves non ultra unchanged")]
+#[test_case(ReasoningEffort::High, None, Some(PROACTIVE_TEXT); "high falls back to built in")]
+#[test_case(ReasoningEffort::High, Some(""), None; "empty proactive suppresses high mode")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn catalog_proactive_mode_is_ultra_only(
+async fn catalog_proactive_mode_applies_across_reasoning_efforts(
     effort: ReasoningEffort,
     proactive: Option<&'static str>,
     expected_hint: Option<&str>,
@@ -281,7 +332,7 @@ async fn catalog_proactive_mode_is_ultra_only(
     Ok(())
 }
 
-#[test_case(ReasoningEffort::High, [CATALOG_EXPLICIT_TEXT, SECOND_MODEL_EXPLICIT_TEXT]; "explicit mode")]
+#[test_case(ReasoningEffort::High, [CATALOG_PROACTIVE_TEXT, SECOND_MODEL_PROACTIVE_TEXT]; "high proactive mode")]
 #[test_case(ReasoningEffort::Ultra, [CATALOG_PROACTIVE_TEXT, SECOND_MODEL_PROACTIVE_TEXT]; "proactive mode")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn model_switch_refreshes_catalog_role_and_mode(
@@ -480,7 +531,7 @@ async fn changing_configured_mode_hint_to_empty_emits_no_update() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Result<()> {
+async fn live_effort_change_keeps_proactive_mode_without_reappending_usage_hint() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -535,7 +586,7 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
             count_containing(&second_texts, PROACTIVE_TEXT),
             count_containing(&second_texts, NO_SPAWN_TEXT),
         ),
-        (1, 1, 1),
+        (1, 1, 0),
     );
     test.codex.ensure_rollout_materialized().await;
     test.codex.flush_rollout().await?;
@@ -552,16 +603,13 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
                 .cloned()
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        recorded_modes,
-        [json!("proactive"), json!("explicitRequestOnly")]
-    );
+    assert_eq!(recorded_modes, [json!("proactive")]);
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
+async fn leaving_ultra_after_cold_resume_keeps_proactive_mode() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
     let server = start_mock_server().await;
@@ -612,7 +660,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
             count_containing(&texts, NO_SPAWN_TEXT),
             count_containing(&texts, PROACTIVE_TEXT),
         ),
-        (2, 1, 1)
+        (1, 0, 1)
     );
 
     Ok(())
@@ -631,6 +679,14 @@ async fn ultra_on_multi_agent_v1_uses_highest_non_ultra_without_mode_instruction
     let test = test_codex()
         .with_model_info_override("gpt-5.4", add_ultra_reasoning)
         .with_config(|config| {
+            config
+                .features
+                .disable(Feature::MultiAgentV2)
+                .expect("test config should disable V2");
+            config
+                .features
+                .enable(Feature::Collab)
+                .expect("test config should enable V1");
             config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
         })
         .build(&server)
