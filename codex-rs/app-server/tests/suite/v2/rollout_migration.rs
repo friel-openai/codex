@@ -859,8 +859,6 @@ async fn large_unmarked_paginated_history_uses_compatibility_reader_and_restarts
                 first_window_id: None,
                 previous_window_id: None,
                 window_id: None,
-                compaction_response_id: None,
-                latest_token_usage_record: None,
                 segment_state_checkpoint: None,
             }),
             legacy_turn_started("large-active-turn"),

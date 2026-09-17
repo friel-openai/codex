@@ -1909,8 +1909,6 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             phase: Some(MessagePhase::Commentary),
             delivery: None,
             memory_citation: None,
-            delivery: None,
-            questions: None,
         });
         let final_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
             questions: None,
@@ -1921,8 +1919,6 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             phase: Some(MessagePhase::FinalAnswer),
             delivery: None,
             memory_citation: None,
-            delivery: None,
-            questions: None,
         });
         let reasoning_item = CoreTurnItem::Reasoning(ReasoningItem {
             id: format!("reasoning-{index}"),
@@ -2135,14 +2131,11 @@ fn certified_indexed_fork_checkpoint(
                 .into(),
             ]),
             retained_context: None,
-            guardian_history: None,
             mcp_resource_origins: None,
             window_number: Some(1),
             first_window_id: Some(window_id.to_string()),
             previous_window_id: None,
             window_id: Some(window_id.to_string()),
-            compaction_response_id: None,
-            latest_token_usage_record: None,
             segment_state_checkpoint: None,
         },
         Some(SegmentPreviousTurnSettings {
@@ -2417,8 +2410,6 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             phase: Some(MessagePhase::FinalAnswer),
             delivery: None,
             memory_citation: None,
-            delivery: None,
-            questions: None,
         });
         let mut items = vec![RolloutItem::EventMsg(EventMsg::TurnStarted(
             TurnStartedEvent {

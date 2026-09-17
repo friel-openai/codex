@@ -3726,7 +3726,7 @@ async fn thread_goal_lifecycle_emits_analytics_and_clear_deletes_goal() -> Resul
         goal_request_body["client_metadata"]["turn_id"],
         response_requests[0].body_json::<serde_json::Value>()?["client_metadata"]["turn_id"]
     );
-    responses::assert_root_turn(&goal_request_body, Some(causal_turn_id))?;
+    responses::assert_root_turn(&goal_request_body, Some(goal_turn_id))?;
     responses::assert_parent_turn(&goal_request_body, /*expected*/ None)?;
 
     let clear_id = mcp
