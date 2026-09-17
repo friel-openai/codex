@@ -1,0 +1,3 @@
+Keep guardian reviews free of subagent instructions
+
+Disable AgentPromptInjection in the extracted guardian configuration builder, preserving the pre-rebase guardian request prefix and feature sanitization. The guardian feature assertion and both model-visible request snapshots cover this contract.

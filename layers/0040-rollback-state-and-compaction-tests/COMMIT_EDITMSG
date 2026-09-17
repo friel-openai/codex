@@ -1,0 +1,3 @@
+Preserve rollback runtime state until persistence commits
+
+Keep review evidence, Guardian state and budget state unchanged when rollback publication is not committed or indeterminate. Confirmed publication already clears them in complete_thread_rollback. Check certified compaction rotation in both Guardian modes with retained-context expectations constructed from fixture inputs before publication.

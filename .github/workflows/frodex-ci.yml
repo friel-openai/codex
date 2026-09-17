@@ -149,12 +149,15 @@ jobs:
       - name: Run core unit and Frodex runtime-recovery tests
         working-directory: ${{ steps.projection.outputs.path }}
         run: |
-          # A codex-core unit test starts this MCP server through the shared
-          # Cargo target directory. `--lib` does not build workspace binaries.
+          # Core unit tests start these exact workspace binaries. `--lib`
+          # does not build them, and assert_cmd requires explicit locations.
           cargo build --manifest-path codex-rs/Cargo.toml \
             --profile ci-test \
-            -p codex-rmcp-client \
-            --bin test_stdio_server
+            -p codex-rmcp-client --bin test_stdio_server \
+            -p codex-cli --bin codex \
+            -p codex-code-mode-host --bin codex-code-mode-host
+          export CARGO_BIN_EXE_codex="${CARGO_TARGET_DIR}/ci-test/codex"
+          export CARGO_BIN_EXE_codex_code_mode_host="${CARGO_TARGET_DIR}/ci-test/codex-code-mode-host"
 
           # Preserve the admitted projection exactly. These five assertions
           # are stale in that source tree: three reconstruct initial context
