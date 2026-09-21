@@ -304,22 +304,69 @@ index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515
          malformed_lineage(
              end.thread_id,
 diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
-index 94d415f7dfae124420d16da1135af9bfe640ec97..d93e3b08c11e2ed98332a515c296a8e368ae4a79 100644
+index 94d415f7dfae124420d16da1135af9bfe640ec97..c1698daaaae994f638cb93af4f469549c4b5ba34 100644
 --- a/codex-rs/thread-store/src/local/thread_history.rs
 +++ b/codex-rs/thread-store/src/local/thread_history.rs
-@@ -156,6 +156,49 @@ END
+@@ -80,6 +80,55 @@ pub(super) const INCOMPLETE_LEGACY_PROJECTION_BYTE_OFFSET: i64 = i64::MAX;
+ pub(super) async fn ensure_projection_integrity_triggers(
+     pool: &sqlx::SqlitePool,
+ ) -> ThreadStoreResult<()> {
++    let mut transaction = pool
++        .begin_with("BEGIN IMMEDIATE")
++        .await
++        .map_err(thread_history_error)?;
++    let publication_trigger_exists = sqlx::query_scalar::<_, i64>(
++        r#"
++SELECT EXISTS (
++    SELECT 1 FROM sqlite_schema
++    WHERE type = 'trigger'
++      AND name = 'frodex_thread_history_projection_publish_realtime'
++)
++        "#,
++    )
++    .fetch_one(&mut *transaction)
++    .await
++    .map_err(thread_history_error)?;
++    if publication_trigger_exists == 0 {
++        let orphan_realtime_rows_exist = sqlx::query_scalar::<_, i64>(
++            r#"
++SELECT EXISTS (
++    SELECT 1
++    FROM thread_realtime_items AS realtime
++    LEFT JOIN thread_history_projection_state AS projection
++        ON projection.thread_id = realtime.thread_id
++    WHERE projection.thread_id IS NULL
++)
++            "#,
++        )
++        .fetch_one(&mut *transaction)
++        .await
++        .map_err(thread_history_error)?;
++        if orphan_realtime_rows_exist != 0 {
++            // Older publication moved the checkpoint but left realtime rows under a random
++            // staging ID. Their root IDs cannot be recovered after successful guard cleanup.
++            // Invalidate complete checkpoints once, preserving their offsets for canonical
++            // fallback and rebuild. The publication trigger records this upgrade atomically.
++            sqlx::query(
++                r#"
++UPDATE thread_history_projection_state
++SET next_rollout_byte_offset = -1 - next_rollout_byte_offset
++WHERE next_rollout_byte_offset >= 0
++  AND next_rollout_byte_offset < 9223372036854775807
++                "#,
++            )
++            .execute(&mut *transaction)
++            .await
++            .map_err(thread_history_error)?;
++        }
++    }
+     for statement in [
          r#"
- CREATE TRIGGER IF NOT EXISTS frodex_thread_items_projection_delete
- AFTER DELETE ON thread_items
-+BEGIN
-+    UPDATE thread_history_projection_state
-+    SET next_rollout_byte_offset = CASE
-+        WHEN next_rollout_byte_offset >= 0
-+             AND next_rollout_byte_offset < 9223372036854775807
-+            THEN -1 - next_rollout_byte_offset
-+        ELSE next_rollout_byte_offset
-+    END
-+    WHERE thread_id = OLD.thread_id;
+ CREATE TRIGGER IF NOT EXISTS frodex_thread_turns_projection_insert
+@@ -165,14 +214,70 @@ BEGIN
+         ELSE next_rollout_byte_offset
+     END
+     WHERE thread_id = OLD.thread_id;
 +END
 +        "#,
 +        r#"
@@ -354,10 +401,41 @@ index 94d415f7dfae124420d16da1135af9bfe640ec97..d93e3b08c11e2ed98332a515c296a8e3
 +        r#"
 +CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_delete
 +AFTER DELETE ON thread_realtime_items
- BEGIN
-     UPDATE thread_history_projection_state
-     SET next_rollout_byte_offset = CASE
-@@ -347,7 +390,10 @@ pub(super) async fn publish_staged_projection(
++BEGIN
++    UPDATE thread_history_projection_state
++    SET next_rollout_byte_offset = CASE
++        WHEN next_rollout_byte_offset >= 0
++             AND next_rollout_byte_offset < 9223372036854775807
++            THEN -1 - next_rollout_byte_offset
++        ELSE next_rollout_byte_offset
++    END
++    WHERE thread_id = OLD.thread_id;
++END
++        "#,
++        // Older publishers move the staging checkpoint last. Moving its realtime rows here
++        // keeps those publishers correct; publishers that move realtime explicitly leave none.
++        r#"
++CREATE TRIGGER IF NOT EXISTS frodex_thread_history_projection_publish_realtime
++AFTER UPDATE OF thread_id ON thread_history_projection_state
++WHEN OLD.thread_id != NEW.thread_id
++BEGIN
++    UPDATE thread_realtime_items
++    SET thread_id = NEW.thread_id
++    WHERE thread_id = OLD.thread_id;
+ END
+         "#,
+     ] {
+         sqlx::query(statement)
+-            .execute(pool)
++            .execute(&mut *transaction)
+             .await
+             .map_err(thread_history_error)?;
+     }
++    transaction.commit().await.map_err(thread_history_error)?;
+     Ok(())
+ }
+
+@@ -347,7 +452,10 @@ pub(super) async fn publish_staged_projection(
              ),
          });
      }
@@ -368,7 +446,7 @@ index 94d415f7dfae124420d16da1135af9bfe640ec97..d93e3b08c11e2ed98332a515c296a8e3
          "DELETE FROM thread_items WHERE thread_id = ?",
          "DELETE FROM thread_turns WHERE thread_id = ?",
          "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
-@@ -361,6 +407,7 @@ pub(super) async fn publish_staged_projection(
+@@ -361,6 +469,7 @@ pub(super) async fn publish_staged_projection(
      for statement in [
          "UPDATE thread_turns SET thread_id = ? WHERE thread_id = ?",
          "UPDATE thread_items SET thread_id = ? WHERE thread_id = ?",
@@ -377,7 +455,7 @@ index 94d415f7dfae124420d16da1135af9bfe640ec97..d93e3b08c11e2ed98332a515c296a8e3
      ] {
          sqlx::query(statement)
 diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
-index 78c63804498aed608f87d97b98de1475404ef27b..5870caee854856015c446a1286bf55e4a0ecff76 100644
+index 78c63804498aed608f87d97b98de1475404ef27b..bc48bacb46faae150c0ac64075406beb730943da 100644
 --- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
 @@ -37,6 +37,8 @@ use crate::SortDirection;
@@ -488,7 +566,7 @@ index 78c63804498aed608f87d97b98de1475404ef27b..5870caee854856015c446a1286bf55e4
      let page = store
          .list_timeline(ListTimelineParams {
              thread_id: child_id,
-@@ -1149,7 +1211,724 @@ INSERT INTO thread_realtime_items (
+@@ -1149,7 +1211,841 @@ INSERT INTO thread_realtime_items (
              .iter()
              .map(crate::local::thread_history::realtime::entry_key)
              .collect::<Vec<_>>(),
@@ -655,6 +733,123 @@ index 78c63804498aed608f87d97b98de1475404ef27b..5870caee854856015c446a1286bf55e4
 +        .rebuild_history_projection(child_id)
 +        .await
 +        .expect("flatten child history projection");
++    let db = history_db(&store).await;
++    let old_guard_statements = [
++        "DROP TRIGGER IF EXISTS frodex_thread_realtime_items_projection_insert",
++        "DROP TRIGGER IF EXISTS frodex_thread_realtime_items_projection_update",
++        "DROP TRIGGER IF EXISTS frodex_thread_realtime_items_projection_delete",
++        "DROP TRIGGER IF EXISTS frodex_thread_history_projection_publish_realtime",
++    ];
++    for statement in old_guard_statements {
++        sqlx::query(statement)
++            .execute(db)
++            .await
++            .expect("emulate the previous installed projection guards");
++    }
++    crate::local::thread_history::ensure_projection_integrity_triggers(db)
++        .await
++        .expect("upgrade an unaffected complete projection");
++    assert!(
++        projection_state(&store, child_id)
++            .await
++            .expect("unaffected checkpoint")
++            .expect("preserved complete checkpoint")
++            .lineage_complete
++    );
++    for statement in old_guard_statements {
++        sqlx::query(statement)
++            .execute(db)
++            .await
++            .expect("emulate the previous installed guards with orphan rows");
++    }
++    let old_staging_id = ThreadId::new();
++    sqlx::query("UPDATE thread_realtime_items SET thread_id = ? WHERE thread_id = ?")
++        .bind(old_staging_id.to_string())
++        .bind(child_id.to_string())
++        .execute(db)
++        .await
++        .expect("emulate old publication's stranded realtime rows");
++    assert!(
++        projection_state(&store, child_id)
++            .await
++            .expect("old checkpoint")
++            .expect("complete old checkpoint")
++            .lineage_complete
++    );
++    crate::local::thread_history::ensure_projection_integrity_triggers(db)
++        .await
++        .expect("upgrade existing projection guards");
++    assert!(
++        !projection_state(&store, child_id)
++            .await
++            .expect("upgraded checkpoint")
++            .expect("preserved old checkpoint")
++            .lineage_complete
++    );
++    let upgraded = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 2,
++        })
++        .await
++        .expect("canonical voice recovery after guard upgrade");
++    assert_eq!(upgraded.items, page.items);
++    assert_eq!(
++        upgraded.active_realtime_session_at_page_start,
++        page.active_realtime_session_at_page_start
++    );
++    store
++        .rebuild_history_projection(child_id)
++        .await
++        .expect("repair the old complete projection");
++    crate::local::thread_history::ensure_projection_integrity_triggers(db)
++        .await
++        .expect("reopen installed guards without repeated invalidation");
++    assert!(
++        projection_state(&store, child_id)
++            .await
++            .expect("reopened checkpoint")
++            .expect("complete rebuilt checkpoint")
++            .lineage_complete
++    );
++
++    // A still-running older writer relocates the checkpoint without moving realtime rows.
++    // Its selected-root checkpoint is absent at publication, after its normal delete step.
++    let staging_id = ThreadId::new();
++    sqlx::query("UPDATE thread_realtime_items SET thread_id = ? WHERE thread_id = ?")
++        .bind(staging_id.to_string())
++        .bind(child_id.to_string())
++        .execute(db)
++        .await
++        .expect("stage realtime rows for the old writer");
++    sqlx::query("UPDATE thread_history_projection_state SET thread_id = ? WHERE thread_id = ?")
++        .bind(staging_id.to_string())
++        .bind(child_id.to_string())
++        .execute(db)
++        .await
++        .expect("stage the old writer checkpoint");
++    sqlx::query("UPDATE thread_history_projection_state SET thread_id = ? WHERE thread_id = ?")
++        .bind(child_id.to_string())
++        .bind(staging_id.to_string())
++        .execute(db)
++        .await
++        .expect("publish via the old writer checkpoint rename");
++    assert!(
++        projection_state(&store, child_id)
++            .await
++            .expect("old writer publication")
++            .expect("complete published checkpoint")
++            .lineage_complete
++    );
++    let staged_realtime = sqlx::query_scalar::<_, i64>(
++        "SELECT COUNT(*) FROM thread_realtime_items WHERE thread_id = ?",
++    )
++    .bind(staging_id.to_string())
++    .fetch_one(db)
++    .await
++    .expect("staging rows moved");
++    assert_eq!(staged_realtime, 0);
 +    let deleted = sqlx::query(
 +        "DELETE FROM thread_realtime_items WHERE thread_id = ? AND item_id = 'voice:started'",
 +    )
@@ -1214,7 +1409,7 @@ index 78c63804498aed608f87d97b98de1475404ef27b..5870caee854856015c446a1286bf55e4
      );
  }
 
-@@ -3243,6 +4022,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+@@ -3243,6 +4139,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
      ))
  }
 

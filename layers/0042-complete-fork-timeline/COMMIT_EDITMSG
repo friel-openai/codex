@@ -9,5 +9,9 @@ Preserve original positions and latest reasoning snapshots across mixed
 projections and cursor pages. Publish realtime rows with the projection
 checkpoint and invalidate incomplete projections after realtime changes.
 
+Invalidate older complete checkpoints once when stranded realtime rows
+prove an earlier publication omitted them. Install guards atomically and
+support checkpoint-last publication by still-running older binaries.
+
 Add native-fork paging and cold-restart API coverage, frozen-cutoff,
-damaged-record and deterministic read-budget regressions.
+damaged-record, upgrade and deterministic read-budget regressions.
