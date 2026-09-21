@@ -1,0 +1,13 @@
+fix(thread-store): preserve inherited fork timelines
+
+thread/timeline/list skipped immutable snapshots without SQLite rows
+and excluded inherited rows from complete root projections. Use the
+complete logical projection when available and read bounded canonical
+records otherwise.
+
+Preserve original positions and latest reasoning snapshots across mixed
+projections and cursor pages. Publish realtime rows with the projection
+checkpoint and invalidate incomplete projections after realtime changes.
+
+Add native-fork paging and cold-restart API coverage, frozen-cutoff,
+damaged-record and deterministic read-budget regressions.

@@ -1,0 +1,2070 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
+index 319af8c57a633200c75e2eb078f87c32afd58a0b..145bc6455e2dbccd5f9b1462bbdb962d3df5822c 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_timeline.rs
+@@ -4,17 +4,24 @@ use app_test_support::TestAppServer;
+ use app_test_support::create_mock_responses_server_repeating_assistant;
+ use codex_app_server_protocol::ClientRequest;
+ use codex_app_server_protocol::SortDirection;
++use codex_app_server_protocol::ThreadForkParams;
++use codex_app_server_protocol::ThreadForkResponse;
+ use codex_app_server_protocol::ThreadItem;
+ use codex_app_server_protocol::ThreadItemsListParams;
+ use codex_app_server_protocol::ThreadItemsListResponse;
++use codex_app_server_protocol::ThreadReadParams;
++use codex_app_server_protocol::ThreadReadResponse;
+ use codex_app_server_protocol::ThreadRealtimeItemContent;
+ use codex_app_server_protocol::ThreadTimelineEntry;
+ use codex_app_server_protocol::ThreadTimelineListParams;
+ use codex_app_server_protocol::ThreadTimelineListResponse;
+ use codex_protocol::ThreadId;
++use codex_protocol::items::AgentMessageContent;
++use codex_protocol::items::AgentMessageItem;
+ use codex_protocol::items::TurnItem;
+ use codex_protocol::items::UserMessageItem;
+ use codex_protocol::models::BaseInstructions;
++use codex_protocol::models::MessagePhase;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ItemCompletedEvent;
+ use codex_protocol::protocol::SessionSource;
+@@ -224,3 +231,225 @@ async fn timeline_pages_mix_items_and_resolve_the_opening_realtime_session() ->
+
+     Ok(())
+ }
++
++#[tokio::test]
++async fn native_fork_timeline_preserves_recent_inherited_messages_after_restart() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let codex_home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
++    let source_id = ThreadId::default();
++    let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
++    let state_db =
++        codex_state::StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
++    let store = LocalThreadStore::new(
++        LocalThreadStoreConfig {
++            codex_home: codex_home.path().to_path_buf(),
++            sqlite,
++            default_model_provider_id: "mock_provider".to_string(),
++        },
++        Some(state_db),
++    );
++    store
++        .create_thread(CreateThreadParams {
++            session_id: source_id.into(),
++            thread_id: source_id,
++            extra_config: None,
++            forked_from_id: None,
++            parent_thread_id: None,
++            source: SessionSource::Cli,
++            thread_source: None,
++            originator: "test_originator".to_string(),
++            base_instructions: BaseInstructions::default(),
++            dynamic_tools: Vec::new(),
++            selected_capability_roots: Vec::new(),
++            multi_agent_version: None,
++            history_mode: ThreadHistoryMode::Paginated,
++            history_base: None,
++            persistence_mode: Default::default(),
++            initial_rollout_ordinal: 0,
++            subagent_history_start_ordinal: None,
++            initial_window_id: Uuid::now_v7().to_string(),
++            metadata: ThreadPersistenceMetadata {
++                cwd: Some(codex_home.path().to_path_buf()),
++                model_provider: "mock_provider".to_string(),
++                memory_mode: ThreadMemoryMode::Enabled,
++            },
++        })
++        .await?;
++    store
++        .persist_thread(source_id, PersistContext::Standard)
++        .await?;
++    for index in 0..3 {
++        let turn_id = format!("turn-{index}");
++        let started_at = 10 + index;
++        let mut items = vec![RolloutItem::EventMsg(EventMsg::TurnStarted(
++            TurnStartedEvent {
++                turn_id: turn_id.clone(),
++                trace_id: None,
++                started_at: Some(started_at),
++                model_context_window: None,
++                collaboration_mode_kind: Default::default(),
++            },
++        ))];
++        for item in [
++            TurnItem::UserMessage(UserMessageItem {
++                id: format!("user-{index}"),
++                client_id: None,
++                content: vec![UserInput::Text {
++                    text: format!("recent question {index}"),
++                    text_elements: Vec::new(),
++                }],
++            }),
++            TurnItem::AgentMessage(AgentMessageItem {
++                id: format!("agent-{index}"),
++                questions: None,
++                content: vec![AgentMessageContent::Text {
++                    text: format!("recent answer {index}"),
++                }],
++                phase: Some(MessagePhase::Commentary),
++                delivery: None,
++                memory_citation: None,
++            }),
++        ] {
++            items.push(RolloutItem::EventMsg(EventMsg::ItemCompleted(
++                ItemCompletedEvent {
++                    thread_id: source_id,
++                    turn_id: turn_id.clone(),
++                    item,
++                    started_at_ms: Some(started_at * 1000),
++                    completed_at_ms: started_at * 1000 + 1,
++                },
++            )));
++        }
++        if index < 2 {
++            items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
++                TurnCompleteEvent {
++                    turn_id,
++                    last_agent_message: None,
++                    error: None,
++                    started_at: Some(started_at),
++                    completed_at: Some(started_at + 1),
++                    duration_ms: Some(1000),
++                    time_to_first_token_ms: None,
++                },
++            )));
++        }
++        store
++            .append_items(AppendThreadItemsParams {
++                thread_id: source_id,
++                items,
++            })
++            .await?;
++    }
++    store.shutdown_thread(source_id).await?;
++    let mut app_server = TestAppServer::builder()
++        .with_codex_home(codex_home.path())
++        .without_auto_env()
++        .build_initialized()
++        .await?;
++    let fork: ThreadForkResponse = app_server
++        .request(|request_id| ClientRequest::ThreadFork {
++            request_id,
++            params: ThreadForkParams {
++                thread_id: source_id.to_string(),
++                exclude_turns: true,
++                ..Default::default()
++            },
++        })
++        .await?;
++    assert!(fork.thread.turns.is_empty());
++    let child_id = fork.thread.id;
++    let source_timeline: ThreadTimelineListResponse = app_server
++        .request(|request_id| ClientRequest::ThreadTimelineList {
++            request_id,
++            params: ThreadTimelineListParams {
++                thread_id: source_id.to_string(),
++                cursor: None,
++                limit: Some(100),
++            },
++        })
++        .await?;
++    assert_eq!(source_timeline.data.len(), 11);
++    for restart in 0..2 {
++        let mut cursor = None;
++        let mut entries = Vec::new();
++        loop {
++            let page: ThreadTimelineListResponse = app_server
++                .request(|request_id| ClientRequest::ThreadTimelineList {
++                    request_id,
++                    params: ThreadTimelineListParams {
++                        thread_id: child_id.clone(),
++                        cursor: cursor.clone(),
++                        limit: Some(2),
++                    },
++                })
++                .await?;
++            entries.extend(page.data.into_iter().rev());
++            let Some(next_cursor) = page.next_cursor else {
++                break;
++            };
++            assert_ne!(cursor.as_ref(), Some(&next_cursor));
++            cursor = Some(next_cursor);
++        }
++        entries.reverse();
++        assert_eq!(entries.len(), source_timeline.data.len() + 1);
++        assert_eq!(
++            &entries[..source_timeline.data.len()],
++            source_timeline.data.as_slice()
++        );
++        assert!(matches!(
++            entries.last(),
++            Some(ThreadTimelineEntry::TurnCompleted { turn_id, status, .. })
++                if turn_id == "turn-2" && *status == codex_app_server_protocol::TurnStatus::Interrupted
++        ));
++        let timeline_items: Vec<_> = entries
++            .iter()
++            .filter_map(|entry| match entry {
++                ThreadTimelineEntry::Item { item, .. } => Some(item.as_ref().clone()),
++                _ => None,
++            })
++            .collect();
++        let ordinary: ThreadItemsListResponse = app_server
++            .request(|request_id| ClientRequest::ThreadItemsList {
++                request_id,
++                params: ThreadItemsListParams {
++                    thread_id: child_id.clone(),
++                    turn_id: None,
++                    cursor: None,
++                    limit: Some(10),
++                    sort_direction: Some(SortDirection::Asc),
++                },
++            })
++            .await?;
++        let expected: Vec<_> = ordinary.data.into_iter().map(|entry| entry.item).collect();
++        assert_eq!(expected.len(), 6);
++        assert_eq!(timeline_items, expected);
++        let read: ThreadReadResponse = app_server
++            .request(|request_id| ClientRequest::ThreadRead {
++                request_id,
++                params: ThreadReadParams {
++                    thread_id: child_id.clone(),
++                    include_turns: true,
++                },
++            })
++            .await?;
++        assert_eq!(
++            read.thread
++                .turns
++                .into_iter()
++                .flat_map(|turn| turn.items)
++                .collect::<Vec<_>>(),
++            timeline_items,
++        );
++        if restart == 0 {
++            assert!(app_server.shutdown_gracefully().await?.success());
++            app_server = TestAppServer::builder()
++                .with_codex_home(codex_home.path())
++                .without_auto_env()
++                .build_initialized()
++                .await?;
++        }
++    }
++    assert!(app_server.shutdown_gracefully().await?.success());
++    Ok(())
++}
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index d2aeacf55eb15022dd53e18a9c65e971b932b9e3..1dbc00dfc6b75f94baf0f85c3942c515de4abfd2 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -104,6 +104,24 @@ impl LocalThreadStore {
+     pub(super) async fn resolve_rollout_lineage(
+         &self,
+         requested_thread_id: ThreadId,
++    ) -> ThreadStoreResult<RolloutLineage> {
++        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Resolve)
++            .await
++    }
++
++    /// Authenticates lineage heads; consumers authenticate byte boundaries only when read.
++    pub(super) async fn resolve_rollout_lineage_deferred(
++        &self,
++        requested_thread_id: ThreadId,
++    ) -> ThreadStoreResult<RolloutLineage> {
++        self.resolve_rollout_lineage_with_offsets(requested_thread_id, LineageOffsetMode::Deferred)
++            .await
++    }
++
++    async fn resolve_rollout_lineage_with_offsets(
++        &self,
++        requested_thread_id: ThreadId,
++        offset_mode: LineageOffsetMode,
+     ) -> ThreadStoreResult<RolloutLineage> {
+         let resolved =
+             thread_rollout_resolver::resolve_current_including_archived(self, requested_thread_id)
+@@ -119,7 +137,7 @@ impl LocalThreadStore {
+             /*inherited_filter_texts*/ None,
+             /*graph_depth*/ 0,
+             &mut active_paths,
+-            LineageOffsetMode::Resolve,
++            offset_mode,
+         )
+         .await?;
+         Ok(RolloutLineage {
+@@ -1641,7 +1659,10 @@ async fn trim_to_history_position(
+ }
+
+ /// Authenticates both parts of a native history boundary, including unordinaled suffixes.
+-fn validated_history_byte_offset(bytes: &[u8], end: HistoryPosition) -> ThreadStoreResult<u64> {
++pub(super) fn validated_history_byte_offset(
++    bytes: &[u8],
++    end: HistoryPosition,
++) -> ThreadStoreResult<u64> {
+     let end_byte_offset = usize::try_from(end.end_byte_offset).map_err(|_| {
+         malformed_lineage(
+             end.thread_id,
+diff --git a/codex-rs/thread-store/src/local/thread_history.rs b/codex-rs/thread-store/src/local/thread_history.rs
+index 94d415f7dfae124420d16da1135af9bfe640ec97..d93e3b08c11e2ed98332a515c296a8e368ae4a79 100644
+--- a/codex-rs/thread-store/src/local/thread_history.rs
++++ b/codex-rs/thread-store/src/local/thread_history.rs
+@@ -156,6 +156,49 @@ END
+         r#"
+ CREATE TRIGGER IF NOT EXISTS frodex_thread_items_projection_delete
+ AFTER DELETE ON thread_items
++BEGIN
++    UPDATE thread_history_projection_state
++    SET next_rollout_byte_offset = CASE
++        WHEN next_rollout_byte_offset >= 0
++             AND next_rollout_byte_offset < 9223372036854775807
++            THEN -1 - next_rollout_byte_offset
++        ELSE next_rollout_byte_offset
++    END
++    WHERE thread_id = OLD.thread_id;
++END
++        "#,
++        r#"
++CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_insert
++AFTER INSERT ON thread_realtime_items
++BEGIN
++    UPDATE thread_history_projection_state
++    SET next_rollout_byte_offset = CASE
++        WHEN next_rollout_byte_offset >= 0
++             AND next_rollout_byte_offset < 9223372036854775807
++            THEN -1 - next_rollout_byte_offset
++        ELSE next_rollout_byte_offset
++    END
++    WHERE thread_id = NEW.thread_id;
++END
++        "#,
++        r#"
++CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_update
++AFTER UPDATE ON thread_realtime_items
++WHEN OLD.thread_id = NEW.thread_id
++BEGIN
++    UPDATE thread_history_projection_state
++    SET next_rollout_byte_offset = CASE
++        WHEN next_rollout_byte_offset >= 0
++             AND next_rollout_byte_offset < 9223372036854775807
++            THEN -1 - next_rollout_byte_offset
++        ELSE next_rollout_byte_offset
++    END
++    WHERE thread_id = NEW.thread_id;
++END
++        "#,
++        r#"
++CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_delete
++AFTER DELETE ON thread_realtime_items
+ BEGIN
+     UPDATE thread_history_projection_state
+     SET next_rollout_byte_offset = CASE
+@@ -347,7 +390,10 @@ pub(super) async fn publish_staged_projection(
+             ),
+         });
+     }
++    // The checkpoint covers every timeline table, including voice-session boundaries.
++    // Publish their staged rows together so complete-root reads cannot omit realtime history.
+     for statement in [
++        "DELETE FROM thread_realtime_items WHERE thread_id = ?",
+         "DELETE FROM thread_items WHERE thread_id = ?",
+         "DELETE FROM thread_turns WHERE thread_id = ?",
+         "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
+@@ -361,6 +407,7 @@ pub(super) async fn publish_staged_projection(
+     for statement in [
+         "UPDATE thread_turns SET thread_id = ? WHERE thread_id = ?",
+         "UPDATE thread_items SET thread_id = ? WHERE thread_id = ?",
++        "UPDATE thread_realtime_items SET thread_id = ? WHERE thread_id = ?",
+         "UPDATE thread_history_projection_state SET thread_id = ? WHERE thread_id = ?",
+     ] {
+         sqlx::query(statement)
+diff --git a/codex-rs/thread-store/src/local/thread_history/read_tests.rs b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+index 78c63804498aed608f87d97b98de1475404ef27b..5870caee854856015c446a1286bf55e4a0ecff76 100644
+--- a/codex-rs/thread-store/src/local/thread_history/read_tests.rs
++++ b/codex-rs/thread-store/src/local/thread_history/read_tests.rs
+@@ -37,6 +37,8 @@ use crate::SortDirection;
+ use crate::StoredTurnError;
+ use crate::StoredTurnStatus;
+ use crate::local::test_support::test_config;
++use crate::local::thread_history::projection_state;
++use crate::local::thread_history::realtime;
+
+ #[tokio::test]
+ async fn list_turns_pages_projected_rows_and_applies_item_views() {
+@@ -776,7 +778,7 @@ async fn list_items_pages_whole_thread_and_per_turn_rows() {
+
+ #[tokio::test]
+ async fn timeline_interleaves_items_and_restores_page_boundary_session_state() {
+-    let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+     let db = history_db(&store).await;
+     for (item_id, ordinal) in [
+         ("before", 10),
+@@ -848,6 +850,7 @@ INSERT INTO thread_realtime_items (
+         .expect("insert realtime item");
+     }
+
++    complete_timeline_fixture(&store, home.path(), thread_id).await;
+     let latest = store
+         .list_timeline(ListTimelineParams {
+             thread_id,
+@@ -933,7 +936,7 @@ INSERT INTO thread_realtime_items (
+
+ #[tokio::test]
+ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
+-    let (_home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let (home, store, thread_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
+     let db = history_db(&store).await;
+     let error = r#"{"message":"failed","codexErrorInfo":null,"additionalDetails":null}"#;
+     for (turn_id, start, end, status, error_json) in [
+@@ -963,6 +966,7 @@ async fn timeline_turn_boundaries_page_through_shared_ordinals() {
+     )
+     .await;
+
++    complete_timeline_fixture(&store, home.path(), thread_id).await;
+     let all = store
+         .list_timeline(ListTimelineParams {
+             thread_id,
+@@ -1122,6 +1126,64 @@ INSERT INTO thread_realtime_items (
+         .expect("insert realtime boundary");
+     }
+
++    // Unmarked SQL rows are not authoritative for an immutable canonical prefix.
++    write_rollout_with_end(
++        &source_path,
++        source_id,
++        /*history_base*/ None,
++        /*next_ordinal*/ 1,
++    );
++    append_timeline_record(
++        &source_path,
++        /*ordinal*/ 1,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "source-turn".to_string(),
++            trace_id: None,
++            started_at: None,
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    for (ordinal, content, id) in [
++        (
++            2,
++            RealtimeItemContent::RealtimeSessionStarted,
++            "voice:started",
++        ),
++        (
++            4,
++            RealtimeItemContent::RealtimeSessionClosed {
++                outcome: RealtimeSessionOutcome::Ended,
++            },
++            "voice:closed",
++        ),
++    ] {
++        append_timeline_record(
++            &source_path,
++            ordinal,
++            RolloutItem::RealtimeItem(RealtimeItem {
++                id: id.to_string(),
++                realtime_session_id: "voice".to_string(),
++                content,
++            }),
++        );
++    }
++    let child_path = rollout_path(home.path(), child_id);
++    write_rollout_with_end(
++        &child_path,
++        child_id,
++        Some(history_position(
++            &source_path,
++            source_id,
++            /*end_ordinal_exclusive*/ 4,
++        )),
++        /*next_ordinal*/ 1,
++    );
++    append_timeline_record(
++        &child_path,
++        /*ordinal*/ 5,
++        timeline_user_item(child_id, "child-turn", "child-item", "child-item"),
++    );
+     let page = store
+         .list_timeline(ListTimelineParams {
+             thread_id: child_id,
+@@ -1149,7 +1211,724 @@ INSERT INTO thread_realtime_items (
+             .iter()
+             .map(crate::local::thread_history::realtime::entry_key)
+             .collect::<Vec<_>>(),
+-        vec![(1, 0, "source-turn"), (1, 2, "voice:started")]
++        vec![(1, 0, "source-turn"), (2, 2, "voice:started")]
++    );
++}
++
++#[tokio::test]
++async fn timeline_reads_unprojected_native_snapshot_and_keeps_first_item_ordinal() {
++    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let source_id = ThreadId::default();
++    let snapshot_id = ThreadId::default();
++    let snapshot = selected_rollout_path(home.path(), source_id, snapshot_id);
++    write_rollout_with_end(
++        &snapshot, source_id, /*history_base*/ None, /*next_ordinal*/ 1,
++    );
++    let item = |text: &str| {
++        RolloutItem::EventMsg(EventMsg::ItemCompleted(
++            codex_protocol::protocol::ItemCompletedEvent {
++                thread_id: source_id,
++                turn_id: "recent-turn".to_string(),
++                item: codex_protocol::items::TurnItem::UserMessage(
++                    codex_protocol::items::UserMessageItem {
++                        id: "recent-user".to_string(),
++                        client_id: None,
++                        content: vec![codex_protocol::user_input::UserInput::Text {
++                            text: text.to_string(),
++                            text_elements: Vec::new(),
++                        }],
++                    },
++                ),
++                started_at_ms: Some(10),
++                completed_at_ms: 11,
++            },
++        ))
++    };
++    let records = [
++        RolloutItem::RealtimeItem(RealtimeItem {
++            id: "voice:started".to_string(),
++            realtime_session_id: "voice".to_string(),
++            content: RealtimeItemContent::RealtimeSessionStarted,
++        }),
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "recent-turn".to_string(),
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++        item("original text"),
++        item("updated recent text"),
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: "recent-turn".to_string(),
++            last_agent_message: None,
++            error: None,
++            started_at: Some(10),
++            completed_at: Some(12),
++            duration_ms: Some(2_000),
++            time_to_first_token_ms: None,
++        })),
++    ];
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&snapshot)
++        .expect("snapshot");
++    for (index, item) in records.into_iter().enumerate() {
++        writeln!(
++            file,
++            "{}",
++            serde_json::to_string(&RolloutLine {
++                timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++                ordinal: Some(index as u64 + 1),
++                item,
++            })
++            .expect("encode canonical record")
++        )
++        .expect("append canonical record");
++    }
++    drop(file);
++    let cutoff = history_position(&snapshot, snapshot_id, /*end_ordinal_exclusive*/ 6);
++    write_rollout_with_end(
++        &rollout_path(home.path(), child_id),
++        child_id,
++        Some(cutoff),
++        /*next_ordinal*/ 2,
++    );
++    // The immutable cutoff must remain independent of later source appends.
++    let original = fs::read(&snapshot).expect("snapshot bytes");
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&snapshot)
++        .expect("snapshot");
++    writeln!(
++        file,
++        "{}",
++        serde_json::to_string(&RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(6),
++            item: item("after fork, excluded"),
++        })
++        .expect("encode post-cutoff record")
++    )
++    .expect("append post-cutoff record");
++    drop(file);
++    let page = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 2,
++        })
++        .await
++        .expect("latest inherited timeline");
++    let RolloutItem::EventMsg(EventMsg::ItemCompleted(updated)) = item("updated recent text")
++    else {
++        panic!("canonical item");
++    };
++    assert_eq!(
++        page.items,
++        vec![
++            ThreadTimelineEntry::Item {
++                position: 3,
++                turn_id: "recent-turn".to_string(),
++                item: Box::new(codex_app_server_protocol::ThreadItem::from(updated.item)),
++            },
++            ThreadTimelineEntry::TurnCompleted {
++                position: 5,
++                turn_id: "recent-turn".to_string(),
++                status: codex_app_server_protocol::TurnStatus::Completed,
++                error: None,
++                started_at: Some(10),
++                completed_at: Some(12),
++                duration_ms: Some(2_000),
++            },
++        ]
++    );
++    assert_eq!(
++        page.active_realtime_session_at_page_start.as_deref(),
++        Some("voice")
++    );
++    let older = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: page.next_cursor,
++            page_size: 2,
++        })
++        .await
++        .expect("older inherited timeline");
++    assert_eq!(
++        older
++            .items
++            .iter()
++            .map(crate::local::thread_history::realtime::entry_key)
++            .collect::<Vec<_>>(),
++        vec![(1, 2, "voice:started"), (2, 0, "recent-turn")]
++    );
++    assert!(older.next_cursor.is_none());
++    assert!(older.active_realtime_session_at_page_start.is_none());
++    assert_eq!(
++        &fs::read(&snapshot).expect("snapshot unchanged")[..original.len()],
++        original.as_slice()
++    );
++    store
++        .rebuild_history_projection(child_id)
++        .await
++        .expect("flatten child history projection");
++    let deleted = sqlx::query(
++        "DELETE FROM thread_realtime_items WHERE thread_id = ? AND item_id = 'voice:started'",
++    )
++    .bind(child_id.to_string())
++    .execute(history_db(&store).await)
++    .await
++    .expect("simulate a missing projected realtime record");
++    assert_eq!(deleted.rows_affected(), 1);
++    assert!(
++        !projection_state(&store, child_id)
++            .await
++            .expect("invalidated child projection")
++            .expect("child projection state")
++            .lineage_complete
++    );
++    let recovered = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 2,
++        })
++        .await
++        .expect("canonical voice state after projection invalidation");
++    assert_eq!(recovered.items, page.items);
++    assert_eq!(
++        recovered.active_realtime_session_at_page_start,
++        page.active_realtime_session_at_page_start
++    );
++    store
++        .rebuild_history_projection(child_id)
++        .await
++        .expect("restore complete realtime projection");
++    fs::remove_file(&snapshot).expect("remove immutable predecessor after verified rebuild");
++    let (rebuilt, stats) = realtime::list_timeline_with_read_stats(
++        &store,
++        ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 2,
++        },
++    )
++    .await
++    .expect("flattened root timeline");
++    assert_eq!(rebuilt.items, page.items);
++    assert_eq!(
++        rebuilt.active_realtime_session_at_page_start,
++        page.active_realtime_session_at_page_start
++    );
++    assert_eq!((stats.canonical_segments, stats.canonical_bytes), (0, 0));
++}
++
++#[tokio::test]
++async fn timeline_unprojected_tail_keeps_ordinal_gaps_without_reading_old_checkpoint() {
++    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let source_id = ThreadId::default();
++    let snapshot_id = ThreadId::default();
++    let older = rollout_path(home.path(), source_id);
++    write_rollout_with_end(
++        &older, source_id, /*history_base*/ None, /*next_ordinal*/ 2,
++    );
++    let checkpoint = serde_json::json!({
++        "timestamp": "2026-07-16T00:00:00.000Z", "ordinal": 2, "type": "compacted",
++        "payload": { "message": "x".repeat(2_000_000), "replacement_history": null }
++    });
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&older)
++        .expect("older segment");
++    writeln!(file, "{checkpoint}").expect("old large checkpoint");
++    drop(file);
++    let snapshot = selected_rollout_path(home.path(), source_id, snapshot_id);
++    write_rollout_with_end(
++        &snapshot,
++        source_id,
++        Some(history_position(
++            &older, source_id, /*end_ordinal_exclusive*/ 3,
++        )),
++        /*next_ordinal*/ 1,
++    );
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 4,
++        RolloutItem::RealtimeItem(RealtimeItem {
++            id: "voice:started".to_string(),
++            realtime_session_id: "voice".to_string(),
++            content: RealtimeItemContent::RealtimeSessionStarted,
++        }),
++    );
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 5,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "recent-turn".to_string(),
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 6,
++        timeline_user_item(source_id, "recent-turn", "before", "before damaged line"),
++    );
++    let token_count = serde_json::json!({
++        "timestamp": "2026-07-16T00:00:00.000Z", "ordinal": 7, "type": "event_msg",
++        "payload": { "type": "token_count", "info": null,
++            "rate_limits": { "primary": { "used_percent": 12.5, "window_minutes": 60, "resets_at": 42 } }
++        }
++    });
++    assert!(
++        codex_rollout::RolloutRecorder::parse_rollout_line_value(token_count.clone())
++            .expect("valid arbitrary-precision fixture")
++            .is_some()
++    );
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&snapshot)
++        .expect("snapshot");
++    writeln!(file, "{token_count}").expect("numeric ordinary record");
++    writeln!(
++        file,
++        "{{\"timestamp\":\"broken\",\"ordinal\":8,\"type\":\"event_msg\",\"payload\":\"truncated"
++    )
++    .expect("damaged ordinary record");
++    drop(file);
++    let after = serde_json::to_value(timeline_user_item(
++        source_id,
++        "recent-turn",
++        "after",
++        "after damaged line",
++    ))
++    .expect("completed item value");
++    let payload = serde_json::to_string(after.get("payload").expect("completed item payload"))
++        .expect("encode payload");
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(&snapshot)
++        .expect("snapshot");
++    writeln!(file, r#"{{"timestamp":"2026-07-16T00:00:00.000Z","ordinal":9,"type":"event_msg","type":"event_msg","payload":{payload}}}"#)
++        .expect("compatible duplicate envelope keys");
++    drop(file);
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 10,
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: "recent-turn".to_string(),
++            last_agent_message: None,
++            error: None,
++            started_at: None,
++            completed_at: Some(12),
++            duration_ms: Some(2_000),
++            time_to_first_token_ms: None,
++        })),
++    );
++    let child = rollout_path(home.path(), child_id);
++    write_rollout_with_end(
++        &child,
++        child_id,
++        Some(HistoryPosition {
++            thread_id: snapshot_id,
++            end_ordinal_exclusive: 11,
++            end_byte_offset: fs::metadata(&snapshot).expect("snapshot metadata").len(),
++        }),
++        /*next_ordinal*/ 2,
++    );
++    let (page, stats) = realtime::list_timeline_with_read_stats(
++        &store,
++        ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 2,
++        },
++    )
++    .await
++    .expect("canonical bounded page");
++    let RolloutItem::EventMsg(EventMsg::ItemCompleted(after)) =
++        timeline_user_item(source_id, "recent-turn", "after", "after damaged line")
++    else {
++        panic!("completed user item");
++    };
++    assert_eq!(
++        page.items,
++        vec![
++            ThreadTimelineEntry::Item {
++                position: 9,
++                turn_id: "recent-turn".to_string(),
++                item: Box::new(codex_app_server_protocol::ThreadItem::from(after.item))
++            },
++            ThreadTimelineEntry::TurnCompleted {
++                position: 10,
++                turn_id: "recent-turn".to_string(),
++                status: codex_app_server_protocol::TurnStatus::Completed,
++                error: None,
++                started_at: Some(10),
++                completed_at: Some(12),
++                duration_ms: Some(2_000)
++            },
++        ]
++    );
++    assert_eq!(
++        page.active_realtime_session_at_page_start,
++        Some("voice".to_string())
++    );
++    assert_eq!(stats.canonical_segments, 2);
++    assert_eq!(
++        stats.canonical_bytes,
++        fs::metadata(&child).expect("child metadata").len()
++            + fs::metadata(&snapshot).expect("snapshot metadata").len()
++    );
++    assert!(stats.canonical_bytes < fs::metadata(&older).expect("older metadata").len() / 100);
++    let older_page = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: page.next_cursor,
++            page_size: 100,
++        })
++        .await
++        .expect("older canonical page");
++    assert_eq!(
++        older_page
++            .items
++            .iter()
++            .map(realtime::entry_key)
++            .collect::<Vec<_>>(),
++        vec![
++            (4, 2, "voice:started"),
++            (5, 0, "recent-turn"),
++            (6, 1, "before")
++        ]
++    );
++    assert!(older_page.next_cursor.is_none());
++}
++
++#[tokio::test]
++async fn timeline_reasoning_updates_across_rotation_keep_first_position_on_older_pages() {
++    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let source_id = ThreadId::default();
++    let snapshot_id = ThreadId::default();
++    let older = rollout_path(home.path(), source_id);
++    write_rollout_with_end(
++        &older, source_id, /*history_base*/ None, /*next_ordinal*/ 1,
++    );
++    append_timeline_record(
++        &older,
++        /*ordinal*/ 1,
++        RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
++            turn_id: "turn".to_string(),
++            trace_id: None,
++            started_at: Some(10),
++            model_context_window: None,
++            collaboration_mode_kind: Default::default(),
++        })),
++    );
++    let reasoning = |summary_text: Vec<String>| {
++        RolloutItem::EventMsg(EventMsg::ItemCompleted(
++            codex_protocol::protocol::ItemCompletedEvent {
++                thread_id: source_id,
++                turn_id: "turn".to_string(),
++                item: codex_protocol::items::TurnItem::Reasoning(
++                    codex_protocol::items::ReasoningItem {
++                        id: "stable-reasoning".to_string(),
++                        summary_text,
++                        raw_content: Vec::new(),
++                    },
++                ),
++                started_at_ms: Some(10),
++                completed_at_ms: 11,
++            },
++        ))
++    };
++    append_timeline_record(
++        &older,
++        /*ordinal*/ 2,
++        reasoning(vec!["first".to_string()]),
++    );
++    append_timeline_record(
++        &older,
++        /*ordinal*/ 3,
++        RolloutItem::RealtimeItem(RealtimeItem {
++            id: "voice:started".to_string(),
++            realtime_session_id: "voice".to_string(),
++            content: RealtimeItemContent::RealtimeSessionStarted,
++        }),
++    );
++    let snapshot = selected_rollout_path(home.path(), source_id, snapshot_id);
++    write_rollout_with_end(
++        &snapshot,
++        source_id,
++        Some(history_position(
++            &older, source_id, /*end_ordinal_exclusive*/ 4,
++        )),
++        /*next_ordinal*/ 1,
++    );
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 5,
++        reasoning(vec!["first".to_string(), "second".to_string()]),
++    );
++    append_timeline_record(
++        &snapshot,
++        /*ordinal*/ 6,
++        RolloutItem::EventMsg(EventMsg::TurnComplete(TurnCompleteEvent {
++            turn_id: "turn".to_string(),
++            last_agent_message: None,
++            error: None,
++            started_at: None,
++            completed_at: Some(12),
++            duration_ms: Some(2_000),
++            time_to_first_token_ms: None,
++        })),
++    );
++    write_rollout_with_end(
++        &rollout_path(home.path(), child_id),
++        child_id,
++        Some(history_position(
++            &snapshot,
++            snapshot_id,
++            /*end_ordinal_exclusive*/ 7,
++        )),
++        /*next_ordinal*/ 2,
++    );
++    let params = ListTimelineParams {
++        thread_id: child_id,
++        cursor: None,
++        page_size: 2,
++    };
++    let latest = store
++        .list_timeline(params.clone())
++        .await
++        .expect("latest reasoning page");
++    assert_eq!(
++        latest
++            .items
++            .iter()
++            .map(realtime::entry_key)
++            .collect::<Vec<_>>(),
++        vec![(3, 2, "voice:started"), (6, 3, "turn")]
++    );
++    let oldest = store
++        .list_timeline(ListTimelineParams {
++            cursor: latest.next_cursor.clone(),
++            ..params.clone()
++        })
++        .await
++        .expect("older reasoning page retains newer cumulative payload");
++    let RolloutItem::EventMsg(EventMsg::ItemCompleted(completed)) =
++        reasoning(vec!["first".to_string(), "second".to_string()])
++    else {
++        panic!("completed reasoning");
++    };
++    assert_eq!(
++        oldest.items,
++        vec![
++            ThreadTimelineEntry::TurnStarted {
++                position: 1,
++                turn_id: "turn".to_string(),
++                started_at: Some(10)
++            },
++            ThreadTimelineEntry::Item {
++                position: 2,
++                turn_id: "turn".to_string(),
++                item: Box::new(codex_app_server_protocol::ThreadItem::from(completed.item))
++            },
++        ]
++    );
++    assert!(oldest.next_cursor.is_none());
++    let all = store
++        .list_timeline(ListTimelineParams {
++            page_size: 20,
++            ..params.clone()
++        })
++        .await
++        .expect("complete canonical reasoning timeline");
++    assert_eq!(
++        all.items,
++        [oldest.items.clone(), latest.items.clone()].concat()
++    );
++    for projection in [
++        "canonical",
++        "complete first-owner SQL",
++        "complete updated-ancestor SQL",
++        "complete child SQL",
++    ] {
++        if projection == "complete first-owner SQL" {
++            let mut builder = codex_state::ThreadMetadataBuilder::new(
++                source_id,
++                older.clone(),
++                Utc::now(),
++                SessionSource::Cli,
++            );
++            builder.history_mode = ThreadHistoryMode::Paginated;
++            store
++                .state_db()
++                .await
++                .expect("state runtime")
++                .upsert_thread(&builder.build(store.config.default_model_provider_id.as_str()))
++                .await
++                .expect("seed rotated source metadata");
++            store
++                .rebuild_history_projection(source_id)
++                .await
++                .expect("flatten only the first-owner SQL prefix");
++            assert!(
++                projection_state(&store, source_id)
++                    .await
++                    .expect("owner state")
++                    .expect("owner projection")
++                    .lineage_complete
++            );
++        } else if projection == "complete updated-ancestor SQL" {
++            select_rollout_path(&store, source_id, snapshot.clone()).await;
++            store
++                .rebuild_history_projection(source_id)
++                .await
++                .expect("flatten only the updated ancestor SQL prefix");
++            assert!(
++                projection_state(&store, snapshot_id)
++                    .await
++                    .expect("ancestor state")
++                    .expect("ancestor projection")
++                    .lineage_complete
++            );
++            assert!(
++                projection_state(&store, child_id)
++                    .await
++                    .expect("child state")
++                    .is_none()
++            );
++        } else if projection == "complete child SQL" {
++            store
++                .rebuild_history_projection(child_id)
++                .await
++                .expect("flatten reasoning history");
++        }
++        let projected = store
++            .list_timeline(ListTimelineParams {
++                page_size: 20,
++                ..params.clone()
++            })
++            .await
++            .expect("complete reasoning timeline");
++        assert_eq!(projected, all, "{projection}");
++        for page_size in [1, 2] {
++            let mut cursor = None;
++            let mut descending_pages = Vec::new();
++            loop {
++                let page = store
++                    .list_timeline(ListTimelineParams {
++                        cursor,
++                        page_size,
++                        ..params.clone()
++                    })
++                    .await
++                    .expect("reasoning pages");
++                descending_pages.push(page.items);
++                cursor = page.next_cursor;
++                if cursor.is_none() {
++                    break;
++                }
++            }
++            descending_pages.reverse();
++            assert_eq!(
++                descending_pages.concat(),
++                all.items,
++                "{projection} page size {page_size}"
++            );
++        }
++    }
++}
++
++#[tokio::test]
++async fn timeline_distinguishes_shared_rollout_ids_and_skips_newer_ordinary_segments() {
++    let (home, store, child_id) = store_with_mode(ThreadHistoryMode::Paginated).await;
++    let source_id = ThreadId::default();
++    let active =
++        write_projected_same_thread_segments(home.path(), source_id, /*segment_count*/ 2);
++    let mut builder = codex_state::ThreadMetadataBuilder::new(
++        source_id,
++        active.clone(),
++        Utc::now(),
++        SessionSource::Cli,
++    );
++    builder.history_mode = ThreadHistoryMode::Paginated;
++    store
++        .state_db()
++        .await
++        .expect("state runtime")
++        .upsert_thread(&builder.build(store.config.default_model_provider_id.as_str()))
++        .await
++        .expect("seed rotated source metadata");
++    let (lines, _, _) = codex_rollout::RolloutRecorder::load_rollout_lines(&active)
++        .await
++        .expect("rotated source head");
++    let recorded_older = lines
++        .into_iter()
++        .find_map(|line| match line.item {
++            RolloutItem::RolloutReference(reference) => Some(reference.rollout_path),
++            _ => None,
++        })
++        .expect("same-thread predecessor");
++    let older =
++        recorded_older.with_file_name(format!("rollout-2026-07-16T00-00-00-{source_id}.jsonl"));
++    fs::rename(&recorded_older, &older)
++        .expect("give the immutable predecessor its authenticated rollout filename");
++    append_timeline_record(
++        &older,
++        /*ordinal*/ 3,
++        timeline_user_item(source_id, "turn", "older-item", "older"),
++    );
++    append_timeline_record(
++        &active,
++        /*ordinal*/ 7,
++        timeline_user_item(source_id, "turn", "newer-item", "newer"),
++    );
++    write_rollout_with_end(
++        &rollout_path(home.path(), child_id),
++        child_id,
++        Some(history_position(
++            &active, source_id, /*end_ordinal_exclusive*/ 8,
++        )),
++        /*next_ordinal*/ 2,
++    );
++    let page = store
++        .list_timeline(ListTimelineParams {
++            thread_id: child_id,
++            cursor: None,
++            page_size: 20,
++        })
++        .await
++        .expect("two files with one rollout ID");
++    assert_eq!(
++        page.items
++            .iter()
++            .map(realtime::entry_key)
++            .collect::<Vec<_>>(),
++        vec![(3, 1, "older-item"), (7, 1, "newer-item")]
++    );
++    // An ordinal cursor in the gap selects only the older physical segment.
++    let cursor =
++        serde_json::json!({ "threadId": child_id, "position": 4, "kind": 0, "id": "" }).to_string();
++    let (older_page, stats) = realtime::list_timeline_with_read_stats(
++        &store,
++        ListTimelineParams {
++            thread_id: child_id,
++            cursor: Some(cursor),
++            page_size: 20,
++        },
++    )
++    .await
++    .expect("old ordinary page");
++    assert_eq!(older_page.items, page.items[..1]);
++    assert_eq!(stats.canonical_segments, 1);
++    assert_eq!(
++        stats.canonical_bytes,
++        fs::metadata(&older).expect("older file metadata").len()
+     );
+ }
+
+@@ -3243,6 +4022,59 @@ fn rollout_path(home: &std::path::Path, thread_id: ThreadId) -> std::path::PathB
+     ))
+ }
+
++fn append_timeline_record(path: &std::path::Path, ordinal: u64, item: RolloutItem) {
++    let mut file = fs::OpenOptions::new()
++        .append(true)
++        .open(path)
++        .expect("open timeline fixture");
++    writeln!(
++        file,
++        "{}",
++        serde_json::to_string(&RolloutLine {
++            timestamp: "2026-07-16T00:00:00.000Z".to_string(),
++            ordinal: Some(ordinal),
++            item,
++        })
++        .expect("encode timeline record")
++    )
++    .expect("append timeline record");
++}
++
++fn timeline_user_item(thread_id: ThreadId, turn_id: &str, id: &str, text: &str) -> RolloutItem {
++    RolloutItem::EventMsg(EventMsg::ItemCompleted(
++        codex_protocol::protocol::ItemCompletedEvent {
++            thread_id,
++            turn_id: turn_id.to_string(),
++            item: codex_protocol::items::TurnItem::UserMessage(
++                codex_protocol::items::UserMessageItem {
++                    id: id.to_string(),
++                    client_id: None,
++                    content: vec![codex_protocol::user_input::UserInput::Text {
++                        text: text.to_string(),
++                        text_elements: Vec::new(),
++                    }],
++                },
++            ),
++            started_at_ms: Some(10),
++            completed_at_ms: 11,
++        },
++    ))
++}
++
++// These SQL-only fixtures test cursor ordering, so mark their seeded rows authoritative.
++async fn complete_timeline_fixture(
++    store: &LocalThreadStore,
++    home: &std::path::Path,
++    thread_id: ThreadId,
++) {
++    let length = fs::metadata(rollout_path(home, thread_id))
++        .expect("fixture metadata")
++        .len();
++    sqlx::query("INSERT INTO thread_history_projection_state (thread_id, next_rollout_byte_offset, next_rollout_ordinal) VALUES (?, ?, 100)")
++        .bind(thread_id.to_string()).bind(length as i64)
++        .execute(history_db(store).await).await.expect("complete timeline fixture projection");
++}
++
+ fn history_position(
+     path: &std::path::Path,
+     thread_id: ThreadId,
+diff --git a/codex-rs/thread-store/src/local/thread_history/realtime.rs b/codex-rs/thread-store/src/local/thread_history/realtime.rs
+index 0dd233b7767094abd05c8a015bef61c7c3756d0e..afd12008afe9c3656e659e2360e172ef3f0d3b10 100644
+--- a/codex-rs/thread-store/src/local/thread_history/realtime.rs
++++ b/codex-rs/thread-store/src/local/thread_history/realtime.rs
+@@ -1,4 +1,7 @@
++use std::collections::HashMap;
++
+ use codex_app_server_protocol::ThreadItem;
++use codex_app_server_protocol::ThreadRealtimeItemContent;
+ use codex_app_server_protocol::ThreadTimelineEntry;
+ use codex_protocol::ThreadId;
+ use codex_protocol::realtime::RealtimeItem;
+@@ -6,6 +9,7 @@ use serde::Deserialize;
+ use serde::Serialize;
+
+ use super::super::LocalThreadStore;
++use super::read::indexed_same_thread_lineage;
+ use super::read::validate_thread_for_paginated_reads;
+ use super::segment_paging::validate_page_size;
+ use super::sqlite_integer;
+@@ -14,6 +18,26 @@ use crate::ListTimelineParams;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+ use crate::TimelinePage;
++use crate::local::rollout_lineage::RolloutLineageSegment;
++
++#[path = "realtime_canonical.rs"]
++mod canonical;
++
++/// Counts physical payload reads independently of SQLite page queries.
++#[derive(Default)]
++pub(super) struct TimelineReadStats {
++    pub(super) canonical_segments: usize,
++    pub(super) canonical_bytes: u64,
++}
++
++/// Migration emits cumulative Reasoning snapshots under one stable item ID within a turn.
++/// Keep the latest snapshot at the first ordinal, including across physical rotations.
++struct ReasoningSnapshot {
++    /// First accepted ItemCompleted ordinal for this turn and item ID.
++    first_ordinal: u64,
++    /// Latest cumulative snapshot; summaries must not be concatenated again.
++    item: Box<ThreadItem>,
++}
+
+ #[derive(Deserialize, Serialize)]
+ #[serde(rename_all = "camelCase")]
+@@ -43,6 +67,19 @@ pub(in crate::local) async fn list_timeline(
+     store: &LocalThreadStore,
+     params: ListTimelineParams,
+ ) -> ThreadStoreResult<TimelinePage> {
++    let (page, stats) = list_timeline_with_read_stats(store, params).await?;
++    tracing::debug!(
++        canonical_segments = stats.canonical_segments,
++        canonical_bytes = stats.canonical_bytes,
++        "read thread timeline page"
++    );
++    Ok(page)
++}
++
++pub(super) async fn list_timeline_with_read_stats(
++    store: &LocalThreadStore,
++    params: ListTimelineParams,
++) -> ThreadStoreResult<(TimelinePage, TimelineReadStats)> {
+     validate_thread_for_paginated_reads(
+         store,
+         params.thread_id,
+@@ -52,7 +89,20 @@ pub(in crate::local) async fn list_timeline(
+     .await?;
+     validate_page_size(params.page_size)?;
+
+-    let lineage = store.resolve_rollout_lineage(params.thread_id).await?;
++    let mut canonical_segments = HashMap::new();
++    // A rebuilt or resumed root stores the entire authenticated lineage under its own ID.
++    // Applying the selected physical segment's lower bound would hide inherited rows.
++    let lineage =
++        if let Some(lineage) = indexed_same_thread_lineage(store, params.thread_id).await? {
++            canonical_segments.insert(0usize, None);
++            lineage
++        } else {
++            store
++                .resolve_rollout_lineage_deferred(params.thread_id)
++                .await?
++        };
++    let mut stats = TimelineReadStats::default();
++    let mut reasoning = HashMap::new();
+     let pool = store.thread_history_db().await?;
+     let cursor = params
+         .cursor
+@@ -82,7 +132,7 @@ pub(in crate::local) async fn list_timeline(
+
+     let mut rows = Vec::new();
+     let max_rows = params.page_size + 1;
+-    for segment in lineage.segments().iter().rev() {
++    for (segment_index, segment) in lineage.segments().iter().enumerate().rev() {
+         let remaining = max_rows.saturating_sub(rows.len());
+         if remaining == 0 {
+             break;
+@@ -90,6 +140,27 @@ pub(in crate::local) async fn list_timeline(
+         if cursor_position.is_some_and(|position| position < segment.start_ordinal()) {
+             continue;
+         }
++        let entries = canonical_entries(
++            store,
++            lineage.segments(),
++            segment_index,
++            &mut canonical_segments,
++            &mut stats,
++            &mut reasoning,
++        )
++        .await?;
++        if let Some(entries) = entries {
++            rows.extend(
++                entries
++                    .iter()
++                    .filter(|entry| {
++                        entry_key(entry) < (cursor_ordinal as u64, cursor_kind, cursor_id)
++                    })
++                    .filter_map(|entry| reasoning_entry(entry, &reasoning))
++                    .take(remaining),
++            );
++            continue;
++        }
+         let upper = segment
+             .end_ordinal()
+             .map(|value| sqlite_integer(value, "rollout ordinal"))
+@@ -153,7 +224,7 @@ LIMIT ?7
+
+         for (position, kind, _id, turn_id, item_json) in segment_rows {
+             let position = u64::try_from(position).map_err(thread_history_error)?;
+-            rows.push(match kind {
++            let entry = match kind {
+                 0 | 3 => serde_json::from_str::<ThreadTimelineEntry>(&item_json)
+                     .map_err(thread_history_error)?,
+                 1 => ThreadTimelineEntry::Item {
+@@ -171,7 +242,29 @@ LIMIT ?7
+                         .into(),
+                 },
+                 _ => return Err(thread_history_error("invalid timeline entry kind")),
+-            });
++            };
++            if lineage.segments().len() > 1
++                && let ThreadTimelineEntry::Item {
++                    position,
++                    turn_id,
++                    item,
++                } = &entry
++                && matches!(item.as_ref(), ThreadItem::Reasoning { .. })
++            {
++                reconcile_reasoning(
++                    store,
++                    lineage.segments(),
++                    segment_index,
++                    &mut canonical_segments,
++                    &mut stats,
++                    &mut reasoning,
++                    (*position, turn_id.clone(), item.clone()),
++                )
++                .await?;
++            }
++            if let Some(entry) = reasoning_entry(&entry, &reasoning) {
++                rows.push(entry);
++            }
+         }
+     }
+
+@@ -197,7 +290,7 @@ LIMIT ?7
+     let (page_start, page_start_kind, page_start_id) =
+         rows.last().map(entry_key).unwrap_or_default();
+     let mut active_realtime_session_at_page_start = None;
+-    for segment in lineage.segments().iter().rev() {
++    for (segment_index, segment) in lineage.segments().iter().enumerate().rev() {
+         let upper = page_start.min(
+             segment
+                 .end_ordinal()
+@@ -207,6 +300,37 @@ LIMIT ?7
+         if upper < segment.start_ordinal() {
+             continue;
+         }
++        if let Some(entries) = canonical_entries(
++            store,
++            lineage.segments(),
++            segment_index,
++            &mut canonical_segments,
++            &mut stats,
++            &mut reasoning,
++        )
++        .await?
++        {
++            let boundary = entries.iter().find_map(|entry| {
++                if entry_key(entry) >= (page_start, page_start_kind, page_start_id) {
++                    return None;
++                }
++                let ThreadTimelineEntry::Realtime { item, .. } = entry else {
++                    return None;
++                };
++                match &item.content {
++                    ThreadRealtimeItemContent::RealtimeSessionStarted => {
++                        Some(Some(item.realtime_session_id.clone()))
++                    }
++                    ThreadRealtimeItemContent::RealtimeSessionClosed { .. } => Some(None),
++                    _ => None,
++                }
++            });
++            if let Some(session_id) = boundary {
++                active_realtime_session_at_page_start = session_id;
++                break;
++            }
++            continue;
++        }
+         let boundary = sqlx::query_as::<_, (String, String)>(
+             r#"
+ SELECT item_type, json_extract(item_json, '$.realtime_session_id')
+@@ -216,7 +340,7 @@ WHERE thread_id = ?
+   AND rollout_ordinal <= ?
+   AND (rollout_ordinal, 2, item_id) < (?, ?, ?)
+   AND item_type IN ('realtime_session_started', 'realtime_session_closed')
+-ORDER BY rollout_ordinal DESC
++ORDER BY rollout_ordinal DESC, item_id DESC
+ LIMIT 1
+             "#,
+         )
+@@ -238,9 +362,311 @@ LIMIT 1
+     }
+
+     rows.reverse();
+-    Ok(TimelinePage {
+-        items: rows,
+-        next_cursor,
+-        active_realtime_session_at_page_start,
+-    })
++    Ok((
++        TimelinePage {
++            items: rows,
++            next_cursor,
++            active_realtime_session_at_page_start,
++        },
++        stats,
++    ))
++}
++
++/// Empty SQL results are authoritative only after the physical file was fully projected.
++/// Frozen fork snapshots deliberately have new rollout IDs and may have no SQL rows yet.
++async fn canonical_entries<'a>(
++    store: &LocalThreadStore,
++    segments: &[RolloutLineageSegment],
++    segment_index: usize,
++    cache: &'a mut HashMap<usize, Option<canonical::CanonicalTimeline>>,
++    stats: &mut TimelineReadStats,
++    reasoning: &mut HashMap<(String, String), ReasoningSnapshot>,
++) -> ThreadStoreResult<Option<&'a [ThreadTimelineEntry]>> {
++    let segment = &segments[segment_index];
++    ensure_segment(store, segment_index, segment, cache, stats).await?;
++    let unstarted = cache
++        .get(&segment_index)
++        .and_then(Option::as_ref)
++        .map(|timeline| timeline.unstarted_turns.clone())
++        .unwrap_or_default();
++    for turn_id in unstarted {
++        for (predecessor_index, predecessor) in segments[..segment_index].iter().enumerate().rev() {
++            ensure_segment(store, predecessor_index, predecessor, cache, stats).await?;
++            let started_at = if let Some(timeline) =
++                cache.get(&predecessor_index).and_then(Option::as_ref)
++            {
++                if timeline.unstarted_turns.contains(&turn_id) {
++                    continue;
++                }
++                timeline.entries.iter().find_map(|entry| match entry {
++                    ThreadTimelineEntry::TurnStarted {
++                        turn_id: id,
++                        started_at,
++                        ..
++                    } if id == &turn_id => Some(*started_at),
++                    _ => None,
++                })
++            } else {
++                let pool = store.thread_history_db().await?;
++                sqlx::query_as::<_, (i64, Option<i64>)>(
++                    "SELECT rollout_ordinal, started_at FROM thread_turns WHERE thread_id = ? AND turn_id = ? AND rollout_ordinal >= ? AND rollout_ordinal < ?"
++                ).bind(predecessor.rollout_id().to_string()).bind(&turn_id)
++                    .bind(sqlite_integer(predecessor.start_ordinal(), "rollout ordinal")?)
++                    .bind(sqlite_integer(predecessor.end_ordinal().unwrap_or(i64::MAX as u64), "rollout ordinal")?)
++                    .fetch_optional(pool).await.map_err(thread_history_error)?
++                    .map(|(_, started_at)| started_at)
++            };
++            if let Some(started_at) = started_at {
++                let timeline = cache
++                    .get_mut(&segment_index)
++                    .and_then(Option::as_mut)
++                    .ok_or_else(|| thread_history_error("missing canonical turn state"))?;
++                // A local abort completes the inherited turn; it must not introduce a second start.
++                timeline.entries.retain(|entry| {
++                    !matches!(entry,
++                    ThreadTimelineEntry::TurnStarted { turn_id: id, .. } if id == &turn_id)
++                });
++                for entry in &mut timeline.entries {
++                    if let ThreadTimelineEntry::TurnCompleted {
++                        turn_id: id,
++                        started_at: current,
++                        ..
++                    } = entry
++                        && id == &turn_id
++                    {
++                        *current = current.or(started_at);
++                    }
++                }
++                timeline.unstarted_turns.retain(|id| id != &turn_id);
++                break;
++            }
++        }
++    }
++    let snapshots = cache
++        .get(&segment_index)
++        .and_then(Option::as_ref)
++        .map(|timeline| {
++            timeline
++                .entries
++                .iter()
++                .filter_map(|entry| match entry {
++                    ThreadTimelineEntry::Item {
++                        position,
++                        turn_id,
++                        item,
++                    } if matches!(item.as_ref(), ThreadItem::Reasoning { .. }) => {
++                        Some((*position, turn_id.clone(), item.clone()))
++                    }
++                    _ => None,
++                })
++                .collect::<Vec<_>>()
++        })
++        .unwrap_or_default();
++    for candidate in snapshots {
++        reconcile_reasoning(
++            store,
++            segments,
++            segment_index,
++            cache,
++            stats,
++            reasoning,
++            candidate,
++        )
++        .await?;
++    }
++    Ok(cache
++        .get(&segment_index)
++        .and_then(Option::as_ref)
++        .map(|timeline| timeline.entries.as_slice()))
++}
++
++/// Both canonical and indexed first-position candidates need newer cumulative snapshots.
++async fn reconcile_reasoning(
++    store: &LocalThreadStore,
++    segments: &[RolloutLineageSegment],
++    segment_index: usize,
++    cache: &mut HashMap<usize, Option<canonical::CanonicalTimeline>>,
++    stats: &mut TimelineReadStats,
++    reasoning: &mut HashMap<(String, String), ReasoningSnapshot>,
++    candidate: (u64, String, Box<ThreadItem>),
++) -> ThreadStoreResult<()> {
++    let (mut first_ordinal, turn_id, mut item) = candidate;
++    let key = (turn_id.clone(), item.id().to_string());
++    if reasoning.contains_key(&key) {
++        return Ok(());
++    }
++    // A complete SQL candidate already stores its first position across the entire prefix.
++    let current_has_start = cache
++        .get(&segment_index)
++        .and_then(Option::as_ref)
++        .is_none_or(|timeline| {
++            !timeline.unstarted_turns.contains(&turn_id)
++                && timeline.entries.iter().any(|entry| {
++                    matches!(entry,
++                ThreadTimelineEntry::TurnStarted { turn_id: id, .. } if id == &turn_id)
++                })
++        });
++    if !current_has_start {
++        for (predecessor_index, predecessor) in segments[..segment_index].iter().enumerate().rev() {
++            ensure_segment(store, predecessor_index, predecessor, cache, stats).await?;
++            if let Some(timeline) = cache.get(&predecessor_index).and_then(Option::as_ref) {
++                if let Some(position) = timeline.entries.iter().find_map(|entry| match entry {
++                    ThreadTimelineEntry::Item {
++                        position,
++                        turn_id: id,
++                        item: old,
++                    } if id == &turn_id && old.id() == item.id() => Some(*position),
++                    _ => None,
++                }) {
++                    first_ordinal = first_ordinal.min(position);
++                }
++                // Migration calls ensure_turn before reasoning and clears it at boundaries.
++                // A matching genuine start proves that this ID cannot have an earlier owner.
++                if !timeline.unstarted_turns.contains(&turn_id)
++                    && timeline.entries.iter().any(|entry| {
++                        matches!(entry,
++                        ThreadTimelineEntry::TurnStarted { turn_id: id, .. } if id == &turn_id)
++                    })
++                {
++                    break;
++                }
++            } else {
++                let pool = store.thread_history_db().await?;
++                if let Some(position) = sqlx::query_scalar::<_, i64>(
++                        "SELECT rollout_ordinal FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ? AND rollout_ordinal >= ? AND rollout_ordinal < ?"
++                    ).bind(predecessor.rollout_id().to_string()).bind(&turn_id).bind(item.id())
++                        .bind(sqlite_integer(predecessor.start_ordinal(), "rollout ordinal")?)
++                        .bind(sqlite_integer(predecessor.end_ordinal().unwrap_or(i64::MAX as u64), "rollout ordinal")?)
++                        .fetch_optional(pool).await.map_err(thread_history_error)? {
++                        first_ordinal = first_ordinal.min(u64::try_from(position).map_err(thread_history_error)?);
++                        break;
++                    }
++            }
++        }
++    }
++    let current_has_end = if let Some(timeline) = cache.get(&segment_index).and_then(Option::as_ref)
++    {
++        timeline.entries.iter().any(|entry| {
++            matches!(entry,
++                ThreadTimelineEntry::TurnCompleted { turn_id: id, .. } if id == &turn_id)
++        })
++    } else {
++        let current = &segments[segment_index];
++        sqlx::query_scalar::<_, i64>(
++                "SELECT 1 FROM thread_turns WHERE thread_id = ? AND turn_id = ? AND rollout_end_ordinal >= ? AND rollout_end_ordinal < ?"
++            ).bind(current.rollout_id().to_string()).bind(&turn_id)
++                .bind(sqlite_integer(current.start_ordinal(), "rollout ordinal")?)
++                .bind(sqlite_integer(current.end_ordinal().unwrap_or(i64::MAX as u64), "rollout ordinal")?)
++                .fetch_optional(store.thread_history_db().await?).await.map_err(thread_history_error)?.is_some()
++    };
++    if !current_has_end {
++        // On an older cursor page, inspect newer records only for this reasoning candidate.
++        // Migration clears reasoning at a terminal boundary, so later turns cannot update it.
++        for (newer_index, newer) in segments.iter().enumerate().skip(segment_index + 1) {
++            ensure_segment(store, newer_index, newer, cache, stats).await?;
++            if let Some(timeline) = cache.get(&newer_index).and_then(Option::as_ref) {
++                if let Some(updated) = timeline.entries.iter().find_map(|entry| match entry {
++                    ThreadTimelineEntry::Item {
++                        turn_id: id,
++                        item: updated,
++                        ..
++                    } if id == &turn_id && updated.id() == item.id() => Some(updated.clone()),
++                    _ => None,
++                }) {
++                    item = updated;
++                }
++                if timeline.entries.iter().any(|entry| {
++                    matches!(entry,
++                        ThreadTimelineEntry::TurnCompleted { turn_id: id, .. } if id == &turn_id)
++                }) {
++                    break;
++                }
++            } else {
++                let pool = store.thread_history_db().await?;
++                let start = sqlite_integer(newer.start_ordinal(), "rollout ordinal")?;
++                let end = sqlite_integer(
++                    newer.end_ordinal().unwrap_or(i64::MAX as u64),
++                    "rollout ordinal",
++                )?;
++                if let Some(json) = sqlx::query_scalar::<_, String>(
++                        "SELECT item_json FROM thread_items WHERE thread_id = ? AND turn_id = ? AND item_id = ? AND rollout_ordinal = ? AND updated_at_ordinal >= ? AND updated_at_ordinal < ?"
++                    ).bind(newer.rollout_id().to_string()).bind(&turn_id).bind(item.id())
++                        .bind(sqlite_integer(first_ordinal, "rollout ordinal")?).bind(start).bind(end)
++                        .fetch_optional(pool).await.map_err(thread_history_error)? {
++                        item = Box::new(serde_json::from_str(&json).map_err(thread_history_error)?);
++                    }
++                if sqlx::query_scalar::<_, i64>(
++                        "SELECT 1 FROM thread_turns WHERE thread_id = ? AND turn_id = ? AND rollout_end_ordinal >= ? AND rollout_end_ordinal < ?"
++                    ).bind(newer.rollout_id().to_string()).bind(&turn_id).bind(start).bind(end)
++                        .fetch_optional(pool).await.map_err(thread_history_error)?.is_some() {
++                        break;
++                    }
++            }
++        }
++    }
++    reasoning.insert(
++        key,
++        ReasoningSnapshot {
++            first_ordinal,
++            item,
++        },
++    );
++    Ok(())
++}
++
++fn reasoning_entry(
++    entry: &ThreadTimelineEntry,
++    reasoning: &HashMap<(String, String), ReasoningSnapshot>,
++) -> Option<ThreadTimelineEntry> {
++    if let ThreadTimelineEntry::Item {
++        position,
++        turn_id,
++        item,
++    } = entry
++        && let Some(snapshot) = reasoning.get(&(turn_id.clone(), item.id().to_string()))
++    {
++        return (*position == snapshot.first_ordinal).then(|| ThreadTimelineEntry::Item {
++            position: *position,
++            turn_id: turn_id.clone(),
++            item: snapshot.item.clone(),
++        });
++    }
++    Some(entry.clone())
++}
++
++async fn ensure_segment(
++    store: &LocalThreadStore,
++    segment_index: usize,
++    segment: &RolloutLineageSegment,
++    cache: &mut HashMap<usize, Option<canonical::CanonicalTimeline>>,
++    stats: &mut TimelineReadStats,
++) -> ThreadStoreResult<()> {
++    let rollout_id = segment.rollout_id();
++    if let std::collections::hash_map::Entry::Vacant(e) = cache.entry(segment_index) {
++        let projection = super::projection_state(store, rollout_id).await?;
++        let file_len = tokio::fs::metadata(segment.rollout_path())
++            .await
++            .map_err(thread_history_error)?
++            .len();
++        let fully_projected = projection.is_some_and(|projection| {
++            projection.lineage_complete
++                && projection.next_byte_offset == file_len
++                && segment
++                    .end_ordinal()
++                    .is_none_or(|end| end == projection.next_ordinal)
++                && segment
++                    .jsonl_end_byte_offset()
++                    .is_none_or(|end| end == projection.next_byte_offset)
++        });
++        let canonical = if fully_projected {
++            None
++        } else {
++            let timeline = canonical::read_segment(segment).await?;
++            stats.canonical_segments += 1;
++            stats.canonical_bytes += timeline.bytes_read;
++            Some(timeline)
++        };
++        e.insert(canonical);
++    }
++    Ok(())
+ }
+diff --git a/codex-rs/thread-store/src/local/thread_history/realtime_canonical.rs b/codex-rs/thread-store/src/local/thread_history/realtime_canonical.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..f1f2157b3cc34fc8d032d1c1d8c1ea73310a9ff4
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/thread_history/realtime_canonical.rs
+@@ -0,0 +1,249 @@
++use std::collections::HashMap;
++
++use codex_app_server_protocol::ThreadHistoryTurnChange;
++use codex_app_server_protocol::ThreadTimelineEntry;
++use codex_app_server_protocol::TurnStatus;
++use codex_app_server_protocol::project_rollout_line;
++use codex_protocol::protocol::HistoryPosition;
++use codex_rollout::RolloutItem;
++use codex_rollout::RolloutRecorder;
++use serde::Deserialize;
++use serde_json::value::RawValue;
++
++use super::entry_key;
++use crate::ThreadStoreResult;
++use crate::local::rollout_lineage::RolloutLineageSegment;
++use crate::local::rollout_lineage::read_rollout_bytes;
++use crate::local::rollout_lineage::validated_history_byte_offset;
++use crate::local::thread_history::thread_history_error;
++
++/// Canonical entries from one physical segment whose SQLite projection is unavailable.
++/// Ordinary malformed records retain the normal paginated reader's ordinal gaps.
++pub(super) struct CanonicalTimeline {
++    pub(super) entries: Vec<ThreadTimelineEntry>,
++    /// Terminal-first local lifecycle records may finish a turn started in a predecessor.
++    pub(super) unstarted_turns: Vec<String>,
++    /// Decoded bytes read from this physical file, including boundary authentication.
++    pub(super) bytes_read: u64,
++}
++
++/// Borrow payload bytes so large model checkpoints do not become serde_json::Value trees.
++#[derive(Deserialize)]
++struct RecordEnvelope<'a> {
++    #[serde(rename = "type")]
++    record_type: String,
++    #[serde(borrow)]
++    #[serde(default)]
++    payload: Option<&'a RawValue>,
++}
++
++/// Select only event payloads that can change timeline entries.
++#[derive(Deserialize)]
++struct EventType {
++    #[serde(rename = "type")]
++    event_type: String,
++}
++
++/// The first lifecycle ordinal and first terminal event reproduce thread_turns upserts.
++struct TimelineTurn {
++    first_ordinal: u64,
++    end_ordinal: Option<u64>,
++    /// A terminal event alone creates a provisional start, as the SQLite projector does.
++    terminal_first: bool,
++    change: ThreadHistoryTurnChange,
++}
++
++pub(super) async fn read_segment(
++    segment: &RolloutLineageSegment,
++) -> ThreadStoreResult<CanonicalTimeline> {
++    let bytes = read_rollout_bytes(segment.rollout_path()).await?;
++    let segment = segment.clone();
++    tokio::task::spawn_blocking(move || reduce_segment(&segment, &bytes))
++        .await
++        .map_err(thread_history_error)?
++}
++
++fn reduce_segment(
++    segment: &RolloutLineageSegment,
++    bytes: &[u8],
++) -> ThreadStoreResult<CanonicalTimeline> {
++    let bytes_read = u64::try_from(bytes.len()).map_err(thread_history_error)?;
++    let end = match (segment.jsonl_end_byte_offset(), segment.end_ordinal()) {
++        (Some(end_byte_offset), Some(end_ordinal_exclusive)) => validated_history_byte_offset(
++            bytes,
++            HistoryPosition {
++                thread_id: segment.rollout_id(),
++                end_ordinal_exclusive,
++                end_byte_offset,
++            },
++        )?,
++        _ => bytes_read,
++    };
++    let end = usize::try_from(end).map_err(thread_history_error)?;
++    let mut turns: HashMap<String, TimelineTurn> = HashMap::new();
++    let mut items: HashMap<(String, String), ThreadTimelineEntry> = HashMap::new();
++    let mut realtime = HashMap::new();
++    let mut parse_errors = 0usize;
++
++    for physical_line in bytes[..end].split_inclusive(|byte| *byte == b'\n') {
++        if physical_line.iter().all(u8::is_ascii_whitespace) {
++            continue;
++        }
++        let (structural, decoded) =
++            match serde_json::from_slice::<RecordEnvelope<'_>>(physical_line) {
++                Ok(envelope) => {
++                    let structural = matches!(
++                        envelope.record_type.as_str(),
++                        "rollout_reference" | "fork_reference"
++                    );
++                    let interesting = structural
++                        || envelope.record_type == "realtime_item"
++                        || (envelope.record_type == "event_msg"
++                            && envelope.payload.is_some_and(|payload| {
++                                serde_json::from_str::<EventType>(payload.get()).map_or(
++                                    true,
++                                    |event| {
++                                        matches!(
++                                            event.event_type.as_str(),
++                                            "turn_started"
++                                                | "turn_complete"
++                                                | "task_started"
++                                                | "task_complete"
++                                                | "turn_aborted"
++                                                | "item_completed"
++                                        )
++                                    },
++                                )
++                            }));
++                    if !interesting {
++                        continue;
++                    }
++                    (
++                        structural,
++                        RolloutRecorder::parse_rollout_line_bytes(physical_line),
++                    )
++                }
++                Err(_) => {
++                    // Value uses the normal reader's last-key-wins policy for duplicate JSON keys.
++                    let value: serde_json::Value = match serde_json::from_slice(physical_line) {
++                        Ok(value) => value,
++                        Err(_) => {
++                            parse_errors += 1;
++                            continue;
++                        }
++                    };
++                    let structural = matches!(
++                        value.get("type").and_then(serde_json::Value::as_str),
++                        Some("rollout_reference" | "fork_reference")
++                    );
++                    (structural, RolloutRecorder::parse_rollout_line_value(value))
++                }
++            };
++        let line = match decoded {
++            Ok(Some(line)) => line,
++            Ok(None) => continue,
++            Err(error) if structural => return Err(thread_history_error(error)),
++            Err(_) => {
++                parse_errors += 1;
++                continue;
++            }
++        };
++        let Some(ordinal) = line.ordinal else {
++            continue;
++        };
++        if segment.end_ordinal().is_some_and(|end| ordinal >= end) {
++            continue;
++        }
++        let changes = project_rollout_line(&line);
++        for mut change in changes.changed_turns {
++            let terminal = change.status != TurnStatus::InProgress;
++            match turns.get_mut(&change.turn_id) {
++                Some(turn)
++                    if turn.end_ordinal.is_none()
++                        && turn.change.status == TurnStatus::InProgress =>
++                {
++                    change.started_at = change.started_at.or(turn.change.started_at);
++                    turn.end_ordinal = terminal.then_some(ordinal);
++                    turn.change = change;
++                }
++                Some(_) => {}
++                None => {
++                    turns.insert(
++                        change.turn_id.clone(),
++                        TimelineTurn {
++                            first_ordinal: ordinal,
++                            end_ordinal: terminal.then_some(ordinal),
++                            terminal_first: terminal,
++                            change,
++                        },
++                    );
++                }
++            }
++        }
++        for change in changes.changed_items {
++            let key = (change.turn_id.clone(), change.item.id().to_string());
++            // Unexpected duplicate ItemCompleted records update the payload, not its position.
++            let entry = items
++                .entry(key)
++                .or_insert_with(|| ThreadTimelineEntry::Item {
++                    position: ordinal,
++                    turn_id: change.turn_id,
++                    item: Box::new(change.item.clone()),
++                });
++            if let ThreadTimelineEntry::Item { item, .. } = entry {
++                **item = change.item;
++            }
++        }
++        if let RolloutItem::RealtimeItem(item) = line.item {
++            realtime
++                .entry(item.id.clone())
++                .or_insert_with(|| ThreadTimelineEntry::Realtime {
++                    position: ordinal,
++                    item: item.into(),
++                });
++        }
++    }
++    if parse_errors != 0 {
++        tracing::warn!(path = %segment.rollout_path().display(), parse_errors,
++            "skipped damaged ordinary records while reading canonical timeline");
++    }
++
++    let mut entries = Vec::new();
++    let mut unstarted_turns = Vec::new();
++    for (turn_id, turn) in turns {
++        if turn.terminal_first {
++            unstarted_turns.push(turn_id.clone());
++        }
++        entries.push(ThreadTimelineEntry::TurnStarted {
++            position: turn.first_ordinal,
++            turn_id: turn_id.clone(),
++            started_at: turn.change.started_at,
++        });
++        if let Some(position) = turn.end_ordinal {
++            entries.push(ThreadTimelineEntry::TurnCompleted {
++                position,
++                turn_id,
++                status: turn.change.status,
++                error: turn.change.error,
++                started_at: turn.change.started_at,
++                completed_at: turn.change.completed_at,
++                duration_ms: turn.change.duration_ms,
++            });
++        }
++    }
++    entries.extend(items.into_values());
++    entries.extend(realtime.into_values());
++    entries.retain(|entry| {
++        segment.contains_ordinal(entry_key(entry).0)
++            && match entry {
++                ThreadTimelineEntry::Item { item, .. } => segment.allows_thread_item(item),
++                _ => true,
++            }
++    });
++    entries.sort_by(|left, right| entry_key(right).cmp(&entry_key(left)));
++    Ok(CanonicalTimeline {
++        entries,
++        unstarted_turns,
++        bytes_read,
++    })
++}
