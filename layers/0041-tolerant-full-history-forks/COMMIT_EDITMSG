@@ -1,0 +1,16 @@
+Share tolerant rollout loading for FullHistory forks
+
+FullHistory forks rejected damaged ordinary records that normal task loading
+skipped, preventing goal supervisors from delivering parent follow-ups.
+
+Use one RolloutRecorder loading policy for files and frozen byte snapshots.
+Allow damaged native records when writing a new immutable fork snapshot,
+preserving accepted ordinals and leaving the original source unchanged.
+Keep canonical metadata, leading references, cutoffs and rotation validation.
+
+Exercise actual supervisor-to-parent delivery for active and rotated history,
+including AGENTS.md prefix order, unchanged valid records and retry state.
+Cover native ordinal gaps, reference errors and compatible token_count data.
+
+Remove duplicate identical None fields from existing rollout test fixtures so
+the focused lib test binaries compile; fixture values remain unchanged.

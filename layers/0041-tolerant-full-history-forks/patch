@@ -1,0 +1,1643 @@
+diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
+index eb8f177f58f103855546cfce3300428718a6eec4..4316cadd8a09c20d3a92edda600756378966030f 100644
+--- a/codex-rs/core/src/agent/control_tests.rs
++++ b/codex-rs/core/src/agent/control_tests.rs
+@@ -57,6 +57,7 @@ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::HistoryPosition;
+ use codex_protocol::protocol::InterAgentCommunication;
+ use codex_protocol::protocol::ItemCompletedEvent;
++use codex_protocol::protocol::SegmentPreviousTurnSettings;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+ use codex_protocol::protocol::ThreadGoal;
+@@ -66,6 +67,7 @@ use codex_protocol::protocol::ThreadMemoryMode;
+ use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+ use codex_protocol::protocol::ThreadSettingsOverrides;
+ use codex_protocol::protocol::ThreadSettingsSnapshot;
++use codex_protocol::protocol::TokenCountEvent;
+ use codex_protocol::protocol::TokenUsage;
+ use codex_protocol::protocol::TokenUsageRecord;
+ use codex_protocol::protocol::TurnAbortReason;
+@@ -73,6 +75,7 @@ use codex_protocol::protocol::TurnAbortedEvent;
+ use codex_protocol::protocol::TurnCompleteEvent;
+ use codex_protocol::protocol::TurnEnvironmentSelections;
+ use codex_protocol::protocol::TurnStartedEvent;
++use codex_rollout::CertifiedSegmentStateCheckpoint;
+ use codex_rollout::RolloutRecorder;
+ use codex_state::DirectionalThreadSpawnEdgeStatus;
+ use codex_thread_store::AppendThreadItemsParams;
+@@ -90,6 +93,7 @@ use codex_utils_path_uri::PathUri;
+ use core_test_support::responses::assert_parent_turn;
+ use core_test_support::responses::assert_root_turn;
+ use core_test_support::responses::ev_completed;
++use core_test_support::responses::ev_function_call_with_namespace;
+ use core_test_support::responses::ev_response_created;
+ use core_test_support::responses::mount_response_sequence;
+ use core_test_support::responses::mount_sse_once;
+@@ -99,6 +103,8 @@ use core_test_support::responses::sse_failed;
+ use core_test_support::responses::sse_response;
+ use core_test_support::responses::start_mock_server;
+ use core_test_support::responses::strip_response_item_ids;
++use core_test_support::streaming_sse::StreamingSseChunk;
++use core_test_support::streaming_sse::start_streaming_sse_server;
+ use pretty_assertions::assert_eq;
+ use serial_test::serial;
+ use std::ffi::OsStr;
+@@ -7836,6 +7842,408 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+     )
+ }
+
++#[test]
++#[serial(fork_env)]
++fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record",
++        paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(false),
++    )
++}
++
++#[test]
++#[serial(fork_env)]
++fn paginated_goal_supervisor_follows_up_after_corrupt_rotated_ancestor() -> anyhow::Result<()> {
++    run_goal_supervisor_test(
++        "paginated_goal_supervisor_follows_up_after_corrupt_rotated_ancestor",
++        paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(true),
++    )
++}
++
++async fn paginated_goal_supervisor_follows_up_after_corrupt_ordinary_record_inner(
++    rotate_ancestor: bool,
++) -> anyhow::Result<()> {
++    const AGENTS_MARKER: &str = "corrupt-history-supervisor-parent-agents-marker";
++    const FOLLOWUP_MARKER: &str = "Continue the goal after loading the damaged parent history.";
++    let (parent_completion_tx, parent_completion_rx) = tokio::sync::oneshot::channel();
++    let (server, _) = start_streaming_sse_server(vec![
++        vec![StreamingSseChunk {
++            gate: None,
++            body: sse(vec![
++                ev_response_created("corrupt-history-parent"),
++                ev_completed("corrupt-history-parent"),
++            ]),
++        }],
++        vec![StreamingSseChunk {
++            gate: None,
++            body: sse(vec![
++                ev_response_created("corrupt-history-supervisor"),
++                ev_function_call_with_namespace(
++                    "corrupt-history-followup",
++                    "supervisor",
++                    "followup_parent",
++                    &serde_json::json!({"message": FOLLOWUP_MARKER}).to_string(),
++                ),
++                ev_completed("corrupt-history-supervisor"),
++            ]),
++        }],
++        vec![StreamingSseChunk {
++            gate: Some(parent_completion_rx),
++            body: sse(vec![
++                ev_response_created("corrupt-history-parent-followup"),
++                ev_completed("corrupt-history-parent-followup"),
++            ]),
++        }],
++    ])
++    .await;
++    let (home, mut config) = test_config().await;
++    for feature in [
++        Feature::AgentPromptInjection,
++        Feature::MultiAgentV2,
++        Feature::Goals,
++        Feature::GoalSupervisor,
++        Feature::Sqlite,
++    ] {
++        let _ = config.features.enable(feature);
++    }
++    config.model_provider.base_url = Some(format!("{}/v1", server.uri()));
++    config.model_provider.supports_websockets = false;
++    config.model_provider.request_max_retries = Some(0);
++    config.model_provider.stream_max_retries = Some(0);
++    let workspace = home.path().join("workspace");
++    std::fs::create_dir_all(&workspace)?;
++    std::fs::write(workspace.join("AGENTS.md"), AGENTS_MARKER)?;
++    config.cwd = workspace.try_into().expect("absolute test workspace");
++    let harness = AgentControlHarness::new_with_config(home, config).await;
++    let state_db = harness
++        .state_db
++        .as_ref()
++        .expect("isolated CODEX_HOME state db");
++    let parent = harness
++        .manager
++        .start_thread(StartThreadOptions {
++            history_mode: Some(ThreadHistoryMode::Paginated),
++            ..StartThreadOptions::new(harness.config.clone())
++        })
++        .await
++        .expect("start paginated parent with the workspace environment");
++    let parent_thread_id = parent.thread_id;
++    let parent_thread = parent.thread;
++    parent_thread
++        .start_or_steer_turn(TurnInputRequest::user_input(text_input("parent seed")))
++        .await?;
++    wait_for_turn_complete(parent_thread.as_ref()).await;
++    parent_thread.ensure_rollout_materialized().await;
++    parent_thread.flush_rollout().await?;
++    let source_path = parent_thread
++        .session
++        .current_rollout_path()
++        .await?
++        .expect("materialized paginated parent");
++    let seed_source = std::fs::read_to_string(source_path.as_path())?;
++    let mut seed_lines = seed_source.lines();
++    assert!(matches!(
++        codex_rollout::parse_rollout_line(seed_lines.next().expect("seed metadata"))?.item,
++        RolloutItem::SessionMeta(_)
++    ));
++    assert!(!matches!(
++        codex_rollout::parse_rollout_line(seed_lines.next().expect("first local seed record"))?
++            .item,
++        RolloutItem::SessionMeta(_)
++    ));
++    let (damaged_index, damaged_ordinal) = seed_source
++        .lines()
++        .enumerate()
++        .find_map(|(index, line)| {
++            let line = codex_rollout::parse_rollout_line(line).expect("valid seed record");
++            (index > 1 && matches!(&line.item, RolloutItem::EventMsg(_))).then(|| {
++                (
++                    index,
++                    line.ordinal.expect("explicit ordinary event ordinal"),
++                )
++            })
++        })
++        .expect("seed turn persisted an interior ordinary event after its first local record");
++    let interrupted_record = format!(
++        "{{\"timestamp\":\"2026-09-21T00:00:00Z\",\"ordinal\":{damaged_ordinal},\"type\":\"event_msg\",\"payload\":{{\"type\":\"agent_message\",\"message\":\"interrupted\n"
++    );
++    let placeholder = format!("{}\n", " ".repeat(interrupted_record.len() - 1));
++    if rotate_ancestor {
++        // Rotation records an immutable byte boundary. Reserve the interrupted line's bytes
++        // before rotation so replacing whitespace later cannot invalidate history_base.
++        let mut reserved_source = String::new();
++        for (index, line) in seed_source.split_inclusive('\n').enumerate() {
++            if index == damaged_index {
++                reserved_source.push_str(&placeholder);
++            }
++            reserved_source.push_str(line);
++        }
++        std::fs::write(source_path.as_path(), reserved_source)?;
++    }
++
++    // The current checkpoint is valid. Only an obsolete ordinary record is interrupted, so
++    // interactive resume can load the checkpoint while the supervisor's FullHistory fork must
++    // tolerate the same damage when it reads the complete parent history.
++    let thread_settings = parent_thread.session.thread_settings_snapshot().await;
++    let history = parent_thread.session.clone_history().await;
++    let (_, window_number, window_id) = parent_thread.session.current_window().await;
++    assert_eq!(
++        window_number, 0,
++        "the seed fixture has no previous compaction windows"
++    );
++    let info = parent_thread.session.token_usage_info().await;
++    let reference_context = parent_thread.session.reference_context_item().await;
++    let previous_turn_settings = SegmentPreviousTurnSettings {
++        model: thread_settings.model.clone(),
++        comp_hash: None,
++        realtime_active: None,
++    };
++    let checkpoint = {
++        CertifiedSegmentStateCheckpoint::new(
++            CompactedItem {
++                message: String::new(),
++                replacement_history: Some(history.annotated_items().to_vec()),
++                retained_context: Some(history.retained_context().clone()),
++                guardian_history: history.guardian_history_checkpoint(),
++                mcp_resource_origins: None,
++                compaction_response_id: None,
++                latest_token_usage_record: None,
++                window_number: Some(window_number),
++                first_window_id: Some(window_id.to_string()),
++                previous_window_id: None,
++                window_id: Some(window_id.to_string()),
++                segment_state_checkpoint: None,
++            },
++            Some(previous_turn_settings),
++            None,
++            reference_context,
++            ThreadSettingsAppliedEvent {
++                thread_id: Some(parent_thread_id),
++                thread_settings,
++            },
++            TokenCountEvent {
++                info,
++                rate_limits: None,
++            },
++        )?
++    };
++    let damaged_path = if rotate_ancestor {
++        parent_thread
++            .session
++            .services
++            .live_thread
++            .as_ref()
++            .expect("paginated parent writer")
++            .freeze_local_segment(FreezeRolloutSegmentParams::rotate_checkpoint(checkpoint))
++            .await?
++            .expect("rotated parent segment")
++            .reference
++            .rollout_path
++    } else {
++        parent_thread
++            .session
++            .persist_rollout_items(checkpoint.items())
++            .await;
++        source_path.as_path().to_path_buf()
++    };
++    parent_thread.flush_rollout().await?;
++    let source = std::fs::read_to_string(&damaged_path)?;
++    let valid_lines = source
++        .lines()
++        .filter(|line| !line.trim().is_empty())
++        .map(codex_rollout::parse_rollout_line)
++        .collect::<Result<Vec<_>, _>>()?;
++    let valid_ordinals = valid_lines
++        .iter()
++        .map(|line| line.ordinal)
++        .collect::<Vec<_>>();
++    assert!(valid_ordinals.iter().all(Option::is_some));
++    let active_path = parent_thread
++        .session
++        .current_rollout_path()
++        .await?
++        .expect("active rollout before damage");
++    let active_source = std::fs::read_to_string(active_path.as_path())?;
++    let head = codex_rollout::parse_rollout_line(active_source.lines().next().expect("metadata"))?;
++    let RolloutItem::SessionMeta(meta) = head.item else {
++        panic!("active rollout must start with session metadata");
++    };
++    let history_base_before = meta.meta.history_base;
++    assert_eq!(history_base_before.is_some(), rotate_ancestor);
++    let mut damaged_source = String::new();
++    let mut replaced_placeholders = 0;
++    for (index, line) in source.split_inclusive('\n').enumerate() {
++        if rotate_ancestor && line == placeholder {
++            damaged_source.push_str(&interrupted_record);
++            replaced_placeholders += 1;
++            continue;
++        }
++        if !rotate_ancestor && index == damaged_index {
++            damaged_source.push_str(&interrupted_record);
++        }
++        damaged_source.push_str(line);
++    }
++    if rotate_ancestor {
++        assert_eq!(replaced_placeholders, 1);
++        assert_eq!(damaged_source.len(), source.len());
++    }
++    std::fs::write(&damaged_path, &damaged_source)?;
++    assert_eq!(
++        damaged_source
++            .lines()
++            .filter(|line| codex_rollout::parse_rollout_line(line).is_ok())
++            .collect::<Vec<_>>(),
++        source
++            .lines()
++            .filter(|line| !line.trim().is_empty())
++            .collect::<Vec<_>>(),
++        "every complete source record must retain its exact bytes"
++    );
++    assert_eq!(
++        damaged_source
++            .lines()
++            .filter_map(|line| codex_rollout::parse_rollout_line(line).ok())
++            .map(|line| line.ordinal)
++            .collect::<Vec<_>>(),
++        valid_ordinals,
++        "interruption must not delete, renumber, or rewrite any complete source record"
++    );
++    let persisted_parent = state_db
++        .get_thread(parent_thread_id)
++        .await?
++        .expect("the materialized parent must already have thread metadata");
++    assert_eq!(persisted_parent.history_mode, ThreadHistoryMode::Paginated);
++    assert_eq!(persisted_parent.rollout_path, active_path.as_path());
++    let state_goal = state_db
++        .thread_goals()
++        .replace_thread_goal(
++            parent_thread_id,
++            "Continue after an interrupted ordinary rollout record.",
++            codex_state::ThreadGoalStatus::Active,
++            None,
++        )
++        .await?;
++    let goal_id = state_goal.goal_id.clone();
++    let goal = crate::goal_supervisor::protocol_goal_from_state(state_goal);
++    let parent_after_goal = state_db
++        .get_thread(parent_thread_id)
++        .await?
++        .expect("goal setup must preserve the materialized parent");
++    assert_eq!(
++        parent_after_goal.history_mode,
++        persisted_parent.history_mode
++    );
++    assert_eq!(
++        parent_after_goal.rollout_path,
++        persisted_parent.rollout_path
++    );
++    crate::goal_supervisor::maybe_start_supervisor_checkin(
++        &parent_thread.session,
++        goal_id.as_str(),
++        &goal,
++    )
++    .await?;
++    timeout(Duration::from_secs(5), server.wait_for_request_count(3))
++        .await
++        .expect("the real supervisor followup should start a parent request");
++
++    let requests = server.requests().await;
++    assert_eq!(
++        requests.len(),
++        3,
++        "the real followup tool must start a parent turn"
++    );
++    let parent_body: serde_json::Value = serde_json::from_slice(&requests[0])?;
++    let supervisor_body: serde_json::Value = serde_json::from_slice(&requests[1])?;
++    let followup_body: serde_json::Value = serde_json::from_slice(&requests[2])?;
++    let parent_input = parent_body["input"].as_array().expect("seed parent input");
++    let supervisor_input = supervisor_body["input"]
++        .as_array()
++        .expect("supervisor input");
++    assert!(
++        parent_input
++            .iter()
++            .any(|item| item.to_string().contains(AGENTS_MARKER))
++    );
++    assert_eq!(supervisor_body["instructions"], parent_body["instructions"]);
++    assert!(
++        supervisor_input.starts_with(parent_input),
++        "FullHistory must retain the exact parent instruction prefix and AGENTS.md order"
++    );
++    assert!(
++        followup_body["input"].to_string().contains(FOLLOWUP_MARKER),
++        "supervisor.followup_parent must deliver its message into the parent's actual request"
++    );
++    assert_eq!(
++        crate::goal_supervisor::supervisor_failure_count_for_test(&parent_thread.session).await,
++        0,
++        "ordinary rollout damage must not start failure backoff"
++    );
++    assert_eq!(
++        state_db
++            .thread_goals()
++            .get_thread_goal_supervisor_snoozed_until_ms(parent_thread_id, goal_id.as_str())
++            .await?,
++        None,
++        "successful followup must not leave a persisted failure retry"
++    );
++    // This harness has no goal extension. Check delivery and retry state before updating the
++    // fixture's goal directly, then release the parent's response. The response barrier prevents
++    // helper retirement from launching an unmocked replacement check while assertions run.
++    let completed_goal = state_db
++        .thread_goals()
++        .update_thread_goal(
++            parent_thread_id,
++            codex_state::GoalUpdate {
++                objective: None,
++                status: Some(codex_state::ThreadGoalStatus::Complete),
++                token_budget: None,
++                expected_goal_id: Some(goal_id.clone()),
++            },
++        )
++        .await?
++        .expect("fixture goal should complete after verified delivery");
++    assert_eq!(completed_goal.goal_id, goal_id);
++    assert_eq!(
++        completed_goal.status,
++        codex_state::ThreadGoalStatus::Complete
++    );
++    parent_completion_tx
++        .send(())
++        .expect("parent response should still be waiting at its completion barrier");
++    wait_for_turn_complete(parent_thread.as_ref()).await;
++    assert_eq!(server.requests().await.len(), 3);
++    parent_thread.flush_rollout().await?;
++    let source_after_followup = std::fs::read(&damaged_path)?;
++    assert!(
++        source_after_followup.starts_with(damaged_source.as_bytes()),
++        "tolerant loading must preserve both interrupted bytes and every complete source record"
++    );
++    if rotate_ancestor {
++        assert_eq!(source_after_followup, damaged_source.as_bytes());
++    }
++    let active_path = parent_thread
++        .session
++        .current_rollout_path()
++        .await?
++        .expect("active rollout after followup");
++    let active_source = std::fs::read_to_string(active_path.as_path())?;
++    let head = codex_rollout::parse_rollout_line(active_source.lines().next().expect("metadata"))?;
++    let RolloutItem::SessionMeta(meta) = head.item else {
++        panic!("active rollout must retain session metadata");
++    };
++    assert_eq!(
++        meta.meta.history_base, history_base_before,
++        "followup must preserve the exact native predecessor identity, ordinal, and byte boundary"
++    );
++    let _ = harness
++        .manager
++        .shutdown_all_threads_bounded(Duration::from_secs(5))
++        .await;
++    server.shutdown().await;
++    Ok(())
++}
++
+ async fn goal_supervisor_helper_request_uses_parent_cache_key_and_mcp_snapshot_inner(
+     history_mode: ThreadHistoryMode,
+ ) -> anyhow::Result<()> {
+diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
+index 098e16753b7c9cc0fdb4bfb47186327cdafa999c..8429515f242c1362f03709fdc8b7c824d23fcff4 100644
+--- a/codex-rs/rollout/src/lib.rs
++++ b/codex-rs/rollout/src/lib.rs
+@@ -19,6 +19,7 @@ mod path_identity;
+ pub use path_identity::rollout_paths_match;
+ mod persistence_metrics;
+ pub(crate) mod policy;
++mod record_loader;
+ pub(crate) mod recorder;
+ mod reference;
+ mod reverse_jsonl_scanner;
+diff --git a/codex-rs/rollout/src/metadata_tests.rs b/codex-rs/rollout/src/metadata_tests.rs
+index 43c7764af368594937196df0020c0a150d694610..531de3c157eea4ff811eae1dc622614837df0e89 100644
+--- a/codex-rs/rollout/src/metadata_tests.rs
++++ b/codex-rs/rollout/src/metadata_tests.rs
+@@ -377,9 +377,6 @@ async fn extract_metadata_streams_large_plain_and_compressed_rollouts() {
+     let mut ordinal = 0_u64;
+     for item in std::iter::once(RolloutItem::SessionMeta(session_meta)).chain((0..32).map(|_| {
+         RolloutItem::Compacted(CompactedItem {
+-            compaction_response_id: None,
+-            guardian_history: None,
+-            latest_token_usage_record: None,
+             message: "x".repeat(256 * 1024),
+             replacement_history: None,
+             retained_context: None,
+@@ -440,9 +437,6 @@ async fn extract_metadata_replays_items_before_a_late_session_meta() {
+             timestamp: "2026-01-27T12:34:55Z".to_string(),
+             ordinal: Some(0),
+             item: RolloutItem::Compacted(CompactedItem {
+-                compaction_response_id: None,
+-                guardian_history: None,
+-                latest_token_usage_record: None,
+                 message: "prefix".to_string(),
+                 replacement_history: None,
+                 retained_context: None,
+diff --git a/codex-rs/rollout/src/record_loader.rs b/codex-rs/rollout/src/record_loader.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..6e21dc33d97b6ef55362a85ef7d9bb2a4189a983
+--- /dev/null
++++ b/codex-rs/rollout/src/record_loader.rs
+@@ -0,0 +1,121 @@
++use std::io;
++use std::path::Path;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::ThreadHistoryMode;
++use serde_json::Value;
++use tracing::trace;
++use tracing::warn;
++
++use crate::RolloutItem;
++use crate::RolloutLine;
++use crate::RolloutRecorder;
++use crate::recorder::reject_unknown_thread_history_mode;
++
++/// The record policy shared by file loading and frozen FullHistory byte snapshots.
++///
++/// Damaged ordinary records do not hide later complete records. Native records keep their
++/// recorded ordinals; only legacy histories may recover several envelopes from one line.
++pub(crate) struct RolloutLineLoader<'a> {
++    path: &'a Path,
++    /// The first decoded SessionMeta identifies this physical rollout.
++    thread_id: Option<ThreadId>,
++    /// Suffix recovery must never invent record boundaries in paginated histories.
++    history_mode: Option<ThreadHistoryMode>,
++    parse_errors: usize,
++    saw_non_empty_line: bool,
++}
++
++impl<'a> RolloutLineLoader<'a> {
++    pub(crate) fn new(path: &'a Path) -> Self {
++        Self {
++            path,
++            thread_id: None,
++            history_mode: None,
++            parse_errors: 0,
++            saw_non_empty_line: false,
++        }
++    }
++
++    pub(crate) fn push(
++        &mut self,
++        bytes: &[u8],
++        mut accept: impl FnMut(RolloutLine),
++    ) -> io::Result<()> {
++        if bytes.iter().all(u8::is_ascii_whitespace) {
++            return Ok(());
++        }
++        self.saw_non_empty_line = true;
++        let value: Value = match serde_json::from_slice(bytes) {
++            Ok(value) => value,
++            Err(error) => {
++                if self.history_mode == Some(ThreadHistoryMode::Legacy)
++                    && let Some(recovered) = crate::recover_legacy_jsonl_suffix(bytes)
++                {
++                    let recovered_record_count = recovered.values.len();
++                    let recovered_lines = recovered
++                        .values
++                        .into_iter()
++                        .map(RolloutRecorder::parse_rollout_line_value)
++                        .collect::<Result<Vec<_>, _>>();
++                    if let Ok(recovered_lines) = recovered_lines {
++                        warn!(
++                            path = %self.path.display(),
++                            discarded_prefix_bytes = recovered.discarded_prefix_bytes,
++                            recovered_record_count,
++                            "recovered complete legacy rollout records after an invalid JSON prefix"
++                        );
++                        for line in recovered_lines.into_iter().flatten() {
++                            accept(line);
++                        }
++                        return Ok(());
++                    }
++                }
++                warn!(path = %self.path.display(), %error, "failed to parse rollout line as JSON");
++                self.parse_errors = self.parse_errors.saturating_add(1);
++                return Ok(());
++            }
++        };
++        if self.thread_id.is_none() {
++            // Later SessionMeta records can belong to copied fork history, not this rollout.
++            reject_unknown_thread_history_mode(&value)?;
++        }
++        let is_rollout_reference = matches!(
++            value.get("type").and_then(Value::as_str),
++            Some("rollout_reference" | "fork_reference")
++        );
++        let line = match RolloutRecorder::parse_rollout_line_value(value) {
++            Ok(Some(line)) => line,
++            Ok(None) => {
++                trace!("skipping legacy ghost_snapshot rollout line");
++                return Ok(());
++            }
++            Err(error) => {
++                if is_rollout_reference {
++                    return Err(io::Error::new(
++                        io::ErrorKind::InvalidData,
++                        "invalid rollout reference record",
++                    ));
++                }
++                trace!("failed to parse rollout line: {error}");
++                self.parse_errors = self.parse_errors.saturating_add(1);
++                return Ok(());
++            }
++        };
++        if self.thread_id.is_none()
++            && let RolloutItem::SessionMeta(meta) = &line.item
++        {
++            self.thread_id = Some(meta.meta.id);
++            self.history_mode = Some(meta.meta.history_mode);
++        }
++        accept(line);
++        Ok(())
++    }
++
++    pub(crate) fn finish(self) -> io::Result<(Option<ThreadId>, usize)> {
++        if !self.saw_non_empty_line {
++            return Err(io::Error::other("empty session file"));
++        }
++        Ok((self.thread_id, self.parse_errors))
++    }
++}
+diff --git a/codex-rs/rollout/src/recorder.rs b/codex-rs/rollout/src/recorder.rs
+index 2a6aa6abd9d949546b19c45e92457a431a01bdb6..94127a5001043d76a4eb60b503b28e47bbe93ca0 100644
+--- a/codex-rs/rollout/src/recorder.rs
++++ b/codex-rs/rollout/src/recorder.rs
+@@ -53,6 +53,7 @@ use super::list::parse_timestamp_uuid_from_filename;
+ use super::metadata;
+ use super::ordinal::RolloutOrdinalState;
+ use super::ordinal::ordinal_state_for_rollout;
++use super::record_loader::RolloutLineLoader;
+ use super::rollout_file_name::RolloutFileName;
+ use super::session_index::find_thread_names_by_ids;
+ use crate::InitialHistory;
+@@ -1149,87 +1150,15 @@ impl RolloutRecorder {
+     ) -> std::io::Result<(Vec<RolloutLine>, Option<ThreadId>, usize)> {
+         trace!("Resuming rollout from {path:?}");
+         let mut lines: Vec<RolloutLine> = Vec::new();
+-        let mut thread_id: Option<ThreadId> = None;
+-        let mut history_mode: Option<ThreadHistoryMode> = None;
+-        let mut parse_errors = 0usize;
++        let mut loader = RolloutLineLoader::new(path);
+         let mut reader = compression::open_rollout_line_reader(path).await?;
+-        let mut saw_non_empty_line = false;
+         while let Some(line) = reader.next_line().await? {
+             if line.trim().is_empty() {
+                 continue;
+             }
+-            saw_non_empty_line = true;
+-            let value: Value = match serde_json::from_str(&line) {
+-                Ok(value) => value,
+-                Err(e) => {
+-                    if history_mode == Some(ThreadHistoryMode::Legacy)
+-                        && let Some(recovered) = crate::recover_legacy_jsonl_suffix(line.as_bytes())
+-                    {
+-                        let recovered_record_count = recovered.values.len();
+-                        let recovered_lines = recovered
+-                            .values
+-                            .into_iter()
+-                            .map(Self::parse_rollout_line_value)
+-                            .collect::<Result<Vec<_>, _>>();
+-                        if let Ok(recovered_lines) = recovered_lines {
+-                            warn!(
+-                                path = %path.display(),
+-                                discarded_prefix_bytes = recovered.discarded_prefix_bytes,
+-                                recovered_record_count,
+-                                "recovered complete legacy rollout records after an invalid JSON prefix"
+-                            );
+-                            lines.extend(recovered_lines.into_iter().flatten());
+-                            continue;
+-                        }
+-                    }
+-                    warn!(path = %path.display(), error = %e, "failed to parse rollout line as JSON");
+-                    parse_errors = parse_errors.saturating_add(1);
+-                    continue;
+-                }
+-            };
+-            if thread_id.is_none() {
+-                // The first SessionMeta belongs to this rollout. Later SessionMeta lines
+-                // can be copied from fork history, so only validate unknown history modes
+-                // before we have parsed the rollout's own SessionMeta.
+-                reject_unknown_thread_history_mode(&value)?;
+-            }
+-
+-            let is_rollout_reference = matches!(
+-                value.get("type").and_then(Value::as_str),
+-                Some("rollout_reference" | "fork_reference")
+-            );
+-            let rollout_line = match Self::parse_rollout_line_value(value) {
+-                Ok(Some(rollout_line)) => rollout_line,
+-                Ok(None) => {
+-                    trace!("skipping legacy ghost_snapshot rollout line");
+-                    continue;
+-                }
+-                Err(e) => {
+-                    if is_rollout_reference {
+-                        return Err(IoError::new(
+-                            std::io::ErrorKind::InvalidData,
+-                            "invalid rollout reference record",
+-                        ));
+-                    }
+-                    trace!("failed to parse rollout line: {e}");
+-                    parse_errors = parse_errors.saturating_add(1);
+-                    continue;
+-                }
+-            };
+-
+-            // Use the FIRST SessionMeta encountered in the file as the canonical
+-            // thread id and main session information. Keep all items intact.
+-            if thread_id.is_none()
+-                && let RolloutItem::SessionMeta(session_meta_line) = &rollout_line.item
+-            {
+-                thread_id = Some(session_meta_line.meta.id);
+-                history_mode = Some(session_meta_line.meta.history_mode);
+-            }
+-            lines.push(rollout_line);
+-        }
+-        if !saw_non_empty_line {
+-            return Err(IoError::other("empty session file"));
++            loader.push(line.as_bytes(), |line| lines.push(line))?;
+         }
++        let (thread_id, parse_errors) = loader.finish()?;
+
+         tracing::debug!(
+             "Resumed rollout with {} items, thread ID: {:?}, parse errors: {}",
+@@ -1240,6 +1169,28 @@ impl RolloutRecorder {
+         Ok((lines, thread_id, parse_errors))
+     }
+
++    /// Loads a decoded JSONL snapshot with the same damaged-record policy as file loading.
++    ///
++    /// Each returned offset is the original physical line's start. Skipping a damaged native
++    /// record does not rewrite the source, move byte boundaries, or assign replacement ordinals.
++    pub fn load_rollout_lines_from_bytes(
++        path: &Path,
++        bytes: &[u8],
++    ) -> std::io::Result<(Vec<(u64, RolloutLine)>, Option<ThreadId>, usize)> {
++        let mut loader = RolloutLineLoader::new(path);
++        let mut lines = Vec::new();
++        let mut offset = 0_u64;
++        for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
++            let start = offset;
++            offset = offset
++                .checked_add(u64::try_from(physical_line.len()).map_err(IoError::other)?)
++                .ok_or_else(|| IoError::other("rollout byte offset overflow"))?;
++            loader.push(physical_line, |line| lines.push((start, line)))?;
++        }
++        let (thread_id, parse_errors) = loader.finish()?;
++        Ok((lines, thread_id, parse_errors))
++    }
++
+     pub async fn get_rollout_history(path: &Path) -> std::io::Result<InitialHistory> {
+         let (items, thread_id, _parse_errors) = Self::load_rollout_items(path).await?;
+         let conversation_id = thread_id
+diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
+index 00abcab02d254e4bead062ad0a12fffc532e969c..bd7f029add14efc6576d87d184e01e7949b1f710 100644
+--- a/codex-rs/rollout/src/reference_tests.rs
++++ b/codex-rs/rollout/src/reference_tests.rs
+@@ -118,10 +118,8 @@ fn agent_line(message: &str, ordinal: u64) -> RolloutLine {
+         timestamp: "2026-07-13T00:00:01Z".to_string(),
+         ordinal: Some(ordinal),
+         item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
+-            questions: None,
+             message: message.to_string(),
+             phase: None,
+-            delivery: None,
+             memory_citation: None,
+             delivery: None,
+             questions: None,
+@@ -220,8 +218,6 @@ fn turn_context_line(root: &Path, turn_id: &str, ordinal: u64) -> RolloutLine {
+         timestamp: "2026-07-13T00:00:01Z".to_string(),
+         ordinal: Some(ordinal),
+         item: RolloutItem::TurnContext(TurnContextItem {
+-            root_turn_id: None,
+-            cyber_access_program: None,
+             turn_id: Some(turn_id.to_string()),
+             root_turn_id: None,
+             cwd: serde_json::from_value(json!(root)).expect("absolute test cwd"),
+@@ -256,9 +252,6 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
+         timestamp: "2026-07-13T00:00:01Z".to_string(),
+         ordinal: Some(ordinal),
+         item: RolloutItem::Compacted(CompactedItem {
+-            compaction_response_id: None,
+-            guardian_history: None,
+-            latest_token_usage_record: None,
+             message: message.to_string(),
+             replacement_history: Some(Vec::new()),
+             retained_context: None,
+@@ -278,9 +271,6 @@ fn compacted_line(message: &str, ordinal: u64) -> RolloutLine {
+ fn checkpoint_lines(message: &str, first_ordinal: u64) -> Vec<RolloutLine> {
+     let cwd: AbsolutePathBuf = serde_json::from_value(json!("/tmp")).expect("absolute test cwd");
+     let compacted = CompactedItem {
+-        compaction_response_id: None,
+-        guardian_history: None,
+-        latest_token_usage_record: None,
+         message: message.to_string(),
+         replacement_history: Some(Vec::new()),
+         retained_context: None,
+diff --git a/codex-rs/rollout/src/segment_checkpoint_tests.rs b/codex-rs/rollout/src/segment_checkpoint_tests.rs
+index f635f3b9b20db5ec4d54fb7ae9a17c32517a29bb..22db887cb513e98ab7826d2cac94938244d76170 100644
+--- a/codex-rs/rollout/src/segment_checkpoint_tests.rs
++++ b/codex-rs/rollout/src/segment_checkpoint_tests.rs
+@@ -28,9 +28,6 @@ use super::validated_segment_state_checkpoint;
+
+ fn compacted() -> CompactedItem {
+     CompactedItem {
+-        compaction_response_id: None,
+-        guardian_history: None,
+-        latest_token_usage_record: None,
+         message: "checkpoint".to_string(),
+         replacement_history: Some(vec![ResponseItemEnvelope::new(ResponseItem::Message {
+             id: None,
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage.rs b/codex-rs/thread-store/src/local/rollout_lineage.rs
+index 8e10df27f27b205d2c2db8f80e25c1100753be8d..d2aeacf55eb15022dd53e18a9c65e971b932b9e3 100644
+--- a/codex-rs/thread-store/src/local/rollout_lineage.rs
++++ b/codex-rs/thread-store/src/local/rollout_lineage.rs
+@@ -467,7 +467,11 @@ impl LocalThreadStore {
+                     malformed_lineage(segment.thread_id, "rollout byte offset overflow")
+                 })?);
+             }
+-            let parsed = parse_rollout_bytes(bytes.as_slice(), segment.thread_id)?;
++            let parsed = parse_rollout_bytes(
++                materialized_path.as_path(),
++                bytes.as_slice(),
++                segment.thread_id,
++            )?;
+             // Ordinal-only legacy cutoffs must name a real boundary, not an ordinal beyond EOF.
+             if segment.end_ordinal_exclusive.is_some()
+                 && parsed
+@@ -1567,40 +1571,14 @@ async fn next_rollout_line(
+ }
+
+ fn parse_rollout_bytes(
++    path: &Path,
+     bytes: &[u8],
+     thread_id: ThreadId,
+ ) -> ThreadStoreResult<Vec<(u64, RolloutLine)>> {
+-    let mut parsed = Vec::new();
+-    let mut offset = 0_u64;
+-    for physical_line in bytes.split_inclusive(|byte| *byte == b'\n') {
+-        let start = offset;
+-        offset = offset
+-            .checked_add(
+-                u64::try_from(physical_line.len())
+-                    .map_err(|_| malformed_lineage(thread_id, "rollout byte offset overflow"))?,
+-            )
+-            .ok_or_else(|| malformed_lineage(thread_id, "rollout byte offset overflow"))?;
+-        if physical_line.iter().all(u8::is_ascii_whitespace) {
+-            continue;
+-        }
+-        let value =
+-            serde_json::from_slice::<serde_json::Value>(physical_line).map_err(|error| {
+-                malformed_lineage(
+-                    thread_id,
+-                    format!("source rollout contains invalid JSON: {error}").as_str(),
+-                )
+-            })?;
+-        let Some(line) = RolloutRecorder::parse_rollout_line_value(value).map_err(|error| {
+-            malformed_lineage(
+-                thread_id,
+-                format!("source rollout contains an invalid record: {error}").as_str(),
+-            )
+-        })?
+-        else {
+-            continue;
+-        };
+-        parsed.push((start, line));
+-    }
++    // resolve_path validates SessionMeta and any leading reference before snapshot loading.
++    // Interior damaged records use the same policy as ordinary file loading, not head recovery.
++    let (parsed, _, _) = RolloutRecorder::load_rollout_lines_from_bytes(path, bytes)
++        .map_err(|error| malformed_lineage(thread_id, error.to_string().as_str()))?;
+     Ok(parsed)
+ }
+
+@@ -1988,3 +1966,7 @@ fn lineage_io_error(err: io::Error) -> ThreadStoreError {
+ #[cfg(test)]
+ #[path = "rollout_lineage_tests.rs"]
+ mod tests;
++
++#[cfg(test)]
++#[path = "rollout_lineage_corrupt_records_tests.rs"]
++mod corrupt_records_tests;
+diff --git a/codex-rs/thread-store/src/local/rollout_lineage_corrupt_records_tests.rs b/codex-rs/thread-store/src/local/rollout_lineage_corrupt_records_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..2a547f6d71d1bdb20eee2152884952adc74cfaa3
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/rollout_lineage_corrupt_records_tests.rs
+@@ -0,0 +1,611 @@
++use std::fs;
++use std::path::Path;
++use std::path::PathBuf;
++
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::AgentMessageEvent;
++use codex_protocol::protocol::EventMsg;
++use codex_protocol::protocol::HistoryPosition;
++use codex_protocol::protocol::SessionMeta;
++use codex_protocol::protocol::SessionMetaLine;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_rollout::RolloutItem;
++use codex_rollout::RolloutLine;
++use codex_rollout::RolloutRecorder;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++
++use super::super::LocalThreadStore;
++use super::super::test_support::test_config;
++use super::RolloutLineage;
++use super::RolloutLineageSegment;
++use super::parse_rollout_bytes;
++use crate::FreezeRolloutSegmentParams;
++
++fn metadata(
++    thread_id: ThreadId,
++    ordinal: u64,
++    history_base: Option<HistoryPosition>,
++) -> RolloutLine {
++    RolloutLine {
++        timestamp: "2026-09-01T00:00:00Z".to_string(),
++        ordinal: Some(ordinal),
++        item: RolloutItem::SessionMeta(SessionMetaLine {
++            meta: SessionMeta {
++                session_id: thread_id.into(),
++                id: thread_id,
++                history_mode: ThreadHistoryMode::Paginated,
++                history_base,
++                ..SessionMeta::default()
++            },
++            git: None,
++        }),
++    }
++}
++
++fn message(ordinal: u64, text: &str) -> RolloutLine {
++    RolloutLine {
++        timestamp: "2026-09-01T00:00:01Z".to_string(),
++        ordinal: Some(ordinal),
++        item: RolloutItem::EventMsg(EventMsg::AgentMessage(AgentMessageEvent {
++            message: text.to_string(),
++            phase: None,
++            memory_citation: None,
++            delivery: None,
++            questions: None,
++        })),
++    }
++}
++
++fn record(line: &RolloutLine) -> Vec<u8> {
++    let mut bytes = serde_json::to_vec(line).expect("serialize rollout record");
++    bytes.push(b'\n');
++    bytes
++}
++
++fn interrupted(line: &RolloutLine) -> Vec<u8> {
++    let complete = record(line);
++    let mut bytes = complete[..complete.len() - 5].to_vec();
++    bytes.push(b'\n');
++    bytes
++}
++
++fn rollout_path(home: &Path, rollout_id: ThreadId) -> PathBuf {
++    home.join("sessions/2026/09/01")
++        .join(format!("rollout-2026-09-01T00-00-00-{rollout_id}.jsonl"))
++}
++
++fn write(path: &Path, bytes: &[u8]) {
++    fs::create_dir_all(path.parent().expect("rollout directory"))
++        .expect("create rollout directory");
++    fs::write(path, bytes).expect("write rollout");
++}
++
++fn segment(
++    thread_id: ThreadId,
++    rollout_id: ThreadId,
++    path: &Path,
++    start_ordinal: u64,
++    end: Option<HistoryPosition>,
++) -> RolloutLineageSegment {
++    RolloutLineageSegment {
++        thread_id,
++        rollout_id,
++        rollout_path: path.to_path_buf(),
++        start_ordinal,
++        end_ordinal_exclusive: end.map(|end| end.end_ordinal_exclusive),
++        end_byte_offset: end.map(|end| end.end_byte_offset),
++        jsonl_end_byte_offset: end.map(|end| end.end_byte_offset),
++        filter_texts: Vec::new(),
++        goal_supervisor_provenance: Default::default(),
++        uses_history_base: false,
++        uses_fork_boundary: false,
++    }
++}
++
++async fn assert_native_snapshot_retains_source_and_ordinals(retry_is_complete: bool) {
++    let home = TempDir::new().expect("temp dir");
++    let thread_id = ThreadId::new();
++    let path = rollout_path(home.path(), thread_id);
++    let meta = metadata(thread_id, /*ordinal*/ 0, /*history_base*/ None);
++    let first = message(/*ordinal*/ 1, "first complete local record");
++    let retry = message(/*ordinal*/ 2, "interrupted ordinary record");
++    let last = message(/*ordinal*/ 3, "later complete record");
++    let mut bytes = record(&meta);
++    bytes.extend_from_slice(&record(&first));
++    bytes.extend_from_slice(&interrupted(&retry));
++    let mut expected = vec![meta, first];
++    if retry_is_complete {
++        bytes.extend_from_slice(&record(&retry));
++        expected.push(retry);
++    }
++    bytes.extend_from_slice(&record(&last));
++    expected.push(last);
++    write(&path, &bytes);
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++
++    let frozen = store
++        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
++        .await
++        .expect("snapshot accepts interior damage without modifying the source");
++    let snapshot_id = frozen.reference.rollout_id.expect("snapshot physical ID");
++    let snapshot_path = &frozen.reference.rollout_path;
++    let base = frozen.history_base.expect("snapshot history_base");
++    assert_ne!(snapshot_id, thread_id);
++    assert_ne!(snapshot_path, &path);
++    assert_eq!(base.thread_id, snapshot_id);
++    assert_eq!(base.end_ordinal_exclusive, 4);
++    assert_eq!(
++        base.end_byte_offset,
++        fs::metadata(snapshot_path)
++            .expect("snapshot metadata")
++            .len()
++    );
++    assert_eq!(frozen.next_rollout_ordinal, Some(4));
++    assert_eq!(fs::read(&path).expect("source bytes after snapshot"), bytes);
++    let (actual, owner, errors) = RolloutRecorder::load_rollout_lines(snapshot_path)
++        .await
++        .expect("read newly published immutable snapshot");
++    assert_eq!(owner, Some(thread_id));
++    assert_eq!(errors, 0);
++    assert_eq!(
++        serde_json::to_value(actual).expect("serialize snapshot envelopes"),
++        serde_json::to_value(&expected).expect("serialize expected snapshot envelopes")
++    );
++    assert_eq!(
++        codex_rollout::resolve_rollout_reference_path(home.path(), &frozen.reference)
++            .await
++            .expect("new physical reference resolves"),
++        *snapshot_path
++    );
++
++    // Follow the new HistoryPosition through the real resolver, including a missing ordinary
++    // ordinal. Native cutoffs use the retained ordinal and new file's bytes, not record count.
++    let child_id = ThreadId::new();
++    let child_path = rollout_path(home.path(), child_id);
++    let mut child_bytes = record(&metadata(child_id, 4, Some(base)));
++    child_bytes.extend_from_slice(&record(&message(5, "child local record")));
++    write(&child_path, &child_bytes);
++    let child_lineage = store
++        .resolve_rollout_lineage(child_id)
++        .await
++        .expect("real resolver authenticates preserved snapshot ordinal cutoff");
++    let inherited = child_lineage
++        .segments
++        .iter()
++        .find(|segment| segment.rollout_id == snapshot_id)
++        .expect("new immutable snapshot is in the resolved lineage");
++    assert_eq!(inherited.end_ordinal_exclusive, Some(4));
++    assert_eq!(inherited.end_byte_offset, Some(base.end_byte_offset));
++
++    let reservation = store
++        .reserve_rollout_writers(&[thread_id])
++        .await
++        .expect("reserve native source for a bounded prefix snapshot");
++    let prefix_snapshot = super::super::segment::freeze_paginated_prefix_reserved(
++        &store,
++        thread_id,
++        &path,
++        thread_id,
++        thread_id,
++        &path,
++        /*end_ordinal_exclusive*/ 4,
++        bytes.len() as u64,
++        &reservation,
++    )
++    .await
++    .expect("bounded snapshot uses the same interior corruption policy");
++    let prefix_base = prefix_snapshot
++        .history_base
++        .expect("prefix snapshot history_base");
++    assert_ne!(prefix_base.thread_id, thread_id);
++    assert_eq!(prefix_base.end_ordinal_exclusive, 4);
++    assert_eq!(
++        prefix_base.end_byte_offset,
++        fs::metadata(&prefix_snapshot.reference.rollout_path)
++            .expect("prefix snapshot metadata")
++            .len()
++    );
++    let (prefix_lines, _, prefix_errors) =
++        RolloutRecorder::load_rollout_lines(&prefix_snapshot.reference.rollout_path)
++            .await
++            .expect("read prefix snapshot");
++    assert_eq!(prefix_errors, 0);
++    assert_eq!(
++        serde_json::to_value(prefix_lines).expect("serialize prefix snapshot envelopes"),
++        serde_json::to_value(expected).expect("serialize expected prefix envelopes")
++    );
++    let error = super::super::segment::freeze_paginated_prefix_reserved(
++        &store,
++        thread_id,
++        &path,
++        thread_id,
++        thread_id,
++        &path,
++        /*end_ordinal_exclusive*/ 5,
++        bytes.len() as u64,
++        &reservation,
++    )
++    .await
++    .expect_err("accepted records cannot authenticate an invented prefix ordinal");
++    assert!(error.to_string().contains("ended at ordinal 4, expected 5"));
++    drop(reservation);
++
++    let error = store
++        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::rotate(Vec::new()))
++        .await
++        .expect_err("rotation still rejects a damaged native source");
++    assert!(error.to_string().contains("contains 1 invalid record(s)"));
++    assert_eq!(
++        fs::read(&path).expect("source bytes after rejected rotation"),
++        bytes
++    );
++}
++
++#[tokio::test]
++async fn full_history_snapshot_keeps_native_retry_ordinals_and_source_bytes() {
++    assert_native_snapshot_retains_source_and_ordinals(/*retry_is_complete*/ true).await;
++}
++
++#[tokio::test]
++async fn full_history_snapshot_keeps_native_ordinal_gaps_and_new_cutoff() {
++    assert_native_snapshot_retains_source_and_ordinals(/*retry_is_complete*/ false).await;
++}
++
++#[tokio::test]
++async fn full_history_snapshot_keeps_damaged_first_local_record_structural() {
++    let home = TempDir::new().expect("temp dir");
++    let thread_id = ThreadId::new();
++    let path = rollout_path(home.path(), thread_id);
++    let first = message(1, "first local record");
++    let mut bytes = record(&metadata(thread_id, 0, None));
++    bytes.extend_from_slice(&interrupted(&first));
++    bytes.extend_from_slice(&record(&first));
++    write(&path, &bytes);
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let error = store
++        .freeze_thread_segment(thread_id, FreezeRolloutSegmentParams::snapshot())
++        .await
++        .expect_err("snapshot must authenticate a possibly leading lineage reference");
++    assert!(
++        error
++            .to_string()
++            .contains("failed to read paginated rollout line")
++    );
++    assert_eq!(fs::read(&path).expect("source remains unchanged"), bytes);
++}
++
++#[tokio::test]
++async fn full_history_skips_interrupted_retry_without_changing_ordinals_or_offsets() {
++    let home = TempDir::new().expect("temp dir");
++    let thread_id = ThreadId::new();
++    let path = rollout_path(home.path(), thread_id);
++    let meta = metadata(thread_id, /*ordinal*/ 0, /*history_base*/ None);
++    let first = message(/*ordinal*/ 1, "first complete local record");
++    let retry = message(/*ordinal*/ 2, "complete retry");
++    let last = message(/*ordinal*/ 3, "later complete record");
++    let meta_bytes = record(&meta);
++    let first_bytes = record(&first);
++    let damaged = interrupted(&retry);
++    let mut bytes = meta_bytes.clone();
++    bytes.extend_from_slice(&first_bytes);
++    bytes.extend_from_slice(&damaged);
++    bytes.extend_from_slice(&record(&retry));
++    let last_offset = bytes.len() as u64;
++    bytes.extend_from_slice(&record(&last));
++    write(&path, &bytes);
++
++    let parsed = parse_rollout_bytes(&path, &bytes, thread_id).expect("load FullHistory bytes");
++    let (file_lines, file_thread_id, errors) = RolloutRecorder::load_rollout_lines(&path)
++        .await
++        .expect("normal compatibility loading");
++
++    assert_eq!(
++        serde_json::to_value(parsed).expect("serialize parsed envelopes and offsets"),
++        serde_json::to_value(vec![
++            (0, meta.clone()),
++            (meta_bytes.len() as u64, first.clone()),
++            (
++                (meta_bytes.len() + first_bytes.len() + damaged.len()) as u64,
++                retry.clone()
++            ),
++            (last_offset, last.clone()),
++        ])
++        .expect("serialize expected envelopes and offsets")
++    );
++    assert_eq!(
++        serde_json::to_value((file_lines, file_thread_id, errors))
++            .expect("serialize file load result"),
++        serde_json::to_value((
++            vec![meta.clone(), first.clone(), retry.clone(), last.clone()],
++            Some(thread_id),
++            1
++        ))
++        .expect("serialize expected file load result")
++    );
++
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let reservation = store
++        .reserve_rollout_writers(&[thread_id])
++        .await
++        .expect("reserve source");
++    let lineage = store
++        .resolve_rollout_lineage(thread_id)
++        .await
++        .expect("real resolver admits damaged records after the trusted rollout head");
++    let (lineage, _, full_history, _) = store
++        .materialize_clean_fork_lineage(
++            thread_id,
++            lineage,
++            &reservation,
++            /*include_full_history*/ true,
++        )
++        .await
++        .expect("prepare FullHistory source")
++        .expect("clean fork preparation remains available");
++    assert_eq!(
++        serde_json::to_value(full_history).expect("serialize FullHistory items"),
++        serde_json::to_value(Some(vec![meta.item, first.item, retry.item, last.item]))
++            .expect("serialize expected FullHistory items")
++    );
++    assert_eq!(lineage.segments[0].end_ordinal_exclusive, Some(4));
++    assert_eq!(
++        lineage.segments[0].end_byte_offset,
++        Some(bytes.len() as u64)
++    );
++    assert_eq!(fs::read(path).expect("source remains intact"), bytes);
++}
++
++#[tokio::test]
++async fn full_history_resolver_keeps_a_damaged_first_local_record_structural() {
++    let home = TempDir::new().expect("temp dir");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let thread_id = ThreadId::new();
++    let path = rollout_path(home.path(), thread_id);
++    let first = message(/*ordinal*/ 1, "complete first-local retry");
++    let mut bytes = record(&metadata(
++        thread_id, /*ordinal*/ 0, /*history_base*/ None,
++    ));
++    bytes.extend_from_slice(&interrupted(&first));
++    bytes.extend_from_slice(&record(&first));
++    write(&path, &bytes);
++
++    // The first local record may be a leading lineage reference. Recovery begins only after
++    // read_rollout_head has decoded that record without changing reference interpretation.
++    let error = store
++        .resolve_rollout_lineage(thread_id)
++        .await
++        .expect_err("the canonical rollout head must remain trustworthy");
++
++    assert!(
++        error
++            .to_string()
++            .contains("failed to read paginated rollout line")
++    );
++    assert_eq!(fs::read(path).expect("source remains intact"), bytes);
++}
++
++#[tokio::test]
++async fn full_history_reads_damaged_rotated_ancestor_without_rewriting_history_base() {
++    let home = TempDir::new().expect("temp dir");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let thread_id = ThreadId::new();
++    let ancestor_id = ThreadId::new();
++    let ancestor = home
++        .path()
++        .join("sessions/rollout_segments")
++        .join(thread_id.to_string())
++        .join(format!("rollout-2026-09-01T00-00-00-{ancestor_id}.jsonl"));
++    let first = message(/*ordinal*/ 1, "immutable ancestor first");
++    let retry = message(/*ordinal*/ 2, "immutable ancestor retry");
++    let mut ancestor_bytes = record(&metadata(
++        thread_id, /*ordinal*/ 0, /*history_base*/ None,
++    ));
++    ancestor_bytes.extend_from_slice(&record(&first));
++    ancestor_bytes.extend_from_slice(&interrupted(&retry));
++    ancestor_bytes.extend_from_slice(&record(&retry));
++    write(&ancestor, &ancestor_bytes);
++    let end = HistoryPosition {
++        thread_id: ancestor_id,
++        end_ordinal_exclusive: 3,
++        end_byte_offset: ancestor_bytes.len() as u64,
++    };
++    let meta = metadata(thread_id, /*ordinal*/ 3, Some(end));
++    let latest = message(/*ordinal*/ 4, "active segment record");
++    let path = rollout_path(home.path(), thread_id);
++    let mut bytes = record(&meta);
++    bytes.extend_from_slice(&record(&latest));
++    write(&path, &bytes);
++    let reservation = store
++        .reserve_rollout_writers(&[thread_id])
++        .await
++        .expect("reserve source");
++    let lineage = RolloutLineage {
++        root_rollout_id: thread_id,
++        segments: vec![
++            segment(
++                thread_id,
++                ancestor_id,
++                &ancestor,
++                /*start_ordinal*/ 1,
++                Some(end),
++            ),
++            segment(thread_id, thread_id, &path, /*start_ordinal*/ 4, None),
++        ],
++    };
++
++    let (lineage, _, full_history, session_meta) = store
++        .materialize_clean_fork_lineage(
++            thread_id,
++            lineage,
++            &reservation,
++            /*include_full_history*/ true,
++        )
++        .await
++        .expect("load damaged ancestor")
++        .expect("prepare complete fork source");
++
++    assert_eq!(
++        serde_json::to_value(full_history).expect("serialize FullHistory items"),
++        serde_json::to_value(Some(vec![
++            meta.item.clone(),
++            first.item,
++            retry.item,
++            latest.item
++        ]))
++        .expect("serialize expected FullHistory items")
++    );
++    assert_eq!(session_meta.meta.history_base, Some(end));
++    assert_eq!(
++        lineage.segments[0].end_byte_offset,
++        Some(end.end_byte_offset)
++    );
++    assert_eq!(
++        fs::read(ancestor).expect("ancestor remains intact"),
++        ancestor_bytes
++    );
++    assert_eq!(
++        fs::read(path).expect("active segment remains intact"),
++        bytes
++    );
++}
++
++#[tokio::test]
++async fn full_history_damaged_tail_keeps_last_complete_ordinal_and_cutoff_checks() {
++    let home = TempDir::new().expect("temp dir");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let thread_id = ThreadId::new();
++    let path = rollout_path(home.path(), thread_id);
++    let meta = metadata(thread_id, /*ordinal*/ 0, /*history_base*/ None);
++    let complete = message(/*ordinal*/ 1, "last complete record");
++    let mut bytes = record(&meta);
++    bytes.extend_from_slice(&record(&complete));
++    bytes.extend_from_slice(&interrupted(&message(
++        /*ordinal*/ 2,
++        "incomplete tail",
++    )));
++    write(&path, &bytes);
++    let reservation = store
++        .reserve_rollout_writers(&[thread_id])
++        .await
++        .expect("reserve source");
++    let lineage = RolloutLineage {
++        root_rollout_id: thread_id,
++        segments: vec![segment(
++            thread_id, thread_id, &path, /*start_ordinal*/ 1, None,
++        )],
++    };
++    let (lineage, _, full_history, _) = store
++        .materialize_clean_fork_lineage(
++            thread_id,
++            lineage,
++            &reservation,
++            /*include_full_history*/ true,
++        )
++        .await
++        .expect("load complete prefix")
++        .expect("prepare latest fork source");
++    assert_eq!(
++        serde_json::to_value(full_history).expect("serialize FullHistory items"),
++        serde_json::to_value(Some(vec![meta.item, complete.item]))
++            .expect("serialize expected FullHistory items")
++    );
++    assert_eq!(lineage.segments[0].end_ordinal_exclusive, Some(2));
++
++    let claimed_end = HistoryPosition {
++        thread_id,
++        end_ordinal_exclusive: 3,
++        end_byte_offset: bytes.len() as u64,
++    };
++    let claimed_lineage = RolloutLineage {
++        root_rollout_id: thread_id,
++        segments: vec![segment(
++            thread_id,
++            thread_id,
++            &path,
++            /*start_ordinal*/ 1,
++            Some(claimed_end),
++        )],
++    };
++    assert!(
++        store
++            .materialize_clean_fork_lineage(
++                thread_id,
++                claimed_lineage,
++                &reservation,
++                /*include_full_history*/ true
++            )
++            .await
++            .expect("inspect claimed cutoff")
++            .is_none(),
++        "damaged tail cannot satisfy a missing ordinal boundary"
++    );
++    assert_eq!(fs::read(path).expect("source remains intact"), bytes);
++}
++
++#[test]
++fn full_history_shared_loader_preserves_arbitrary_precision_token_count() {
++    let thread_id = ThreadId::new();
++    let path = Path::new("native-token-count.jsonl");
++    let mut bytes = record(&metadata(
++        thread_id, /*ordinal*/ 0, /*history_base*/ None,
++    ));
++    let token_count = serde_json::json!({
++        "timestamp": "2026-09-01T00:00:01Z", "ordinal": 1, "type": "event_msg",
++        "payload": { "type": "token_count", "info": null,
++            "rate_limits": { "primary": { "used_percent": 12.5, "window_minutes": 60, "resets_at": 42 } }
++        }
++    });
++    let token_count_offset = bytes.len() as u64;
++    let token_count_bytes = serde_json::to_vec(&token_count).expect("serialize token count");
++    bytes.extend_from_slice(&token_count_bytes);
++    bytes.push(b'\n');
++    let expected = RolloutRecorder::parse_rollout_line_value(token_count)
++        .expect("compatible token count")
++        .expect("ordinary record");
++
++    let parsed =
++        parse_rollout_bytes(path, &bytes, thread_id).expect("parse arbitrary precision event");
++
++    assert_eq!(
++        serde_json::to_value(parsed.last()).expect("serialize token count envelope and offset"),
++        serde_json::to_value(Some(&(token_count_offset, expected)))
++            .expect("serialize expected token count envelope and offset")
++    );
++    assert_eq!(parsed.len(), 2);
++}
++
++#[test]
++fn full_history_shared_loader_keeps_reference_errors_fatal_and_native_suffixes_unsplit() {
++    let thread_id = ThreadId::new();
++    let path = Path::new("native-record-policy.jsonl");
++    let meta = record(&metadata(
++        thread_id, /*ordinal*/ 0, /*history_base*/ None,
++    ));
++    let ordinary = record(&message(
++        /*ordinal*/ 1,
++        "valid suffix must not invent a native boundary",
++    ));
++    let mut bytes = meta.clone();
++    bytes.extend_from_slice(b"{broken");
++    bytes.extend_from_slice(&ordinary);
++    let (parsed, parsed_thread_id, errors) =
++        RolloutRecorder::load_rollout_lines_from_bytes(path, &bytes)
++            .expect("skip malformed native physical line");
++    assert_eq!(
++        (parsed.len(), parsed_thread_id, errors),
++        (1, Some(thread_id), 1)
++    );
++
++    let mut bytes = meta;
++    bytes.extend_from_slice(br#"{"timestamp":"2026-09-01T00:00:01Z","ordinal":1,"type":"rollout_reference","payload":{}}"#);
++    bytes.push(b'\n');
++    let error = parse_rollout_bytes(path, &bytes, thread_id)
++        .err()
++        .expect("reference topology remains validated");
++    assert!(
++        error
++            .to_string()
++            .contains("invalid rollout reference record")
++    );
++}
+diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
+index 97125d770f15a4a6693b212acb9965b935669c2d..b837dbd441346ea4479ed32277690c7636878044 100644
+--- a/codex-rs/thread-store/src/local/segment.rs
++++ b/codex-rs/thread-store/src/local/segment.rs
+@@ -835,8 +835,13 @@ async fn freeze_thread_segment_reserved_with_publication(
+             message: format!("thread {thread_id} does not have a readable rollout"),
+         })?;
+     let stable_path = codex_rollout::plain_rollout_path(recorded_path.as_path());
++    let validation = if params.is_snapshot() {
++        SourceRolloutValidation::Snapshot
++    } else {
++        SourceRolloutValidation::Rotation
++    };
+     let (source_meta, next_rollout_ordinal, existing_reference, source_lines, skipped_records) =
+-        validate_source_rollout(source_path.as_path(), thread_id).await?;
++        validate_source_rollout(source_path.as_path(), thread_id, validation).await?;
+     let history_mode = source_meta.meta.history_mode;
+     if let Some((_recorder, _rollout_id, live_history_mode)) = live_entry.as_ref()
+         && *live_history_mode != history_mode
+@@ -1639,8 +1644,12 @@ async fn freeze_paginated_prefix_reserved_inner(
+ ) -> ThreadStoreResult<FrozenRolloutSegment> {
+     debug_assert!(reservation.contains(source_thread_id));
+     debug_assert!(reservation.contains(prefix_thread_id));
+-    let (source_session_meta, _, _, _, _) =
+-        validate_source_rollout(source_rollout_path, source_thread_id).await?;
++    let (source_session_meta, _, _, _, _) = validate_source_rollout(
++        source_rollout_path,
++        source_thread_id,
++        SourceRolloutValidation::Snapshot,
++    )
++    .await?;
+     let history_mode = source_session_meta.meta.history_mode;
+     let prefix_bytes = super::rollout_lineage::read_rollout_bytes(prefix_rollout_path).await?;
+     let end_byte_offset =
+@@ -1660,21 +1669,19 @@ async fn freeze_paginated_prefix_reserved_inner(
+             ),
+         });
+     }
+-    let mut prefix_lines = prefix
+-        .split(|byte| *byte == b'\n')
+-        .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+-        .filter_map(
+-            |line| match RolloutRecorder::parse_rollout_line_bytes(line) {
+-                Ok(Some(line)) => Some(Ok(line)),
+-                Ok(None) => None,
+-                Err(err) => Some(Err(ThreadStoreError::Internal {
+-                    message: format!(
+-                        "failed to read prepared rollout prefix for {prefix_thread_id}: {err}"
+-                    ),
+-                })),
+-            },
+-        )
+-        .collect::<ThreadStoreResult<Vec<_>>>()?;
++    let (prefix_lines, _, parse_errors) =
++        RolloutRecorder::load_rollout_lines_from_bytes(prefix_rollout_path, prefix)
++            .map_err(thread_store_io_error)?;
++    let mut prefix_lines = prefix_lines
++        .into_iter()
++        .map(|(_, line)| line)
++        .collect::<Vec<_>>();
++    if parse_errors != 0 {
++        // A malformed first local record could be a leading lineage reference. Interior
++        // recovery must not change which lineage the immutable snapshot represents.
++        super::rollout_lineage::read_rollout_head(prefix_rollout_path).await?;
++        validate_snapshot_ordinals(prefix_lines.as_slice())?;
++    }
+     match prefix_lines.first().map(|line| &line.item) {
+         Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == prefix_thread_id => {}
+         Some(RolloutItem::SessionMeta(_)) => {
+@@ -2050,9 +2057,17 @@ fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenc
+             == right.compacted_replacement_history_filter_texts
+ }
+
++/// Rotation can replace the active rollout; a snapshot writes a new immutable rollout ID.
++#[derive(Clone, Copy)]
++enum SourceRolloutValidation {
++    Rotation,
++    Snapshot,
++}
++
+ async fn validate_source_rollout(
+     path: &Path,
+     thread_id: ThreadId,
++    validation: SourceRolloutValidation,
+ ) -> ThreadStoreResult<(
+     SessionMetaLine,
+     Option<u64>,
+@@ -2082,16 +2097,23 @@ async fn validate_source_rollout(
+             });
+         }
+     };
+-    if parse_errors != 0 && source_meta.meta.history_mode != ThreadHistoryMode::Legacy {
+-        return Err(ThreadStoreError::Internal {
+-            message: format!(
+-                "rollout {} contains {parse_errors} invalid record(s)",
+-                path.display()
+-            ),
+-        });
+-    }
+     let (next_rollout_ordinal, repaired_ordinals) =
+-        repair_source_ordinals(lines.as_mut_slice(), source_meta.meta.history_mode)?;
++        if parse_errors != 0 && source_meta.meta.history_mode == ThreadHistoryMode::Paginated {
++            if matches!(validation, SourceRolloutValidation::Rotation) {
++                return Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "rollout {} contains {parse_errors} invalid record(s)",
++                        path.display()
++                    ),
++                });
++            }
++            super::rollout_lineage::read_rollout_head(path).await?;
++            // The new snapshot ID has its own byte cutoff. Keep every accepted native ordinal,
++            // including gaps, without changing the source or a pre-existing HistoryPosition.
++            (Some(validate_snapshot_ordinals(lines.as_slice())?), false)
++        } else {
++            repair_source_ordinals(lines.as_mut_slice(), source_meta.meta.history_mode)?
++        };
+     let existing_reference = match lines.as_slice() {
+         [
+             RolloutLine {
+@@ -2114,6 +2136,27 @@ async fn validate_source_rollout(
+     ))
+ }
+
++/// Validates accepted native records without inventing ordinals for damaged physical records.
++fn validate_snapshot_ordinals(lines: &[RolloutLine]) -> ThreadStoreResult<u64> {
++    let mut previous = None;
++    for line in lines {
++        let ordinal = line.ordinal.ok_or_else(|| ThreadStoreError::Internal {
++            message: "paginated snapshot line is missing an ordinal".to_string(),
++        })?;
++        if previous.is_some_and(|previous| ordinal <= previous) {
++            return Err(ThreadStoreError::Internal {
++                message: "paginated snapshot ordinals are not strictly increasing".to_string(),
++            });
++        }
++        previous = Some(ordinal);
++    }
++    previous
++        .and_then(|ordinal| ordinal.checked_add(1))
++        .ok_or_else(|| ThreadStoreError::Internal {
++            message: "paginated snapshot is empty or has an ordinal overflow".to_string(),
++        })
++}
++
+ /// Restores the physical-record ordinal invariant before a segment is frozen.
+ ///
+ /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
