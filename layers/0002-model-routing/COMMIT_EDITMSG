@@ -1,11 +1,1 @@
 Route model profiles and retry recoverable responses
-
-Combine the existing implementation and corrections:
-
-- Add resilient model routing profiles
-- Restore same-model retries after partial streams
-- Allow custom model aliases to match backend slugs
-
-Original-commit: 5a5516423e573f2a63d3fd798e687926152938b5
-Original-commit: 9402ddc9643aaa1cd76061afc671af0bb6aec52e
-Original-commit: ae123e9309b66671854ef08c8e1ae30f40697e97

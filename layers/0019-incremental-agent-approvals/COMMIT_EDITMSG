@@ -1,7 +1,0 @@
-Update agent approvals without rescanning every event
-
-Combine the existing implementation and corrections:
-
-- Avoid rescanning agent approvals for every event
-
-Original-commit: 5243f509df8680c4c6632c1b93144a7577843ec9

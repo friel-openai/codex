@@ -1,9 +1,0 @@
-Build and exercise paired Frodex release binaries
-
-Combine the existing implementation and corrections:
-
-- Add release-built Frodex recovery acceptance
-- Restore Frodex release workflow
-
-Original-commit: 1444b225d73aa7aeba57002b1d7b6d4c0af4c9f7
-Original-commit: df2af33345048de412e1005690c1f13b94c79e1d

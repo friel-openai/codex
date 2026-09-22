@@ -1,3 +1,115 @@
+diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
+index da84311484c85513c358db59c9fba652b6b02522..133bad99db5c9fe4837a6f7085d01107c05ff2b1 100644
+--- a/codex-rs/app-server/src/message_processor.rs
++++ b/codex-rs/app-server/src/message_processor.rs
+@@ -1,5 +1,6 @@
+ use std::collections::HashSet;
+ use std::future::Future;
++use std::pin::Pin;
+ use std::sync::Arc;
+ use std::sync::OnceLock;
+ use std::sync::atomic::AtomicBool;
+@@ -103,6 +104,37 @@ use crate::models_refresh_worker::ModelsRefreshWorker;
+
+ const CONNECTION_RPC_DRAIN_TIMEOUT: Duration = Duration::from_secs(/*secs*/ 30);
+
++/// Erases a selected handler's future so the dispatcher does not retain every request variant.
++type InitializedRequestFuture = Pin<
++    Box<
++        dyn Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>>
++            + Send
++            + 'static,
++    >,
++>;
++
++#[inline(never)]
++fn build_boxed_request_future<Builder, RequestFuture>(builder: Builder) -> InitializedRequestFuture
++where
++    Builder: FnOnce() -> RequestFuture,
++    RequestFuture:
++        Future<Output = Result<Option<ClientResponsePayload>, JSONRPCErrorError>> + Send + 'static,
++{
++    Box::pin(builder())
++}
++
++// Awaiting inside one match makes the dispatcher's debug poll reserve stack for every handler.
++// Build and erase only the selected future before the dispatcher awaits it.
++macro_rules! boxed_request_future {
++    ($request:expr, { $($pattern:pat => $body:expr $(,)?)+ }) => {
++        match $request {
++            $(
++                $pattern => build_boxed_request_future(move || async move { $body }),
++            )+
++        }
++    };
++}
++
+ fn deserialize_client_request(request: JSONRPCRequest) -> Result<ClientRequest, JSONRPCErrorError> {
+     reject_obsolete_request_fields(&request)?;
+
+@@ -972,6 +1004,7 @@ impl MessageProcessor {
+         Ok(())
+     }
+
++    #[deny(clippy::large_stack_frames)]
+     async fn handle_initialized_client_request(
+         self: Arc<Self>,
+         connection_request_id: ConnectionRequestId,
+@@ -988,9 +1021,13 @@ impl MessageProcessor {
+             connection_id,
+             request_id: codex_request.id().clone(),
+         };
+-        let result: Result<Option<ClientResponsePayload>, JSONRPCErrorError> = match codex_request {
++        let response_request_id = request_id.clone();
++        let response_outgoing = Arc::clone(&self.outgoing);
++        let request_future = boxed_request_future!(codex_request, {
+             ClientRequest::Initialize { .. } => {
+-                panic!("Initialize should be handled before initialized request dispatch");
++                Err(invalid_request(
++                    "Initialize should be handled before initialized request dispatch",
++                ))
+             }
+             ClientRequest::UserVerificationStatus { .. }
+             | ClientRequest::UserVerificationEnroll { .. }
+@@ -1696,17 +1733,20 @@ impl MessageProcessor {
+             ClientRequest::FeedbackUpload { params, .. } => {
+                 self.feedback_processor.feedback_upload(params).await
+             }
+-        };
++        });
++        let result = request_future.await;
+
+         match result {
+             Ok(Some(response)) => {
+-                self.outgoing
+-                    .send_response_as(request_id.clone(), response)
++                response_outgoing
++                    .send_response_as(response_request_id.clone(), response)
+                     .await;
+             }
+             Ok(None) => {}
+             Err(error) => {
+-                self.outgoing.send_error(request_id.clone(), error).await;
++                response_outgoing
++                    .send_error(response_request_id.clone(), error)
++                    .await;
+             }
+         }
+         Ok(())
+diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
+index 048f2eeb8ec724814a21dcc7d28818359a45a248..f120224822ea6273f7dc55be9eb396572ae82d9d 100644
+--- a/codex-rs/app-server/tests/common/test_app_server.rs
++++ b/codex-rs/app-server/tests/common/test_app_server.rs
+@@ -256,6 +256,9 @@ impl TestAppServer {
+             codex_home.join("managed_config.toml"),
+         );
+         cmd.env_remove(CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR);
++        // Auth tests explicitly supply synthetic credentials below; never inherit the developer's.
++        cmd.env_remove(codex_login::CODEX_ACCESS_TOKEN_ENV_VAR);
++        cmd.env_remove("OPENAI_API_KEY");
+         cmd.args(args);
+
+         for (k, v) in env_overrides {
 diff --git a/codex-rs/cli/src/main.rs b/codex-rs/cli/src/main.rs
 index 50aa97352b0795d71e2989683c4231c7d1e2e1f8..85a79a6959317e2c11e8c66d9107155110bdba21 100644
 --- a/codex-rs/cli/src/main.rs
@@ -1713,7 +1825,7 @@ index 0ee0cd986a3159e4d1f9e71759b73a239d953067..defb38aac427ce88a33d42623c75714c
  // Single integration test binary that aggregates all test modules.
  // The submodules live in `tests/all/`.
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
-index 4adf018bc6876cc83d1d95480a3290a189e2b509..2cc36a89346fcfbf6c0f13a455a7e5ac54ff67fe 100644
+index 4adf018bc6876cc83d1d95480a3290a189e2b509..c2d200bcbc993c13bc1fdac30c73f8c410fbf035 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs
 +++ b/codex-rs/core/tests/suite/subagent_notifications.rs
 @@ -1,9 +1,13 @@
@@ -1942,7 +2054,7 @@ index 4adf018bc6876cc83d1d95480a3290a189e2b509..2cc36a89346fcfbf6c0f13a455a7e5ac
 +        .set_app_server_client_info(
 +            Some("codex-tui".to_string()),
 +            Some("test-client-version".to_string()),
-+            false,
++            /*mcp_elicitations_auto_deny*/ false,
 +        )
 +        .await?;
 +
@@ -2591,3 +2703,55 @@ index 4f7a3ab89fc91ad3c974f58ea8cd84c7ef74baee..20dba1c1fde2872068a83ce543520fb9
  mod hooks;
  mod mcp_required_exit;
  mod originator;
+diff --git a/codex-rs/tui/src/status/tests.rs b/codex-rs/tui/src/status/tests.rs
+index e644dcb2cca72a2be1d4cff14c30150e1b1c1b5f..ade36b58007802f51124aa0381c8309707d7f4db 100644
+--- a/codex-rs/tui/src/status/tests.rs
++++ b/codex-rs/tui/src/status/tests.rs
+@@ -175,14 +175,24 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
+     lines
+         .iter()
+         .map(|line| {
+-            line.spans
++            let rendered = line
++                .spans
+                 .iter()
+                 .map(|span| span.content.as_ref())
+-                .collect::<String>()
++                .collect::<String>();
++            normalize_version(&rendered)
+         })
+         .collect()
+ }
+
++fn normalize_version(rendered: &str) -> String {
++    let version = format!("(v{})", crate::version::CODEX_CLI_VERSION);
++    rendered.replace(
++        &version,
++        &format!("(v0.0.0){}", " ".repeat(version.len().saturating_sub(8))),
++    )
++}
++
+ fn sanitize_directory(lines: Vec<String>) -> Vec<String> {
+     let frame_width = lines
+         .iter()
+@@ -234,7 +244,7 @@ fn buffer_to_text(buffer: &Buffer, width: u16) -> String {
+                 .to_string()
+         })
+         .collect::<Vec<_>>();
+-    sanitize_directory(lines).join("\n")
++    normalize_version(&sanitize_directory(lines).join("\n"))
+ }
+
+ fn reset_at_from(captured_at: &chrono::DateTime<chrono::Local>, seconds: i64) -> i64 {
+diff --git a/codex-rs/tui/src/version.rs b/codex-rs/tui/src/version.rs
+index 8c8d108dc61314c01eeb31a987f48cf508f6fa9d..539c4083dc353ec191a4091039eee8181da7451c 100644
+--- a/codex-rs/tui/src/version.rs
++++ b/codex-rs/tui/src/version.rs
+@@ -1,2 +1,7 @@
+ /// The current Codex CLI version as embedded at compile time.
++#[cfg(not(test))]
+ pub const CODEX_CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
++
++// Snapshot geometry must not depend on the length of the release version.
++#[cfg(test)]
++pub const CODEX_CLI_VERSION: &str = "0.0.0";

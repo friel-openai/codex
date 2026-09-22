@@ -4794,6 +4794,18 @@ index 7fadf9c4a69488fcbe9c7a09e4877d0ce899ab57..b76d714401e80ec85b19ad4e031dbccd
              }
              Ok(_) => continue,
              Err(e) => return Err(e),
+diff --git a/codex-rs/core/src/compact_model_fallback.rs b/codex-rs/core/src/compact_model_fallback.rs
+index 3c4d1f24ea241885b42d3b4211b89a2f33cc04a1..0ed32fea6ad8be7496cfb37aed322f251a540084 100644
+--- a/codex-rs/core/src/compact_model_fallback.rs
++++ b/codex-rs/core/src/compact_model_fallback.rs
+@@ -10,6 +10,7 @@ pub(crate) fn should_retry_with_current_model(error: &CodexErr) -> bool {
+     matches!(
+         error.details(),
+         CodexErrorDetails::InvalidRequest(_)
++            | CodexErrorDetails::ModelUnavailable(_)
+             | CodexErrorDetails::UnexpectedStatus(_)
+             | CodexErrorDetails::ContextWindowExceeded
+             | CodexErrorDetails::UsageLimitReached(_)
 diff --git a/codex-rs/core/src/compact_remote.rs b/codex-rs/core/src/compact_remote.rs
 index 302936dfeb2ab053f677eb457ce1a6640895594a..24e3f7b5207d7707cc8919dc61484d627e11a5cf 100644
 --- a/codex-rs/core/src/compact_remote.rs
@@ -5760,7 +5772,7 @@ index bfbe5d162bfee86ac41c53a5fd2944dc3f39a809..e2c64fc47b92dcf933572d4185633017
      }
  }
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..428d496b9c3c92a726ac4849b1d0c3cadc4e2223 100644
+index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..7d9069627d5dda4ecd6230756766a20314340e0f 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
 @@ -3,6 +3,7 @@ use std::borrow::Cow;
@@ -5813,7 +5825,7 @@ index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..428d496b9c3c92a726ac4849b1d0c3ca
              config.mcp_servers = next_config.mcp_servers.clone();
              config.mcp_optional_startup_grace = next_config.mcp_optional_startup_grace;
              config.mcp_oauth_credentials_store_mode = next_config.mcp_oauth_credentials_store_mode;
-@@ -1999,6 +2014,58 @@ impl Session {
+@@ -1999,6 +2014,62 @@ impl Session {
                  warn!("failed to refresh MCP OAuth coordination config: {err}");
              }
              let config = Arc::new(config);
@@ -5869,10 +5881,14 @@ index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..428d496b9c3c92a726ac4849b1d0c3ca
 +                    state.model_routing = Default::default();
 +                }
 +            }
++            state
++                .session_configuration
++                .model_info_overrides
++                .custom_models = config.custom_models.clone();
              state.session_configuration.original_config_do_not_use = Arc::clone(&config);
              self.mark_mcp_runtime_dirty();
              let new_config = notify_config_contributors
-@@ -2135,6 +2202,19 @@ impl Session {
+@@ -2135,6 +2206,19 @@ impl Session {
          let next_config = {
              let state = self.state.lock().await;
              let mut config = (*state.session_configuration.original_config_do_not_use).clone();
@@ -5892,7 +5908,7 @@ index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..428d496b9c3c92a726ac4849b1d0c3ca
              for (config_toml_path, user_config) in reloaded_user_configs {
                  let config_layer_stack = match config
                      .config_layer_stack
-@@ -2148,8 +2228,32 @@ impl Session {
+@@ -2148,8 +2232,32 @@ impl Session {
                  };
                  config.config_layer_stack = config_layer_stack;
              }
@@ -5925,7 +5941,7 @@ index 2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a..428d496b9c3c92a726ac4849b1d0c3ca
              config
          };
          self.services.skills_service.clear_cache();
-@@ -3746,6 +3850,7 @@ impl Session {
+@@ -3746,6 +3854,7 @@ impl Session {
              selected_capability_roots,
              executor_capability_discovery,
              mcp,
@@ -6603,8 +6619,100 @@ index c76b9b4feca5b5ff14ed95948c8a751eeb720436..ee1eff66db19ec2d0d8a3804d68a266e
          summary: codex_protocol::config_types::ReasoningSummary::Auto,
      };
      let previous_turn_id = previous_context_item
+diff --git a/codex-rs/core/src/session/step_activation.rs b/codex-rs/core/src/session/step_activation.rs
+index 8dc090315aa15e231f34d1968d76ecce1d509186..2156a17d7707ff749c72cee58822ac9d1a58b459 100644
+--- a/codex-rs/core/src/session/step_activation.rs
++++ b/codex-rs/core/src/session/step_activation.rs
+@@ -12,6 +12,8 @@ use crate::context::GuardianNodeReplPolicy;
+ use crate::exec_policy::AllowPrefixRules;
+ use crate::guardian::BUNDLED_GUARDIAN_POLICY_TEMPLATE;
+ use codex_features::Feature;
++use codex_protocol::error::CodexErr;
++use codex_protocol::error::Result as CodexResult;
+ use codex_protocol::openai_models::GuardianV2ModelConfig;
+ use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+ use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
+@@ -20,6 +22,14 @@ use codex_protocol::protocol::TurnSettingsUpdate;
+ use codex_protocol::protocol::TurnSettingsUpdateOutcome;
+ use std::sync::Arc;
+
++/// Identifies the running task and settings version used to prepare a replacement context.
++/// A sparse update or task replacement invalidates preparation without being overwritten.
++pub(super) struct TurnContextReplacement {
++    turn: Arc<TurnContext>,
++    task_done: Arc<tokio::sync::Notify>,
++    pub(super) settings: Arc<ResolvedStepSettings>,
++}
++
+ /// Temporary restrictions while approvals and Guardian still read the admitted
+ /// `TurnContext`. Ordinary live authorization is validated separately. Remove
+ /// these restrictions as their consumers migrate to captured step settings.
+@@ -223,6 +233,63 @@ fn check_legacy_model_safety(
+ }
+
+ impl Session {
++    pub(super) async fn prepare_turn_context_replacement(
++        &self,
++        turn: &Arc<TurnContext>,
++    ) -> CodexResult<TurnContextReplacement> {
++        let active = self.active_turn.lock().await;
++        let task = active
++            .as_ref()
++            .and_then(|active| active.task.as_ref())
++            .filter(|task| {
++                Arc::ptr_eq(&task.turn_context, turn) && !task.cancellation_token.is_cancelled()
++            })
++            .ok_or(CodexErr::TurnAborted)?;
++        Ok(TurnContextReplacement {
++            turn: Arc::clone(turn),
++            task_done: Arc::clone(&task.done),
++            settings: turn.current_settings.load_full(),
++        })
++    }
++
++    /// Publishes a prepared replacement only if its original task and settings still own the turn.
++    /// `false` requests preparation again after a sparse settings update; cancellation is an error.
++    #[expect(
++        clippy::await_holding_invalid_type,
++        reason = "managed-policy validation and context publication must remain atomic"
++    )]
++    pub(super) async fn try_replace_active_turn_context(
++        &self,
++        prepared: &TurnContextReplacement,
++        replacement: &Arc<TurnContext>,
++    ) -> CodexResult<bool> {
++        let mut active = self.active_turn.lock().await;
++        let task = active
++            .as_mut()
++            .and_then(|active| active.task.as_mut())
++            .filter(|task| {
++                Arc::ptr_eq(&task.done, &prepared.task_done)
++                    && Arc::ptr_eq(&task.turn_context, &prepared.turn)
++                    && !task.cancellation_token.is_cancelled()
++            })
++            .ok_or(CodexErr::TurnAborted)?;
++        if !Arc::ptr_eq(
++            &task.turn_context.current_settings.load_full(),
++            &prepared.settings,
++        ) {
++            return Ok(false);
++        }
++        let state = self.state.lock().await;
++        self.validate_active_step_settings(
++            replacement,
++            &replacement.current_settings.load_full(),
++            &state.session_configuration,
++        )
++        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
++        task.turn_context = Arc::clone(replacement);
++        Ok(true)
++    }
++
+     /// Publishes settings to the named, originally captured live task, regardless
+     /// of task kind. Publication does not propagate to child sessions or require
+     /// the task to sample; consumers using initial settings remain unchanged.
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index ef63fb535ae1269f04e649a9ef6a48e419a2d855..2e746ab72043fbc64e586b2234e329d62c9b18a6 100644
+index ef63fb535ae1269f04e649a9ef6a48e419a2d855..8b50f92101bce71da56ed77e93ceeab6f20c1ddf 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
 @@ -17,6 +17,7 @@ use codex_config::RequirementSource;
@@ -6638,6 +6746,204 @@ index ef63fb535ae1269f04e649a9ef6a48e419a2d855..2e746ab72043fbc64e586b2234e329d6
      fn raw_model_catalog(
          &self,
          strategy: RefreshStrategy,
+@@ -235,6 +245,197 @@ fn step_values(
+     )
+ }
+
++#[tokio::test]
++async fn routing_replacement_preserves_active_settings_and_accepts_later_updates() {
++    let ActivationFixture {
++        session,
++        turn,
++        finish,
++        lookup,
++    } = activation_fixture(activation_models()).await;
++    let future = desired_step_settings(&session).await;
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &turn.sub_id,
++                TurnSettingsUpdate {
++                    summary: Some(ReasoningSummary::Detailed),
++                    ..Default::default()
++                }
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    let prepared = session
++        .prepare_turn_context_replacement(&turn)
++        .await
++        .expect("capture task");
++    let candidate = codex_models_manager::ModelRoutingCandidate {
++        model: MODEL_B.to_string(),
++        reasoning_effort: Some(ReasoningEffort::Low),
++        service_tier: None,
++    };
++    lookup.release();
++    let routed = Arc::new(
++        turn.with_unchecked_routing_candidate(
++            "test-profile",
++            &candidate,
++            &session.services.models_manager,
++            &prepared.settings,
++        )
++        .await,
++    );
++    assert_eq!(
++        routed.initial_settings.selected().reasoning_summary,
++        Some(ReasoningSummary::Detailed)
++    );
++    assert_eq!(
++        routed.initial_settings.selected().personality,
++        prepared.settings.selected().personality
++    );
++    assert_eq!(
++        routed.initial_settings.selected().approval_policy,
++        prepared.settings.selected().approval_policy
++    );
++    assert!(
++        session
++            .try_replace_active_turn_context(&prepared, &routed)
++            .await
++            .expect("publish route")
++    );
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &turn.sub_id,
++                TurnSettingsUpdate {
++                    summary: Some(ReasoningSummary::Concise),
++                    ..Default::default()
++                }
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    assert_eq!(
++        routed.current_settings.load().reasoning_summary,
++        ReasoningSummary::Concise
++    );
++    assert_eq!(
++        turn.current_settings.load().reasoning_summary,
++        ReasoningSummary::Detailed
++    );
++    let step = session
++        .capture_step_context(Arc::clone(&routed), &CancellationToken::new())
++        .await
++        .expect("capture routed step");
++    assert_eq!(step.settings.model_info.slug, MODEL_B);
++    assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
++    assert_eq!(desired_step_settings(&session).await, future);
++    finish.notify_one();
++}
++
++#[tokio::test]
++async fn routing_replacement_rejects_preparation_before_a_sparse_update() {
++    let ActivationFixture {
++        session,
++        turn,
++        finish,
++        lookup,
++    } = activation_fixture(activation_models()).await;
++    let prepared = session
++        .prepare_turn_context_replacement(&turn)
++        .await
++        .expect("capture task");
++    let candidate = codex_models_manager::ModelRoutingCandidate {
++        model: MODEL_B.to_string(),
++        reasoning_effort: Some(ReasoningEffort::Low),
++        service_tier: None,
++    };
++    let source = Arc::clone(&turn);
++    let models = Arc::clone(&session.services.models_manager);
++    let settings = Arc::clone(&prepared.settings);
++    let routing = tokio::spawn(async move {
++        Arc::new(
++            source
++                .with_unchecked_routing_candidate("test-profile", &candidate, &models, &settings)
++                .await,
++        )
++    });
++    lookup.wait_until_blocked().await;
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &turn.sub_id,
++                TurnSettingsUpdate {
++                    summary: Some(ReasoningSummary::Detailed),
++                    ..Default::default()
++                }
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    lookup.release();
++    let routed = routing.await.expect("prepared candidate");
++    assert!(
++        !session
++            .try_replace_active_turn_context(&prepared, &routed)
++            .await
++            .expect("detect stale preparation")
++    );
++    assert_eq!(
++        turn.current_settings.load().reasoning_summary,
++        ReasoningSummary::Detailed
++    );
++    assert_eq!(
++        session
++            .prepare_turn_context_replacement(&turn)
++            .await
++            .expect("original owner retained")
++            .settings
++            .reasoning_summary,
++        ReasoningSummary::Detailed
++    );
++    finish.notify_one();
++}
++
++#[tokio::test]
++async fn workspace_refresh_keeps_active_settings_separate_from_future_settings() {
++    let ActivationFixture {
++        session,
++        turn,
++        finish,
++        ..
++    } = activation_fixture(activation_models()).await;
++    {
++        let mut state = session.state.lock().await;
++        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
++        settings.collaboration_mode =
++            settings
++                .collaboration_mode
++                .with_updates(Some(MODEL_B.to_string()), None, None);
++    }
++    let future = desired_step_settings(&session).await;
++    let prepared = session
++        .prepare_turn_context_replacement(&turn)
++        .await
++        .expect("capture owner");
++    let refreshed = session
++        .refresh_active_turn_context(&turn, &prepared.settings)
++        .await;
++    assert_eq!(
++        refreshed.initial_settings.selected(),
++        prepared.settings.selected()
++    );
++    assert_eq!(refreshed.model_info().slug, MODEL_A);
++    assert!(
++        session
++            .try_replace_active_turn_context(&prepared, &refreshed)
++            .await
++            .expect("publish workspace context")
++    );
++    assert_eq!(desired_step_settings(&session).await, future);
++    finish.notify_one();
++}
++
+ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
+     Arc::clone(
+         &session
 diff --git a/codex-rs/core/src/session/step_context.rs b/codex-rs/core/src/session/step_context.rs
 index ff91aad3c9c2206c7481447287b20a96d6308cae..2a266ae44e9a9b88278f56ab4f829959ca2ded98 100644
 --- a/codex-rs/core/src/session/step_context.rs
@@ -6655,19 +6961,19 @@ index ff91aad3c9c2206c7481447287b20a96d6308cae..2a266ae44e9a9b88278f56ab4f829959
      pub(crate) tool_router: Arc<ToolRouter>,
      /// The canonical AGENTS.md value observed with this environment snapshot.
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index 49502e8a6ea47833448be8997118ad2c884d07e0..8abe06149c7deb9087ed1668f3cf59224b373821 100644
+index 3f8241b5a01ced8dd4e6169c235da4b153fc2639..c506dc99b54a51e6a9fda2f4dd52e4d1dae2d33d 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
-@@ -211,6 +211,7 @@ impl ModelInfoOverrides {
+@@ -216,6 +216,7 @@ impl ModelInfoOverrides {
              personality_enabled,
              // The models manager already owns its catalog.
              model_catalog: None,
-+            custom_models: Default::default(),
++            custom_models: self.custom_models.clone(),
          }
      }
  }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index f451f1b02b1d574295b0fce491ca38598fe53c71..e9b8517c2d44e36a6977b9bf59726f127507fc74 100644
+index d21e883d4ff1e0f0d56d63ad709c58334663d700..a2344a13bd37ed1bcd101d6a68adce7037bef128 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -6,6 +6,7 @@ pub(crate) use super::step_settings::tests::update_selected_settings_for_test;
@@ -6686,10 +6992,43 @@ index f451f1b02b1d574295b0fce491ca38598fe53c71..e9b8517c2d44e36a6977b9bf59726f12
              tool_router: Arc::new(ToolRouter::from_parts(
                  ToolRegistry::empty_for_test(),
                  Vec::new(),
-@@ -1747,6 +1749,191 @@ exclude = ["SECRET_*", 17]
+@@ -1747,6 +1749,224 @@ exclude = ["SECRET_*", 17]
      assert_eq!(current_config, previous_config);
  }
 
++#[tokio::test]
++async fn refresh_runtime_config_resolves_updated_alias_without_mutating_captured_turn() {
++    let (session, _) = make_session_and_context().await;
++    let alias = codex_models_manager::CustomModelConfig {
++        model: "gpt-5.2".to_string(),
++        routing_profile: None,
++        model_context_window: Some(128_000),
++        model_auto_compact_token_limit: Some(100_000),
++        trust_candidate_constraints: false,
++    };
++    let mut config = (*session.get_config().await).clone();
++    config
++        .custom_models
++        .insert("local-alias".to_string(), alias);
++    session.refresh_runtime_config(config.clone()).await;
++    {
++        let mut state = session.state.lock().await;
++        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
++        settings.collaboration_mode =
++            settings
++                .collaboration_mode
++                .with_updates(Some("local-alias".to_string()), None, None);
++    }
++    let captured = session.new_default_turn().await;
++    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
++    config.custom_models.get_mut("local-alias").unwrap().model = "gpt-5.4".to_string();
++    session.refresh_runtime_config(config).await;
++    let refreshed = session.new_default_turn().await;
++    assert_eq!(refreshed.model_info().request_model_slug(), "gpt-5.4");
++    assert_eq!(captured.model_info().request_model_slug(), "gpt-5.2");
++    assert_eq!(refreshed.model_info().context_window, Some(128_000));
++}
++
 +#[tokio::test]
 +async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_health() {
 +    let (session, _turn_context) = make_session_and_context().await;
@@ -6878,7 +7217,7 @@ index f451f1b02b1d574295b0fce491ca38598fe53c71..e9b8517c2d44e36a6977b9bf59726f12
  #[tokio::test]
  async fn reload_user_config_layer_updates_base_and_selected_profile_layers() {
      let (session, _turn_context) = make_session_and_context().await;
-@@ -3790,6 +3977,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
+@@ -3798,6 +4018,8 @@ async fn record_initial_history_forked_hydrates_previous_turn_settings() {
          realtime_active: Some(turn_context.realtime_active),
          cyber_access_program: None,
          effort: turn_context.reasoning_effort().cloned(),
@@ -6887,7 +7226,7 @@ index f451f1b02b1d574295b0fce491ca38598fe53c71..e9b8517c2d44e36a6977b9bf59726f12
          summary: codex_protocol::config_types::ReasoningSummary::Auto,
      };
      let turn_id = previous_context_item
-@@ -11325,6 +11514,7 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
+@@ -11333,6 +11555,7 @@ async fn legacy_compaction_retains_only_the_selected_step(first_attempt: FirstAt
          InitialContextInjection::DoNotInject,
          CompactionReason::ModelDownshift,
          CompactionPhase::PreTurn,
@@ -8226,7 +8565,7 @@ index 4719e1d891b208ce5910d6995d6d56fc4b298b6d..1d118168215e945f19f129af0ca15efc
 
      if should_emit_token_count {
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedfa78ef02c 100644
+index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..17ea3762c20c94aa0daa57c608ac74c81fedb8b1 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
 @@ -15,12 +15,14 @@ use codex_core_plugins::TrustedPluginRoots;
@@ -8459,7 +8798,7 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
              options,
              TurnMultiAgentRuntime::ResolveAndStore,
              self.git_enrichment_policy,
-+            true,
++            /*resolve_model_routing*/ true,
          )
          .await
      }
@@ -8467,7 +8806,7 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
              NewTurnContextOptions::default(),
              TurnMultiAgentRuntime::Preview,
              GitEnrichmentPolicy::Skip,
-+            true,
++            /*resolve_model_routing*/ true,
          )
          .await
      }
@@ -8490,7 +8829,7 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
          let multi_agent_version = match multi_agent_runtime {
              TurnMultiAgentRuntime::ResolveAndStore => {
                  self.resolve_multi_agent_version_for_model(&model_info, &per_turn_config)
-@@ -1039,6 +1207,35 @@ impl Session {
+@@ -1039,6 +1207,37 @@ impl Session {
          if turn_context.config.model_provider_id == codex_model_provider_info::OPENAI_PROVIDER_ID {
              turn_context.cyber_access_program = options.cyber_access_program;
          }
@@ -8520,13 +8859,15 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
 +                turn_context = routed;
 +            }
 +        }
-+        self.services
-+            .thread_extension_data
-+            .insert(turn_context.model_info().clone());
++        if matches!(multi_agent_runtime, TurnMultiAgentRuntime::ResolveAndStore) {
++            self.services
++                .thread_extension_data
++                .insert(turn_context.model_info().as_ref().clone());
++        }
          let turn_context = Arc::new(turn_context);
          if git_enrichment_policy == GitEnrichmentPolicy::Fresh
              && turn_context
-@@ -1108,6 +1305,63 @@ impl Session {
+@@ -1108,6 +1307,65 @@ impl Session {
              .await
      }
 
@@ -8539,8 +8880,12 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
 +    pub(crate) async fn refresh_active_turn_context(
 +        &self,
 +        current: &TurnContext,
++        settings: &ResolvedStepSettings,
 +    ) -> Arc<TurnContext> {
-+        let session_configuration = self.default_turn_configuration().await;
++        let mut session_configuration = self.default_turn_configuration().await;
++        // Workspace changes rebuild environments, not the active turn's model preferences.
++        // Future thread settings may already differ from this request's settings.
++        session_configuration.step_settings = Arc::new(settings.selected().clone());
 +        let refreshed = self
 +            .new_turn_context_from_configuration(
 +                current.sub_id.clone(),
@@ -8549,9 +8894,9 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
 +                    final_output_json_schema: current.final_output_json_schema.clone(),
 +                    cyber_access_program: current.cyber_access_program,
 +                },
-+                TurnMultiAgentRuntime::ResolveAndStore,
++                TurnMultiAgentRuntime::Preview,
 +                self.git_enrichment_policy,
-+                false,
++                /*resolve_model_routing*/ false,
 +            )
 +            .await;
 +        let mut refreshed = Arc::try_unwrap(refreshed)
@@ -8578,12 +8923,10 @@ index 8df4f1cab6c39453f26866c1e40c7cf233f398b2..3c56336e8a3b42d0012d1758dfacaedf
 +                    profile_name,
 +                    candidate,
 +                    &self.services.models_manager,
++                    settings,
 +                )
 +                .await;
 +        }
-+        self.services
-+            .thread_extension_data
-+            .insert(refreshed.model_info().clone());
 +        Arc::new(refreshed)
 +    }
 +
@@ -8681,27 +9024,6 @@ index 5333661a6f1f3bb8334ff125e0a73317d1c8c9d2..d3fd4717c303698a8120f4a47346f9d5
              active_connector_selection: HashSet::new(),
              pending_session_start_sources: VecDeque::new(),
              granted_permissions_by_environment_id: HashMap::new(),
-diff --git a/codex-rs/core/src/state/turn.rs b/codex-rs/core/src/state/turn.rs
-index b03dbf737fa9f1e642ec0d9bb7386083bf35c945..94f7a1c639791a2a37764e10b48bbc2005a1b441 100644
---- a/codex-rs/core/src/state/turn.rs
-+++ b/codex-rs/core/src/state/turn.rs
-@@ -33,6 +33,8 @@ use codex_protocol::protocol::TokenUsage;
- pub(crate) struct ActiveTurn {
-     pub(crate) task: Option<RunningTask>,
-     pub(crate) turn_state: Arc<Mutex<TurnState>>,
-+    /// Whether changed model execution settings must be applied before this turn's next request.
-+    pub(crate) execution_settings_refresh_requested: bool,
- }
-
- /// Whether mailbox deliveries should still be folded into the current turn.
-@@ -61,6 +63,7 @@ impl Default for ActiveTurn {
-         Self {
-             task: None,
-             turn_state: Arc::new(Mutex::new(TurnState::default())),
-+            execution_settings_refresh_requested: false,
-         }
-     }
- }
 diff --git a/codex-rs/core/src/tasks/regular.rs b/codex-rs/core/src/tasks/regular.rs
 index fa5734218505fb12ab50728df389685836b2339a..c900706c97c6e7352e467f4c8e5ecb737b063a90 100644
 --- a/codex-rs/core/src/tasks/regular.rs
@@ -9162,10 +9484,10 @@ index 1c6a629926705a48e9955a1088593dcd3cb67ca5..54f027111d0eeab5af8da4917221d48b
  mod model_visible_layout;
 diff --git a/codex-rs/core/tests/suite/model_routing_midturn.rs b/codex-rs/core/tests/suite/model_routing_midturn.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..7716189025c61718392a8575763feaccaed23fe3
+index 0000000000000000000000000000000000000000..5409886356bb218f7104b6928bec5f19c621603e
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/model_routing_midturn.rs
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,411 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::time::Duration;
@@ -9357,7 +9679,7 @@ index 0000000000000000000000000000000000000000..7716189025c61718392a8575763feacc
 +        ],
 +    )
 +    .await;
-+    let test = build_routed_test(&server, false).await?;
++    let test = build_routed_test(&server, /*multi_agent_v2*/ false).await?;
 +
 +    submit_prompt(&test, "run two tools").await?;
 +    let events = events_until_complete(&test).await;
@@ -9406,7 +9728,7 @@ index 0000000000000000000000000000000000000000..7716189025c61718392a8575763feacc
 +        ],
 +    )
 +    .await;
-+    let test = build_routed_test(&server, true).await?;
++    let test = build_routed_test(&server, /*multi_agent_v2*/ true).await?;
 +
 +    submit_prompt(&test, INITIAL_PROMPT).await?;
 +    wait_for_event(&test.codex, |event| {
@@ -9445,8 +9767,30 @@ index 0000000000000000000000000000000000000000..7716189025c61718392a8575763feacc
 +    Ok(())
 +}
 +
-+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-+async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -> Result<()> {
++#[test]
++fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute() -> Result<()> {
++    // `codex_arg0::arg0_dispatch_or_else` gives the top-level future and Tokio workers this
++    // stack budget. This integration test bypasses that entry point, so reproduce its runtime.
++    let test_thread = std::thread::Builder::new()
++        .name("steering-required-mcp-midturn-reroute".to_string())
++        .stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES)
++        .spawn(|| {
++            tokio::runtime::Builder::new_multi_thread()
++                .worker_threads(2)
++                .thread_stack_size(codex_async_utils::THREAD_STACK_SIZE_BYTES)
++                .enable_all()
++                .build()?
++                .block_on(
++                    steering_required_mcp_survives_precaptured_step_and_midturn_reroute_inner(),
++                )
++        })?;
++    match test_thread.join() {
++        Ok(result) => result,
++        Err(payload) => std::panic::resume_unwind(payload),
++    }
++}
++
++async fn steering_required_mcp_survives_precaptured_step_and_midturn_reroute_inner() -> Result<()> {
 +    skip_if_no_network!(Ok(()));
 +
 +    const CALL_ID: &str = "routing-required-mcp-wait";
@@ -9557,10 +9901,10 @@ index 0000000000000000000000000000000000000000..7716189025c61718392a8575763feacc
 +}
 diff --git a/codex-rs/core/tests/suite/model_routing_profiles.rs b/codex-rs/core/tests/suite/model_routing_profiles.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef93f87501
+index 0000000000000000000000000000000000000000..12d23ee3e450552691ee3a182b1d7670d5415fbb
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/model_routing_profiles.rs
-@@ -0,0 +1,1438 @@
+@@ -0,0 +1,1503 @@
 +use std::collections::HashMap;
 +use std::sync::Arc;
 +use std::sync::Mutex;
@@ -9949,9 +10293,19 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +        ],
 +    )
 +    .await;
-+    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    primary.experimental_supported_tools = vec![TOOL_NAME.to_string()];
-+    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    fallback.experimental_supported_tools = vec![TOOL_NAME.to_string()];
 +    let test = test_codex()
 +        .with_config(move |config| {
@@ -10500,7 +10854,7 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +        vec![
 +            sse_response(sse(vec![
 +                ev_assistant_message("message-primary-history", "history before reroute"),
-+                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
 +            ])),
 +            sse_response(sse(vec![overload_failure])),
 +            sse_response(sse(vec![
@@ -10511,17 +10865,27 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +                        "encrypted_content": "test-routed-compaction-summary"
 +                    }
 +                }),
-+                ev_completed_with_tokens("response-fallback-compact", 10),
++                ev_completed_with_tokens("response-fallback-compact", /*total_tokens*/ 10),
 +            ])),
 +            sse_response(sse_completed("response-fallback-final")),
 +        ],
 +    )
 +    .await;
-+    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    primary.context_window = Some(100_000);
 +    primary.auto_compact_token_limit = Some(90_000);
 +    primary.comp_hash = None;
-+    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    fallback.context_window = Some(10_000);
 +    fallback.auto_compact_token_limit = Some(9_000);
 +    fallback.comp_hash = None;
@@ -10610,7 +10974,7 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +        vec![
 +            sse_response(sse(vec![
 +                ev_assistant_message("message-primary-history", "history before reroute"),
-+                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
 +            ])),
 +            sse_response(sse(vec![overload_failure()])),
 +            sse_response(sse(vec![
@@ -10621,13 +10985,28 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +        ],
 +    )
 +    .await;
-+    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    primary.context_window = Some(100_000);
 +    primary.auto_compact_token_limit = Some(90_000);
-+    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    fallback.context_window = Some(10_000);
 +    fallback.auto_compact_token_limit = Some(9_000);
-+    let mut second_fallback = catalog_model(SECOND_FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut second_fallback = catalog_model(
++        SECOND_FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    second_fallback.context_window = Some(100_000);
 +    second_fallback.auto_compact_token_limit = Some(90_000);
 +    let test = test_codex()
@@ -10716,17 +11095,27 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +        vec![
 +            sse_response(sse(vec![
 +                ev_assistant_message("message-primary-history", "history before reroute"),
-+                ev_completed_with_tokens("response-primary-history", 20_000),
++                ev_completed_with_tokens("response-primary-history", /*total_tokens*/ 20_000),
 +            ])),
 +            sse_response(sse(vec![overload_failure])),
 +            sse_response(sse_completed("response-fallback-final")),
 +        ],
 +    )
 +    .await;
-+    let mut primary = catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None);
++    let mut primary = catalog_model(
++        PRIMARY,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    primary.context_window = Some(100_000);
 +    primary.auto_compact_token_limit = Some(90_000);
-+    let mut fallback = catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None);
++    let mut fallback = catalog_model(
++        FALLBACK,
++        &[ReasoningEffort::Medium],
++        &[],
++        /*default_service_tier*/ None,
++    );
 +    fallback.context_window = Some(10_000);
 +    fallback.auto_compact_token_limit = Some(9_000);
 +    let test = test_codex()
@@ -10842,8 +11231,18 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +            ]);
 +            config.model_catalog = Some(ModelsResponse {
 +                models: vec![
-+                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
-+                    catalog_model(FALLBACK, &[ReasoningEffort::High], &[], None),
++                    catalog_model(
++                        PRIMARY,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
++                    catalog_model(
++                        FALLBACK,
++                        &[ReasoningEffort::High],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
 +                ],
 +            });
 +        })
@@ -10889,8 +11288,18 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +            ]);
 +            config.model_catalog = Some(ModelsResponse {
 +                models: vec![
-+                    catalog_model(PRIMARY, &[ReasoningEffort::Medium], &[], None),
-+                    catalog_model(FALLBACK, &[ReasoningEffort::Medium], &[], None),
++                    catalog_model(
++                        PRIMARY,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
++                    catalog_model(
++                        FALLBACK,
++                        &[ReasoningEffort::Medium],
++                        &[],
++                        /*default_service_tier*/ None,
++                    ),
 +                ],
 +            });
 +        })
@@ -10936,7 +11345,7 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +            });
 +            config
 +                .features
-+                .set_enabled(Feature::FastMode, true)
++                .set_enabled(Feature::FastMode, /*enabled*/ true)
 +                .expect("enable fast mode");
 +        })
 +        .build(&server)
@@ -10982,7 +11391,7 @@ index 0000000000000000000000000000000000000000..3ff01fd43d1e4b1f1de7faafbbf15aef
 +            });
 +            config
 +                .features
-+                .set_enabled(Feature::FastMode, false)
++                .set_enabled(Feature::FastMode, /*enabled*/ false)
 +                .expect("disable fast mode");
 +        })
 +        .build(&server)
@@ -11813,6 +12222,21 @@ index 0000000000000000000000000000000000000000..04162582ffc21f2fe7e7eab5ce17785c
 +
 +    Ok(())
 +}
+diff --git a/codex-rs/core/tests/suite/model_runtime_selectors.rs b/codex-rs/core/tests/suite/model_runtime_selectors.rs
+index 2c3de12486e776ad8f1f2da7ca64b7c339a20ec7..db4e3a29890fffb8ea3c59f11620ea183f22fd01 100644
+--- a/codex-rs/core/tests/suite/model_runtime_selectors.rs
++++ b/codex-rs/core/tests/suite/model_runtime_selectors.rs
+@@ -438,6 +438,10 @@ async fn remote_multi_agent_selector_uses_model_selected_before_first_turn() ->
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_config(|config| {
+             config.model = Some(ROOT_MODEL.to_string());
++            config
++                .features
++                .disable(Feature::MultiAgentV2)
++                .expect("let the remote catalog choose the version for this fixture");
+         });
+     let test = builder.build(&server).await?;
+     assert_eq!(
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
 index 9085357b682a2c550a933f271a657f2b220daad1..1e349494befd44df2c8369615b443b428b8c11ec 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
@@ -12008,6 +12432,57 @@ index d9741d0381b742b2d49c4705029e2faffa1ad3a6..09344a06cfbf4c3a8c682761a0d6845d
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn connection_failure_pauses_retry_budget_until_provider_is_reachable() -> anyhow::Result<()>
  {
+diff --git a/codex-rs/core/tests/suite/window_headers.rs b/codex-rs/core/tests/suite/window_headers.rs
+index 22bbd2d8e00bfbb1f5055d938a9c348a34d788cb..1238dd7b3b5d6bcc42f3520d7f026ecb14c32006 100644
+--- a/codex-rs/core/tests/suite/window_headers.rs
++++ b/codex-rs/core/tests/suite/window_headers.rs
+@@ -48,21 +48,30 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
+     });
+     let initial = builder.build(&server).await?;
+     let initial_thread = Arc::clone(&initial.codex);
+-    let rollout_path = initial
+-        .session_configured
+-        .rollout_path
+-        .clone()
+-        .expect("rollout path");
+
+     submit_user_turn(&initial_thread, "before compact").await?;
+     submit_compact_turn(&initial_thread).await?;
+     submit_user_turn(&initial_thread, "after compact").await?;
++    let rollout_path = codex_rollout::find_thread_path_by_id_str(
++        initial.config.codex_home.as_path(),
++        &initial.session_configured.session_id.to_string(),
++        None,
++    )
++    .await?
++    .expect("current rollout path");
+     shutdown_thread(&initial_thread).await?;
+
+     let resumed = builder
+-        .resume(&server, initial.home.clone(), rollout_path.clone())
++        .resume(
++            &server,
++            initial.home.clone(),
++            rollout_path
++                .strip_prefix(initial.home.path())?
++                .to_path_buf(),
++        )
+         .await?;
+     submit_user_turn(&resumed.codex, "after resume").await?;
++    let rollout_path = resumed.codex.rollout_path().expect("migrated rollout path");
+     shutdown_thread(&resumed.codex).await?;
+
+     let forked = resumed
+@@ -74,7 +83,8 @@ async fn window_id_advances_after_compact_persists_on_resume_and_resets_on_fork(
+             /*thread_source*/ None,
+             /*parent_trace*/ None,
+         )
+-        .await?;
++        .await
++        .expect("fork after migration and resume");
+     submit_user_turn(&forked.thread, "after fork").await?;
+     shutdown_thread(&forked.thread).await?;
+
 diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs b/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs
 index 9b60a471ebb6b07c1c39c02285163e6412c39cca..19863ed96621018a22e932a58f1ab145d77f909c 100644
 --- a/codex-rs/ext/guardian-v2/src/async_scorer/metrics.rs

@@ -1,7 +1,0 @@
-Retry failed goal supervisor startup
-
-Combine the existing implementation and corrections:
-
-- Retry failed goal supervisor startup
-
-Original-commit: 54ec03a5304592ed331ec85827a31c85b075f20d

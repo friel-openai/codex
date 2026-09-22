@@ -1,7 +1,0 @@
-Share MCP connections across an agent tree
-
-Combine the existing implementation and corrections:
-
-- Share MCP connections across agent trees
-
-Original-commit: 6574098e959acb66e26c87f979f5710536ec10b6

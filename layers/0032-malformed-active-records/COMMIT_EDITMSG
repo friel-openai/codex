@@ -1,7 +1,0 @@
-Keep valid history readable after a damaged active record
-
-Combine the existing implementation and corrections:
-
-- Keep damaged active rollouts readable across resume
-
-Original-commit: 49de0d8a01ba5d393748de0e60dd397c3e15e3c7

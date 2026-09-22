@@ -498,11 +498,86 @@ index ed0f14659c4eded6bb3c68f7d8fe4c59327de2b9..2ccb5b173331cbeb0e446e9eb779ca76
          let separate_guardian_developer_message =
              crate::guardian::is_basic_session_source(&session_source);
          // Keep the guardian policy prompt out of the aggregated developer bundle so it
+diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
+index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b153fc2639 100644
+--- a/codex-rs/core/src/session/step_settings.rs
++++ b/codex-rs/core/src/session/step_settings.rs
+@@ -4,6 +4,7 @@ use crate::config::Constrained;
+ use crate::config::ConstraintError;
+ use crate::config::ConstraintResult;
+ use codex_config::ConfigRequirements;
++use codex_models_manager::CustomModelConfig;
+ use codex_models_manager::ModelsManagerConfig;
+ use codex_models_manager::manager::ModelsManager;
+ use codex_otel::SessionTelemetry;
+@@ -16,6 +17,7 @@ use codex_protocol::config_types::ServiceTier;
+ use codex_protocol::openai_models::ModelInfo;
+ use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::AskForApproval;
++use std::collections::HashMap;
+ use std::sync::Arc;
+
+ /// Model and execution settings selected for an individual model step within
+@@ -174,7 +176,7 @@ impl ResolvedStepSettings {
+     }
+ }
+
+-/// Explicit startup overrides applied to catalog-derived model metadata.
++/// Per-thread overrides applied to catalog-derived model metadata.
+ /// Construct from `Config::to_models_manager_config()` so model-derived base
+ /// instructions are not mistaken for explicit overrides.
+ #[derive(Clone, Debug, Default, PartialEq, Eq)]
+@@ -183,6 +185,8 @@ pub(crate) struct ModelInfoOverrides {
+     pub(crate) auto_compact_token_limit: Option<i64>,
+     pub(crate) tool_output_token_limit: Option<usize>,
+     pub(crate) base_instructions: Option<String>,
++    /// Thread-local alias definitions must take precedence over the shared picker catalog.
++    pub(crate) custom_models: HashMap<String, CustomModelConfig>,
+ }
+
+ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+@@ -192,6 +196,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+             auto_compact_token_limit: config.model_auto_compact_token_limit,
+             tool_output_token_limit: config.tool_output_token_limit,
+             base_instructions: config.base_instructions,
++            custom_models: config.custom_models,
+         }
+     }
+ }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index d16b01849b7850e7162f3f79eff6164faece643f..f451f1b02b1d574295b0fce491ca38598fe53c71 100644
+index d16b01849b7850e7162f3f79eff6164faece643f..d21e883d4ff1e0f0d56d63ad709c58334663d700 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -12710,3 +12710,119 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
+@@ -2779,12 +2779,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
+     let history_before_seed = session.state.lock().await.clone_history();
+     assert_eq!(expected, raw_history_items(&history_before_seed));
+
++    // Rendering after persistence would deduplicate the newly inserted role
++    // prompt and would no longer describe this first context update.
++    let initial_context = build_initial_context(&session, &turn_context).await;
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
+     session
+         .record_context_updates_and_set_reference_context_item(&step_context)
+         .await
+         .expect("world state should build");
+-    let initial_context = build_initial_context(&session, &turn_context).await;
+     expected.extend(initial_context);
+     let history_after_seed = session.clone_history().await;
+     assert_eq!(
+@@ -3672,6 +3674,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
+
+     let mut builder = test_codex().with_config(|config| {
+         config.update_plan_enabled = true;
++        config
++            .features
++            .disable(Feature::AgentPromptInjection)
++            .unwrap();
++        config.features.disable(Feature::MultiAgentV2).unwrap();
++        config.features.disable(Feature::Collab).unwrap();
+         config.permissions.approval_policy =
+             codex_config::Constrained::allow_any(AskForApproval::OnRequest);
+     });
+@@ -12710,3 +12718,119 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
 
      Ok(())
  }
@@ -681,6 +756,18 @@ index 0000000000000000000000000000000000000000..bd45150ed0f68eb60e871d2e9bbca497
 +## Reporting Expectations
 +
 +When you've completed your task, report back with outcomes, file(s) changed, commands run, how you verified your work, and context needed for the parent agent to evaluate your work and determine what to do next.
+diff --git a/codex-rs/core/tests/suite/agents_md.rs b/codex-rs/core/tests/suite/agents_md.rs
+index 979077370613209ca3dcf1033e50284ef57c6f58..ff4d1f6762bc042be9d963b30c820ac9e348c601 100644
+--- a/codex-rs/core/tests/suite/agents_md.rs
++++ b/codex-rs/core/tests/suite/agents_md.rs
+@@ -1512,6 +1512,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()>
+         .with_home(Arc::clone(&home))
+         .with_config(|config| {
+             let _ = config.features.enable(Feature::Collab);
++            let _ = config.features.disable(Feature::MultiAgentV2);
+             let _ = config.features.disable(Feature::EnableRequestCompression);
+         });
+     let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/auto_review.rs b/codex-rs/core/tests/suite/auto_review.rs
 index e5291445894cd39a344d7600126325a248319a72..73ad0f4a477fa7216a34c798e749c82c8127bd68 100644
 --- a/codex-rs/core/tests/suite/auto_review.rs
@@ -693,6 +780,121 @@ index e5291445894cd39a344d7600126325a248319a72..73ad0f4a477fa7216a34c798e749c82c
          display_name: format!("{slug} display"),
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
+diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
+index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088614f4ff6 100644
+--- a/codex-rs/core/tests/suite/compact.rs
++++ b/codex-rs/core/tests/suite/compact.rs
+@@ -1323,9 +1323,11 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+                 // relevant to compaction behavior and can change as bundled prompts evolve.
+                 let role = value.get("role").and_then(|role| role.as_str());
+                 if role == Some("developer")
+-                    && texts
+-                        .into_iter()
+-                        .any(|text| text.contains("`sandbox_mode`"))
++                    && texts.into_iter().any(|text| {
++                        text.contains("`sandbox_mode`")
++                            || text.starts_with("You are `/root`, the primary agent")
++                            || text.starts_with("<multi_agent_mode>")
++                    })
+                 {
+                     return None;
+                 }
+@@ -1352,10 +1354,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+         let input = body.get("input").and_then(|v| v.as_array()).unwrap();
+         let input = normalize_inputs(input);
+         assert_eq!(input.len(), 3);
+-        let environment_message = input[0]["content"][0]["text"].as_str().unwrap();
++        let actual_environment_message = input[0]["content"][0]["text"].as_str().unwrap();
+         let user_message_received = input[1]["content"][0]["text"].as_str().unwrap();
+         let summary_message = input[2]["content"][0]["text"].as_str().unwrap();
+-        assert_eq!(environment_message, environment_message);
++        assert_eq!(actual_environment_message, environment_message);
+         assert_eq!(user_message_received, user_message);
+         assert_eq!(
+             summary_message, expected_summary,
+@@ -5082,17 +5084,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+         ev_assistant_message("m1", FIRST_REPLY),
+         ev_completed_with_tokens("r1", /*total_tokens*/ 500),
+     ]);
+-    let mut responses = vec![first_turn];
+-    responses.extend(
+-        (0..5).map(|_| {
+-            sse_failed(
+-                "compact-failed",
+-                "context_length_exceeded",
+-                "Your input exceeds the context window of this model. Please adjust your input and try again.",
+-            )
+-        }),
++    let first_turn_log = mount_sse_once(&server, first_turn).await;
++    let failure = sse_failed(
++        "compact-failed",
++        "context_length_exceeded",
++        CONTEXT_LIMIT_MESSAGE,
+     );
+-    let request_log = mount_sse_sequence(&server, responses).await;
++    let request_log = mount_sse_once(&server, failure.clone()).await;
++    // Compaction drops one historical item per retry. Keep failing regardless
++    // of how many bundled instruction messages precede the user's history.
++    wiremock::Mock::given(wiremock::matchers::method("POST"))
++        .and(wiremock::matchers::path("/v1/responses"))
++        .respond_with(sse_response(failure))
++        .with_priority(6)
++        .mount(&server)
++        .await;
+
+     let mut model_provider = non_openai_model_provider(&server);
+     model_provider.stream_max_retries = Some(0);
+@@ -5132,10 +5138,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+     wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
+
+     let requests = request_log.requests();
+-    assert!(
+-        requests.len() >= 2,
+-        "expected first turn and at least one compaction request"
+-    );
++    first_turn_log.single_request();
++    assert_eq!(requests.len(), 1, "expected the first compaction request");
+
+     insta::assert_snapshot!(
+         "pre_turn_compaction_context_window_exceeded_shapes",
+@@ -5143,7 +5147,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+             "Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
+             &[(
+                 "Local Compaction Request (Incoming User Excluded)",
+-                &requests[1]
++                &requests[0]
+             ),]
+         )
+     );
+@@ -5329,6 +5333,10 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
+             config.model_provider = provider;
+             config.model_context_window = Some(100);
+             config.model_auto_compact_token_limit = Some(90);
++            config
++                .features
++                .enable(Feature::AgentPromptInjection)
++                .expect("retain the root role during compaction");
+         });
+     let test = builder.build(&server).await?;
+
+@@ -5355,6 +5363,17 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
+     assert_single_instruction_fragment(&requests[0], &expected_fragment);
+     assert_single_instruction_fragment(&requests[1], &expected_fragment);
+     assert_single_instruction_fragment(&requests[2], &expected_fragment);
++    for request in &requests {
++        assert_eq!(
++            request
++                .message_input_texts("developer")
++                .iter()
++                .filter(|text| text.contains("# You are the Root Agent"))
++                .count(),
++            1,
++            "initial, compact, and replacement requests each retain exactly one role prompt",
++        );
++    }
+     assert_eq!(
+         test.codex.instruction_sources().await,
+         vec![PathUri::from_abs_path(&source)],
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
 index 7443b63188dcb6468f877ada98ba6c146ce557a8..9085357b682a2c550a933f271a657f2b220daad1 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
@@ -841,6 +1043,713 @@ index ce4c1c66b71a89ca619699ed602d544fac7122ec..0ea6200c1fd51be8f9da512dcfdaeaa8
                  display_name: "RMCP Text Only".to_string(),
                  description: Some("Test model without image input support".to_string()),
                  default_reasoning_level: None,
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
+index daa7700601e993ceebb6ae18390e74df5e1453bd..9c81f0bb4bd87eff0a457d4c7d86364076a37739 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
+@@ -5,15 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Manual /compact with prior user
+ Scenario: Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.
+
+ ## Local Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:first manual turn
+-03:message/assistant:FIRST_REPLY
+-04:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:first manual turn
++05:message/assistant:FIRST_REPLY
++06:message/user:<SUMMARIZATION_PROMPT>
+
+ ## Local Post-Compaction History Layout
+ 00:message/user:first manual turn
+ 01:message/user:<COMPACTION_SUMMARY>\nFIRST_MANUAL_SUMMARY
+-02:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-04:message/user:second manual turn
++02:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++06:message/user:second manual turn
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
+index 6007a02a111ea6f515894fb39968f61083c5a2d8..4fdc7434cabf4e18643eaaab39fcaa9fea27bae6 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
+@@ -9,6 +9,10 @@ Scenario: Manual /compact with no prior user turn currently still issues a compa
+
+ ## Local Post-Compaction History Layout
+ 00:message/user:<COMPACTION_SUMMARY>\nMANUAL_EMPTY_SUMMARY
+-01:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-03:message/user:AFTER_MANUAL_EMPTY_COMPACT
++01:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++05:message/user:AFTER_MANUAL_EMPTY_COMPACT
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
+index ab46355e356de535a12c3d11e8f3b4dbfebed76f..c96ea078ca1807854bd31e2f6c93acb2530fb6b2 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
+@@ -5,15 +5,23 @@ expression: "format_labeled_requests_snapshot(\"True mid-turn continuation compa
+ Scenario: True mid-turn continuation compaction after tool output: compact request includes tool artifacts, and the continuation request includes the summary in the same turn.
+
+ ## Local Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:function call limit push
+-03:function_call/test_tool
+-04:function_call_output:unsupported call: test_tool
+-05:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:function call limit push
++05:function_call/test_tool
++06:function_call_output:unsupported call: test_tool
++07:message/user:<SUMMARIZATION_PROMPT>
+
+ ## Local Post-Compaction History Layout
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:function call limit push
+-03:message/user:<COMPACTION_SUMMARY>\nAUTO_SUMMARY
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:function call limit push
++05:message/user:<COMPACTION_SUMMARY>\nAUTO_SUMMARY
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
+index d63924a44aae66561ba53b2865a36865617a06e3..1c5533d277bf891af5c0f16fe0dc4a6747ad7538 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
+@@ -5,22 +5,33 @@ expression: "format_labeled_requests_snapshot(\"Pre-sampling compaction on model
+ Scenario: Pre-sampling compaction on model switch to a smaller context window: current behavior compacts using prior-turn history only (incoming user message excluded), and the follow-up request carries compacted history plus the new user message.
+
+ ## Initial Request (Previous Model)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:before switch
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:before switch
+
+ ## Pre-sampling Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:before switch
+-03:message/assistant:before switch
+-04:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:before switch
++05:message/assistant:before switch
++06:message/user:<SUMMARIZATION_PROMPT>
+
+ ## Post-Compaction Follow-up Request (Next Model)
+ 00:message/user:before switch
+ 01:message/user:<COMPACTION_SUMMARY>\nPRE_SAMPLING_SUMMARY
+-02:message/developer[2]:
++02:message/developer[3]:
+     [01] <model_switch>\nThe user was previously using a different model....
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-04:message/user:after switch
++    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++06:message/user:after switch
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
+index 9df96774c8e716f2b8f84adb4f5543d9810587d1..f7f4bff9d653ca00fe62258dbbbfbf14ea56fdae 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
+@@ -5,8 +5,12 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction context
+ Scenario: Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.
+
+ ## Local Compaction Request (Incoming User Excluded)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:FIRST_REPLY
+-04:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:FIRST_REPLY
++06:message/user:<SUMMARIZATION_PROMPT>
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
+index 679081353e468cb5f471bd8f65d8cda22350ca74..1e2f4a6dd2947c9ddea2b019fa13c3382cb98e67 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
+@@ -5,20 +5,28 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction with a
+ Scenario: Pre-turn auto-compaction with a context override emits the context diff in the compact request while the incoming user message is still excluded.
+
+ ## Local Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:FIRST_REPLY
+-04:message/user:USER_TWO
+-05:message/assistant:SECOND_REPLY
+-06:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:FIRST_REPLY
++06:message/user:USER_TWO
++07:message/assistant:SECOND_REPLY
++08:message/user:<SUMMARIZATION_PROMPT>
+
+ ## Local Post-Compaction History Layout
+ 00:message/user:USER_ONE
+ 01:message/user:USER_TWO
+ 02:message/user:<COMPACTION_SUMMARY>\nPRE_TURN_SUMMARY
+-03:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
+-05:message/user[2]:
++03:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++04:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++05:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
++07:message/user[2]:
+     [01] <input_image:detail,image_url>
+     [02] USER_THREE
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
+index 6dd728d5b8960cff55a19097c51170c7be0c1410..a668a37735d5294475c6eac411b4b2144a0cfd34 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
+@@ -5,22 +5,33 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn compaction during model
+ Scenario: Pre-turn compaction during model switch (without pre-sampling model-switch compaction): current behavior strips incoming <model_switch> from the compact request and restores it in the post-compaction follow-up request.
+
+ ## Initial Request (Previous Model)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:BEFORE_SWITCH_USER
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:BEFORE_SWITCH_USER
+
+ ## Local Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:BEFORE_SWITCH_USER
+-03:message/assistant:BEFORE_SWITCH_REPLY
+-04:message/user:<SUMMARIZATION_PROMPT>
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:BEFORE_SWITCH_USER
++05:message/assistant:BEFORE_SWITCH_REPLY
++06:message/user:<SUMMARIZATION_PROMPT>
+
+ ## Local Post-Compaction History Layout
+ 00:message/user:BEFORE_SWITCH_USER
+ 01:message/user:<COMPACTION_SUMMARY>\nPRETURN_SWITCH_SUMMARY
+-02:message/developer[2]:
++02:message/developer[3]:
+     [01] <model_switch>\nThe user was previously using a different model....
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-04:message/user:AFTER_SWITCH_USER
++    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++06:message/user:AFTER_SWITCH_USER
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
+index 196206a674a4ad4caeaa78cfe359e0eb1c41fdc1..06f0a0cf37d49ad5dee36d7bd4fac89473f225ee 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
+@@ -5,17 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact while rea
+ Scenario: Remote manual /compact while realtime remains active: the next regular turn restates realtime-start instructions after compaction clears the baseline.
+
+ ## Remote Compaction Request
+-00:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:REMOTE_FIRST_REPLY
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:REMOTE_FIRST_REPLY
+
+ ## Remote Post-Compaction History Layout
+ 00:compaction:encrypted=true
+-01:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-03:message/user:USER_TWO
++01:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++05:message/user:USER_TWO
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
+index 8b61ee61589ac653031057d335d881853f91cd32..815b8e5df341b76162ea45154ecbd299a4fc9529 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
+@@ -5,13 +5,21 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact where rem
+ Scenario: Remote manual /compact where remote compact output is compaction-only: follow-up layout uses the returned compaction item plus new user message.
+
+ ## Remote Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:hello remote compact
+-03:message/assistant:FIRST_REMOTE_REPLY
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:hello remote compact
++05:message/assistant:FIRST_REMOTE_REPLY
+
+ ## Remote Post-Compaction History Layout
+ 00:compaction:encrypted=true
+-01:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-03:message/user:after compact
++01:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++05:message/user:after compact
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
+index 5a616330b8874be066159779a948d2318a31108e..b1310ea74a92ee9be86ceaf4c4e19e9160e679df 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
+@@ -5,6 +5,10 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact with no p
+ Scenario: Remote manual /compact with no prior user turn skips the remote compact request; the follow-up turn carries canonical context and new user message.
+
+ ## Remote Post-Compaction History Layout
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
+index 59e68c368aaa7d3fae235380f4a6b7eafc14fd3b..4f1e51467fff04411d053f35cb7e37d8176c96be 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
+@@ -5,28 +5,38 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn continuation com
+ Scenario: Remote mid-turn continuation compaction after realtime was closed before the turn: the initial second-turn request emits realtime-end instructions, but the continuation request does not restate them after compaction because the current turn already established the inactive baseline.
+
+ ## Second Turn Initial Request
+-00:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:SETUP_USER
+-03:message/assistant:REMOTE_SETUP_REPLY
+-04:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
+-05:message/user:USER_TWO
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:SETUP_USER
++05:message/assistant:REMOTE_SETUP_REPLY
++06:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
++07:message/user:USER_TWO
+
+ ## Remote Compaction Request
+-00:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:SETUP_USER
+-03:message/assistant:REMOTE_SETUP_REPLY
+-04:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
+-05:message/user:USER_TWO
+-06:function_call/test_tool
+-07:function_call_output:unsupported call: test_tool
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:SETUP_USER
++05:message/assistant:REMOTE_SETUP_REPLY
++06:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
++07:message/user:USER_TWO
++08:function_call/test_tool
++09:function_call_output:unsupported call: test_tool
+
+ ## Remote Post-Compaction History Layout
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:compaction:encrypted=true
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:compaction:encrypted=true
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
+index e84d4352dec9b73739be58a04813a562c66b8c45..99c8c940a9c6275a6b477241651db7f892f77f49 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
+@@ -11,6 +11,10 @@ Scenario: After a prior manual /compact produced an older remote compaction item
+ ## Second Turn Request (After Compaction)
+ 00:message/user:USER_ONE
+ 01:compaction:encrypted=true
+-02:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-04:message/user:USER_TWO
++02:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++06:message/user:USER_TWO
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
+index 388aee9981a3eb4dcfd8bfcaf81d92eea6b02b32..1525c61e7924b1290e3c3215b6e71523cb19c276 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
+@@ -5,14 +5,22 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn continuation com
+ Scenario: Remote mid-turn continuation compaction after tool output: compact request includes tool artifacts and the follow-up request includes the returned compaction item.
+
+ ## Remote Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:function_call/test_tool
+-04:function_call_output:unsupported call: test_tool
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:function_call/test_tool
++06:function_call_output:unsupported call: test_tool
+
+ ## Remote Post-Compaction History Layout
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:compaction:encrypted=true
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:compaction:encrypted=true
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
+index 5633154dc6472fc525bccbd10f3db538dba637ef..f4bccf10a82ca4b1373d893f139e21ab703fdac6 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
+@@ -5,13 +5,21 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn compaction where
+ Scenario: Remote mid-turn compaction where compact output has only a compaction item: continuation layout reinjects context before that compaction item.
+
+ ## Remote Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:function_call/test_tool
+-04:function_call_output:unsupported call: test_tool
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:function_call/test_tool
++06:function_call_output:unsupported call: test_tool
+
+ ## Remote Post-Compaction History Layout
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:compaction:encrypted=true
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:compaction:encrypted=true
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
+index 4c7644281638cb227d6e464fc4df0d4a86056c09..ae0d90346be368ec9a02fde347d0a5ffafd92187 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
+@@ -5,7 +5,11 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
+ Scenario: Remote pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.
+
+ ## Remote Compaction Request (Incoming User Excluded)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:REMOTE_FIRST_REPLY
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:REMOTE_FIRST_REPLY
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
+index b6644e749cdbaecff9052777f21e9ae5f3f4aa7d..b11d71f58fd35f204a36d2f876d97d5a10665593 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
+@@ -5,7 +5,11 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
+ Scenario: Remote pre-turn auto-compaction parse failure: compaction request excludes the incoming user message and the turn stops.
+
+ ## Remote Compaction Request (Incoming User Excluded)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:turn that exceeds token threshold
+-03:message/assistant:initial turn complete
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:turn that exceeds token threshold
++05:message/assistant:initial turn complete
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
+index d1192b4da1619af8920a31b357aa2b621f1f716d..7624939364373fc91abd5aa0dbf6e647cea7abfe 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
+@@ -5,17 +5,25 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
+ Scenario: Remote pre-turn auto-compaction with a context override emits the context diff in the compact request while excluding the incoming user message.
+
+ ## Remote Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:REMOTE_FIRST_REPLY
+-04:message/user:USER_TWO
+-05:message/assistant:REMOTE_SECOND_REPLY
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:REMOTE_FIRST_REPLY
++06:message/user:USER_TWO
++07:message/assistant:REMOTE_SECOND_REPLY
+
+ ## Remote Post-Compaction History Layout
+ 00:message/user:USER_ONE
+ 01:message/user:USER_TWO
+ 02:compaction:encrypted=true
+-03:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
+-05:message/user:USER_THREE
++03:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++04:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++05:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
++07:message/user:USER_THREE
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
+index 87abe26618813d8e7bc2e56f0252ad86cb3108ab..187910e422364eda07f779cd0496fe26eafc55a8 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
+@@ -5,17 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
+ Scenario: Remote pre-turn auto-compaction while realtime remains active: compaction clears the reference baseline, so the follow-up request restates realtime-start instructions.
+
+ ## Remote Compaction Request
+-00:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:USER_ONE
+-03:message/assistant:REMOTE_FIRST_REPLY
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:USER_ONE
++05:message/assistant:REMOTE_FIRST_REPLY
+
+ ## Remote Post-Compaction History Layout
+ 00:compaction:encrypted=true
+-01:message/developer[2]:
+-    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-03:message/user:USER_TWO
++01:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++05:message/user:USER_TWO
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
+index 72fcffea42464e8377584007e2b3b5dbce92b817..81af215119484326d0efe9e1197be8e912581fcf 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
+@@ -5,21 +5,32 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn compaction durin
+ Scenario: Remote pre-turn compaction during model switch currently excludes incoming user input, strips incoming <model_switch> from the compact request payload, and restores it in the post-compaction follow-up request.
+
+ ## Initial Request (Previous Model)
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:BEFORE_SWITCH_USER
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:BEFORE_SWITCH_USER
+
+ ## Remote Compaction Request
+-00:message/developer:<PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:BEFORE_SWITCH_USER
+-03:message/assistant:BEFORE_SWITCH_REPLY
++00:message/developer[2]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:BEFORE_SWITCH_USER
++05:message/assistant:BEFORE_SWITCH_REPLY
+
+ ## Remote Post-Compaction History Layout
+ 00:message/user:BEFORE_SWITCH_USER
+ 01:compaction:encrypted=true
+-02:message/developer[2]:
++02:message/developer[3]:
+     [01] <model_switch>\nThe user was previously using a different model....
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-04:message/user:AFTER_SWITCH_USER
++    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [03] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
++04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
++05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++06:message/user:AFTER_SWITCH_USER
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
+index 7b91b52cdfd573545315e3761185dc8cf88ceb69..544aca77a58d383e62eef76eecd009558cb51586 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
+@@ -5,18 +5,24 @@ expression: "format_labeled_requests_snapshot(\"First post-resume turn where pre
+ Scenario: First post-resume turn where pre-turn override sets model to rollout model; no model-switch update should appear.
+
+ ## Last Request Before Resume
+-00:message/developer[2]:
+-    [01] <SKILLS_INSTRUCTIONS>
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:seed resume history
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a multi-agent Codex session. Until you...
++    [02] <SKILLS_INSTRUCTIONS>
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. Any earlier developer instruction ...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:seed resume history
+
+ ## First Request After Resume + Override
+-00:message/developer[2]:
+-    [01] <SKILLS_INSTRUCTIONS>
+-    [02] <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
+-02:message/user:seed resume history
+-03:message/assistant:recorded before resume
+-04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
+-05:message/user:first resumed turn after model override
++00:message/developer[3]:
++    [01] # You are the Root Agent\n\nYou are the **root agent** in a multi-agent Codex session. Until you...
++    [02] <SKILLS_INSTRUCTIONS>
++    [03] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
++02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. Any earlier developer instruction ...
++03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
++04:message/user:seed resume history
++05:message/assistant:recorded before resume
++06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
++07:message/user:first resumed turn after model override
 diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
 index 5d451683b79ef51bf06074484a2af3ae7764e5f8..c5f00ae69033eacbefbeed15a8c1b397d96daae8 100644
 --- a/codex-rs/core/tests/suite/spawn_agent_description.rs

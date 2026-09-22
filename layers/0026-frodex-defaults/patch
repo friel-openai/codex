@@ -1,0 +1,1059 @@
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+index 4a1295cbf35ddd61e5bdfa25c350aa200f32cbf0..6128f84455262e3b4e75002909262b2226df06b1 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
+@@ -2714,18 +2714,29 @@ async fn thread_resume_keeps_paused_goal_paused() -> Result<()> {
+ }
+
+ #[tokio::test]
+-async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Result<()> {
+-    let server = create_mock_responses_server_repeating_assistant("Done").await;
++async fn app_server_restart_recovers_overdue_goal_with_default_supervisor() -> Result<()> {
++    let server = MockServer::start().await;
++    let response_mock = responses::mount_sse_once(
++        &server,
++        responses::sse(vec![
++            responses::ev_response_created("recovered-supervisor"),
++            responses::ev_function_call_with_namespace(
++                "recovered-snooze",
++                "supervisor",
++                "snooze",
++                r#"{"delay_seconds":3600}"#,
++            ),
++            responses::ev_completed("recovered-supervisor"),
++        ]),
++    )
++    .await;
+     let codex_home = TempDir::new()?;
+     mock_responses_config(&server.uri()).write(codex_home.path())?;
+     let config_path = codex_home.path().join("config.toml");
+     let config = std::fs::read_to_string(&config_path)?;
+     std::fs::write(
+         &config_path,
+-        config.replace(
+-            "personality = true\n",
+-            "personality = true\ngoals = true\ngoal_supervisor = true\n",
+-        ),
++        config.replace("personality = true\n", "personality = true\ngoals = true\n"),
+     )?;
+     let thread_id = create_fake_rollout(
+         codex_home.path(),
+@@ -2806,6 +2817,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
+     assert!(input.contains("# Goal Supervisor Assignment"));
+     assert!(input.contains("continue after app-server restart"));
+
++    timeout(DEFAULT_READ_TIMEOUT, async {
++        loop {
++            if state_db
++                .thread_goals()
++                .get_thread_goal_supervisor_snoozed_until_ms(thread_id, &goal.goal_id)
++                .await?
++                .is_some_and(|deadline| deadline > Utc::now().timestamp_millis())
++            {
++                break anyhow::Ok(());
++            }
++            tokio::time::sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await??;
++    // A successful helper snooze must not leave an ordinary parent continuation queued.
++    tokio::time::sleep(Duration::from_millis(200)).await;
++    assert_eq!(response_mock.requests().len(), 1);
++    let response_requests = server
++        .received_requests()
++        .await
++        .expect("wiremock should record requests")
++        .into_iter()
++        .filter(|request| request.url.path().ends_with("/responses"))
++        .count();
++    assert_eq!(
++        response_requests, 1,
++        "only the authorized helper may run after restart"
++    );
++    timeout(DEFAULT_READ_TIMEOUT, second.shutdown_gracefully()).await??;
++
+     Ok(())
+ }
+
+diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
+index 8b7e210bf851b9cb1dcd15c0979c9c40d795aa43..5e80e2beac82ca5844cb8861a3f12e07fd158140 100644
+--- a/codex-rs/core/config.schema.json
++++ b/codex-rs/core/config.schema.json
+@@ -2405,7 +2405,7 @@
+           "type": "integer"
+         },
+         "enable_thread_adoption": {
+-          "description": "Expose same-thread adoption and subagent promotion only when explicitly enabled.",
++          "description": "Expose same-thread adoption and subagent promotion unless explicitly disabled.",
+           "type": "boolean"
+         },
+         "enabled": {
+diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
+index 6d3a2c3fd5c245e3baa572a779e633e4437eff17..290687d4480b415c870ac0951c1cfb43ccc5a4b7 100644
+--- a/codex-rs/core/src/config/config_tests.rs
++++ b/codex-rs/core/src/config/config_tests.rs
+@@ -12075,9 +12075,11 @@ enabled = true
+     assert_eq!(
+         (
+             config.agent_max_threads,
++            config.multi_agent_v2.max_concurrent_threads_per_session,
++            config.effective_agent_max_threads(MultiAgentVersion::V1),
+             config.effective_agent_max_threads(MultiAgentVersion::V2)
+         ),
+-        (None, Some(3))
++        (None, 257, Some(256), Some(256))
+     );
+
+     Ok(())
+@@ -12210,24 +12212,39 @@ fn multi_agent_v2_exposes_model_overrides_by_default() {
+ }
+
+ #[test]
+-fn multi_agent_v2_thread_adoption_is_disabled_by_default() {
++fn frodex_maintained_agent_defaults_are_enabled() {
++    let features = codex_features::Features::with_defaults();
++    for feature in [
++        Feature::MultiAgentV2,
++        Feature::GoalSupervisor,
++        Feature::AgentPromptInjection,
++    ] {
++        assert!(features.enabled(feature), "{feature:?} must be enabled");
++    }
++
+     let config = resolve_multi_agent_v2_config(&ConfigToml::default());
++    assert!(config.enable_thread_adoption);
++}
+
+-    assert!(!config.enable_thread_adoption);
++#[test]
++fn multi_agent_v2_thread_adoption_is_enabled_by_default() {
++    let config = resolve_multi_agent_v2_config(&ConfigToml::default());
++
++    assert!(config.enable_thread_adoption);
+ }
+
+ #[test]
+-fn multi_agent_v2_thread_adoption_can_be_enabled_from_feature_table() {
++fn multi_agent_v2_thread_adoption_can_be_disabled_from_feature_table() {
+     let config_toml = toml::from_str(
+         r#"[features.multi_agent_v2]
+-enable_thread_adoption = true
++enable_thread_adoption = false
+ "#,
+     )
+     .expect("multi-agent v2 thread adoption config should parse");
+
+     let config = resolve_multi_agent_v2_config(&config_toml);
+
+-    assert!(config.enable_thread_adoption);
++    assert!(!config.enable_thread_adoption);
+ }
+
+ #[tokio::test]
+diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
+index 8628ac74ec433b95a67f1583af7854b2cbb61a8c..a48c68eddb2a01b74adf611db300ef216fde24e9 100644
+--- a/codex-rs/core/src/config/mod.rs
++++ b/codex-rs/core/src/config/mod.rs
+@@ -235,34 +235,13 @@ impl Default for GhostSnapshotConfig {
+ /// files are *silently truncated* to this size so we do not take up too much of
+ /// the context window.
+ pub(crate) const AGENTS_MD_MAX_BYTES: usize = DEFAULT_PROJECT_DOC_MAX_BYTES; // 32 KiB
+-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(6);
+-pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 4;
++// Frodex permits 256 children by default; the V2 session limit also counts the root.
++pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(256);
++pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_CONCURRENT_THREADS_PER_SESSION: usize = 257;
+ pub(crate) const DEFAULT_MULTI_AGENT_V2_MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
+ pub(crate) const DEFAULT_MULTI_AGENT_V2_MAX_WAIT_TIMEOUT_MS: i64 = 3600 * 1000;
+ pub(crate) const DEFAULT_MULTI_AGENT_V2_DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
+ const DEFAULT_MULTI_AGENT_V2_TOOL_NAMESPACE: &str = "collaboration";
+-const DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT: &str =
+-    "When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.";
+-const DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT: &str = r#"Note that collaboration tools cannot be called from inside `functions.exec`. Call `spawn_agent`, `send_message`, `followup_task`, `wait_agent`, `interrupt_agent`, and `list_agents` only as direct tool calls using the recipient shown in their tool definitions, such as `to=functions.collaboration.spawn_agent`, since they are intentionally absent from the `functions.exec` `tools.*` namespace. `frodex.close_agent` is a separate direct tool for closing an owned descendant agent. Available tools in `functions.exec` are explicitly described with a `tools` namespace in the developer message.
+-
+-All agents share the same directory. In detail:
+-- All agents have access to the same container and filesystem as you.
+-- All agents use the same current working directory.
+-- As a result, edits made by one agent are immediately visible to all other agents.
+-"#;
+-fn default_multi_agent_v2_usage_hint_text(
+-    usage_hint_text: &str,
+-    max_concurrency: usize,
+-    wait_agent_usage_hint_text: Option<&str>,
+-) -> String {
+-    let wait_agent_usage_hint_text = match wait_agent_usage_hint_text {
+-        Some(wait_agent_usage_hint_text) => format!("{wait_agent_usage_hint_text}\n\n"),
+-        None => String::new(),
+-    };
+-    format!(
+-        "{usage_hint_text}\n{DEFAULT_MULTI_AGENT_V2_SHARED_USAGE_HINT_TEXT}\n{wait_agent_usage_hint_text}There are {max_concurrency} available concurrency slots, meaning that up to {max_concurrency} agents can be active at once, including you."
+-    )
+-}
+
+ pub(crate) const HARD_MIN_MULTI_AGENT_V2_TIMEOUT_MS: i64 = 0;
+ pub(crate) const HARD_MAX_MULTI_AGENT_V2_TIMEOUT_MS: i64 =
+@@ -1320,7 +1299,7 @@ pub struct MultiAgentV2Config {
+     pub hide_spawn_agent_metadata: bool,
+     pub expose_spawn_agent_model_overrides: bool,
+     pub wait_agent_enabled: bool,
+-    /// Expose same-thread adoption and promotion only after explicit opt-in.
++    /// Expose same-thread adoption and promotion unless explicitly disabled.
+     pub enable_thread_adoption: bool,
+     pub non_code_mode_only: bool,
+ }
+@@ -1341,7 +1320,7 @@ impl MultiAgentV2Config {
+             hide_spawn_agent_metadata: true,
+             expose_spawn_agent_model_overrides: true,
+             wait_agent_enabled: true,
+-            enable_thread_adoption: false,
++            enable_thread_adoption: true,
+             non_code_mode_only: true,
+         }
+     }
+@@ -2780,39 +2759,6 @@ fn resolve_multi_agent_v2_config(config_toml: &ConfigToml) -> MultiAgentV2Config
+     let enable_thread_adoption = base
+         .and_then(|config| config.enable_thread_adoption)
+         .unwrap_or(default.enable_thread_adoption);
+-    let default_wait_agent_usage_hint_text = if wait_agent_enabled {
+-        Some(DEFAULT_MULTI_AGENT_V2_WAIT_AGENT_USAGE_HINT_TEXT)
+-    } else {
+-        None
+-    };
+-    let mut default_root_agent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+-        DEFAULT_MULTI_AGENT_V2_ROOT_AGENT_USAGE_HINT_TEXT,
+-        max_concurrent_threads_per_session,
+-        default_wait_agent_usage_hint_text,
+-    ));
+-    let mut default_subagent_usage_hint_text = Some(default_multi_agent_v2_usage_hint_text(
+-        DEFAULT_MULTI_AGENT_V2_SUBAGENT_USAGE_HINT_TEXT,
+-        max_concurrent_threads_per_session,
+-        default_wait_agent_usage_hint_text,
+-    ));
+-    if expose_spawn_agent_model_overrides {
+-        default_root_agent_usage_hint_text = Some(append_usage_hint_text(
+-            default_root_agent_usage_hint_text.as_deref(),
+-            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+-        ));
+-        default_subagent_usage_hint_text = Some(append_usage_hint_text(
+-            default_subagent_usage_hint_text.as_deref(),
+-            DEFAULT_MULTI_AGENT_V2_MODEL_OVERRIDE_USAGE_HINT_TEXT,
+-        ));
+-    }
+-    let root_agent_usage_hint_text = resolve_optional_prompt_text(
+-        base.map(|config| &config.root_agent_usage_hint_text),
+-        default_root_agent_usage_hint_text,
+-    );
+-    let subagent_usage_hint_text = resolve_optional_prompt_text(
+-        base.map(|config| &config.subagent_usage_hint_text),
+-        default_subagent_usage_hint_text,
+-    );
+     let subagent_developer_instructions = base
+         .and_then(|config| config.subagent_developer_instructions.as_ref())
+         .map(|instructions| instructions.trim().to_string());
+diff --git a/codex-rs/core/src/session/multi_agents.rs b/codex-rs/core/src/session/multi_agents.rs
+index 2d492d1d9de5c1c271e0687c8f438cfeebf18ba8..b74cdfbdd58bd08684217638c438ab6dd58152d8 100644
+--- a/codex-rs/core/src/session/multi_agents.rs
++++ b/codex-rs/core/src/session/multi_agents.rs
+@@ -3,7 +3,6 @@ use crate::context::MultiAgentRoleInstructions;
+ use crate::session::turn_context::TurnContext;
+ use codex_protocol::config_types::MultiAgentMode;
+ use codex_protocol::openai_models::MultiAgentRoleMessages;
+-use codex_protocol::openai_models::ReasoningEffort;
+ use codex_protocol::protocol::MultiAgentVersion;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::SubAgentSource;
+@@ -174,20 +173,14 @@ pub(crate) fn effective_multi_agent_mode(turn_context: &TurnContext) -> Option<M
+         .as_deref()
+         .or_else(|| catalog_mode.and_then(|mode| mode.hint_text.as_deref()));
+
+-    // A configured or catalog hint, including an empty string, defines a custom policy instead
+-    // of an effort-derived built-in policy.
++    // Custom hints, including empty strings, override Frodex's effort-independent proactive
++    // default. Catalog mode templates supply wording without restricting the reasoning effort.
+     let multi_agent_mode = match mode_hint_text {
+         Some(hint_text) => MultiAgentMode::Custom(hint_text.to_string()),
+-        None => match turn_context.effective_reasoning_effort() {
+-            Some(ReasoningEffort::Ultra) => catalog_mode
+-                .and_then(|messages| messages.proactive.clone())
+-                .map(MultiAgentMode::Custom)
+-                .unwrap_or(MultiAgentMode::Proactive),
+-            _ => catalog_mode
+-                .and_then(|messages| messages.explicit.clone())
+-                .map(MultiAgentMode::Custom)
+-                .unwrap_or(MultiAgentMode::ExplicitRequestOnly),
+-        },
++        None => catalog_mode
++            .and_then(|messages| messages.proactive.clone())
++            .map(MultiAgentMode::Custom)
++            .unwrap_or(MultiAgentMode::Proactive),
+     };
+
+     match &turn_context.session_source {
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index ae1d4ba31399494d19d96e142180dcd43198538a..885711bcd20565cc5cb8bef2a4856911dbe3944c 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -12118,6 +12118,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+         |config| {
+             if enable_multi_agent_v2 {
+                 let _ = config.features.enable(Feature::MultiAgentV2);
++            } else {
++                config
++                    .features
++                    .disable(Feature::MultiAgentV2)
++                    .expect("test config should disable V2");
+             }
+             config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
+             config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
+@@ -14787,16 +14792,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+ async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
+     let codex_home = tempfile::tempdir().expect("create temp dir");
+     let mut config = build_test_config(codex_home.path()).await;
+-    for feature in [
+-        Feature::AgentPromptInjection,
+-        Feature::Goals,
+-        Feature::GoalSupervisor,
+-    ] {
+-        config
+-            .features
+-            .enable(feature)
+-            .expect("test config should enable goal supervisor prompt injection");
+-    }
++    config
++        .features
++        .enable(Feature::Goals)
++        .expect("test config should enable goals");
+
+     let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
+         .await
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index b84ec115ec4c89eb3ca24fb84ccc4a94d21297ea..77ef08311fea29f4458696da59cf8c3ae86a98ff 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -955,7 +955,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
+ }
+
+ #[tokio::test]
+-async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
++async fn multi_agent_v2_ownership_transfer_can_be_explicitly_disabled() {
+     let (mut session, mut turn) = make_session_and_context().await;
+     let manager = thread_manager(&turn);
+     let root = manager
+@@ -965,6 +965,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+     session.services.agent_control = manager.agent_control();
+     session.thread_id = root.thread_id;
+     let mut config = (*turn.config).clone();
++    config.multi_agent_v2.enable_thread_adoption = false;
+     config
+         .features
+         .enable(Feature::MultiAgentV2)
+@@ -986,7 +987,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+         ))
+         .await
+     else {
+-        panic!("existing-thread adoption must be disabled by default");
++        panic!("existing-thread adoption must respect the explicit opt-out");
+     };
+     let Err(promote_error) = PromoteAgentHandler
+         .handle(invocation(
+@@ -997,7 +998,7 @@ async fn multi_agent_v2_ownership_transfer_is_disabled_by_default() {
+         ))
+         .await
+     else {
+-        panic!("subagent promotion must be disabled by default");
++        panic!("subagent promotion must respect the explicit opt-out");
+     };
+
+     let expected = FunctionCallError::RespondToModel(
+@@ -4560,12 +4561,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+         .expect("closed children should load");
+     assert_eq!(closed_children, Vec::<ThreadId>::new());
+
++    // The live root is listed separately; this assertion concerns only the unloaded worker.
+     let output = ListAgentsHandlerV2
+         .handle(invocation(
+             session.clone(),
+             turn.clone(),
+             "list_agents",
+-            function_payload(json!({})),
++            function_payload(json!({"path_prefix": "worker"})),
+         ))
+         .await
+         .expect("list_agents should succeed");
+diff --git a/codex-rs/core/src/tools/spec_plan_tests.rs b/codex-rs/core/src/tools/spec_plan_tests.rs
+index 3f6b7f8447505b9d1cfdfda8787b985fb1408f41..4a5d41dc6680163a2d086f36e2dc5aa0826bb765 100644
+--- a/codex-rs/core/src/tools/spec_plan_tests.rs
++++ b/codex-rs/core/src/tools/spec_plan_tests.rs
+@@ -2776,6 +2776,10 @@ async fn code_mode_excludes_default_namespace_tools() {
+
+ #[tokio::test]
+ async fn multi_agent_feature_selects_one_agent_tool_family() {
++    let default = probe(|_| {}).await;
++    default.assert_visible_contains(&[MULTI_AGENT_V2_NAMESPACE]);
++    default.assert_visible_lacks(&[MULTI_AGENT_V1_NAMESPACE]);
++
+     let v1 = probe(|turn| {
+         set_feature(turn, Feature::Collab, /*enabled*/ true);
+         set_feature(turn, Feature::MultiAgentV2, /*enabled*/ false);
+@@ -2921,9 +2925,11 @@ async fn multi_agent_feature_selects_one_agent_tool_family() {
+ }
+
+ #[tokio::test]
+-async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
++async fn multi_agent_v2_ownership_tools_use_separate_default_namespace() {
+     let disabled = probe(|turn| {
+-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
++        update_config(turn, |config| {
++            config.multi_agent_v2.enable_thread_adoption = false;
++        });
+     })
+     .await;
+
+@@ -2942,13 +2948,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
+             ))
+     );
+
+-    let enabled = probe(|turn| {
+-        set_feature(turn, Feature::MultiAgentV2, /*enabled*/ true);
+-        update_config(turn, |config| {
+-            config.multi_agent_v2.enable_thread_adoption = true;
+-        });
+-    })
+-    .await;
++    let enabled = probe(|_| {}).await;
+     assert_eq!(
+         enabled.namespace_function_names(FRODEX_AGENT_OWNERSHIP_NAMESPACE),
+         &[
+@@ -2974,7 +2974,7 @@ async fn multi_agent_v2_ownership_tools_use_separate_opt_in_namespace() {
+             )
+         })
+     else {
+-        panic!("explicit thread adoption must expose adopt_agent");
++        panic!("default thread adoption must expose adopt_agent");
+     };
+     let properties = adopt_agent
+         .parameters
+diff --git a/codex-rs/core/tests/suite/multi_agent_mode.rs b/codex-rs/core/tests/suite/multi_agent_mode.rs
+index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d477ea4ea 100644
+--- a/codex-rs/core/tests/suite/multi_agent_mode.rs
++++ b/codex-rs/core/tests/suite/multi_agent_mode.rs
+@@ -128,6 +128,56 @@ async fn submit_turn(
+     Ok(())
+ }
+
++#[test_case("none")]
++#[test_case("minimal")]
++#[test_case("low")]
++#[test_case("medium")]
++#[test_case("high")]
++#[test_case("xhigh")]
++#[test_case("max")]
++#[test_case("ultra")]
++#[test_case("persistent")]
++#[test_case("future-effort")]
++#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++async fn frodex_default_delegation_is_proactive_at_every_effort(effort: &str) -> Result<()> {
++    skip_if_no_network!(Ok(()));
++
++    let effort: ReasoningEffort = serde_json::from_value(json!(effort))?;
++    let supported_effort = effort.clone();
++    let server = start_mock_server().await;
++    let response = mount_sse_once(
++        &server,
++        sse(vec![ev_response_created("resp-1"), ev_completed("resp-1")]),
++    )
++    .await;
++    let test = test_codex()
++        .with_model_info_override("gpt-5.4", move |model_info| {
++            model_info
++                .supported_reasoning_levels
++                .push(ReasoningEffortPreset {
++                    effort: supported_effort,
++                    description: "Test effort".to_string(),
++                });
++        })
++        .with_config(configure_multi_agent_v2)
++        .build_with_auto_env(&server)
++        .await?;
++
++    submit_turn(&test.codex, "hello", Some(effort)).await?;
++    let input = response.single_request().input();
++    let texts = developer_texts(&input);
++    assert_eq!(
++        (
++            count_containing(&texts, PROACTIVE_TEXT),
++            count_containing(&texts, NO_SPAWN_TEXT),
++            count_containing(&texts, "There are 257 available concurrency slots"),
++        ),
++        (1, 0, 1)
++    );
++
++    Ok(())
++}
++
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn ultra_reasoning_uses_highest_non_ultra_and_proactive_mode() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+@@ -229,12 +279,13 @@ async fn mode_hints_override_reasoning_effort(source: ModeHintSource) -> Result<
+ }
+
+ #[test_case(ReasoningEffort::Ultra, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_PROACTIVE_TEXT); "ultra uses proactive override")]
+-#[test_case(ReasoningEffort::High, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_EXPLICIT_TEXT); "non ultra ignores proactive override")]
++#[test_case(ReasoningEffort::High, Some(CATALOG_PROACTIVE_TEXT), Some(CATALOG_PROACTIVE_TEXT); "high uses proactive override")]
+ #[test_case(ReasoningEffort::Ultra, None, Some(PROACTIVE_TEXT); "ultra falls back to built in")]
+ #[test_case(ReasoningEffort::Ultra, Some(""), None; "empty proactive suppresses ultra mode")]
+-#[test_case(ReasoningEffort::High, Some(""), Some(CATALOG_EXPLICIT_TEXT); "empty proactive leaves non ultra unchanged")]
++#[test_case(ReasoningEffort::High, None, Some(PROACTIVE_TEXT); "high falls back to built in")]
++#[test_case(ReasoningEffort::High, Some(""), None; "empty proactive suppresses high mode")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn catalog_proactive_mode_is_ultra_only(
++async fn catalog_proactive_mode_applies_across_reasoning_efforts(
+     effort: ReasoningEffort,
+     proactive: Option<&'static str>,
+     expected_hint: Option<&str>,
+@@ -281,7 +332,7 @@ async fn catalog_proactive_mode_is_ultra_only(
+     Ok(())
+ }
+
+-#[test_case(ReasoningEffort::High, [CATALOG_EXPLICIT_TEXT, SECOND_MODEL_EXPLICIT_TEXT]; "explicit mode")]
++#[test_case(ReasoningEffort::High, [CATALOG_PROACTIVE_TEXT, SECOND_MODEL_PROACTIVE_TEXT]; "high proactive mode")]
+ #[test_case(ReasoningEffort::Ultra, [CATALOG_PROACTIVE_TEXT, SECOND_MODEL_PROACTIVE_TEXT]; "proactive mode")]
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn model_switch_refreshes_catalog_role_and_mode(
+@@ -480,7 +531,7 @@ async fn changing_configured_mode_hint_to_empty_emits_no_update() -> Result<()>
+ }
+
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Result<()> {
++async fn live_effort_change_keeps_proactive_mode_without_reappending_usage_hint() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+
+     let server = start_mock_server().await;
+@@ -535,7 +586,7 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
+             count_containing(&second_texts, PROACTIVE_TEXT),
+             count_containing(&second_texts, NO_SPAWN_TEXT),
+         ),
+-        (1, 1, 1),
++        (1, 1, 0),
+     );
+     test.codex.ensure_rollout_materialized().await;
+     test.codex.flush_rollout().await?;
+@@ -552,16 +603,13 @@ async fn live_mode_change_appends_mode_without_reappending_usage_hint() -> Resul
+                 .cloned()
+         })
+         .collect::<Vec<_>>();
+-    assert_eq!(
+-        recorded_modes,
+-        [json!("proactive"), json!("explicitRequestOnly")]
+-    );
++    assert_eq!(recorded_modes, [json!("proactive")]);
+
+     Ok(())
+ }
+
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
++async fn leaving_ultra_after_cold_resume_keeps_proactive_mode() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+
+     let server = start_mock_server().await;
+@@ -612,7 +660,7 @@ async fn leaving_ultra_after_cold_resume_emits_explicit_mode() -> Result<()> {
+             count_containing(&texts, NO_SPAWN_TEXT),
+             count_containing(&texts, PROACTIVE_TEXT),
+         ),
+-        (2, 1, 1)
++        (1, 0, 1)
+     );
+
+     Ok(())
+@@ -631,6 +679,14 @@ async fn ultra_on_multi_agent_v1_uses_highest_non_ultra_without_mode_instruction
+     let test = test_codex()
+         .with_model_info_override("gpt-5.4", add_ultra_reasoning)
+         .with_config(|config| {
++            config
++                .features
++                .disable(Feature::MultiAgentV2)
++                .expect("test config should disable V2");
++            config
++                .features
++                .enable(Feature::Collab)
++                .expect("test config should enable V1");
+             config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
+         })
+         .build(&server)
+diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
+index c5f00ae69033eacbefbeed15a8c1b397d96daae8..b4fb7bdd0696223fe0de48eaec0f93d0421452c7 100644
+--- a/codex-rs/core/tests/suite/spawn_agent_description.rs
++++ b/codex-rs/core/tests/suite/spawn_agent_description.rs
+@@ -206,6 +206,10 @@ async fn spawn_agent_description_lists_visible_models_and_reasoning_efforts() ->
+         .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
+         .with_model("visible-model")
+         .with_config(|config| {
++            config
++                .features
++                .disable(Feature::MultiAgentV2)
++                .expect("exercise the V1 tool contract");
+             config
+                 .features
+                 .enable(Feature::Collab)
+diff --git a/codex-rs/features/src/feature_configs.rs b/codex-rs/features/src/feature_configs.rs
+index 729d40f469ef7b824ff3b10ae047d093211459ea..03f1b88bd369d32f3a073c22d70f90f8ad0338bd 100644
+--- a/codex-rs/features/src/feature_configs.rs
++++ b/codex-rs/features/src/feature_configs.rs
+@@ -287,7 +287,7 @@ pub struct MultiAgentV2ConfigToml {
+     /// Expose the multi-agent v2 `wait_agent` tool.
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub wait_agent_enabled: Option<bool>,
+-    /// Expose same-thread adoption and subagent promotion only when explicitly enabled.
++    /// Expose same-thread adoption and subagent promotion unless explicitly disabled.
+     #[serde(skip_serializing_if = "Option::is_none")]
+     pub enable_thread_adoption: Option<bool>,
+     #[serde(skip_serializing_if = "Option::is_none")]
+diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
+index d7f5646b60f6a308d45e86db29c58c39e576ac8f..dfb15aeb0d8c99a683809744f122eb474aa591b3 100644
+--- a/codex-rs/features/src/lib.rs
++++ b/codex-rs/features/src/lib.rs
+@@ -1271,7 +1271,7 @@ pub const FEATURES: &[FeatureSpec] = &[
+         id: Feature::MultiAgentV2,
+         key: "multi_agent_v2",
+         stage: Stage::Stable,
+-        default_enabled: false,
++        default_enabled: true,
+     },
+     FeatureSpec {
+         id: Feature::MultiAgentMode,
+@@ -1282,8 +1282,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+     FeatureSpec {
+         id: Feature::AgentPromptInjection,
+         key: "agent_prompt_injection",
+-        stage: Stage::UnderDevelopment,
+-        default_enabled: false,
++        stage: Stage::Stable,
++        default_enabled: true,
+     },
+     FeatureSpec {
+         id: Feature::SpawnCsv,
+@@ -1606,12 +1606,8 @@ pub const FEATURES: &[FeatureSpec] = &[
+     FeatureSpec {
+         id: Feature::GoalSupervisor,
+         key: "goal_supervisor",
+-        stage: Stage::Experimental {
+-            name: "Goal supervisor",
+-            menu_description: "Use an internal supervisor helper for active goal continuation.",
+-            announcement: "",
+-        },
+-        default_enabled: false,
++        stage: Stage::Stable,
++        default_enabled: true,
+     },
+     FeatureSpec {
+         id: Feature::TokenBudget,
+diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
+index 58355c1fd8ac254f97348dd6e64754b2c822a126..9db7d5242e1cb90c3d2369cda23a53704c5d2e3e 100644
+--- a/codex-rs/features/src/tests.rs
++++ b/codex-rs/features/src/tests.rs
+@@ -470,33 +470,52 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
+ }
+
+ #[test]
+-fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
++fn agent_prompt_injection_is_stable_and_enabled_by_default() {
+     assert_eq!(
+         feature_for_key("agent_prompt_injection"),
+         Some(Feature::AgentPromptInjection)
+     );
+-    assert_eq!(
+-        Feature::AgentPromptInjection.stage(),
+-        Stage::UnderDevelopment
+-    );
+-    assert_eq!(Feature::AgentPromptInjection.default_enabled(), false);
+-    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
++    assert_eq!(Feature::AgentPromptInjection.stage(), Stage::Stable);
++    assert!(Feature::AgentPromptInjection.default_enabled());
++
++    let mut features = Features::with_defaults();
++    assert!(features.enabled(Feature::AgentPromptInjection));
++
++    features.apply_map(&BTreeMap::from([(
++        "agent_prompt_injection".to_string(),
++        false,
++    )]));
++    assert!(!features.enabled(Feature::AgentPromptInjection));
+ }
+
+ #[test]
+-fn goal_supervisor_is_experimental_and_disabled_by_default() {
++fn goal_supervisor_is_stable_and_enabled_by_default() {
+     assert_eq!(
+         feature_for_key("goal_supervisor"),
+         Some(Feature::GoalSupervisor)
+     );
+-    assert!(matches!(
+-        Feature::GoalSupervisor.stage(),
+-        Stage::Experimental { .. }
+-    ));
+-    assert!(!Feature::GoalSupervisor.default_enabled());
+-    assert!(!Features::with_defaults().enabled(Feature::GoalSupervisor));
++    assert_eq!(Feature::GoalSupervisor.stage(), Stage::Stable);
++    assert!(Feature::GoalSupervisor.default_enabled());
++    assert!(Features::with_defaults().enabled(Feature::GoalSupervisor));
+ }
+
++#[test]
++fn multi_agent_v2_is_stable_and_enabled_by_default() {
++    assert_eq!(
++        feature_for_key("multi_agent_v2"),
++        Some(Feature::MultiAgentV2)
++    );
++    assert_eq!(Feature::MultiAgentV2.stage(), Stage::Stable);
++    assert!(Feature::MultiAgentV2.default_enabled());
++
++    let mut features = Features::with_defaults();
++    assert!(features.enabled(Feature::MultiAgentV2));
++
++    features.apply_map(&BTreeMap::from([("multi_agent_v2".to_string(), false)]));
++    assert!(!features.enabled(Feature::MultiAgentV2));
++}
++
++#[test]
+ fn apps_require_feature_flag_and_chatgpt_auth() {
+     let mut features = Features::with_defaults();
+     assert!(!features.apps_enabled_for_auth(/*has_chatgpt_auth*/ false));
+diff --git a/scripts/frodex_admission/fixtures/release_cases.json b/scripts/frodex_admission/fixtures/release_cases.json
+index 5ff601fb4588b2e2b7e565a8e31ed4391eba8241..5dd65d97b66e938fa252109788781b61857f644f 100644
+--- a/scripts/frodex_admission/fixtures/release_cases.json
++++ b/scripts/frodex_admission/fixtures/release_cases.json
+@@ -29,6 +29,20 @@
+       "auth": false,
+       "report_schema": "assertions"
+     },
++    {
++      "name": "agent-defaults-and-explicit-overrides",
++      "argv": [
++        "/usr/bin/python3",
++        "{source}/scripts/frodex_agent_defaults_smoke.py",
++        "--codex", "{candidate}",
++        "--source", "{source}",
++        "--report", "{report}"
++      ],
++      "timeout_seconds": 120,
++      "network": false,
++      "auth": false,
++      "report_schema": "assertions"
++    },
+     {
+       "name": "configured-model-six-tool-smoke",
+       "argv": [
+diff --git a/scripts/frodex_agent_defaults_smoke.py b/scripts/frodex_agent_defaults_smoke.py
+new file mode 100644
+index 0000000000000000000000000000000000000000..1720084c0d9ceacd5e3fa67d0188664c1021f536
+--- /dev/null
++++ b/scripts/frodex_agent_defaults_smoke.py
+@@ -0,0 +1,307 @@
++#!/usr/bin/env python3
++"""Check packaged delegation defaults and active-child limits with a local model server."""
++
++import argparse
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++import os
++from pathlib import Path
++import threading
++
++from frodex_thread_resume_smoke import load_app_server_client, response_result
++
++
++CHILD_MESSAGE = "FRODEX_CAPACITY_CHILD"
++PROACTIVE = "Proactive multi-agent delegation is active."
++EXPLICIT = "Do not spawn sub-agents unless the user"
++CUSTOM = "Delegate only when explicitly requested by the user."
++
++
++def message_texts(body, role):
++    return [
++        part.get("text", "")
++        for item in body.get("input", [])
++        if item.get("role") == role
++        for part in item.get("content", [])
++        if isinstance(part, dict)
++    ]
++
++
++def spawned_task(output):
++    try:
++        result = json.loads(output)
++    except (TypeError, json.JSONDecodeError):
++        return None
++    if isinstance(result, dict) and isinstance(result.get("task_name"), str):
++        return result["task_name"]
++    return None
++
++
++def run_case(client_type, codex, home, work, name, child_limit):
++    """Keep children executing until all parent spawn results have been inspected."""
++    home.mkdir()
++    requests = []
++    outputs = {}
++    condition = threading.Condition()
++    release_children = threading.Event()
++    children_started = 0
++    errors = []
++    attempts = 7 if child_limit is None else child_limit + 1
++
++    class ModelHandler(BaseHTTPRequestHandler):
++        """Supply deterministic tool calls while holding child inference requests open."""
++
++        def log_message(self, *_args):
++            pass
++
++        def do_POST(self):
++            nonlocal children_started
++            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
++            if self.path.endswith("/analytics/codex/turn-costs"):
++                self.send_response(200)
++                self.send_header("Content-Type", "application/json")
++                self.end_headers()
++                self.wfile.write(b'{"turns":[]}')
++                return
++            if self.path != "/v1/responses":
++                self.send_error(404)
++                return
++            child = any(
++                item.get("type") == "agent_message"
++                and item.get("recipient", "").startswith("/root/defaults_child_")
++                for item in body.get("input", [])
++            )
++            if child:
++                with condition:
++                    children_started += 1
++                    condition.notify_all()
++                if not release_children.wait(40):
++                    errors.append("parent did not finish before child deadline")
++                number = f"child-{threading.get_ident()}"
++                item = None
++            else:
++                requests.append(body)
++                number = len(requests)
++                for record in body.get("input", []):
++                    if record.get("type") == "function_call_output":
++                        outputs[record["call_id"]] = record["output"]
++                successful = sum(
++                    spawned_task(value) is not None for value in outputs.values()
++                )
++                with condition:
++                    ready = condition.wait_for(
++                        lambda: children_started >= successful, timeout=10
++                    )
++                if not ready:
++                    errors.append(
++                        "spawn returned before child inference became observable"
++                    )
++                    self.send_error(500)
++                    return
++                item = (
++                    {
++                        "type": "function_call",
++                        "call_id": f"spawn-{number}",
++                        "namespace": "collaboration",
++                        "name": "spawn_agent",
++                        "arguments": json.dumps(
++                            {
++                                "task_name": f"defaults_child_{number}",
++                                "message": f"{CHILD_MESSAGE} {number}",
++                                "fork_turns": "none",
++                            }
++                        ),
++                    }
++                    if number <= attempts
++                    else None
++                )
++            if item is None:
++                item = {
++                    "type": "message",
++                    "id": f"msg-{number}",
++                    "role": "assistant",
++                    "content": [{"type": "output_text", "text": "DONE"}],
++                }
++            events = [
++                {"type": "response.created", "response": {"id": f"resp-{number}"}},
++                {"type": "response.output_item.done", "item": item},
++                {"type": "response.completed", "response": {"id": f"resp-{number}"}},
++            ]
++            response = "".join(
++                f"event: {event['type']}\ndata: {json.dumps(event)}\n\n"
++                for event in events
++            ).encode()
++            self.send_response(200)
++            self.send_header("Content-Type", "text/event-stream")
++            self.send_header("Content-Length", str(len(response)))
++            self.end_headers()
++            try:
++                self.wfile.write(response)
++            except (BrokenPipeError, ConnectionResetError):
++                if not child:
++                    raise
++
++    server = ThreadingHTTPServer(("127.0.0.1", 0), ModelHandler)
++    worker = threading.Thread(target=server.serve_forever, daemon=True)
++    worker.start()
++    config = f"""model = "mock-model"
++model_provider = "mock_provider"
++model_reasoning_effort = "high"
++approval_policy = "never"
++sandbox_mode = "read-only"
++[features]
++code_mode = false
++goal_supervisor = false
++[model_providers.mock_provider]
++name = "Agent defaults admission mock"
++base_url = "http://127.0.0.1:{server.server_port}/v1"
++wire_api = "responses"
++request_max_retries = 0
++stream_max_retries = 0
++"""
++    if child_limit is not None:
++        config += f'''[agents]
++max_concurrent_threads_per_session = {child_limit}
++[features.multi_agent_v2]
++multi_agent_mode_hint_text = "{CUSTOM}"
++'''
++    (home / "config.toml").write_text(config)
++    environment = dict(os.environ, CODEX_HOME=str(home))
++    try:
++        with client_type(
++            codex, env=environment, cwd=work, timeout_seconds=40
++        ) as client:
++            response_result(
++                client.request(
++                    "initialize",
++                    {
++                        "clientInfo": {
++                            "name": "frodex-agent-defaults-admission",
++                            "version": "1",
++                        },
++                        "capabilities": {"experimentalApi": True},
++                    },
++                ),
++                "initialize",
++            )
++            client.notify("initialized")
++            thread = response_result(
++                client.request(
++                    "thread/start",
++                    {
++                        "cwd": str(work),
++                        "historyMode": "paginated",
++                    },
++                ),
++                "thread/start",
++            )["thread"]["id"]
++            started = response_result(
++                client.request(
++                    "turn/start",
++                    {
++                        "threadId": thread,
++                        "input": [
++                            {
++                                "type": "text",
++                                "text": "Exercise agent defaults.",
++                                "textElements": [],
++                            }
++                        ],
++                    },
++                ),
++                "turn/start",
++            )
++            completed = client.wait_for_notification(
++                "turn/completed",
++                predicate=lambda params: (
++                    params.get("threadId") == thread
++                    and params.get("turn", {}).get("id") == started["turn"]["id"]
++                ),
++            )
++            release_children.set()
++            turn_status = completed["params"]["turn"]["status"]
++    finally:
++        release_children.set()
++        server.shutdown()
++        server.server_close()
++        worker.join(timeout=5)
++    successes = []
++    failures = []
++    for call_id, output in outputs.items():
++        task = spawned_task(output)
++        if task is not None:
++            successes.append(task)
++        else:
++            failures.append({"call_id": call_id, "output": output})
++    instructions = (
++        "\n".join(message_texts(requests[0], "developer")) if requests else ""
++    )
++    expected_count = attempts if child_limit is None else child_limit
++    assertions = {
++        "parent_turn_completed": turn_status == "completed",
++        "all_spawn_results_returned": len(outputs) == attempts,
++        "distinct_children": len(set(successes)) == expected_count,
++        "children_were_active": children_started == expected_count,
++        "no_mock_errors": not errors,
++        "capacity_guidance": f"There are {257 if child_limit is None else child_limit + 1} available concurrency slots"
++        in instructions,
++        "delegation_policy": (
++            PROACTIVE in instructions and EXPLICIT not in instructions
++            if child_limit is None
++            else CUSTOM in instructions and PROACTIVE not in instructions
++        ),
++        "limit_enforcement": (
++            not failures
++            if child_limit is None
++            else len(failures) == 1
++            and "agent thread limit reached" in str(failures[0]["output"])
++        ),
++    }
++    return {
++        "name": name,
++        "assertions": assertions,
++        "children_started": children_started,
++        "successes": successes,
++        "failures": failures,
++        "errors": errors,
++        "turn_status": turn_status,
++    }
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--codex", type=Path, required=True)
++    parser.add_argument("--source", type=Path, required=True)
++    parser.add_argument("--report", type=Path, required=True)
++    args = parser.parse_args()
++    client_type = load_app_server_client(args.source)
++    home = Path(os.environ["CODEX_HOME"])
++    cases = [
++        run_case(client_type, args.codex, home / name, Path.cwd(), name, limit)
++        for name, limit in [("defaults", None), ("explicit-limit-and-policy", 2)]
++    ]
++    passed = all(all(case["assertions"].values()) for case in cases)
++    args.report.write_text(
++        json.dumps(
++            {
++                "schema_version": 1,
++                "passed": passed,
++                "cases": cases,
++                "assertions": [
++                    f"{case['name']}:{key}"
++                    for case in cases
++                    for key, value in case["assertions"].items()
++                    if value
++                ],
++            },
++            indent=2,
++        )
++        + "\n"
++    )
++    if not passed:
++        raise RuntimeError(f"agent defaults regression: {args.report}")
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())

@@ -1,9 +1,0 @@
-Resume persisted goals and retry failed running supervisors
-
-Combine the existing implementation and corrections:
-
-- Restore persisted goal supervisor scheduling
-- Repair goal supervisor recovery loop
-
-Original-commit: 91b58f6d5016fea73e1cfa981c5f5459133b80f7
-Original-commit: 935985e88e06ba1cb872d9fd72591110ba073fe1

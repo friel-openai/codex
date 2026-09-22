@@ -1,9 +1,0 @@
-Reject incompatible encrypted collaboration inputs
-
-Combine the existing implementation and corrections:
-
-- Prevent encrypted collaboration inputs from entering code mode
-- Preserve collaboration contracts in the recovery stack
-
-Original-commit: 6449bcf59307fc73d283c393d81efe68fa4f3ab7
-Original-commit: cb1cadd5e5818b35c1f059cabbca1db8599d2d96

@@ -1,7 +1,0 @@
-Keep filesystem task listing bounded
-
-Combine the existing implementation and corrections:
-
-- Restore bounded filesystem thread listing
-
-Original-commit: 8884b15dca2449093268bb90073b6f8786d2aca7

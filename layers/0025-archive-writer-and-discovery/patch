@@ -1,0 +1,1183 @@
+diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
+index 4611e3b5808540d2a8e7757a3f720ba054a33632..5720103c89caa7693859724d291e1f0388c90446 100644
+--- a/codex-rs/app-server/src/request_processors/thread_processor.rs
++++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
+@@ -2137,7 +2137,7 @@ impl ThreadRequestProcessor {
+                         "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
+                     );
+                 }
+-                return Err(thread_store_archive_error("archive", err));
++                return Err(thread_store_mutation_error("archive", err));
+             }
+         };
+         let mut current_agent_ids_to_evict = already_archived_thread_ids;
+@@ -6469,6 +6469,28 @@ impl ThreadRequestProcessor {
+         &self,
+         stored_thread: &StoredThread,
+     ) -> Result<(), JSONRPCErrorError> {
++        if stored_thread.history_mode == ThreadHistoryMode::Legacy
++            && stored_thread
++                .rollout_path
++                .as_ref()
++                .is_some_and(|path| !path.starts_with(self.config.codex_home.as_path()))
++        {
++            let indexed = match self.state_db.as_ref() {
++                Some(state_db) => state_db
++                    .get_thread(stored_thread.thread_id)
++                    .await
++                    .map_err(|error| {
++                        internal_error(format!("failed to check selected rollout: {error}"))
++                    })?
++                    .is_some(),
++                None => false,
++            };
++            // An explicitly supplied external Legacy file has no home-selected rollout until
++            // its first resume. Existing indexed selections still require the check below.
++            if !indexed {
++                return Ok(());
++            }
++        }
+         let selected = self
+             .thread_store
+             .read_thread(StoreReadThreadParams {
+diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
+index 52a8f66ca2659e07a853b5401007887fbfefcd63..d41f0c138e95b58a79bbd58139d3642ee726903e 100644
+--- a/codex-rs/app-server/tests/suite/v2/mod.rs
++++ b/codex-rs/app-server/tests/suite/v2/mod.rs
+@@ -101,6 +101,7 @@ mod session_end;
+ mod skills_list;
+ mod sleep;
+ mod thread_archive;
++mod thread_archive_discovery;
+ mod thread_delete;
+ mod thread_environments;
+ mod thread_fork;
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
+index 51e602df07665a0a8d388939514a331eb7ed6e44..b919724bc147c49e3479afcaee37939adad53000 100644
+--- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
++++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
+@@ -203,6 +203,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+     let codex_home = TempDir::new()?;
+     MockResponsesConfig::new(&server.uri())
+         .enable_feature(Feature::Collab)
++        .disable_feature(Feature::MultiAgentV2)
+         .write(codex_home.path())?;
+     let parent_id = create_fake_paginated_rollout(
+         codex_home.path(),
+@@ -231,7 +232,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+         .upsert_thread_spawn_edge(
+             parent_thread_id,
+             child_thread_id,
+-            DirectionalThreadSpawnEdgeStatus::Closed,
++            DirectionalThreadSpawnEdgeStatus::Open,
+         )
+         .await?;
+
+@@ -571,7 +572,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
+         .upsert_thread_spawn_edge(
+             parent_thread_id,
+             child_thread_id,
+-            DirectionalThreadSpawnEdgeStatus::Closed,
++            DirectionalThreadSpawnEdgeStatus::Open,
+         )
+         .await?;
+     state_db
+@@ -683,7 +684,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+         .upsert_thread_spawn_edge(
+             parent_thread_id,
+             child_thread_id,
+-            DirectionalThreadSpawnEdgeStatus::Closed,
++            DirectionalThreadSpawnEdgeStatus::Open,
+         )
+         .await?;
+     state_db
+diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive_discovery.rs b/codex-rs/app-server/tests/suite/v2/thread_archive_discovery.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e59f8e0d3
+--- /dev/null
++++ b/codex-rs/app-server/tests/suite/v2/thread_archive_discovery.rs
+@@ -0,0 +1,161 @@
++use anyhow::Result;
++use app_test_support::MockResponsesConfig;
++use app_test_support::TestAppServer;
++use app_test_support::create_fake_rollout;
++use app_test_support::create_mock_responses_server_repeating_assistant;
++use codex_app_server_protocol::ClientRequest;
++use codex_app_server_protocol::ThreadArchiveParams;
++use codex_app_server_protocol::ThreadArchiveResponse;
++use codex_app_server_protocol::ThreadForkParams;
++use codex_app_server_protocol::ThreadForkResponse;
++use codex_app_server_protocol::ThreadHistoryMode;
++use codex_app_server_protocol::ThreadReadParams;
++use codex_app_server_protocol::ThreadReadResponse;
++use codex_app_server_protocol::ThreadStartParams;
++use codex_app_server_protocol::TurnStartParams;
++use codex_app_server_protocol::UserInput;
++use codex_protocol::ThreadId;
++use codex_state::StateRuntime;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++
++#[tokio::test]
++async fn thread_archive_loaded_fork_does_not_read_unrelated_rollouts() -> Result<()> {
++    let server = create_mock_responses_server_repeating_assistant("Done").await;
++    let home = TempDir::new()?;
++    MockResponsesConfig::new(&server.uri()).write(home.path())?;
++    let state = StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
++        "mock_provider".to_string(),
++    )
++    .await?;
++    state
++        .mark_backfill_complete(/*last_watermark*/ None)
++        .await?;
++    // Keep background migration out of the I/O measurement without disabling foreground history.
++    let _maintenance = codex_rollout::try_acquire_rollout_maintenance_job_lock(home.path())?
++        .expect("maintenance lock");
++    let mut app = TestAppServer::builder()
++        .with_codex_home(home.path())
++        .with_env_overrides(&[("FRODEX_HISTORY_IO_TRACE", Some("1"))])
++        .with_json_logging("warn,codex_history_io=trace")
++        .build_initialized()
++        .await?;
++    let parent = app
++        .start_thread(ThreadStartParams {
++            history_mode: Some(ThreadHistoryMode::Paginated),
++            ..Default::default()
++        })
++        .await?
++        .thread;
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: parent.id.clone(),
++        input: vec![UserInput::Text {
++            text: "parent history".to_string(),
++            text_elements: Vec::new(),
++        }],
++        ..Default::default()
++    })
++    .await?;
++    let ThreadForkResponse { thread: child, .. } = app
++        .request(|request_id| ClientRequest::ThreadFork {
++            request_id,
++            params: ThreadForkParams {
++                thread_id: parent.id.clone(),
++                exclude_turns: true,
++                ..Default::default()
++            },
++        })
++        .await?;
++    app.start_turn_and_wait_for_completion(TurnStartParams {
++        thread_id: child.id.clone(),
++        input: vec![UserInput::Text {
++            text: "child history".to_string(),
++            text_elements: Vec::new(),
++        }],
++        ..Default::default()
++    })
++    .await?;
++
++    let parent_before: ThreadReadResponse = app
++        .request(|request_id| ClientRequest::ThreadRead {
++            request_id,
++            params: ThreadReadParams {
++                thread_id: parent.id.clone(),
++                include_turns: true,
++            },
++        })
++        .await?;
++    assert!(!parent_before.thread.turns.is_empty());
++    // These files did not exist during startup or fork. Any read is unrelated archive work.
++    let mut unrelated_ids = Vec::new();
++    for _ in 0..64 {
++        unrelated_ids.push(create_fake_rollout(
++            home.path(),
++            "2025-01-01T00-00-00",
++            "2025-01-01T00:00:00Z",
++            "unrelated history",
++            Some("mock_provider"),
++            /*git_info*/ None,
++        )?);
++    }
++    let _: ThreadArchiveResponse = app
++        .request(|request_id| ClientRequest::ThreadArchive {
++            request_id,
++            params: ThreadArchiveParams {
++                thread_id: child.id.clone(),
++            },
++        })
++        .await?;
++    // A second archive must remain idempotent, not attempt to reload the stopped writer.
++    let _: ThreadArchiveResponse = app
++        .request(|request_id| ClientRequest::ThreadArchive {
++            request_id,
++            params: ThreadArchiveParams {
++                thread_id: child.id.clone(),
++            },
++        })
++        .await?;
++    let parent_after: ThreadReadResponse = app
++        .request(|request_id| ClientRequest::ThreadRead {
++            request_id,
++            params: ThreadReadParams {
++                thread_id: parent.id.clone(),
++                include_turns: true,
++            },
++        })
++        .await?;
++    assert_eq!(parent_after.thread.turns, parent_before.thread.turns);
++    app.shutdown_gracefully().await?;
++
++    let events = app.json_log_events()?;
++    let opened_paths = events
++        .iter()
++        .filter(|event| event["fields"]["event.name"] == "codex.history.rollout.open")
++        .filter_map(|event| event["fields"]["rollout_path"].as_str())
++        .collect::<Vec<_>>();
++    assert!(
++        opened_paths.iter().any(|path| path.contains(&child.id)),
++        "the loaded fork must establish that rollout read observation is enabled"
++    );
++    let unrelated_reads = opened_paths
++        .iter()
++        .filter(|path| unrelated_ids.iter().any(|id| path.contains(id)))
++        .copied()
++        .collect::<Vec<_>>();
++    assert_eq!(unrelated_reads, Vec::<&str>::new());
++    let parent_metadata = state
++        .get_thread(ThreadId::from_string(&parent.id)?)
++        .await?
++        .expect("parent metadata");
++    let child_metadata = state
++        .get_thread(ThreadId::from_string(&child.id)?)
++        .await?
++        .expect("child metadata");
++    assert!(parent_metadata.archived_at.is_none());
++    assert!(parent_metadata.rollout_path.exists());
++    assert!(child_metadata.archived_at.is_some());
++    assert!(child_metadata.rollout_path.exists());
++    Ok(())
++}
+diff --git a/codex-rs/core/tests/suite/rollout_compression.rs b/codex-rs/core/tests/suite/rollout_compression.rs
+index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57bd5064763 100644
+--- a/codex-rs/core/tests/suite/rollout_compression.rs
++++ b/codex-rs/core/tests/suite/rollout_compression.rs
+@@ -35,6 +35,7 @@ use pretty_assertions::assert_eq;
+ use wiremock::MockServer;
+
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
++#[tracing_test::traced_test]
+ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history() -> Result<()> {
+     skip_if_no_network!(Ok(()));
+
+@@ -115,16 +116,20 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+     let child_path = child.thread.rollout_path().context("child rollout")?;
+     test.codex.shutdown_and_wait().await?;
+     child.thread.shutdown_and_wait().await?;
+-    assert_eq!(
+-        codex_rollout::read_session_meta_line(&child_path)
+-            .await?
+-            .meta
+-            .history_base
+-            .map(|base| base.thread_id),
+-        Some(test.session_configured.thread_id),
+-    );
++    let history_base = codex_rollout::read_session_meta_line(&child_path)
++        .await?
++        .meta
++        .history_base
++        .expect("fork history base");
++    assert_ne!(history_base.thread_id, test.session_configured.thread_id);
++    let frozen_path = codex_rollout::find_rollout_path_by_rollout_id(
++        &test.config.codex_home,
++        history_base.thread_id,
++    )
++    .await?
++    .context("frozen fork prefix")?;
+
+-    let paths = [&parent_path, &child_path];
++    let paths = [&parent_path, &frozen_path, &child_path];
+     let original_bytes = paths
+         .iter()
+         .map(std::fs::read)
+@@ -155,7 +160,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+         }
+     })
+     .await
+-    .context("shared rollout compression should finish")?;
++    .with_context(|| {
++        format!(
++            "shared rollout compression should finish: {:?}",
++            paths
++                .iter()
++                .map(|path| (
++                    path,
++                    path.exists(),
++                    path.with_extension("jsonl.zst").exists()
++                ))
++                .collect::<Vec<_>>()
++        )
++    })?;
+     for (path, original) in paths.into_iter().zip(original_bytes) {
+         let compressed = std::fs::File::open(path.with_extension("jsonl.zst"))?;
+         assert_eq!(zstd::stream::decode_all(compressed)?, original);
+@@ -215,6 +232,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+         "reading the ancestor must not materialize it"
+     );
+     assert!(parent_path.with_extension("jsonl.zst").exists());
++    assert!(
++        !frozen_path.exists(),
++        "reading the frozen prefix must not materialize it"
++    );
++    assert!(frozen_path.with_extension("jsonl.zst").exists());
+     resumed.thread.shutdown_and_wait().await?;
+     Ok(())
+ }
+diff --git a/codex-rs/rollout/src/compression.rs b/codex-rs/rollout/src/compression.rs
+index c35e4845b4b342205e97ff26d07d8a568230d1d5..8e5fd8f8ed2da01b2adef5b3c501c16f2bb21632 100644
+--- a/codex-rs/rollout/src/compression.rs
++++ b/codex-rs/rollout/src/compression.rs
+@@ -486,6 +486,9 @@ mod worker {
+         }
+         let mut stack = vec![root.to_path_buf()];
+         let mut jobs = JoinSet::new();
++        // Physical segments share their logical thread's writer reservation. Do not let
++        // this worker mistake another compression job for an active foreground writer.
++        let mut job_threads = std::collections::HashMap::new();
+         while let Some(dir) = stack.pop() {
+             if started_at.elapsed() >= WORKER_MAX_RUNTIME || maintenance.should_yield()? {
+                 break;
+@@ -505,7 +508,7 @@ mod worker {
+                     Ok(Some(entry)) => entry,
+                     Ok(None) => break,
+                     Err(err) => {
+-                        drain_compression_jobs(&mut jobs, stats).await;
++                        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
+                         return Err(err);
+                     }
+                 };
+@@ -549,13 +552,15 @@ mod worker {
+                 };
+                 stats.scanned = stats.scanned.saturating_add(1);
+                 metrics::file("scanned");
+-                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
+-                    collect_next_compression_job(&mut jobs, stats).await;
++                let thread_id = meta.meta.id;
++                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS
++                    || job_threads.values().any(|owner| *owner == thread_id)
++                {
++                    collect_next_compression_job(&mut jobs, &mut job_threads, stats).await;
+                 }
+                 let writers = Arc::clone(writers);
+                 let maintenance = Arc::clone(maintenance);
+-                let thread_id = meta.meta.id;
+-                jobs.spawn_blocking(move || {
++                let job = jobs.spawn_blocking(move || {
+                     let started_at = Instant::now();
+                     // The guard moves with the blocking job through cancellation and publication.
+                     let result = compress_rollout_if_cold_blocking(
+@@ -567,9 +572,10 @@ mod worker {
+                     let duration = started_at.elapsed();
+                     (path, duration, result)
+                 });
++                job_threads.insert(job.id(), thread_id);
+             }
+         }
+-        drain_compression_jobs(&mut jobs, stats).await;
++        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
+         Ok(())
+     }
+
+@@ -625,22 +631,29 @@ mod worker {
+
+     async fn drain_compression_jobs(
+         jobs: &mut JoinSet<CompressionJobResult>,
++        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
+         stats: &mut CompressionStats,
+     ) {
+         while !jobs.is_empty() {
+-            collect_next_compression_job(jobs, stats).await;
++            collect_next_compression_job(jobs, job_threads, stats).await;
+         }
+     }
+
+     async fn collect_next_compression_job(
+         jobs: &mut JoinSet<CompressionJobResult>,
++        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
+         stats: &mut CompressionStats,
+     ) {
+-        let Some(result) = jobs.join_next().await else {
++        let Some(result) = jobs.join_next_with_id().await else {
+             return;
+         };
++        let job_id = match &result {
++            Ok((job_id, _)) => *job_id,
++            Err(error) => error.id(),
++        };
++        job_threads.remove(&job_id);
+         match result {
+-            Ok((_, duration, Ok(measurement))) => {
++            Ok((_, (_, duration, Ok(measurement)))) => {
+                 let outcome = measurement.outcome;
+                 match outcome {
+                     CompressionOutcome::Compressed => {
+@@ -666,7 +679,7 @@ mod worker {
+                     }
+                 }
+             }
+-            Ok((path, duration, Err(err))) => {
++            Ok((_, (path, duration, Err(err)))) => {
+                 stats.failed = stats.failed.saturating_add(1);
+                 metrics::file("failed");
+                 metrics::file_duration("failed", duration);
+@@ -886,17 +899,6 @@ mod worker {
+         }
+     }
+
+-    async fn wait_for_foreground_maintenance(
+-        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
+-    ) -> io::Result<()> {
+-        loop {
+-            if maintenance.should_yield()? {
+-                return Ok(());
+-            }
+-            tokio::time::sleep(Duration::from_millis(25)).await;
+-        }
+-    }
+-
+     fn set_file_metadata(
+         file: &File,
+         modified: SystemTime,
+diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
+index 8ec91549d4ded973977e61232b7c3c67afb47376..0aa381477f9eaba077a9accca7c602c82634a2dd 100644
+--- a/codex-rs/rollout/src/compression_tests.rs
++++ b/codex-rs/rollout/src/compression_tests.rs
+@@ -583,6 +583,32 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+     Ok(())
+ }
+
++#[tokio::test]
++async fn worker_compresses_all_segments_of_one_thread_in_one_run() -> anyhow::Result<()> {
++    let home = TempDir::new()?;
++    let thread_id = ThreadId::new();
++    let mut paths = Vec::new();
++    let transcript = "shared thread segment\n".repeat(16_384);
++    for _ in 0..16 {
++        let path = archived_rollout_path(home.path(), "2025-01-03T12-00-00", Uuid::new_v4());
++        write_rollout(&path, thread_id, &transcript)?;
++        set_old_mtime(&path)?;
++        paths.push(path);
++    }
++    worker::run(home.path().to_path_buf()).await?;
++    for path in paths {
++        assert!(
++            !path.exists(),
++            "compression must not skip its own writer reservation: {path:?}"
++        );
++        let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
++        assert_eq!(loaded_id, Some(thread_id));
++        assert_eq!(errors, 0);
++        assert_eq!(items.len(), 2);
++    }
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
+     let home = TempDir::new()?;
+@@ -878,7 +904,7 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
+         drop(reader);
+         drop(migration);
+
+-        // A new run must rebuild the reference index after foreground work changed it.
++        // Shared rollout compression must preserve the append and the referenced byte offsets.
+         let child_uuid = Uuid::from_u128(29);
+         let child_id = ThreadId::from_string(&child_uuid.to_string())?;
+         let child = archived_rollout_path(home.path(), "2025-01-03T12-00-01", child_uuid);
+@@ -893,7 +919,8 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
+         )?;
+         set_old_mtime(&path)?;
+         worker::run(home.path().to_path_buf()).await?;
+-        assert!(path.exists());
++        assert!(!path.exists());
++        assert!(compressed_rollout_path(&path).exists());
+         let (items, loaded_id, parse_errors) = RolloutRecorder::load_rollout_items(&path).await?;
+         assert_eq!(loaded_id, Some(thread_id));
+         assert_eq!(parse_errors, 0);
+diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
+index 0f5741911cd194fd02343a921005a1ce3c689761..8571a0d59718c2a40817cf3e53cb99261804556d 100644
+--- a/codex-rs/rollout/src/list.rs
++++ b/codex-rs/rollout/src/list.rs
+@@ -1098,12 +1098,12 @@ async fn select_thread_candidates(
+                 continue;
+             }
+         }
+-        selected.push(
+-            candidates
+-                .into_iter()
+-                .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
+-                .expect("duplicate group is nonempty"),
+-        );
++        if let Some(candidate) = candidates
++            .into_iter()
++            .max_by_key(|candidate| (candidate.created_at, candidate.rollout_id))
++        {
++            selected.push(candidate);
++        }
+     }
+     Ok(selected)
+ }
+diff --git a/codex-rs/rollout/src/writer_lock.rs b/codex-rs/rollout/src/writer_lock.rs
+index 95c0e63e8cc62f2269868f820fe149f2a3f77c5d..1179cc478a224c37eee9556d3542ba5fbc752e87 100644
+--- a/codex-rs/rollout/src/writer_lock.rs
++++ b/codex-rs/rollout/src/writer_lock.rs
+@@ -285,6 +285,18 @@ impl Drop for RolloutWriterLockGuard {
+             }
+         };
+
++        // A subprocess can inherit this open file description before exec closes CLOEXEC
++        // descriptors. Closing our descriptor alone would leave its flock held by that child.
++        // Independently opened fork-reader reservations are not released by this unlock.
++        match &self.state {
++            WriterLockState::Exclusive(file) | WriterLockState::Shared(file) => {
++                if let Err(err) = file.unlock() {
++                    warn!("failed to release thread writer lock: {err}");
++                    return;
++                }
++            }
++            WriterLockState::Unreserved => {}
++        }
+         // Close the writer lock before deleting it so cleanup works on Windows too.
+         drop(std::mem::replace(
+             &mut self.state,
+@@ -318,3 +330,7 @@ impl Drop for RolloutWriterLockGuard {
+         drop(coordination_lock);
+     }
+ }
++
++#[cfg(all(test, unix))]
++#[path = "writer_lock_tests.rs"]
++mod tests;
+diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0e58673b801b692294e08bbeaa1d5fe8d7a0caa5
+--- /dev/null
++++ b/codex-rs/rollout/src/writer_lock_tests.rs
+@@ -0,0 +1,52 @@
++use super::*;
++
++#[test]
++fn writer_release_does_not_wait_for_inherited_file_descriptors() -> io::Result<()> {
++    let home = tempfile::TempDir::new()?;
++    let coordinator = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
++    let thread_id = ThreadId::new();
++    let guard = coordinator.try_acquire(thread_id)?.expect("writer");
++    // dup and fork share the open file description. CLOEXEC does not help while a child is
++    // still preparing to exec, so closing the parent's descriptor alone retains flock ownership.
++    let inherited = match &guard.state {
++        WriterLockState::Exclusive(file) => file.try_clone()?,
++        _ => panic!("expected exclusive writer"),
++    };
++    drop(guard);
++    let next_writer = coordinator.try_acquire(thread_id)?;
++    assert!(
++        next_writer.is_some(),
++        "shutdown must release the writer before inherited descriptors close"
++    );
++    drop(inherited);
++    Ok(())
++}
++
++#[test]
++fn writer_release_preserves_independently_acquired_fork_reader() -> io::Result<()> {
++    let home = tempfile::TempDir::new()?;
++    let coordinator = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
++    let other = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
++    let thread_id = ThreadId::new();
++    let mut writer = coordinator.try_acquire(thread_id)?.expect("writer");
++    writer.share_for_fork()?;
++    let reader = other
++        .try_acquire_fork_reader(thread_id)?
++        .expect("fork reader");
++    let inherited = match &writer.state {
++        WriterLockState::Shared(file) => file.try_clone()?,
++        _ => panic!("expected shared writer"),
++    };
++    drop(writer);
++    assert!(
++        coordinator.try_acquire(thread_id)?.is_none(),
++        "the independent reader must still exclude archive"
++    );
++    drop(reader);
++    assert!(
++        coordinator.try_acquire(thread_id)?.is_some(),
++        "only independent reservations may retain ownership"
++    );
++    drop(inherited);
++    Ok(())
++}
+diff --git a/codex-rs/thread-store/src/local/archive_discovery_tests.rs b/codex-rs/thread-store/src/local/archive_discovery_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..0d0318453132189cb8bfa2926ead4b27e3cda225
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/archive_discovery_tests.rs
+@@ -0,0 +1,271 @@
++use std::fs;
++
++use chrono::Utc;
++use codex_protocol::ThreadId;
++use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadHistoryMode;
++use codex_rollout::ARCHIVED_SESSIONS_SUBDIR;
++use codex_utils_absolute_path::test_support::PathExt;
++use pretty_assertions::assert_eq;
++use tempfile::TempDir;
++use uuid::Uuid;
++
++use crate::ArchiveThreadParams;
++use crate::ThreadStore;
++use crate::local::LocalThreadStore;
++use crate::local::test_support::test_config;
++use crate::local::test_support::write_session_file_with_history_mode;
++
++#[tokio::test]
++async fn archive_preserves_selected_alias_and_moves_owned_physical_rollouts_only() {
++    for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
++        let home = TempDir::new().expect("home");
++        let config = test_config(home.path());
++        let state = codex_state::StateRuntime::init(
++            codex_state::SqliteConfig::new_for_testing(home.path().abs()),
++            config.default_model_provider_id.clone(),
++        )
++        .await
++        .expect("state");
++        state
++            .mark_backfill_complete(/*last_watermark*/ None)
++            .await
++            .expect("backfill");
++        let store = LocalThreadStore::new(config.clone(), Some(state.clone()));
++        let id = Uuid::from_u128(301);
++        let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
++        let selected = write_session_file_with_history_mode(
++            home.path(),
++            "2025-01-03T12-00-00",
++            id,
++            history_mode,
++        )
++        .expect("selected");
++        let contents = fs::read(&selected).expect("contents");
++        let retained =
++            codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
++                .expect("retained path");
++        fs::write(&retained, &contents).expect("retained");
++        let compressed =
++            codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
++                .expect("compressed path")
++                .with_extension("jsonl.zst");
++        let compressed_bytes = zstd::stream::encode_all(contents.as_slice(), 3).expect("compress");
++        fs::write(&compressed, &compressed_bytes).expect("compressed");
++
++        let parent = write_session_file_with_history_mode(
++            home.path(),
++            "2025-01-03T11-00-00",
++            Uuid::from_u128(302),
++            history_mode,
++        )
++        .expect("parent");
++        let parent_contents = fs::read(&parent).expect("parent contents");
++        // A matching filename does not authorize moving a file owned by another thread.
++        let foreign =
++            codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
++                .expect("foreign path");
++        fs::write(&foreign, &parent_contents).expect("foreign");
++
++        // SQLite can select an authenticated alias whose filename encodes a different ID.
++        let alias = selected.with_file_name(format!(
++            "rollout-2025-01-03T12-00-00-{}.jsonl",
++            ThreadId::new(),
++        ));
++        fs::rename(&selected, &alias).expect("alias");
++        let mut metadata = codex_state::ThreadMetadataBuilder::new(
++            thread_id,
++            alias.clone(),
++            Utc::now(),
++            SessionSource::Cli,
++        )
++        .build(&config.default_model_provider_id);
++        metadata.history_mode = history_mode;
++        state
++            .upsert_thread(&metadata)
++            .await
++            .expect("selected metadata");
++
++        store
++            .archive_thread(ArchiveThreadParams { thread_id })
++            .await
++            .expect("archive");
++        let archived = home.path().join(ARCHIVED_SESSIONS_SUBDIR);
++        for (path, bytes) in [
++            (&alias, &contents),
++            (&retained, &contents),
++            (&compressed, &compressed_bytes),
++        ] {
++            assert!(!path.exists());
++            assert_eq!(
++                fs::read(archived.join(path.file_name().expect("filename")))
++                    .expect("archived bytes"),
++                *bytes
++            );
++        }
++        assert_eq!(
++            fs::read(&parent).expect("unchanged parent"),
++            parent_contents
++        );
++        assert_eq!(
++            fs::read(&foreign).expect("unchanged foreign"),
++            parent_contents
++        );
++        let updated = state
++            .get_thread(thread_id)
++            .await
++            .expect("metadata")
++            .expect("thread");
++        assert_eq!(
++            updated.rollout_path,
++            archived.join(alias.file_name().expect("alias name"))
++        );
++        assert!(updated.archived_at.is_some());
++    }
++}
++
++#[tokio::test]
++async fn archive_leaves_matching_filename_with_malformed_session_meta_untouched() {
++    let home = TempDir::new().expect("home");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let id = Uuid::from_u128(304);
++    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
++    let selected = write_session_file_with_history_mode(
++        home.path(),
++        "2025-01-03T12-00-00",
++        id,
++        ThreadHistoryMode::Legacy,
++    )
++    .expect("selected");
++    let selected_bytes = fs::read(&selected).expect("selected bytes");
++    let malformed_candidate =
++        codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
++            .expect("matching candidate path");
++    let malformed_bytes = br#"{"timestamp":"2025-01-03T11:59:59Z","type":"session_meta""#;
++    fs::write(&malformed_candidate, malformed_bytes).expect("malformed candidate");
++
++    store
++        .archive_thread(ArchiveThreadParams { thread_id })
++        .await
++        .expect("archive selected rollout");
++
++    let archived = home.path().join(ARCHIVED_SESSIONS_SUBDIR);
++    assert_eq!(
++        fs::read(archived.join(selected.file_name().expect("selected filename")))
++            .expect("archived selected bytes"),
++        selected_bytes
++    );
++    assert_eq!(
++        fs::read(&malformed_candidate).expect("unchanged malformed candidate"),
++        malformed_bytes
++    );
++    assert!(
++        !archived
++            .join(
++                malformed_candidate
++                    .file_name()
++                    .expect("malformed candidate filename")
++            )
++            .exists()
++    );
++}
++
++#[tokio::test]
++async fn archive_moves_sqlite_selected_damaged_alias_byte_for_byte() {
++    let home = TempDir::new().expect("home");
++    let config = test_config(home.path());
++    let state = codex_state::StateRuntime::init(
++        codex_state::SqliteConfig::new_for_testing(home.path().abs()),
++        config.default_model_provider_id.clone(),
++    )
++    .await
++    .expect("state");
++    state
++        .mark_backfill_complete(/*last_watermark*/ None)
++        .await
++        .expect("backfill");
++    let store = LocalThreadStore::new(config.clone(), Some(state.clone()));
++    let id = Uuid::from_u128(305);
++    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
++    let selected = write_session_file_with_history_mode(
++        home.path(),
++        "2025-01-03T12-00-00",
++        id,
++        ThreadHistoryMode::Legacy,
++    )
++    .expect("selected");
++    let alias = selected.with_file_name(format!(
++        "rollout-2025-01-03T12-00-00-{}.jsonl",
++        ThreadId::new(),
++    ));
++    fs::rename(&selected, &alias).expect("alias selected rollout");
++    let damaged_bytes = br#"{"timestamp":"2025-01-03T12:00:00Z","type":"session_meta","payload":"#;
++    fs::write(&alias, damaged_bytes).expect("damage selected alias");
++    let metadata = codex_state::ThreadMetadataBuilder::new(
++        thread_id,
++        alias.clone(),
++        Utc::now(),
++        SessionSource::Cli,
++    )
++    .build(&config.default_model_provider_id);
++    state
++        .upsert_thread(&metadata)
++        .await
++        .expect("selected metadata");
++
++    store
++        .archive_thread(ArchiveThreadParams { thread_id })
++        .await
++        .expect("archive damaged selected alias");
++
++    let archived_path = home
++        .path()
++        .join(ARCHIVED_SESSIONS_SUBDIR)
++        .join(alias.file_name().expect("alias filename"));
++    assert!(!alias.exists());
++    assert_eq!(
++        fs::read(&archived_path).expect("archived damaged bytes"),
++        damaged_bytes
++    );
++    let updated = state
++        .get_thread(thread_id)
++        .await
++        .expect("metadata")
++        .expect("thread");
++    assert_eq!(updated.rollout_path, archived_path);
++    assert!(updated.archived_at.is_some());
++}
++
++#[tokio::test]
++async fn archive_restores_already_moved_rollouts_after_rename_failure() {
++    let home = TempDir::new().expect("home");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let id = Uuid::from_u128(303);
++    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
++    let selected = write_session_file_with_history_mode(
++        home.path(),
++        "2025-01-03T12-00-00",
++        id,
++        ThreadHistoryMode::Legacy,
++    )
++    .expect("selected");
++    let retained = codex_rollout::history_rollout_path_with_rollout_id(&selected, ThreadId::new())
++        .expect("retained path");
++    let contents = fs::read(&selected).expect("contents");
++    fs::write(&retained, &contents).expect("retained");
++    let archive_folder = home.path().join(ARCHIVED_SESSIONS_SUBDIR);
++    fs::create_dir_all(archive_folder.join(selected.file_name().expect("filename")))
++        .expect("block selected destination with directory");
++
++    // Explicit order guarantees that one rename succeeds before the second fails.
++    super::archive_thread_with_paths(&store, thread_id, vec![retained.clone(), selected.clone()])
++        .await
++        .expect_err("rename must fail");
++    assert_eq!(fs::read(&retained).expect("restored retained"), contents);
++    assert_eq!(fs::read(&selected).expect("selected preserved"), contents);
++    assert!(
++        !archive_folder
++            .join(retained.file_name().expect("filename"))
++            .exists()
++    );
++}
+diff --git a/codex-rs/thread-store/src/local/archive_inherited_writer_tests.rs b/codex-rs/thread-store/src/local/archive_inherited_writer_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd22ada3242
+--- /dev/null
++++ b/codex-rs/thread-store/src/local/archive_inherited_writer_tests.rs
+@@ -0,0 +1,73 @@
++use std::io::Read;
++use std::io::Write;
++use std::os::unix::net::UnixStream;
++use std::os::unix::process::CommandExt;
++use std::process::Command;
++use std::time::Duration;
++
++use codex_protocol::ThreadId;
++use tempfile::TempDir;
++use uuid::Uuid;
++
++use crate::ArchiveThreadParams;
++use crate::ThreadStore;
++use crate::local::LocalThreadStore;
++use crate::local::test_support::test_config;
++use crate::local::test_support::write_session_file;
++
++#[tokio::test]
++async fn archive_after_writer_shutdown_does_not_wait_for_subprocess_exec() {
++    let home = TempDir::new().expect("home");
++    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
++    let id = Uuid::from_u128(304);
++    let thread_id = ThreadId::from_string(&id.to_string()).expect("thread id");
++    let path = write_session_file(home.path(), "2025-01-03T12-00-00", id).expect("rollout");
++    let writer = store
++        .writer_lock_coordinator
++        .acquire(thread_id)
++        .expect("writer");
++    let (mut parent, mut child) = UnixStream::pair().expect("handshake");
++    parent
++        .set_read_timeout(Some(Duration::from_secs(10)))
++        .expect("parent timeout");
++    child
++        .set_read_timeout(Some(Duration::from_secs(10)))
++        .expect("child timeout");
++    let subprocess = std::thread::spawn(move || {
++        let mut command = Command::new("/bin/sh");
++        command.args(["-c", ":"]);
++        // SAFETY: the callback only reads and writes already-open descriptors. No locks or
++        // allocations are used between fork and exec. The timeout also bounds failed tests.
++        unsafe {
++            command.pre_exec(move || {
++                child.write_all(&[1])?;
++                child.read_exact(&mut [0])?;
++                Ok(())
++            });
++        }
++        command.spawn().and_then(|mut process| process.wait())
++    });
++    let ready = parent.read_exact(&mut [0]);
++    // Session shutdown drops this same guard. The child has inherited its CLOEXEC descriptor,
++    // but has not executed a program yet, so close alone cannot release the writer's flock.
++    drop(writer);
++    let archived = if ready.is_ok() {
++        Some(
++            store
++                .archive_thread(ArchiveThreadParams { thread_id })
++                .await,
++        )
++    } else {
++        None
++    };
++    let released = parent.write_all(&[1]);
++    let child_result = subprocess.join().expect("spawn worker");
++    // Reap the child before asserting the archive result, including on the expected red run.
++    ready.expect("child reached pre_exec");
++    released.expect("release child");
++    assert!(child_result.expect("subprocess").success());
++    archived
++        .expect("archive attempted")
++        .expect("first archive must succeed");
++    assert!(!path.exists());
++}
+diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
+index 075a0a873f8098066dc72c94558dff3da0feb9a4..364891437d2d2344f331806e798d6d9bd406856d 100644
+--- a/codex-rs/thread-store/src/local/archive_thread.rs
++++ b/codex-rs/thread-store/src/local/archive_thread.rs
+@@ -1,5 +1,4 @@
+ use super::LocalThreadStore;
+-use super::helpers::owned_rollout_paths_from_index;
+ use super::helpers::restore_rollout_moves;
+ use super::helpers::rollout_path_is_archived;
+ use super::helpers::scoped_rollout_path;
+@@ -8,7 +7,8 @@ use crate::ArchiveThreadsParams;
+ use crate::ThreadStoreError;
+ use crate::ThreadStoreResult;
+ use chrono::Utc;
+-use codex_rollout::RolloutReferenceIndex;
++use codex_rollout::find_all_rollout_paths_by_thread_id;
++use codex_rollout::read_session_meta_line_exact;
+ use tracing::warn;
+
+ use super::thread_rollout_resolver;
+@@ -39,21 +39,23 @@ pub(super) async fn archive_threads(
+         }
+     }
+     let _writer_guards = store.acquire_writer_locks(&lock_thread_ids).await?;
+-    // Only inspect active files whose names belong to the threads being archived.
+-    let reference_index = RolloutReferenceIndex::scan_unarchived_threads(
+-        store.config.codex_home.as_path(),
+-        &thread_ids,
+-    )
+-    .await
+-    .map_err(|err| ThreadStoreError::Internal {
+-        message: format!("failed to scan thread rollout files: {err}"),
+-    })?;
+-
+     let parent_thread_id = thread_ids[0];
+     let mut archived_thread_ids = Vec::new();
+     for thread_id in thread_ids {
+-        let rollout_paths = owned_rollout_paths_from_index(&reference_index, thread_id);
+-        match archive_thread_with_paths(store, thread_id, rollout_paths).await {
++        // Archive preserves references; it needs owned filenames, not a global reference index
++        // that opens unrelated rollouts and decodes their first history records.
++        let result =
++            match find_all_rollout_paths_by_thread_id(store.config.codex_home.as_path(), thread_id)
++                .await
++            {
++                Ok(paths) => archive_thread_with_paths(store, thread_id, paths).await,
++                Err(err) => Err(ThreadStoreError::Internal {
++                    message: format!(
++                        "failed to enumerate rollout files for thread {thread_id}: {err}"
++                    ),
++                }),
++            };
++        match result {
+             Ok(()) => archived_thread_ids.push(thread_id),
+             Err(err) if archived_thread_ids.is_empty() => return Err(err),
+             Err(err) => warn!(
+@@ -98,6 +100,15 @@ async fn archive_thread_with_paths(
+             rollout_path.as_path(),
+             "sessions",
+         )?;
++        // Filenames select candidates, but session metadata determines ownership. Retain the
++        // separately resolved selected path, including SQLite aliases and damaged metadata.
++        if rollout_path != selected_rollout_path
++            && !read_session_meta_line_exact(canonical_rollout_path.as_path())
++                .await
++                .is_ok_and(|meta| meta.meta.id == thread_id)
++        {
++            continue;
++        }
+         let file_name =
+             validated_rollout_file_name(canonical_rollout_path.as_path(), rollout_path.as_path())?;
+         let destination = archive_folder.join(&file_name);
+@@ -149,6 +160,14 @@ async fn archive_thread_with_paths(
+     Ok(())
+ }
+
++#[cfg(test)]
++#[path = "archive_discovery_tests.rs"]
++mod discovery_tests;
++
++#[cfg(all(test, unix))]
++#[path = "archive_inherited_writer_tests.rs"]
++mod inherited_writer_tests;
++
+ #[cfg(test)]
+ mod tests {
+     use std::time::Duration;
+diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
+index 2f9fab8aebbfb0da148f06611b10b608f5e63c28..bf886f168519776b169a7d0cdf25b33304ce2224 100644
+--- a/codex-rs/thread-store/src/local/rollout_migration.rs
++++ b/codex-rs/thread-store/src/local/rollout_migration.rs
+@@ -664,6 +664,7 @@ impl LocalThreadStore {
+                 .map_err(migration_error)?
+             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
+                 != codex_rollout::plain_rollout_path(path.as_path())
++            && !same_rollout_moved(&selected.rollout_path, &path).await
+         {
+             // A stable thread can retain older physical rollouts after a revert. Migrating one of
+             // those files would overwrite the selected thread's history mode and migration journal.
+@@ -941,6 +942,7 @@ impl LocalThreadStore {
+                 .map_err(migration_error)?
+             && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
+                 != codex_rollout::plain_rollout_path(path.as_path())
++            && !same_rollout_moved(&selected.rollout_path, &path).await
+         {
+             return Ok(None);
+         }
+@@ -1957,6 +1959,16 @@ async fn find_current_rollout_path(
+         }))
+ }
+
++// Archiving changes the directory but not physical rollout identity. A still-present selected
++// file or a different filename means this is an older rollout, not the selected file moving.
++async fn same_rollout_moved(selected: &Path, candidate: &Path) -> bool {
++    codex_rollout::plain_rollout_path(selected).file_name()
++        == codex_rollout::plain_rollout_path(candidate).file_name()
++        && codex_rollout::existing_rollout_path(selected)
++            .await
++            .is_none()
++}
++
+ fn matches_selection(selected: &[ThreadId], actual: Option<ThreadId>) -> bool {
+     selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
+ }
+diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
+index f910b7752de96c0ff559652071b3d339921c9c6e..b837dbd441346ea4479ed32277690c7636878044 100644
+--- a/codex-rs/thread-store/src/local/segment.rs
++++ b/codex-rs/thread-store/src/local/segment.rs
+@@ -270,6 +270,11 @@ async fn reserve_segment_writers(
+         };
+         let (source_path, live_recorder, allow_missing_source) = match live_source {
+             Some((source_path, recorder, allow_missing_source)) => {
++                // Durable creation still defers the first file write. Materialize that header
++                // before discovering references; deferred threads remain buffered until freeze.
++                if !allow_missing_source {
++                    recorder.persist().await.map_err(thread_store_io_error)?;
++                }
+                 (source_path, Some(recorder), allow_missing_source)
+             }
+             None => {
+diff --git a/codex-rs/tui/src/session_archive_commands_tests.rs b/codex-rs/tui/src/session_archive_commands_tests.rs
+index f715257094fdd4f114d89abbb7ec708127a365ae..ddcfe2d30fbfa5e7c3cfc97b43057c633026ae88 100644
+--- a/codex-rs/tui/src/session_archive_commands_tests.rs
++++ b/codex-rs/tui/src/session_archive_commands_tests.rs
+@@ -503,12 +503,35 @@ async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_e
+         /*archived*/ false,
+     );
+     custom_metadata.source = serde_json::to_string(&custom_source)?;
+-    custom_metadata.recency_at += chrono::Duration::hours(/*hours*/ 1);
+-    custom_metadata.updated_at += chrono::Duration::hours(/*hours*/ 1);
++    // Queueing advances the first thread's recency beyond its fixture date.
++    // Keep the duplicate-name winner explicitly newer than that persisted value.
++    let queued_metadata = runtime
++        .get_thread(thread_id)
++        .await
++        .map_err(std::io::Error::other)?
++        .expect("queued thread remains indexed");
++    custom_metadata.recency_at =
++        queued_metadata.recency_at + chrono::Duration::hours(/*hours*/ 1);
++    custom_metadata.updated_at = custom_metadata.recency_at;
+     runtime
+         .upsert_thread(&custom_metadata)
+         .await
+         .map_err(std::io::Error::other)?;
++    let legacy_thread_id = ThreadId::new();
++    write_rollout(
++        &config,
++        legacy_thread_id,
++        /*archived*/ false,
++        "2025-02-01T10:00:00Z",
++        "preview",
++        SessionSource::Cli,
++    )?;
++    codex_rollout::append_thread_name(
++        config.codex_home.as_path(),
++        legacy_thread_id,
++        "saved-session",
++    )
++    .await?;
+     let (resolved_custom_thread_id, _) = run_session_queue_action_with_app_server(
+         &mut app_server,
+         config.codex_home.as_path(),
+@@ -517,11 +540,21 @@ async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_e
+         "custom-client-message-id",
+     )
+     .await?;
+-    assert_eq!(resolved_custom_thread_id, custom_thread_id);
+-    runtime
+-        .update_thread_title(custom_thread_id, "saved-session")
+-        .await
+-        .map_err(std::io::Error::other)?;
++    assert_eq!(
++        (
++            resolved_custom_thread_id,
++            runtime
++                .get_thread(legacy_thread_id)
++                .await
++                .map_err(std::io::Error::other)?,
++        ),
++        (custom_thread_id, None),
++    );
++    // Queueing may migrate the rollout; rename through the API so the correct
++    // legacy title or paginated name column is updated.
++    app_server
++        .thread_set_name(custom_thread_id, "saved-session".to_string())
++        .await?;
+
+     let duplicate_error = run_session_queue_action_with_app_server(
+         &mut app_server,
