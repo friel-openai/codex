@@ -16,6 +16,7 @@ import (
 	"github.com/friel-openai/codex/layerctl/internal/gitrepo"
 	"github.com/friel-openai/codex/layerctl/internal/layer"
 	"github.com/friel-openai/codex/layerctl/internal/projection"
+	"github.com/friel-openai/codex/layerctl/internal/rewrite"
 	"github.com/friel-openai/codex/layerctl/internal/upstream"
 )
 
@@ -23,7 +24,7 @@ import (
 // current directory.
 func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: layerctl projection <create|list|path|checkout|delete> ...")
+		return errors.New("usage: layerctl <projection|layer|upstream|check> ...")
 	}
 	workingDirectory, err := os.Getwd()
 	if err != nil {
@@ -46,6 +47,10 @@ func Run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	case "projection":
 		return runProjection(ctx, service, args[1:], stdout, stderr)
 	case "layer":
+		if len(args) > 1 && (args[1] == "hunks" || args[1] == "move" || args[1] == "redistribute" || args[1] == "regroup") {
+			rewrites := &rewrite.Service{Definition: canonical, Git: git}
+			return runRewrite(ctx, rewrites, args[1:], stdout, stderr)
+		}
 		layers := &layer.Service{Definition: canonical, Git: git, Projection: service}
 		return runLayer(ctx, layers, args[1:], stderr)
 	case "upstream":
