@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 4611e3b5808540d2a8e7757a3f720ba054a33632..5720103c89caa7693859724d291e1f0388c90446 100644
+index 5aa2fa7a162c47fabc329afee4161f920b4b1560..23e16173b66d28d0dce519e7ddfbe39f25e14771 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2137,7 +2137,7 @@ impl ThreadRequestProcessor {
+@@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
                          "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                      );
                  }
@@ -11,7 +11,7 @@ index 4611e3b5808540d2a8e7757a3f720ba054a33632..5720103c89caa7693859724d291e1f03
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6469,6 +6469,28 @@ impl ThreadRequestProcessor {
+@@ -6491,6 +6491,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -41,22 +41,22 @@ index 4611e3b5808540d2a8e7757a3f720ba054a33632..5720103c89caa7693859724d291e1f03
              .thread_store
              .read_thread(StoreReadThreadParams {
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 52a8f66ca2659e07a853b5401007887fbfefcd63..d41f0c138e95b58a79bbd58139d3642ee726903e 100644
+index 8b1d9e21267a0f65881085e692dd51e2184f38a0..48d78d2ee9c8fed956ed953e9d46934df2e244c1 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -101,6 +101,7 @@ mod session_end;
+@@ -122,6 +122,7 @@ mod session_end;
  mod skills_list;
  mod sleep;
  mod thread_archive;
 +mod thread_archive_discovery;
+ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
- mod thread_fork;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_archive.rs b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-index 51e602df07665a0a8d388939514a331eb7ed6e44..b919724bc147c49e3479afcaee37939adad53000 100644
+index e7928f51b5a9df6c188fbd1878c60fdb70d1d3ac..0a9fd660801b859b8bbb6e58f4d171565496491b 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_archive.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_archive.rs
-@@ -203,6 +203,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -206,6 +206,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
      let codex_home = TempDir::new()?;
      MockResponsesConfig::new(&server.uri())
          .enable_feature(Feature::Collab)
@@ -64,7 +64,7 @@ index 51e602df07665a0a8d388939514a331eb7ed6e44..b919724bc147c49e3479afcaee37939a
          .write(codex_home.path())?;
      let parent_id = create_fake_paginated_rollout(
          codex_home.path(),
-@@ -231,7 +232,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
+@@ -234,7 +235,7 @@ async fn thread_archive_shuts_down_resumed_archived_descendant() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -73,7 +73,7 @@ index 51e602df07665a0a8d388939514a331eb7ed6e44..b919724bc147c49e3479afcaee37939a
          )
          .await?;
 
-@@ -571,7 +572,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
+@@ -604,7 +605,7 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -82,7 +82,7 @@ index 51e602df07665a0a8d388939514a331eb7ed6e44..b919724bc147c49e3479afcaee37939a
          )
          .await?;
      state_db
-@@ -683,7 +684,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
+@@ -716,7 +717,7 @@ async fn thread_archive_succeeds_when_descendant_archive_fails() -> Result<()> {
          .upsert_thread_spawn_edge(
              parent_thread_id,
              child_thread_id,
@@ -259,7 +259,7 @@ index 0000000000000000000000000000000000000000..8e468af8ea9e2edcc13ac4729817818e
 +    Ok(())
 +}
 diff --git a/codex-rs/core/tests/suite/rollout_compression.rs b/codex-rs/core/tests/suite/rollout_compression.rs
-index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57bd5064763 100644
+index 2ccc07497996c0bca01c55145e953c2d8166433e..29eff3d6de6016edfc680c69ccb3a3c0c79a57e3 100644
 --- a/codex-rs/core/tests/suite/rollout_compression.rs
 +++ b/codex-rs/core/tests/suite/rollout_compression.rs
 @@ -35,6 +35,7 @@ use pretty_assertions::assert_eq;
@@ -270,7 +270,7 @@ index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57b
  async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history() -> Result<()> {
      skip_if_no_network!(Ok(()));
 
-@@ -115,16 +116,20 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -111,16 +112,20 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
      let child_path = child.thread.rollout_path().context("child rollout")?;
      test.codex.shutdown_and_wait().await?;
      child.thread.shutdown_and_wait().await?;
@@ -300,7 +300,7 @@ index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57b
      let original_bytes = paths
          .iter()
          .map(std::fs::read)
-@@ -155,7 +160,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -151,7 +156,19 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
          }
      })
      .await
@@ -321,7 +321,7 @@ index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57b
      for (path, original) in paths.into_iter().zip(original_bytes) {
          let compressed = std::fs::File::open(path.with_extension("jsonl.zst"))?;
          assert_eq!(zstd::stream::decode_all(compressed)?, original);
-@@ -215,6 +232,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
+@@ -211,6 +228,11 @@ async fn compressed_shared_fork_resume_preserves_checkpoint_and_frozen_history()
          "reading the ancestor must not materialize it"
      );
      assert!(parent_path.with_extension("jsonl.zst").exists());
@@ -333,126 +333,11 @@ index b95498227bcaaeaa5b66eaf4544229b7eae0524a..0542fa0b5e6f481e0e1177773804a57b
      resumed.thread.shutdown_and_wait().await?;
      Ok(())
  }
-diff --git a/codex-rs/rollout/src/compression.rs b/codex-rs/rollout/src/compression.rs
-index c35e4845b4b342205e97ff26d07d8a568230d1d5..8e5fd8f8ed2da01b2adef5b3c501c16f2bb21632 100644
---- a/codex-rs/rollout/src/compression.rs
-+++ b/codex-rs/rollout/src/compression.rs
-@@ -486,6 +486,9 @@ mod worker {
-         }
-         let mut stack = vec![root.to_path_buf()];
-         let mut jobs = JoinSet::new();
-+        // Physical segments share their logical thread's writer reservation. Do not let
-+        // this worker mistake another compression job for an active foreground writer.
-+        let mut job_threads = std::collections::HashMap::new();
-         while let Some(dir) = stack.pop() {
-             if started_at.elapsed() >= WORKER_MAX_RUNTIME || maintenance.should_yield()? {
-                 break;
-@@ -505,7 +508,7 @@ mod worker {
-                     Ok(Some(entry)) => entry,
-                     Ok(None) => break,
-                     Err(err) => {
--                        drain_compression_jobs(&mut jobs, stats).await;
-+                        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
-                         return Err(err);
-                     }
-                 };
-@@ -549,13 +552,15 @@ mod worker {
-                 };
-                 stats.scanned = stats.scanned.saturating_add(1);
-                 metrics::file("scanned");
--                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS {
--                    collect_next_compression_job(&mut jobs, stats).await;
-+                let thread_id = meta.meta.id;
-+                while jobs.len() >= MAX_CONCURRENT_COMPRESSION_JOBS
-+                    || job_threads.values().any(|owner| *owner == thread_id)
-+                {
-+                    collect_next_compression_job(&mut jobs, &mut job_threads, stats).await;
-                 }
-                 let writers = Arc::clone(writers);
-                 let maintenance = Arc::clone(maintenance);
--                let thread_id = meta.meta.id;
--                jobs.spawn_blocking(move || {
-+                let job = jobs.spawn_blocking(move || {
-                     let started_at = Instant::now();
-                     // The guard moves with the blocking job through cancellation and publication.
-                     let result = compress_rollout_if_cold_blocking(
-@@ -567,9 +572,10 @@ mod worker {
-                     let duration = started_at.elapsed();
-                     (path, duration, result)
-                 });
-+                job_threads.insert(job.id(), thread_id);
-             }
-         }
--        drain_compression_jobs(&mut jobs, stats).await;
-+        drain_compression_jobs(&mut jobs, &mut job_threads, stats).await;
-         Ok(())
-     }
-
-@@ -625,22 +631,29 @@ mod worker {
-
-     async fn drain_compression_jobs(
-         jobs: &mut JoinSet<CompressionJobResult>,
-+        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
-         stats: &mut CompressionStats,
-     ) {
-         while !jobs.is_empty() {
--            collect_next_compression_job(jobs, stats).await;
-+            collect_next_compression_job(jobs, job_threads, stats).await;
-         }
-     }
-
-     async fn collect_next_compression_job(
-         jobs: &mut JoinSet<CompressionJobResult>,
-+        job_threads: &mut std::collections::HashMap<tokio::task::Id, codex_protocol::ThreadId>,
-         stats: &mut CompressionStats,
-     ) {
--        let Some(result) = jobs.join_next().await else {
-+        let Some(result) = jobs.join_next_with_id().await else {
-             return;
-         };
-+        let job_id = match &result {
-+            Ok((job_id, _)) => *job_id,
-+            Err(error) => error.id(),
-+        };
-+        job_threads.remove(&job_id);
-         match result {
--            Ok((_, duration, Ok(measurement))) => {
-+            Ok((_, (_, duration, Ok(measurement)))) => {
-                 let outcome = measurement.outcome;
-                 match outcome {
-                     CompressionOutcome::Compressed => {
-@@ -666,7 +679,7 @@ mod worker {
-                     }
-                 }
-             }
--            Ok((path, duration, Err(err))) => {
-+            Ok((_, (path, duration, Err(err)))) => {
-                 stats.failed = stats.failed.saturating_add(1);
-                 metrics::file("failed");
-                 metrics::file_duration("failed", duration);
-@@ -886,17 +899,6 @@ mod worker {
-         }
-     }
-
--    async fn wait_for_foreground_maintenance(
--        maintenance: &crate::maintenance::RolloutCompressionMaintenanceGuard,
--    ) -> io::Result<()> {
--        loop {
--            if maintenance.should_yield()? {
--                return Ok(());
--            }
--            tokio::time::sleep(Duration::from_millis(25)).await;
--        }
--    }
--
-     fn set_file_metadata(
-         file: &File,
-         modified: SystemTime,
 diff --git a/codex-rs/rollout/src/compression_tests.rs b/codex-rs/rollout/src/compression_tests.rs
-index 8ec91549d4ded973977e61232b7c3c67afb47376..0aa381477f9eaba077a9accca7c602c82634a2dd 100644
+index 914b2f99e6c49e405ccdeded4a7a006227458381..b59c44702fd074856e8f4ba7fb36fb738e2ad115 100644
 --- a/codex-rs/rollout/src/compression_tests.rs
 +++ b/codex-rs/rollout/src/compression_tests.rs
-@@ -583,6 +583,32 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
+@@ -613,6 +613,33 @@ async fn compression_preserves_read_only_rollout_permissions() -> anyhow::Result
      Ok(())
  }
 
@@ -468,12 +353,13 @@ index 8ec91549d4ded973977e61232b7c3c67afb47376..0aa381477f9eaba077a9accca7c602c8
 +        set_old_mtime(&path)?;
 +        paths.push(path);
 +    }
-+    worker::run(home.path().to_path_buf()).await?;
++    worker::run(home.path().to_path_buf(), Startup).await?;
 +    for path in paths {
 +        assert!(
 +            !path.exists(),
-+            "compression must not skip its own writer reservation: {path:?}"
++            "compression must publish every physical segment of the thread: {path:?}"
 +        );
++        assert!(compressed_rollout_path(&path).exists());
 +        let (items, loaded_id, errors) = RolloutRecorder::load_rollout_items(&path).await?;
 +        assert_eq!(loaded_id, Some(thread_id));
 +        assert_eq!(errors, 0);
@@ -485,30 +371,11 @@ index 8ec91549d4ded973977e61232b7c3c67afb47376..0aa381477f9eaba077a9accca7c602c8
  #[tokio::test]
  async fn worker_skips_existing_compressed_archived_rollouts() -> anyhow::Result<()> {
      let home = TempDir::new()?;
-@@ -878,7 +904,7 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
-         drop(reader);
-         drop(migration);
-
--        // A new run must rebuild the reference index after foreground work changed it.
-+        // Shared rollout compression must preserve the append and the referenced byte offsets.
-         let child_uuid = Uuid::from_u128(29);
-         let child_id = ThreadId::from_string(&child_uuid.to_string())?;
-         let child = archived_rollout_path(home.path(), "2025-01-03T12-00-01", child_uuid);
-@@ -893,7 +919,8 @@ async fn foreground_access_interrupts_compression_without_losing_appends() -> an
-         )?;
-         set_old_mtime(&path)?;
-         worker::run(home.path().to_path_buf()).await?;
--        assert!(path.exists());
-+        assert!(!path.exists());
-+        assert!(compressed_rollout_path(&path).exists());
-         let (items, loaded_id, parse_errors) = RolloutRecorder::load_rollout_items(&path).await?;
-         assert_eq!(loaded_id, Some(thread_id));
-         assert_eq!(parse_errors, 0);
 diff --git a/codex-rs/rollout/src/list.rs b/codex-rs/rollout/src/list.rs
-index 0f5741911cd194fd02343a921005a1ce3c689761..8571a0d59718c2a40817cf3e53cb99261804556d 100644
+index fb9d2612692ed2cb564adbc6b4c6471b7e6d3bfd..490c5a76afad701ecaee2b1b286a7e1fbe5e4e9b 100644
 --- a/codex-rs/rollout/src/list.rs
 +++ b/codex-rs/rollout/src/list.rs
-@@ -1098,12 +1098,12 @@ async fn select_thread_candidates(
+@@ -1099,12 +1099,12 @@ async fn select_thread_candidates(
                  continue;
              }
          }
@@ -527,94 +394,43 @@ index 0f5741911cd194fd02343a921005a1ce3c689761..8571a0d59718c2a40817cf3e53cb9926
      }
      Ok(selected)
  }
-diff --git a/codex-rs/rollout/src/writer_lock.rs b/codex-rs/rollout/src/writer_lock.rs
-index 95c0e63e8cc62f2269868f820fe149f2a3f77c5d..1179cc478a224c37eee9556d3542ba5fbc752e87 100644
---- a/codex-rs/rollout/src/writer_lock.rs
-+++ b/codex-rs/rollout/src/writer_lock.rs
-@@ -285,6 +285,18 @@ impl Drop for RolloutWriterLockGuard {
-             }
-         };
-
-+        // A subprocess can inherit this open file description before exec closes CLOEXEC
-+        // descriptors. Closing our descriptor alone would leave its flock held by that child.
-+        // Independently opened fork-reader reservations are not released by this unlock.
-+        match &self.state {
-+            WriterLockState::Exclusive(file) | WriterLockState::Shared(file) => {
-+                if let Err(err) = file.unlock() {
-+                    warn!("failed to release thread writer lock: {err}");
-+                    return;
-+                }
-+            }
-+            WriterLockState::Unreserved => {}
-+        }
-         // Close the writer lock before deleting it so cleanup works on Windows too.
-         drop(std::mem::replace(
-             &mut self.state,
-@@ -318,3 +330,7 @@ impl Drop for RolloutWriterLockGuard {
-         drop(coordination_lock);
-     }
+diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
+index f8db8e86be4cdee1905ea7176e3a76f154434625..7c4197e6ecfe4c90c481caf5b1509db8d04333ae 100644
+--- a/codex-rs/rollout/src/writer_lock_tests.rs
++++ b/codex-rs/rollout/src/writer_lock_tests.rs
+@@ -235,3 +235,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
+     );
+     assert!(writer.acquire(thread_id).is_ok());
  }
 +
-+#[cfg(all(test, unix))]
-+#[path = "writer_lock_tests.rs"]
-+mod tests;
-diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
-new file mode 100644
-index 0000000000000000000000000000000000000000..0e58673b801b692294e08bbeaa1d5fe8d7a0caa5
---- /dev/null
-+++ b/codex-rs/rollout/src/writer_lock_tests.rs
-@@ -0,0 +1,52 @@
-+use super::*;
-+
 +#[test]
-+fn writer_release_does_not_wait_for_inherited_file_descriptors() -> io::Result<()> {
-+    let home = tempfile::TempDir::new()?;
-+    let coordinator = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
++fn writer_release_preserves_independently_acquired_fork_reader() {
++    let home = TempDir::new().expect("temp dir");
++    let coordinator = Arc::new(WriterLockCoordinator::new(home.path()));
++    let other = Arc::new(WriterLockCoordinator::new(home.path()));
 +    let thread_id = ThreadId::new();
-+    let guard = coordinator.try_acquire(thread_id)?.expect("writer");
-+    // dup and fork share the open file description. CLOEXEC does not help while a child is
-+    // still preparing to exec, so closing the parent's descriptor alone retains flock ownership.
-+    let inherited = match &guard.state {
-+        WriterLockState::Exclusive(file) => file.try_clone()?,
-+        _ => panic!("expected exclusive writer"),
-+    };
-+    drop(guard);
-+    let next_writer = coordinator.try_acquire(thread_id)?;
-+    assert!(
-+        next_writer.is_some(),
-+        "shutdown must release the writer before inherited descriptors close"
-+    );
-+    drop(inherited);
-+    Ok(())
-+}
-+
-+#[test]
-+fn writer_release_preserves_independently_acquired_fork_reader() -> io::Result<()> {
-+    let home = tempfile::TempDir::new()?;
-+    let coordinator = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
-+    let other = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
-+    let thread_id = ThreadId::new();
-+    let mut writer = coordinator.try_acquire(thread_id)?.expect("writer");
-+    writer.share_for_fork()?;
-+    let reader = other
-+        .try_acquire_fork_reader(thread_id)?
-+        .expect("fork reader");
-+    let inherited = match &writer.state {
-+        WriterLockState::Shared(file) => file.try_clone()?,
++    let writer = Arc::new(coordinator.acquire(thread_id).expect("writer"));
++    writer.share_for_fork().expect("export");
++    let reader = other.acquire_fork_reader(thread_id).expect("fork reader");
++    // dup and fork share the writer's open file description, unlike the separate reader.
++    let inherited = match &*writer.state.lock().expect("writer state") {
++        WriterLockState::Shared(file) => file.try_clone().expect("inherited descriptor"),
 +        _ => panic!("expected shared writer"),
 +    };
 +    drop(writer);
-+    assert!(
-+        coordinator.try_acquire(thread_id)?.is_none(),
-+        "the independent reader must still exclude archive"
++    assert_eq!(
++        coordinator
++            .acquire(thread_id)
++            .expect_err("the independent reader must still exclude archive")
++            .kind(),
++        ErrorKind::WouldBlock
 +    );
 +    drop(reader);
-+    assert!(
-+        coordinator.try_acquire(thread_id)?.is_some(),
-+        "only independent reservations may retain ownership"
-+    );
++    let next_writer = coordinator
++        .acquire(thread_id)
++        .expect("only independent reservations may retain ownership");
 +    drop(inherited);
-+    Ok(())
++    drop(next_writer);
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_discovery_tests.rs b/codex-rs/thread-store/src/local/archive_discovery_tests.rs
 new file mode 100644
@@ -973,7 +789,7 @@ index 0000000000000000000000000000000000000000..5e6e812a727cbfa943a7048446599cd2
 +    assert!(!path.exists());
 +}
 diff --git a/codex-rs/thread-store/src/local/archive_thread.rs b/codex-rs/thread-store/src/local/archive_thread.rs
-index 075a0a873f8098066dc72c94558dff3da0feb9a4..364891437d2d2344f331806e798d6d9bd406856d 100644
+index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f83061d363 100644
 --- a/codex-rs/thread-store/src/local/archive_thread.rs
 +++ b/codex-rs/thread-store/src/local/archive_thread.rs
 @@ -1,5 +1,4 @@
@@ -1060,7 +876,7 @@ index 075a0a873f8098066dc72c94558dff3da0feb9a4..364891437d2d2344f331806e798d6d9b
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 2f9fab8aebbfb0da148f06611b10b608f5e63c28..bf886f168519776b169a7d0cdf25b33304ce2224 100644
+index c5051a8a38813890d550cd84d38673e0bd5379dc..ed5338624a3f9982bb61c6af6709fd2406d4734e 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
 @@ -664,6 +664,7 @@ impl LocalThreadStore {
@@ -1097,7 +913,7 @@ index 2f9fab8aebbfb0da148f06611b10b608f5e63c28..bf886f168519776b169a7d0cdf25b333
      selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
  }
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index f910b7752de96c0ff559652071b3d339921c9c6e..b837dbd441346ea4479ed32277690c7636878044 100644
+index ba433a4499615a45f79eefe79516d38cb9a41180..d5290cf9fafe4ad456a938e80011e6d9742c811b 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -270,6 +270,11 @@ async fn reserve_segment_writers(

@@ -1,11 +1,11 @@
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index bc30ebf1406e8abfa34ec8078fd30a8459b6b07c..eed989a82904cf07c1f72f4fa63bd87f80dba5dc 100644
+index fc5fbb99ac445999cb335601a4499f4c93d1d3c2..43c4114ca5edb41964770a76ef05ead7a7daac46 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -552,6 +552,10 @@ pub enum ThreadStoreToml {
- pub struct AutoReviewToml {
-     /// Additional policy instructions inserted into the guardian prompt.
+@@ -566,6 +566,10 @@ pub struct AutoReviewToml {
      pub policy: Option<String>,
+     /// Experimental full Guardian prompt template containing the tenant policy placeholder.
+     pub experimental_policy_template: Option<String>,
 +
 +    /// Runs approval autoreview on `gpt-5.6-sol` with UltraFast preferred and Fast fallback.
 +    #[serde(default)]
@@ -14,10 +14,10 @@ index bc30ebf1406e8abfa34ec8078fd30a8459b6b07c..eed989a82904cf07c1f72f4fa63bd87f
 
  #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 0f7dd87c93daf4b96db3026c844d5364051aaa4e..8b7e210bf851b9cb1dcd15c0979c9c40d795aa43 100644
+index 7ec48aacaf47314e4dc88ab161ed1fc4dac21a6b..05f7e74ea225ce66af36288478f9a82fc00c1aa6 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -386,6 +386,11 @@
+@@ -397,6 +397,11 @@
          "policy": {
            "description": "Additional policy instructions inserted into the guardian prompt.",
            "type": "string"
@@ -30,20 +30,20 @@ index 0f7dd87c93daf4b96db3026c844d5364051aaa4e..8b7e210bf851b9cb1dcd15c0979c9c40
        },
        "type": "object"
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index 7640292517ad6a8680601a0b47012a49b54400b8..6d3a2c3fd5c245e3baa572a779e633e4437eff17 100644
+index 99be9224149bebd0236fa0be21b3f5e566566e77..5854ec597735783264627d4bf49cc05f089d360a 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
-@@ -8169,6 +8169,7 @@ fn config_toml_deserializes_auto_review_policy() {
-         r#"
+@@ -8369,6 +8369,7 @@ fn config_toml_deserializes_auto_review_policy_and_template() {
  [auto_review]
  policy = "Use the user-configured guardian policy."
+ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
 +use_ultrafast = true
  "#,
      )
      .expect("TOML deserialization should succeed");
-@@ -8179,6 +8180,45 @@ policy = "Use the user-configured guardian policy."
-             .and_then(|auto_review| auto_review.policy.as_deref()),
-         Some("Use the user-configured guardian policy.")
+@@ -8384,6 +8385,46 @@ experimental_policy_template = "Configured template: {{ tenant_policy_config }}"
+             Some("Configured template: {{ tenant_policy_config }}"),
+         )
      );
 +    assert!(
 +        cfg.auto_review
@@ -70,6 +70,7 @@ index 7640292517ad6a8680601a0b47012a49b54400b8..6d3a2c3fd5c245e3baa572a779e633e4
 +        ConfigToml {
 +            auto_review: Some(AutoReviewToml {
 +                policy: None,
++                experimental_policy_template: None,
 +                use_ultrafast: true,
 +            }),
 +            ..Default::default()
@@ -87,31 +88,31 @@ index 7640292517ad6a8680601a0b47012a49b54400b8..6d3a2c3fd5c245e3baa572a779e633e4
  }
 
  #[tokio::test]
-@@ -8187,6 +8227,7 @@ async fn load_config_uses_auto_review_guardian_policy_config() -> std::io::Resul
-     let cfg = ConfigToml {
-         auto_review: Some(AutoReviewToml {
-             policy: Some("  Use the user-configured guardian policy.  ".to_string()),
+@@ -8395,6 +8436,7 @@ async fn load_config_uses_auto_review_guardian_policy_config_and_template() -> s
+             experimental_policy_template: Some(
+                 "  Configured template: {{ tenant_policy_config }}  ".to_string(),
+             ),
 +            use_ultrafast: false,
          }),
          ..Default::default()
      };
-@@ -8224,6 +8265,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
-     let cfg = ConfigToml {
+@@ -8439,6 +8481,7 @@ async fn requirements_guardian_policy_beats_auto_review() -> std::io::Result<()>
          auto_review: Some(AutoReviewToml {
              policy: Some("Use the user-configured guardian policy.".to_string()),
+             experimental_policy_template: None,
 +            use_ultrafast: false,
          }),
          ..Default::default()
      };
-@@ -8254,6 +8296,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
-     let cfg = ConfigToml {
+@@ -8470,6 +8513,7 @@ async fn load_config_ignores_empty_auto_review_guardian_policy_config() -> std::
          auto_review: Some(AutoReviewToml {
              policy: Some("   ".to_string()),
+             experimental_policy_template: None,
 +            use_ultrafast: false,
          }),
          ..Default::default()
      };
-@@ -9674,6 +9717,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
+@@ -9890,6 +9934,7 @@ fn routed_custom_models_preserve_candidates_and_context_overrides() -> std::io::
              }),
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -120,12 +121,12 @@ index 7640292517ad6a8680601a0b47012a49b54400b8..6d3a2c3fd5c245e3baa572a779e633e4
      );
      Ok(())
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index ceab0234104a086a48045232afd7ac5670ba8616..8628ac74ec433b95a67f1583af7854b2cbb61a8c 100644
+index 2877e8fc54abb0c82e212e3bdf7ef7baa75e66d1..be94d995f689217dd21483bc5a158322c7a041bd 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
-@@ -713,6 +713,9 @@ pub struct Config {
-     /// guardian developer prompt.
-     pub guardian_policy_config: Option<String>,
+@@ -697,6 +697,9 @@ pub struct Config {
+     /// placeholder when a review session is built.
+     pub guardian_policy_template: Option<String>,
 
 +    /// Whether approval autoreview uses the fixed UltraFast-to-Fast routing profile.
 +    pub auto_review_use_ultrafast: bool,
@@ -133,7 +134,7 @@ index ceab0234104a086a48045232afd7ac5670ba8616..8628ac74ec433b95a67f1583af7854b2
      /// Whether to inject the `<permissions instructions>` developer block.
      pub include_permissions_instructions: bool,
 
-@@ -3300,6 +3303,7 @@ pub(crate) fn resolve_custom_models(
+@@ -3265,6 +3268,7 @@ pub(crate) fn resolve_custom_models(
                  routing_profile,
                  model_context_window: custom_model.model_context_window,
                  model_auto_compact_token_limit: custom_model.model_auto_compact_token_limit,
@@ -141,93 +142,70 @@ index ceab0234104a086a48045232afd7ac5670ba8616..8628ac74ec433b95a67f1583af7854b2
              },
          );
      }
-@@ -4175,6 +4179,10 @@ impl Config {
-                             auto_review.policy.as_deref(),
-                         ))
-                 });
+@@ -4139,6 +4143,10 @@ impl Config {
+                     auto_review.experimental_policy_template.as_deref(),
+                 )
+             });
 +        let auto_review_use_ultrafast = cfg
 +            .auto_review
 +            .as_ref()
 +            .is_some_and(|auto_review| auto_review.use_ultrafast);
-         let personality = personality
-             .or(cfg.personality)
-             .or_else(|| {
-@@ -4506,6 +4514,7 @@ impl Config {
-                 .or(show_raw_agent_reasoning)
+         let personality = personality.or(cfg.personality);
+
+         let experimental_compact_prompt_path = cfg.experimental_compact_prompt_file.as_ref();
+@@ -4487,6 +4495,7 @@ impl Config {
                  .unwrap_or(false),
              guardian_policy_config,
+             guardian_policy_template,
 +            auto_review_use_ultrafast,
              model_reasoning_effort: cfg.model_reasoning_effort,
              plan_mode_reasoning_effort: cfg.plan_mode_reasoning_effort,
              model_reasoning_summary: cfg.model_reasoning_summary,
 diff --git a/codex-rs/core/src/guardian/review.rs b/codex-rs/core/src/guardian/review.rs
-index 452463796f4932fff80c07429fcec6c0b8cbdea5..0b72fecd06f97e8fa6e13adffa8b86fb67617df2 100644
+index 56ae527025850d5992602b0bff031ff2e67d8c38..5f5a90bf7636a0a1520de5152ec3aed32dfec8aa 100644
 --- a/codex-rs/core/src/guardian/review.rs
 +++ b/codex-rs/core/src/guardian/review.rs
-@@ -9,7 +9,11 @@ use codex_analytics::GuardianReviewedAction;
- use codex_core_plugins::PluginCommandAttribution;
- use codex_extension_api::ThreadIdleCause;
- use codex_features::Feature;
+@@ -14,7 +14,11 @@ use codex_guardian_reviewer::GuardianReviewOutcome;
+ #[cfg(test)]
+ use codex_guardian_reviewer::GuardianReviewSessionLimits;
+ use codex_guardian_reviewer::ReviewModel;
 +use codex_models_manager::CustomModelConfig;
 +use codex_models_manager::ModelRoutingCandidate;
 +use codex_models_manager::ModelRoutingProfile;
- use codex_protocol::config_types::ApprovalsReviewer;
+ use codex_prompts::ResolvedModelMessages;
 +use codex_protocol::config_types::ServiceTier;
- use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
- use codex_protocol::openai_models::ModelInfo;
- use codex_protocol::protocol::AskForApproval;
-@@ -77,6 +81,9 @@ const GUARDIAN_TIMEOUT_INSTRUCTIONS: &str = concat!(
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::InternalSessionSource;
+ use codex_protocol::protocol::ReviewDecision;
+@@ -46,6 +50,9 @@ use super::review_session::build_guardian_review_session_config;
+ use codex_guardian_reviewer::guardian_output_schema;
 
- const GUARDIAN_REVIEW_MAX_ATTEMPTS: i64 = 3;
  const GUARDIAN_PLUGIN_ATTRIBUTION_TIMEOUT: Duration = Duration::from_secs(5);
-+const ULTRAFAST_AUTO_REVIEW_MODEL: &str = "gpt-5.6-sol";
++pub(super) const ULTRAFAST_AUTO_REVIEW_MODEL: &str = "gpt-5.6-sol";
 +const ULTRAFAST_AUTO_REVIEW_PROFILE: &str = "__frodex_auto_review_ultrafast";
 +const ULTRAFAST_SERVICE_TIER: &str = "ultrafast";
 
  async fn plugin_attribution_for_guardian_request(
      context: &GuardianReviewContext,
-@@ -799,6 +806,7 @@ pub(super) struct GuardianReviewSessionConfig {
-     pub(super) node_repl_policy: GuardianNodeReplPolicy,
-     pub(super) compaction_model_hash: Option<String>,
-     model: String,
-+    analytics_model: String,
-     reasoning_effort: Option<codex_protocol::openai_models::ReasoningEffort>,
-     default_review_model_id: String,
-     catalog_contains_auto_review: bool,
-@@ -831,7 +839,12 @@ pub(super) async fn guardian_review_session_config(
-             fallback
-         }
-     };
--    let model_override = turn.model_info().auto_review_model_override.as_deref();
+@@ -143,6 +150,7 @@ pub(super) async fn guardian_review_session_config(
+         .get::<codex_guardian_reviewer::ReviewerConfig<crate::config::Config>>()
+         .ok_or_else(|| anyhow::anyhow!("Guardian reviewer configuration is not installed"))?;
+     let model_messages = ResolvedModelMessages::from_model(&guardian_model_info);
 +    let use_ultrafast = turn.config.auto_review_use_ultrafast;
-+    let model_override = if use_ultrafast {
-+        Some(ULTRAFAST_AUTO_REVIEW_MODEL)
-+    } else {
-+        turn.model_info().auto_review_model_override.as_deref()
-+    };
-     let review_model_id = model_override.unwrap_or(default_review_model_id);
-     let review_model = available_models
-         .iter()
-@@ -841,7 +854,7 @@ pub(super) async fn guardian_review_session_config(
-         .any(|preset| preset.model == default_review_model_id);
-     let guardian_review_model_overridden = model_override.is_some();
-     let guardian_review_model_override = model_override.map(str::to_string);
--    let (guardian_model, guardian_reasoning_effort) = if let Some(preset) = review_model {
-+    let (mut guardian_model, guardian_reasoning_effort) = if let Some(preset) = review_model {
-         let reasoning_effort = preferred_reasoning_effort(
-             preset
-                 .supported_reasoning_efforts
-@@ -893,6 +906,29 @@ pub(super) async fn guardian_review_session_config(
+     let mut spawn_config = build_guardian_review_session_config(
+         (reviewer_config.0)(turn.config.as_ref())?,
+         live_network_config,
+@@ -162,7 +170,28 @@ pub(super) async fn guardian_review_session_config(
                  )
              })?;
      }
-+    let analytics_model = guardian_model.clone();
+-    if review_model.model != context.model_info.slug {
 +    if use_ultrafast {
 +        let candidates = [ULTRAFAST_SERVICE_TIER, ServiceTier::Fast.request_value()]
 +            .into_iter()
 +            .map(|service_tier| ModelRoutingCandidate {
 +                model: ULTRAFAST_AUTO_REVIEW_MODEL.to_string(),
-+                reasoning_effort: guardian_reasoning_effort.clone(),
++                reasoning_effort: review_model.reasoning_effort.clone(),
 +                service_tier: Some(service_tier.to_string()),
 +            })
 +            .collect();
@@ -241,78 +219,115 @@ index 452463796f4932fff80c07429fcec6c0b8cbdea5..0b72fecd06f97e8fa6e13adffa8b86fb
 +                trust_candidate_constraints: true,
 +            },
 +        );
-+        guardian_model = ULTRAFAST_AUTO_REVIEW_PROFILE.to_string();
-+        spawn_config.model = Some(guardian_model.clone());
++        spawn_config.model = Some(ULTRAFAST_AUTO_REVIEW_PROFILE.to_string());
 +    }
-     if guardian_model != turn.model_info().slug {
++    if use_ultrafast || review_model.model != context.model_info.slug {
          spawn_config.model_context_window = None;
          spawn_config.model_auto_compact_token_limit = None;
-@@ -903,6 +939,7 @@ pub(super) async fn guardian_review_session_config(
-         node_repl_policy: GuardianNodeReplPolicy::from_model_messages(
-             guardian_model_info.model_messages.as_ref(),
-         ),
-+        analytics_model,
-         model: guardian_model,
-         reasoning_effort: guardian_reasoning_effort,
-         default_review_model_id: default_review_model_id.to_string(),
-@@ -960,6 +997,7 @@ async fn run_guardian_review_session_before_deadline(
-                 schema,
-                 model: session_config.model,
-                 compaction_model_hash: session_config.compaction_model_hash,
-+                analytics_model: session_config.analytics_model,
-                 reasoning_effort: session_config.reasoning_effort,
-                 guardian_default_review_model_id: session_config.default_review_model_id,
-                 guardian_catalog_contains_auto_review: session_config.catalog_contains_auto_review,
+     }
 diff --git a/codex-rs/core/src/guardian/review_session.rs b/codex-rs/core/src/guardian/review_session.rs
-index 14c18e373820bdee00273ef189e542860abb7548..f8dbc3397396822c2fc19f16efc220bfbcb62816 100644
+index b186804af786429040e06263c7497c11898a6d76..c73f7821a5b80e553b75335d4bdda36898dc4edc 100644
 --- a/codex-rs/core/src/guardian/review_session.rs
 +++ b/codex-rs/core/src/guardian/review_session.rs
-@@ -120,6 +120,7 @@ pub(crate) struct GuardianReviewSessionParams {
-     pub(crate) schema: Value,
-     pub(crate) model: String,
-     pub(crate) compaction_model_hash: Option<String>,
-+    pub(crate) analytics_model: String,
-     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
-     pub(crate) guardian_default_review_model_id: String,
-     pub(crate) guardian_catalog_contains_auto_review: bool,
-@@ -938,7 +939,7 @@ async fn run_review_on_session(
-         GuardianReviewAnalyticsResult::from_session(GuardianReviewSessionAnalyticsParams {
-             guardian_thread_id: review_session.session.thread_id().to_string(),
-             guardian_session_kind,
--            guardian_model: params.model.clone(),
-+            guardian_model: params.analytics_model.clone(),
-             guardian_reasoning_effort: guardian_reasoning_effort.map(|effort| effort.to_string()),
-             guardian_default_review_model_id: params.guardian_default_review_model_id.clone(),
-             guardian_catalog_contains_auto_review: params.guardian_catalog_contains_auto_review,
+@@ -665,7 +665,12 @@ async fn run_review_on_session(
+         permission_profile: params.spawn_config.permissions.permission_profile().clone(),
+         reasoning_summary: params.reasoning_summary,
+         personality: params.personality,
+-        model: review_model.model.clone(),
++        // Per-review settings must preserve the routing alias selected at session creation.
++        model: params
++            .spawn_config
++            .model
++            .clone()
++            .unwrap_or_else(|| review_model.model.clone()),
+         reasoning_effort: review_model.reasoning_effort.clone(),
+         parent_response_id: params.parent_context.parent_response_id.clone(),
+         schema: params.schema.clone(),
 diff --git a/codex-rs/core/src/guardian/review_session_tests.rs b/codex-rs/core/src/guardian/review_session_tests.rs
-index 163d430fc193edbb6af89e42887dd4094235f695..1480cc3f2b69b940ea8d92ebd03c86388e70ba90 100644
+index 9438026f137df4eaa400a1cd977ea2119405bf71..eefa0e917e199427e8148a6698d61fc99723bf93 100644
 --- a/codex-rs/core/src/guardian/review_session_tests.rs
 +++ b/codex-rs/core/src/guardian/review_session_tests.rs
-@@ -247,6 +247,7 @@ async fn test_review_params() -> GuardianReviewSessionParams {
-         },
-         reasons: ApprovalRequestReasons::default(),
-         schema: super::super::guardian_output_schema(),
-+        analytics_model: model.clone(),
-         model,
-         compaction_model_hash: None,
-         reasoning_effort,
+@@ -701,8 +701,10 @@ fn token_usage_delta_never_reports_negative_usage() {
+     );
+ }
+
++#[test_case::test_case(Some("guardian-routing-alias"); "configured routing alias")]
++#[test_case::test_case(None; "concrete model fallback")]
+ #[tokio::test]
+-async fn run_review_on_reused_session_waits_for_submitted_turn() {
++async fn run_review_on_reused_session_waits_for_submitted_turn(routing_model: Option<&str>) {
+     let (review_session, tx_event, rx_sub) = test_review_session().await;
+     {
+         let mut state = review_session.state.lock().await;
+@@ -713,7 +715,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+                 transcript_entry_count: 0,
+             });
+     }
+-    let params = test_review_params().await;
++    let mut params = test_review_params().await;
++    let concrete_model = params.review_model.model.clone();
++    params.spawn_config.model = routing_model.map(str::to_string);
++    let expected_submission_model = routing_model.unwrap_or(&concrete_model).to_string();
+
+     let review = tokio::spawn(async move {
+         run_review_on_session(
+@@ -726,9 +731,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+     });
+     let submission = rx_sub.recv().await.expect("guardian submission");
+     let id = submission.id;
+-    let Op::TurnInput { reply, .. } = submission.op else {
++    let Op::TurnInput { request, reply, .. } = submission.op else {
+         panic!("expected turn-input submission");
+     };
++    assert_eq!(
++        request
++            .thread_settings
++            .collaboration_mode
++            .expect("reviewer collaboration mode")
++            .settings
++            .model,
++        expected_submission_model
++    );
+     reply
+         .send(Ok(TurnInputSubmission::Started {
+             turn_id: id.clone(),
+@@ -752,6 +766,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
+         panic!("expected submitted turn completion");
+     };
+     assert_eq!(last_agent_message.as_deref(), Some("fresh"));
++    assert_eq!(analytics_result.guardian_model, Some(concrete_model));
+     assert_eq!(analytics_result.time_to_first_token_ms, Some(42));
+     assert_eq!(disposition, SessionDisposition::Reusable);
+ }
 diff --git a/codex-rs/core/src/guardian/reviewer_config.rs b/codex-rs/core/src/guardian/reviewer_config.rs
-index a792069ba46e32cc85a9a48aa25a99a002a0f033..34c56684554fb8ee3e75178e9dcb8024ad1539ad 100644
+index bd3a2f62883b6d3ddf3f33ec127a62a5eda16036..4d1e8ce90e13b2527f3f6d49bb95cd5a28c0b8c1 100644
 --- a/codex-rs/core/src/guardian/reviewer_config.rs
 +++ b/codex-rs/core/src/guardian/reviewer_config.rs
-@@ -88,6 +88,7 @@ pub fn build_guardian_review_session_config(
-     }
-     for feature in [
-         Feature::Collab,
-+        Feature::AgentPromptInjection,
-         Feature::MultiAgentV2,
-         Feature::GuardianV2,
-         Feature::CodexHooks,
+@@ -77,8 +77,18 @@ pub(crate) async fn resolve_review_model(
+         )
+         .await;
+     let default_review_model_id = turn.provider.approval_review_preferred_model();
++    // Resolve policy and telemetry against the concrete reviewer. Its execution alias is installed
++    // only after model selection, so prewarming and live review resolve the same catalog entry.
++    let parent_model_with_review_override = turn.config.auto_review_use_ultrafast.then(|| {
++        let mut model = context.model_info.as_ref().clone();
++        model.auto_review_model_override =
++            Some(super::review::ULTRAFAST_AUTO_REVIEW_MODEL.to_owned());
++        model
++    });
+     let review_model = codex_guardian_reviewer::select_review_model(
+-        &context.model_info,
++        parent_model_with_review_override
++            .as_ref()
++            .unwrap_or(context.model_info.as_ref()),
+         context.reasoning_effort.as_ref(),
+         default_review_model_id,
+         &available_models,
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb75ef71c09 100644
+index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6555ee582 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
-@@ -79,6 +79,7 @@ use core_test_support::responses::mount_sse_once;
+@@ -78,6 +78,7 @@ use core_test_support::responses::mount_sse_once;
  use core_test_support::responses::mount_sse_sequence;
  use core_test_support::responses::sse;
  use core_test_support::responses::sse_failed;
@@ -320,7 +335,7 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
  use core_test_support::responses::start_mock_server;
  use core_test_support::skip_if_no_network;
  use core_test_support::streaming_sse::StreamingSseChunk;
-@@ -2115,6 +2116,106 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
+@@ -2055,6 +2056,126 @@ async fn guardian_review_uses_preferred_review_model_without_model_catalog_overr
      Ok(())
  }
 
@@ -386,15 +401,35 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
 +    )
 +    .await;
 +
++    let requests = request_log.requests();
++    assert_eq!(requests.len(), 3);
++    let request_efforts = requests
++        .iter()
++        .map(|request| {
++            request
++                .body_json()
++                .pointer("/reasoning/effort")
++                .and_then(serde_json::Value::as_str)
++                .map(str::to_string)
++        })
++        .collect::<Vec<_>>();
++    assert_eq!(request_efforts, vec![request_efforts[0].clone(); 3]);
 +    for (outcome, analytics) in [first_outcome, second_outcome] {
 +        let GuardianReviewOutcome::Completed(assessment) = outcome else {
 +            panic!("expected Guardian assessment");
 +        };
 +        assert_eq!(assessment.outcome, GuardianAssessmentOutcome::Allow);
 +        assert_eq!(analytics.guardian_model.as_deref(), Some("gpt-5.6-sol"));
++        assert_eq!(
++            analytics.guardian_reasoning_effort.as_deref(),
++            request_efforts[0].as_deref()
++        );
++        assert_eq!(analytics.guardian_review_model_overridden, Some(true));
++        assert_eq!(
++            analytics.guardian_review_model_override.as_deref(),
++            Some("gpt-5.6-sol")
++        );
 +    }
-+    let requests = request_log.requests();
-+    assert_eq!(requests.len(), 3);
 +    assert_eq!(
 +        requests
 +            .iter()
@@ -427,7 +462,7 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
  async fn guardian_review_records_missing_auto_review_model_in_analytics_metadata()
  -> anyhow::Result<()> {
-@@ -3406,7 +3507,7 @@ async fn escalated_retry_bypasses_extension_approval_and_runs_guardian() -> anyh
+@@ -3389,7 +3510,7 @@ async fn guardian_review_routes_required_actions(
  #[tokio::test]
  async fn guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history() -> anyhow::Result<()>
  {
@@ -436,23 +471,34 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
 
      let handle = std::thread::Builder::new()
          .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-@@ -3797,6 +3898,63 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
+@@ -3783,6 +3904,94 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
      );
  }
 
++#[test_case::test_case(false; "distinct_parent_model")]
++#[test_case::test_case(true; "same_parent_model")]
 +#[tokio::test]
-+async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enabled() {
++async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enabled(
++    same_parent_model: bool,
++) {
 +    let server = start_mock_server().await;
 +    let (session, mut turn) = guardian_test_session_and_turn(&server).await;
 +    let parent_model = turn.model_info.slug.clone();
 +    let parent_service_tier = turn.config.service_tier.clone();
 +    let mut config = (*turn.config).clone();
 +    config.auto_review_use_ultrafast = true;
++    config.model_context_window = Some(900_000);
++    config.model_auto_compact_token_limit = Some(600_000);
 +    Arc::get_mut(&mut turn)
 +        .expect("turn should be unique")
 +        .config = Arc::new(config);
 +
-+    let guardian_config = guardian_review_session_config(session.as_ref(), turn.as_ref())
++    let mut context = GuardianReviewContext::from(&turn);
++    if same_parent_model {
++        Arc::make_mut(&mut context.model_info).slug = "gpt-5.6-sol".to_string();
++    }
++    let captured_parent_model = context.model_info.slug.clone();
++    let guardian_config = guardian_review_session_config(session.as_ref(), &context)
 +        .await
 +        .expect("guardian config");
 +    let expected_effort = guardian_config.spawn_config.model_reasoning_effort.clone();
@@ -460,6 +506,23 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
 +    assert_eq!(
 +        guardian_config.spawn_config.model.as_deref(),
 +        Some("__frodex_auto_review_ultrafast")
++    );
++    assert_eq!(guardian_config.review_model.model, "gpt-5.6-sol");
++    assert!(guardian_config.review_model.model_overridden);
++    assert_eq!(
++        guardian_config.review_model.model_override.as_deref(),
++        Some("gpt-5.6-sol")
++    );
++    assert_eq!(
++        guardian_config.review_model.reasoning_effort,
++        expected_effort
++    );
++    assert_eq!(
++        (
++            guardian_config.spawn_config.model_context_window,
++            guardian_config.spawn_config.model_auto_compact_token_limit,
++        ),
++        (None, None)
 +    );
 +    assert_eq!(
 +        guardian_config
@@ -488,7 +551,10 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
 +        })
 +    );
 +    assert_eq!(turn.model_info.slug, parent_model);
++    assert_eq!(context.model_info.slug, captured_parent_model);
 +    assert_eq!(turn.config.service_tier, parent_service_tier);
++    assert_eq!(turn.config.model_context_window, Some(900_000));
++    assert_eq!(turn.config.model_auto_compact_token_limit, Some(600_000));
 +    assert!(
 +        !turn
 +            .config
@@ -500,34 +566,50 @@ index d0da4e86b976ea5cf22a2dd7d1d4c02f939052a1..a0756e83b92c4afe8651951132d33bb7
  #[tokio::test]
  async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
      let server = start_mock_server().await;
-@@ -3927,6 +4085,10 @@ async fn guardian_review_session_config_uses_live_network_proxy_state() {
- #[tokio::test]
- async fn guardian_review_session_config_disables_mcp_apps_plugins_memories_and_guardian_v2() {
-     let mut parent_config = test_config().await;
+@@ -3883,6 +4092,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+         Feature::Plugins,
+         Feature::GuardianV2,
+         Feature::CodexHooks,
++        Feature::AgentPromptInjection,
++        Feature::TokenBudget,
++        Feature::ContextManagement,
+     ];
+     for feature in disabled_features {
+         parent_config
+@@ -3894,6 +4106,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+     parent_config.include_skill_instructions = true;
+     parent_config.memories.use_memories = true;
+     parent_config.memories.dedicated_tools = true;
++    parent_config.token_budget = Some(crate::config::TokenBudgetConfig {
++        guidance_message: Some("parent token-budget guidance".to_string()),
++        ..Default::default()
++    });
++    parent_config.token_budget_startup_config = None;
 +    parent_config
-+        .features
-+        .enable(Feature::AgentPromptInjection)
-+        .expect("agent prompt injection is configurable");
-     let server: McpServerConfig =
-         toml::from_str("command = \"docs-server\"").expect("deserialize MCP server");
-     parent_config
-@@ -3962,6 +4124,11 @@ async fn guardian_review_session_config_disables_mcp_apps_plugins_memories_and_g
-     assert!(!guardian_config.features.enabled(Feature::Apps));
-     assert!(!guardian_config.features.enabled(Feature::Plugins));
-     assert!(!guardian_config.features.enabled(Feature::GuardianV2));
-+    assert!(
-+        !guardian_config
-+            .features
-+            .enabled(Feature::AgentPromptInjection)
-+    );
-     assert!(!guardian_config.include_apps_instructions);
++        .prepare_token_budget_for_startup()
++        .expect("capture parent token-budget preferences");
+     parent_config.developer_instructions =
+         Some("parent or managed config should not replace guardian policy".to_string());
+     parent_config.notify = Some(vec![
+@@ -3923,6 +4143,13 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+     assert!(!guardian_config.include_skill_instructions);
      assert!(!guardian_config.memories.use_memories);
      assert!(!guardian_config.memories.dedicated_tools);
++    assert_eq!(
++        guardian_config.token_budget,
++        Some(crate::config::TokenBudgetConfig::default())
++    );
++    assert_eq!(guardian_config.token_budget_startup_config, None);
++    assert!(parent_config.features.enabled(Feature::TokenBudget));
++    assert!(parent_config.token_budget_startup_config.is_some());
+     assert_eq!(guardian_config.notify, None);
+     assert_eq!(guardian_config.developer_instructions, None);
+     assert_eq!(
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 1edafe1abe35b47afceb1197fe0ca945e7ac1ea4..6decf4d9146f40d28f79f90ef202e40f04becf06 100644
+index 44e08c4fec2ee28a782c8665b23a9aaff39f2c01..c93f504cf3f9516d376a782f147fde74933997ab 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2706,6 +2706,7 @@ impl Session {
+@@ -2750,6 +2750,7 @@ impl Session {
                  .with_user_layer_from(&next_config.config_layer_stack);
              config.tool_suggest =
                  resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
@@ -556,21 +638,20 @@ index 685fbe962079e72337a520f5035c18e6d70874a1..9880fc5dc5db275c03a214344e1cc3dc
      )]);
 
 diff --git a/codex-rs/core/src/session/model_routing.rs b/codex-rs/core/src/session/model_routing.rs
-index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf5461c5b5233 100644
+index cee7d5d171873a434919a09064ddbf75ddd8b3f0..b6d765c6e9f4d9f83730b354a75fbc70ab0c9b5b 100644
 --- a/codex-rs/core/src/session/model_routing.rs
 +++ b/codex-rs/core/src/session/model_routing.rs
-@@ -16,6 +16,8 @@ use tracing::info;
+@@ -16,6 +16,7 @@ use tracing::info;
  use tracing::warn;
 
  use super::session::Session;
 +use super::step_context::StepContext;
-+use super::step_settings::ResolvedStepSettings;
+ use super::step_context::StepInputs;
  use super::turn_context::TurnContext;
 
- /// Explains why a custom-model routing profile changed its active request configuration.
-@@ -104,12 +106,21 @@ impl Session {
-         profile_name: &str,
+@@ -106,12 +107,9 @@ impl Session {
          attempted: &HashSet<ModelRoutingCandidate>,
+         inputs: &StepInputs,
      ) -> Option<ModelRoutingSelection> {
 -        let profile = base
 -            .config
@@ -578,55 +659,35 @@ index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf546
 -            .get(profile_name)?
 -            .routing_profile
 -            .as_ref()?;
-+        let settings = base.current_settings.load_full();
-+        self.select_model_routing_context_with_settings(base, profile_name, attempted, &settings)
-+            .await
-+    }
-+
-+    pub(super) async fn select_model_routing_context_with_settings(
-+        &self,
-+        base: &TurnContext,
-+        profile_name: &str,
-+        attempted: &HashSet<ModelRoutingCandidate>,
-+        settings: &ResolvedStepSettings,
-+    ) -> Option<ModelRoutingSelection> {
 +        let custom_model = base.config.custom_models.get(profile_name)?;
 +        let profile = custom_model.routing_profile.as_ref()?;
 +        let trust_candidate_constraints = custom_model.trust_candidate_constraints;
          let now = self.model_routing_now().await;
          let mut attempted = attempted.clone();
          let mut last_rejected = None;
-@@ -140,6 +151,7 @@ impl Session {
-                             profile_name,
-                             &candidate,
-                             &self.services.models_manager,
-+                            settings,
-                         )
-                         .await;
-                     return Some(ModelRoutingSelection {
-@@ -150,10 +162,26 @@ impl Session {
+@@ -153,15 +151,26 @@ impl Session {
                      });
                  }
              };
 -            if let Some(context) = base
--                .with_routing_candidate(profile_name, &candidate, &self.services.models_manager)
+-                .with_routing_candidate(
 +            let context = if trust_candidate_constraints {
 +                Some(
 +                    base.with_unchecked_routing_candidate(
 +                        profile_name,
 +                        &candidate,
 +                        &self.services.models_manager,
-+                        settings,
++                        inputs,
 +                    )
 +                    .await,
 +                )
 +            } else {
 +                base.with_routing_candidate(
-+                    profile_name,
-+                    &candidate,
-+                    &self.services.models_manager,
-+                    settings,
-+                )
+                     profile_name,
+                     &candidate,
+                     &self.services.models_manager,
+                     inputs,
+                 )
                  .await
 -            {
 +            };
@@ -634,7 +695,7 @@ index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf546
                  return Some(ModelRoutingSelection {
                      context,
                      last_success: previous_success,
-@@ -168,10 +196,10 @@ impl Session {
+@@ -176,10 +185,10 @@ impl Session {
 
      pub(super) async fn record_model_routing_failure(
          &self,
@@ -647,7 +708,7 @@ index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf546
              return;
          };
          let now = self.model_routing_now().await;
-@@ -183,8 +211,8 @@ impl Session {
+@@ -191,8 +200,8 @@ impl Session {
          );
      }
 
@@ -658,7 +719,7 @@ index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf546
              return;
          };
          self.state
-@@ -253,6 +281,17 @@ impl Session {
+@@ -261,6 +270,17 @@ impl Session {
      }
  }
 
@@ -676,36 +737,299 @@ index 0af6bf1fad1098d26c55e1e5c923e4c7c41031ea..8261bd7705ae651b38d0d4e2e7bbf546
  pub(super) fn classify_model_routing_failure(
      details: &CodexErrorDetails,
  ) -> Option<ModelRoutingFailure> {
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc73774ee2 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -457,6 +457,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+                 &turn.sub_id,
+                 TurnSettingsUpdate {
+                     summary: Some(ReasoningSummary::Detailed),
++                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                     ..Default::default()
+                 }
+             )
+@@ -494,6 +495,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+         routed.initial_settings.selected().approval_policy,
+         prepared.inputs.settings.selected().approval_policy
+     );
++    assert_eq!(
++        routed.initial_settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
+     assert!(
+         session
+             .try_replace_active_turn_context(&prepared, &routed)
+@@ -530,6 +535,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+         .expect("capture routed step");
+     assert_eq!(step.settings.model_info.slug, MODEL_B);
+     assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
++    assert_eq!(
++        step.settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
+     assert_eq!(desired_step_settings(&session).await, future);
+     finish.notify_one();
+ }
+@@ -673,6 +682,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+         finish,
+         ..
+     } = activation_fixture(activation_models()).await;
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &turn.sub_id,
++                TurnSettingsUpdate {
++                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
++                    ..Default::default()
++                }
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
+     let before_workspace = session
+         .prepare_turn_context_replacement(&turn)
+         .await
+@@ -704,6 +725,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+         refreshed.initial_settings.selected(),
+         prepared.inputs.settings.selected()
+     );
++    assert_eq!(
++        refreshed.initial_settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
++    assert_eq!(
++        refreshed
++            .next_step_input
++            .load()
++            .settings
++            .mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
+     assert_eq!(refreshed.model_info().slug, MODEL_A);
+     assert_eq!(
+         refreshed
+@@ -729,6 +762,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+     finish.notify_one();
+ }
+
++#[test_case(Some(MODEL_A), None, None; "explicit model")]
++#[test_case(None, Some(ReasoningEffort::High), None; "explicit effort")]
++#[test_case(None, None, Some(ServiceTier::Fast); "explicit tier")]
++#[test_case(None, None, None; "summary only retains routing")]
++#[tokio::test]
++async fn workspace_refresh_preserves_explicit_settings_after_routing(
++    model: Option<&str>,
++    effort: Option<ReasoningEffort>,
++    service_tier: Option<ServiceTier>,
++) {
++    let ActivationFixture {
++        session,
++        turn,
++        finish,
++        lookup,
++    } = activation_fixture(activation_models()).await;
++    let future = desired_step_settings(&session).await;
++    let prepared = session
++        .prepare_turn_context_replacement(&turn)
++        .await
++        .expect("capture initial task");
++    let candidate = codex_models_manager::ModelRoutingCandidate {
++        model: MODEL_B.to_string(),
++        reasoning_effort: Some(ReasoningEffort::Low),
++        service_tier: None,
++    };
++    lookup.release();
++    let mut routed = turn
++        .with_unchecked_routing_candidate(
++            "test-profile",
++            &candidate,
++            &session.services.models_manager,
++            &prepared.inputs,
++        )
++        .await;
++    routed.model_routing_previous_candidate = Some(codex_models_manager::ModelRoutingCandidate {
++        model: MODEL_A.to_string(),
++        reasoning_effort: Some(ReasoningEffort::Low),
++        service_tier: None,
++    });
++    routed.model_routing_selection_reason =
++        Some(crate::session::model_routing::ModelRoutingReason::PreferredCandidateRecovered);
++    let routed = Arc::new(routed);
++    assert!(
++        session
++            .try_replace_active_turn_context(&prepared, &routed)
++            .await
++            .expect("install routed task")
++    );
++
++    let retains_routing = model.is_none() && effort.is_none() && service_tier.is_none();
++    let expected_effort = effort.clone().unwrap_or(ReasoningEffort::Low);
++    let expected_tier = service_tier.map(|tier| tier.request_value());
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &routed.sub_id,
++                TurnSettingsUpdate {
++                    model: model.map(str::to_string),
++                    effort: effort.map(Some),
++                    service_tier: expected_tier.map(|tier| Some(tier.to_string())),
++                    summary: Some(ReasoningSummary::Detailed),
++                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
++                },
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    let directory = tempfile::tempdir().expect("workspace directory");
++    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
++    let commit = commit_workspace_for_activation(&session, &routed, &cwd).await;
++    session
++        .activate_workspace_environments(&routed, &commit.configuration)
++        .await
++        .expect("activate workspace after explicit settings");
++    let prepared = session
++        .prepare_turn_context_replacement(&routed)
++        .await
++        .expect("capture explicit settings and workspace");
++    let refreshed = session
++        .refresh_active_turn_context(&routed, &prepared.inputs)
++        .await;
++    assert_eq!(
++        refreshed.initial_settings.selected(),
++        prepared.inputs.settings.selected()
++    );
++    assert_eq!(
++        refreshed.initial_settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
++    if retains_routing {
++        assert_eq!(refreshed.model_profile.as_deref(), Some("test-profile"));
++        assert_eq!(refreshed.model_routing_candidate.as_ref(), Some(&candidate));
++    } else {
++        assert_eq!(refreshed.model_profile, None);
++        assert_eq!(refreshed.model_routing_candidate, None);
++        assert_eq!(refreshed.model_routing_previous_candidate, None);
++        assert_eq!(refreshed.model_routing_selection_reason, None);
++        assert_eq!(refreshed.model_routing_retry_at, None);
++    }
++    assert!(
++        session
++            .try_replace_active_turn_context(&prepared, &refreshed)
++            .await
++            .expect("publish refreshed task")
++    );
++    let step = session
++        .capture_step_context(Arc::clone(&refreshed), &CancellationToken::new())
++        .await
++        .expect("capture refreshed step");
++    assert_eq!(
++        step_values(&step),
++        (
++            model.unwrap_or(MODEL_B),
++            Some(expected_effort),
++            ReasoningSummary::Detailed,
++            expected_tier,
++        )
++    );
++    session.record_model_routing_success(&step).await;
++    assert_eq!(
++        session.state.lock().await.model_routing.last_success(),
++        retains_routing.then_some(&candidate)
++    );
++
++    assert_eq!(
++        session
++            .apply_turn_settings(
++                &refreshed.sub_id,
++                TurnSettingsUpdate {
++                    summary: Some(ReasoningSummary::Concise),
++                    ..Default::default()
++                },
++            )
++            .await,
++        TurnSettingsUpdateOutcome::Applied
++    );
++    assert_eq!(
++        refreshed.next_step_input.load().settings.reasoning_summary,
++        ReasoningSummary::Concise
++    );
++    assert_eq!(
++        routed.next_step_input.load().settings.reasoning_summary,
++        ReasoningSummary::Detailed
++    );
++    assert_eq!(
++        refreshed
++            .next_step_input
++            .load()
++            .settings
++            .mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
++    assert_eq!(desired_step_settings(&session).await, future);
++    finish.notify_one();
++}
++
+ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
+     Arc::clone(
+         &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index aa87f5d75450782a35d76a2e5c8d5016299c87c7..2f392be3092ce8b982c947c99c5d7f2280564859 100644
+index fe5ad040b49c108b00d2bede1786173067fa3082..3cfc6036b69a8a76b04247067150e41ba8fa4d74 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -1838,6 +1838,7 @@ async fn refresh_runtime_config_renames_selected_routing_profile_and_preserves_h
-         }),
-         model_context_window: None,
-         model_auto_compact_token_limit: None,
-+        trust_candidate_constraints: false,
-     };
-     let mut next_config = (*session.get_config().await).clone();
-     {
-@@ -1892,6 +1893,7 @@ async fn refresh_runtime_config_detaches_removed_profile_to_last_successful_tupl
-         }),
-         model_context_window: None,
-         model_auto_compact_token_limit: None,
-+        trust_candidate_constraints: false,
-     };
-     let mut next_config = (*session.get_config().await).clone();
-     {
-@@ -1952,6 +1954,7 @@ async fn refresh_runtime_config_detaches_removed_direct_alias_without_changing_r
-         routing_profile: None,
-         model_context_window: None,
-         model_auto_compact_token_limit: None,
-+        trust_candidate_constraints: false,
-     };
-     let effort = codex_protocol::openai_models::ReasoningEffort::High;
-     let service_tier = "test-tier".to_string();
+@@ -5502,6 +5502,7 @@ async fn turn_context_with_model_updates_model_fields() {
+             Arc::clone(&settings.model_info),
+             /*fast_mode_enabled*/ true,
+         );
++        settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::AutoReview);
+     });
+     Arc::make_mut(&mut turn_context.config).service_tier =
+         turn_context.initial_settings.service_tier.clone();
+@@ -5513,12 +5514,14 @@ async fn turn_context_with_model_updates_model_fields() {
+         .collaboration_mode
+         .settings
+         .reasoning_effort = Some(ReasoningEffortConfig::High);
++    let mut current_settings = ResolvedStepSettings::new(
++        Arc::new(current_selection),
++        Arc::clone(turn_context.model_info()),
++        /*fast_mode_enabled*/ true,
++    );
++    current_settings.mcp_approvals_reviewer_override = Some(ApprovalsReviewer::User);
+     let current = Arc::new(StepInputs {
+-        settings: Arc::new(ResolvedStepSettings::new(
+-            Arc::new(current_selection),
+-            Arc::clone(turn_context.model_info()),
+-            /*fast_mode_enabled*/ true,
+-        )),
++        settings: Arc::new(current_settings),
+         environments: captured.environments.clone(),
+     });
+     turn_context.next_step_input.store(Arc::clone(&current));
+@@ -5565,6 +5568,22 @@ async fn turn_context_with_model_updates_model_fields() {
+         &turn_context.next_step_input.load_full()
+     ));
+     assert!(!Arc::ptr_eq(&captured.settings, &updated.initial_settings));
++    assert_eq!(
++        updated.initial_settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
++    assert_eq!(
++        captured.settings.mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::AutoReview)
++    );
++    assert_eq!(
++        turn_context
++            .next_step_input
++            .load()
++            .settings
++            .mcp_approvals_reviewer_override,
++        Some(ApprovalsReviewer::User)
++    );
+     assert!(Arc::ptr_eq(
+         &updated.initial_settings,
+         &updated.next_step_input.load().settings
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1ba123b78 100644
+index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b9a8e4f9a 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -160,6 +160,19 @@ pub(crate) struct McpStartupRequirements {
@@ -728,19 +1052,13 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
  /// Provider startup state for a regular turn.
  ///
  /// A cooling routing candidate defers provider session creation, startup prewarm consumption, and
-@@ -436,32 +449,6 @@ pub(crate) async fn run_turn(
-
-     let mut next_step_context = Some(first_step_context);
-     'turn: loop {
--        let execution_settings_refresh_requested = {
--            let mut active_turn = sess.active_turn.lock().await;
--            active_turn.as_mut().is_some_and(|active_turn| {
--                std::mem::take(&mut active_turn.execution_settings_refresh_requested)
--            })
--        };
--        if execution_settings_refresh_requested {
+@@ -546,18 +559,30 @@ pub(crate) async fn run_turn(
+             })
+         };
+         if execution_settings_refresh_requested {
+-            let inputs = turn_context.next_step_input.load_full();
 -            let refreshed_turn_context = sess
--                .refresh_active_turn_context(turn_context.as_ref())
+-                .refresh_active_turn_context(turn_context.as_ref(), &inputs)
 -                .await;
 -            let refreshed_step_context = sess
 -                .capture_step_context_with_required_mcp_servers(
@@ -750,18 +1068,34 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 -                    required_plugins,
 -                )
 -                .await?;
--            world_state = sess
--                .record_context_updates_and_set_reference_context_item(
--                    refreshed_step_context.as_ref(),
--                )
--                .await?;
--            turn_context = refreshed_turn_context;
--            next_step_context = Some(refreshed_step_context);
--        }
-         // Note that pending_input would be something like a message the user
-         // submitted through the UI while the model was running. Though the UI
-         // may support this, the model might not.
-@@ -596,7 +583,7 @@ pub(crate) async fn run_turn(
++            let (refreshed_turn_context, refreshed_step_context) = loop {
++                let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
++                let refreshed = sess
++                    .refresh_active_turn_context(&turn_context, &prepared.inputs)
++                    .await;
++                let step = sess
++                    .capture_step_context_inner(
++                        Arc::clone(&refreshed),
++                        &cancellation_token,
++                        required_servers,
++                        required_plugins,
++                    )
++                    .await?;
++                if sess
++                    .try_replace_active_turn_context(&prepared, &refreshed)
++                    .await?
++                {
++                    sess.set_last_known_step_context(&step).await;
++                    sess.services
++                        .thread_extension_data
++                        .insert(step.settings.model_info.as_ref().clone());
++                    break (refreshed, step);
++                }
++            };
+             world_state = sess
+                 .record_context_updates_and_set_reference_context_item(
+                     refreshed_step_context.as_ref(),
+@@ -704,7 +729,7 @@ pub(crate) async fn run_turn(
                          sess.notify_model_routing_candidate_change(previous, &turn_context, reason)
                              .await;
                      }
@@ -770,12 +1104,13 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                          .await;
                      initial_routing_change_pending = false;
                  }
-@@ -606,15 +593,30 @@ pub(crate) async fn run_turn(
+@@ -714,16 +739,30 @@ pub(crate) async fn run_turn(
                      refresh_turn_context,
                  } = sampling_request_output;
                  if refresh_turn_context {
+-                    let inputs = turn_context.next_step_input.load_full();
 -                    let refreshed_turn_context = sess
--                        .refresh_active_turn_context(turn_context.as_ref())
+-                        .refresh_active_turn_context(turn_context.as_ref(), &inputs)
 -                        .await;
 -                    let refreshed_step_context = sess
 -                        .capture_step_context(
@@ -786,7 +1121,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 +                    let (refreshed_turn_context, refreshed_step_context) = loop {
 +                        let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
 +                        let refreshed = sess
-+                            .refresh_active_turn_context(&turn_context, &prepared.settings)
++                            .refresh_active_turn_context(&turn_context, &prepared.inputs)
 +                            .await;
 +                        let step = sess
 +                            .capture_step_context_inner(
@@ -810,7 +1145,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                      let display_roots =
                          turn_diff_display_roots(refreshed_step_context.as_ref()).await;
                      turn_diff_tracker
-@@ -819,7 +821,7 @@ pub(crate) async fn run_turn(
+@@ -999,7 +1038,7 @@ pub(crate) async fn run_turn(
              Err(failure) => {
                  let routing_failure = classify_model_routing_failure(failure.error.details());
                  if let Some(routing_failure) = routing_failure.as_ref() {
@@ -819,7 +1154,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                          .await;
                  }
                  if failure.reroute_safe
-@@ -827,14 +829,36 @@ pub(crate) async fn run_turn(
+@@ -1007,15 +1046,41 @@ pub(crate) async fn run_turn(
                      && let Some(profile_name) = turn_context.model_profile.clone()
                  {
                      let mut last_compaction_error = None;
@@ -828,6 +1163,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 -                            turn_context.as_ref(),
 -                            &profile_name,
 -                            &attempted_routing_candidates,
+-                            &turn_context.next_step_input.load_full(),
 -                        )
 -                        .await
 -                    {
@@ -835,15 +1171,20 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 +                        let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
 +                        // An explicit active model update takes precedence over a fallback for
 +                        // a request that was already in flight when the update arrived.
-+                        if prepared.settings.selected().collaboration_mode.model()
++                        if prepared
++                            .inputs
++                            .settings
++                            .selected()
++                            .collaboration_mode
++                            .model()
 +                            != turn_context
 +                                .initial_settings
 +                                .selected()
 +                                .collaboration_mode
 +                                .model()
-+                            || prepared.settings.reasoning_effort()
++                            || prepared.inputs.settings.reasoning_effort()
 +                                != turn_context.initial_settings.reasoning_effort()
-+                            || prepared.settings.selected().service_tier
++                            || prepared.inputs.settings.selected().service_tier
 +                                != turn_context.initial_settings.selected().service_tier
 +                        {
 +                            client_session.reset_for_model_reroute();
@@ -851,11 +1192,11 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 +                            continue 'turn;
 +                        }
 +                        let Some(selection) = sess
-+                            .select_model_routing_context_with_settings(
++                            .select_model_routing_context(
 +                                turn_context.as_ref(),
 +                                &profile_name,
 +                                &attempted_routing_candidates,
-+                                &prepared.settings,
++                                &prepared.inputs,
 +                            )
 +                            .await
 +                        else {
@@ -864,7 +1205,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                          if !sess
                              .wait_for_model_routing_retry(selection.retry_at, &cancellation_token)
                              .await
-@@ -845,33 +869,33 @@ pub(crate) async fn run_turn(
+@@ -1026,33 +1091,33 @@ pub(crate) async fn run_turn(
                          routed.model_routing_previous_candidate = None;
                          routed.model_routing_selection_reason = None;
                          let routed = Arc::new(routed);
@@ -875,8 +1216,9 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 -                            .thread_extension_data
 -                            .insert(routed.model_info().clone());
 -                        let routed_step_context = match sess
+-                            .capture_step_context_with_required_mcp_servers(
 +                        let routed_step_context = sess
-                             .capture_step_context_with_required_mcp_servers(
++                            .capture_step_context_inner(
                                  Arc::clone(&routed),
                                  &cancellation_token,
                                  &step_context.required_mcp_servers,
@@ -915,7 +1257,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                              &routed_step_context,
                              &world_state,
                              &mut client_session,
-@@ -885,9 +909,6 @@ pub(crate) async fn run_turn(
+@@ -1066,9 +1131,6 @@ pub(crate) async fn run_turn(
                                      CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                                  ) =>
                              {
@@ -925,7 +1267,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                                  return Err(err);
                              }
                              Err(err) => {
-@@ -895,20 +916,14 @@ pub(crate) async fn run_turn(
+@@ -1076,20 +1138,14 @@ pub(crate) async fn run_turn(
                                      classify_model_routing_failure(err.details())
                                  {
                                      sess.record_model_routing_failure(
@@ -947,7 +1289,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                                  info!("Turn error during model reroute compaction: {err:#}");
                                  let error = err.to_codex_protocol_error();
                                  sess.emit_turn_error_lifecycle(
-@@ -928,7 +943,7 @@ pub(crate) async fn run_turn(
+@@ -1109,7 +1165,7 @@ pub(crate) async fn run_turn(
                              // segment and rebuilds from the compacted local history.
                              client_session.reset_for_model_reroute();
                              sess.notify_model_routing_change(
@@ -956,7 +1298,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -961,24 +976,14 @@ pub(crate) async fn run_turn(
+@@ -1142,24 +1198,14 @@ pub(crate) async fn run_turn(
                          } else {
                              routed_step_context
                          };
@@ -984,7 +1326,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -1002,9 +1007,6 @@ pub(crate) async fn run_turn(
+@@ -1187,9 +1233,6 @@ pub(crate) async fn run_turn(
                          continue 'turn;
                      }
                      if let Some(err) = last_compaction_error {
@@ -994,7 +1336,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
                          info!("Turn error during model reroute compaction: {err:#}");
                          let error = err.to_codex_protocol_error();
                          sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
-@@ -1652,14 +1654,18 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1871,14 +1914,18 @@ async fn maybe_run_previous_model_inline_compact(
  /// the task's previous-turn configuration.
  async fn maybe_run_model_reroute_inline_compact(
      sess: &Arc<Session>,
@@ -1015,7 +1357,7 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
          routed_turn_context.model_info().comp_hash.as_deref(),
      ) {
          Some(CompactionReason::CompHashChanged)
-@@ -1684,10 +1690,12 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -1903,10 +1950,12 @@ async fn maybe_run_model_reroute_inline_compact(
                  .model_context_window()
                  .is_some_and(|context_window| active_context_tokens >= context_window),
          };
@@ -1027,15 +1369,15 @@ index 71022a209db3af75f5060aecfa3d35817b248607..c1825ed95d70fe44c0dd352a330b95b1
 +            && previous_step_context
 +                .settings
 +                .model_info
-+                .context_window
++                .usable_context_window()
                  .zip(routed_turn_context.model_context_window())
                  .is_some_and(|(previous, routed)| previous > routed);
          (routed_limit_reached && is_model_downshift).then_some(CompactionReason::ModelDownshift)
 diff --git a/codex-rs/core/src/session/turn_context.rs b/codex-rs/core/src/session/turn_context.rs
-index 14150a8f74c326725acb02b8f282424b8b9ef51c..5b3433725f5079e4c7a57c411fe91a821509a182 100644
+index 3363b928a890417d888e03e27df20c465b0407c4..a3f56eaf3fd34bc72c707cb1e7809f59cda925c1 100644
 --- a/codex-rs/core/src/session/turn_context.rs
 +++ b/codex-rs/core/src/session/turn_context.rs
-@@ -481,9 +481,20 @@ impl TurnContext {
+@@ -653,9 +653,20 @@ impl TurnContext {
          &self,
          model: String,
          models_manager: &SharedModelsManager,
@@ -1056,7 +1398,7 @@ index 14150a8f74c326725acb02b8f282424b8b9ef51c..5b3433725f5079e4c7a57c411fe91a82
          let model_info = models_manager
              .get_model_info(model.as_str(), &config.to_models_manager_config())
              .await;
-@@ -492,7 +503,7 @@ impl TurnContext {
+@@ -664,7 +675,7 @@ impl TurnContext {
              .iter()
              .map(|preset| preset.effort.clone())
              .collect::<Vec<_>>();
@@ -1065,7 +1407,7 @@ index 14150a8f74c326725acb02b8f282424b8b9ef51c..5b3433725f5079e4c7a57c411fe91a82
              if supported_reasoning_levels.contains(current_reasoning_effort) {
                  Some(current_reasoning_effort.clone())
              } else {
-@@ -516,7 +527,7 @@ impl TurnContext {
+@@ -688,17 +699,19 @@ impl TurnContext {
              )
              .await;
          let model_info = Arc::new(model_info);
@@ -1074,49 +1416,30 @@ index 14150a8f74c326725acb02b8f282424b8b9ef51c..5b3433725f5079e4c7a57c411fe91a82
          selected.collaboration_mode = selected.collaboration_mode.with_updates(
              Some(model),
              Some(reasoning_effort),
-@@ -589,11 +600,13 @@ impl TurnContext {
-         model_profile: &str,
-         candidate: &ModelRoutingCandidate,
-         models_manager: &SharedModelsManager,
-+        settings: &ResolvedStepSettings,
-     ) -> Option<Self> {
-         self.with_routing_candidate_validation(
-             model_profile,
-             candidate,
-             models_manager,
-+            settings,
-             RoutingCandidateValidation::RequireCatalogSupport,
-         )
-         .await
-@@ -609,12 +622,14 @@ impl TurnContext {
-         model_profile: &str,
-         candidate: &ModelRoutingCandidate,
-         models_manager: &SharedModelsManager,
-+        settings: &ResolvedStepSettings,
-     ) -> Self {
-         match self
-             .with_routing_candidate_validation(
-                 model_profile,
-                 candidate,
-                 models_manager,
-+                settings,
-                 RoutingCandidateValidation::TrustConfiguration,
-             )
-             .await
-@@ -629,10 +644,11 @@ impl TurnContext {
-         model_profile: &str,
-         candidate: &ModelRoutingCandidate,
-         models_manager: &SharedModelsManager,
-+        settings: &ResolvedStepSettings,
+             /*developer_instructions*/ None,
+         );
+-        let step_settings = Arc::new(ResolvedStepSettings::new(
++        let mut step_settings = ResolvedStepSettings::new(
+             Arc::new(selected),
+             model_info,
+             config.features.enabled(Feature::FastMode),
+-        ));
++        );
++        step_settings.mcp_approvals_reviewer_override = settings.mcp_approvals_reviewer_override;
++        let step_settings = Arc::new(step_settings);
+         config.service_tier = step_settings.service_tier.clone();
+         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
+         let available_models = models_manager
+@@ -814,7 +827,7 @@ impl TurnContext {
          validation: RoutingCandidateValidation,
      ) -> Option<Self> {
          let mut routed = self
 -            .with_model(candidate.model.clone(), models_manager)
-+            .with_model_settings(candidate.model.clone(), models_manager, settings)
++            .with_model_settings(candidate.model.clone(), models_manager, &inputs.settings)
              .await;
          let mut model_info = Arc::clone(&routed.initial_settings.model_info);
          if let Some(custom_model) = self.config.custom_models.get(model_profile) {
-@@ -674,7 +690,10 @@ impl TurnContext {
+@@ -856,7 +869,10 @@ impl TurnContext {
              {
                  return None;
              }
@@ -1128,11 +1451,60 @@ index 14150a8f74c326725acb02b8f282424b8b9ef51c..5b3433725f5079e4c7a57c411fe91a82
                  Arc::make_mut(&mut model_info)
                      .service_tiers
                      .push(ModelServiceTier {
+@@ -884,11 +900,10 @@ impl TurnContext {
+             /*developer_instructions*/ None,
+         );
+         selected.service_tier = service_tier;
+-        let settings = Arc::new(ResolvedStepSettings::new(
+-            Arc::new(selected),
+-            model_info,
+-            fast_mode_enabled,
+-        ));
++        let mut settings =
++            ResolvedStepSettings::new(Arc::new(selected), model_info, fast_mode_enabled);
++        settings.mcp_approvals_reviewer_override = inputs.settings.mcp_approvals_reviewer_override;
++        let settings = Arc::new(settings);
+         config.service_tier = settings.service_tier.clone();
+         routed.multi_agent_version =
+             config.multi_agent_version_for_model(settings.model_info.multi_agent_version);
+@@ -1630,6 +1645,12 @@ impl Session {
+             .await;
+         let mut refreshed = Arc::try_unwrap(refreshed)
+             .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
++        Arc::make_mut(&mut refreshed.initial_settings).mcp_approvals_reviewer_override =
++            inputs.settings.mcp_approvals_reviewer_override;
++        refreshed.next_step_input = ArcSwap::from_pointee(StepInputs {
++            settings: Arc::clone(&refreshed.initial_settings),
++            environments: refreshed.initial_environments.clone(),
++        });
+
+         crate::skills::preserve_implicit_skill_invocations(
+             current.extension_data.as_ref(),
+@@ -1646,7 +1667,18 @@ impl Session {
+         if let (Some(profile_name), Some(candidate)) = (
+             current.model_profile.as_deref(),
+             current.model_routing_candidate.as_ref(),
+-        ) {
++        ) && inputs.settings.selected().collaboration_mode.model()
++            == current
++                .initial_settings
++                .selected()
++                .collaboration_mode
++                .model()
++            && inputs.settings.reasoning_effort() == current.initial_settings.reasoning_effort()
++            && inputs.settings.selected().service_tier
++                == current.initial_settings.selected().service_tier
++        {
++            // Explicit active model, effort, or tier updates supersede the routed candidate.
++            // Other updates retain the candidate while rebuilding workspace-derived state.
+             refreshed = refreshed
+                 .with_unchecked_routing_candidate(
+                     profile_name,
 diff --git a/codex-rs/core/tests/suite/client_websockets.rs b/codex-rs/core/tests/suite/client_websockets.rs
-index b3274e8e08aabcdf1d3d03482f2c965720900292..02dc4c54babbc210fafdbda40a7591c802fbec9b 100755
+index 9d1db4241fa32d8c276bd0ca6a91d9fa88aa5930..bafc2efa73f0c8bcd9bdc3335129e412779614af 100755
 --- a/codex-rs/core/tests/suite/client_websockets.rs
 +++ b/codex-rs/core/tests/suite/client_websockets.rs
-@@ -112,6 +112,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
+@@ -119,6 +119,7 @@ async fn routed_websocket_test(server: &WebSocketTestServer) -> TestCodex {
              }),
              model_context_window: None,
              model_auto_compact_token_limit: None,
@@ -1141,10 +1513,10 @@ index b3274e8e08aabcdf1d3d03482f2c965720900292..02dc4c54babbc210fafdbda40a7591c8
      )]);
      let mut primary_model = model_info_from_slug(ROUTED_WEBSOCKET_PRIMARY);
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index de173816d4fb59b25bddf44307c78d02aabe5ebd..453f4ebe16525c465a6e069d2d04866c0ebc0574 100644
+index 10598494da20e4c5c87ff38f8a1ab3b17ee60960..cb9b5401b176ca3e8f47a07ca7fe3d4b65dbc477 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
-@@ -86,6 +86,10 @@ async fn guardian_history_survives_restart_and_user_fork(
+@@ -88,6 +88,10 @@ async fn guardian_history_survives_restart_and_user_fork(
      initial.submit_text_turn(authorization).await?;
      initial.codex.submit(Op::Compact).await?;
      wait_for_event(&initial.codex, |event| {
@@ -1192,10 +1564,10 @@ index b79a09c1cf0f88fc6babd64b427780fdc3e32a32..ae6e45298210de7b8d9ac94041d5d44b
      )])
  }
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
-index 1e349494befd44df2c8369615b443b428b8c11ec..38d0da56c676124139e1a4cbe55ead27699b3c0e 100644
+index 8a9bfc128be1dfa53a1c0582e92c94c450bd8355..42e2df24769e678ab512afd8c94a196f9390a74a 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
 +++ b/codex-rs/core/tests/suite/model_switching.rs
-@@ -960,6 +960,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
+@@ -837,6 +837,7 @@ async fn custom_model_alias_uses_backing_model_in_responses_request() -> Result<
              routing_profile: None,
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -1204,11 +1576,11 @@ index 1e349494befd44df2c8369615b443b428b8c11ec..38d0da56c676124139e1a4cbe55ead27
      );
      let remote_model = test_model_info(
 diff --git a/codex-rs/core/tests/suite/step_settings.rs b/codex-rs/core/tests/suite/step_settings.rs
-index c27c566434951c88f7a22ab02689d818d90846b4..9831978e82a5d57ce8130ec26cf69e1cc5890b8d 100644
+index bc419aa9683a9037c231d9170efcec6eff825cc4..7c3b1c10adce810dc252b6306492b85dc44507db 100644
 --- a/codex-rs/core/tests/suite/step_settings.rs
 +++ b/codex-rs/core/tests/suite/step_settings.rs
-@@ -178,6 +178,89 @@ async fn submit_turn_settings(
-     Ok(tokio::time::timeout(std::time::Duration::from_secs(/*secs*/ 10), outcome).await??)
+@@ -267,6 +267,89 @@ async fn apply_turn_settings(
+     Ok(())
  }
 
 +#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1297,29 +1669,23 @@ index c27c566434951c88f7a22ab02689d818d90846b4..9831978e82a5d57ce8130ec26cf69e1c
  fn request_settings(request: &ResponsesRequest) -> Value {
      let body = request.body_json();
      json!({
-diff --git a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
-index 4569173057087d495c8541df526c88c8ef2d2faf..4bc34ed1bac85252c4464b11ebdd8028289c8c6a 100644
---- a/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
-+++ b/codex-rs/ext/guardian-v2/src/async_scorer/sampler.rs
-@@ -240,11 +240,11 @@ impl LunaSampler {
-                 ApiError::Transport(TransportError::Build(_))
-                 | ApiError::ContextWindowExceeded
-                 | ApiError::QuotaExceeded
--                | ApiError::UsageNotIncluded
-                 | ApiError::UsageLimitReached(_)
-+                | ApiError::UsageNotIncluded
-                 | ApiError::RateLimit(_)
--                | ApiError::InvalidRequest { .. }
-                 | ApiError::ModelUnavailable { .. }
-+                | ApiError::InvalidRequest { .. }
-                 | ApiError::MisalignmentPolicyViolation { .. }
-                 | ApiError::CyberPolicy { .. },
-             ) => false,
+diff --git a/codex-rs/ext/guardian-v2/src/sync_reviewer/reviewer_config.rs b/codex-rs/ext/guardian-v2/src/sync_reviewer/reviewer_config.rs
+index 6fb27ee98227c2e2531cb93c30cf833aa635fb05..4fbeede224a92682eafc8e6b02f31782eab33b9a 100644
+--- a/codex-rs/ext/guardian-v2/src/sync_reviewer/reviewer_config.rs
++++ b/codex-rs/ext/guardian-v2/src/sync_reviewer/reviewer_config.rs
+@@ -38,6 +38,7 @@ pub(crate) fn build_reviewer_config(parent_config: &Config) -> anyhow::Result<Co
+     })?;
+     for feature in [
+         Feature::Collab,
++        Feature::AgentPromptInjection,
+         Feature::MultiAgentV2,
+         Feature::GuardianV2,
+         Feature::TokenBudget,
 diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
-index 763feb33df0bda28690304ad51bfa5a25d6ee858..aab68411a9817597073ec612c249c4df661633ad 100644
+index 835cccfe0d7451ac2c989595a7661d998da2c741..e377ae7109284331c19446fa36ba80346c1bb75f 100644
 --- a/codex-rs/models-manager/src/config.rs
 +++ b/codex-rs/models-manager/src/config.rs
-@@ -25,6 +25,11 @@ pub struct CustomModelConfig {
+@@ -24,6 +24,11 @@ pub struct CustomModelConfig {
      pub model_context_window: Option<i64>,
      /// Optional auto-compaction limit applied to every candidate in this alias.
      pub model_auto_compact_token_limit: Option<i64>,
@@ -1332,10 +1698,10 @@ index 763feb33df0bda28690304ad51bfa5a25d6ee858..aab68411a9817597073ec612c249c4df
 
  impl CustomModelConfig {
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index fcd187e66852e38bfc0b96cfbd08104cd783b039..b112db871ed3b2a1150cf61fa3f088255ba3721b 100644
+index 60656bd31f437a8d16419c79b59a633d2f29b0ec..4c578837dc95539d7cfeba71889727b86d57847e 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -784,6 +784,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
+@@ -823,6 +823,7 @@ async fn custom_model_alias_uses_backing_model_metadata_and_request_model() {
              routing_profile: None,
              model_context_window: Some(123_456),
              model_auto_compact_token_limit: Some(100_000),
@@ -1343,7 +1709,7 @@ index fcd187e66852e38bfc0b96cfbd08104cd783b039..b112db871ed3b2a1150cf61fa3f08825
          },
      );
      let mut remote = remote_model("gpt-real", "Real", /*priority*/ 0);
-@@ -831,6 +832,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
+@@ -874,6 +875,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                  routing_profile: None,
                  model_context_window: None,
                  model_auto_compact_token_limit: None,
@@ -1351,7 +1717,7 @@ index fcd187e66852e38bfc0b96cfbd08104cd783b039..b112db871ed3b2a1150cf61fa3f08825
              },
          ),
          (
-@@ -840,6 +842,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
+@@ -883,6 +885,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
                  routing_profile: None,
                  model_context_window: None,
                  model_auto_compact_token_limit: None,
@@ -1359,15 +1725,7 @@ index fcd187e66852e38bfc0b96cfbd08104cd783b039..b112db871ed3b2a1150cf61fa3f08825
              },
          ),
      ]);
-@@ -877,6 +880,7 @@ async fn upstream_model_presets_exclude_custom_aliases_and_preserve_slug_collisi
-             routing_profile: None,
-             model_context_window: None,
-             model_auto_compact_token_limit: None,
-+            trust_candidate_constraints: false,
-         },
-     )]));
-     assert_eq!(
-@@ -906,6 +910,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
+@@ -941,6 +944,7 @@ async fn replacing_custom_models_updates_picker_and_fallback_lookup() {
              routing_profile: None,
              model_context_window: Some(64_000),
              model_auto_compact_token_limit: None,
@@ -1375,7 +1733,15 @@ index fcd187e66852e38bfc0b96cfbd08104cd783b039..b112db871ed3b2a1150cf61fa3f08825
          },
      )]);
 
-@@ -953,6 +958,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
+@@ -1013,6 +1017,7 @@ async fn replacing_custom_models_preserves_authenticated_remote_catalog() {
+             routing_profile: None,
+             model_context_window: None,
+             model_auto_compact_token_limit: None,
++            trust_candidate_constraints: false,
+         },
+     )]);
+     manager.replace_custom_models(replacement.clone());
+@@ -1063,6 +1068,7 @@ fn try_list_models_reads_complete_snapshots_during_custom_model_replacement() {
          routing_profile: None,
          model_context_window: None,
          model_auto_compact_token_limit: None,

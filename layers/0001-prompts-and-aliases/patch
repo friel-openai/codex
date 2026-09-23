@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/common/models_cache.rs b/codex-rs/app-server/tests/common/models_cache.rs
-index 1bd6f316d75b376030d9f0c7ecb86423e8cc344c..8e8ec12f19600eccfcaea48af768678a902de26d 100644
+index 0b14bc00353c36b1092e9bd4292279787d0ffeae..c990d67b5ac0a17154d4de05ac5c08ff0e4db12f 100644
 --- a/codex-rs/app-server/tests/common/models_cache.rs
 +++ b/codex-rs/app-server/tests/common/models_cache.rs
-@@ -17,6 +17,7 @@ use std::path::Path;
+@@ -13,6 +13,7 @@ use std::path::Path;
  fn preset_to_info(preset: &ModelPreset, priority: i32) -> ModelInfo {
      ModelInfo {
          slug: preset.id.clone(),
@@ -11,10 +11,10 @@ index 1bd6f316d75b376030d9f0c7ecb86423e8cc344c..8e8ec12f19600eccfcaea48af768678a
          description: Some(preset.description.clone()),
          default_reasoning_level: Some(preset.default_reasoning_effort.clone()),
 diff --git a/codex-rs/codex-api/tests/models_integration.rs b/codex-rs/codex-api/tests/models_integration.rs
-index eb3ae763e7898d7f9dac0320777c5dc0ccb0f190..38590b7d3754c671929bdef1c885ae48756866ec 100644
+index ed43d8aaed8bdbf4124a6d20c52c14ace21504af..43c226f071528daa84702b07e80efa2fd6274f86 100644
 --- a/codex-rs/codex-api/tests/models_integration.rs
 +++ b/codex-rs/codex-api/tests/models_integration.rs
-@@ -54,6 +54,7 @@ async fn models_client_hits_models_endpoint() {
+@@ -109,6 +109,7 @@ async fn models_client_hits_models_endpoint() {
      let response = ModelsResponse {
          models: vec![ModelInfo {
              slug: "gpt-test".to_string(),
@@ -23,10 +23,10 @@ index eb3ae763e7898d7f9dac0320777c5dc0ccb0f190..38590b7d3754c671929bdef1c885ae48
              description: Some("desc".to_string()),
              default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
-index 7bf981482f6ade394c484c5794f9bbdb42404b9b..a0ed67f03c564066422ab26ff2eb479d84746774 100644
+index bdaee871795b76c92662f37238d1045147025440..4267b414321239e2851949b4d213255225263add 100644
 --- a/codex-rs/config/src/config_toml.rs
 +++ b/codex-rs/config/src/config_toml.rs
-@@ -305,6 +305,10 @@ pub struct ConfigToml {
+@@ -317,6 +317,10 @@ pub struct ConfigToml {
      #[serde(default, deserialize_with = "deserialize_model_providers")]
      pub model_providers: HashMap<String, ModelProviderInfo>,
 
@@ -37,7 +37,7 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..a0ed67f03c564066422ab26ff2eb479d
      /// Maximum total bytes of project instruction content across all selected environments.
      #[serde(default = "default_project_doc_max_bytes")]
      pub project_doc_max_bytes: Option<usize>,
-@@ -950,6 +954,19 @@ pub fn validate_model_providers(
+@@ -975,6 +979,19 @@ pub fn validate_model_providers(
      Ok(())
  }
 
@@ -58,20 +58,20 @@ index 7bf981482f6ade394c484c5794f9bbdb42404b9b..a0ed67f03c564066422ab26ff2eb479d
      deserializer: D,
  ) -> Result<HashMap<String, ModelProviderInfo>, D::Error>
 diff --git a/codex-rs/core/config.schema.json b/codex-rs/core/config.schema.json
-index 2d5d268a678f81a5f59890bd1526a2da26287427..cbed5c3d53eb44e389e752db93c25f5e85555176 100644
+index 9dffbb207f9fc780095500909f0610438aa93bc2..519e62edcefa0e36fd0f8b6862b27813f659723a 100644
 --- a/codex-rs/core/config.schema.json
 +++ b/codex-rs/core/config.schema.json
-@@ -602,6 +602,9 @@
-           "default": null,
-           "description": "Optional feature toggles scoped to this profile.",
-           "properties": {
+@@ -649,6 +649,9 @@
+             "agent_message_board": {
+               "type": "boolean"
+             },
 +            "agent_prompt_injection": {
 +              "type": "boolean"
 +            },
-             "apply_patch_freeform": {
+             "analytics_plan_history": {
                "type": "boolean"
              },
-@@ -1214,6 +1217,34 @@
+@@ -1346,6 +1349,34 @@
        ],
        "type": "string"
      },
@@ -106,7 +106,7 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..cbed5c3d53eb44e389e752db93c25f5e
      "ExperimentalRequestUserInput": {
        "additionalProperties": false,
        "properties": {
-@@ -5935,6 +5966,14 @@
+@@ -6461,6 +6492,14 @@
      "computer_use": {
        "$ref": "#/definitions/ComputerUseConfigToml"
      },
@@ -121,17 +121,17 @@ index 2d5d268a678f81a5f59890bd1526a2da26287427..cbed5c3d53eb44e389e752db93c25f5e
      "default_permissions": {
        "description": "Default permissions profile to apply. Names starting with `:` refer to built-in profiles; other names are resolved from the `[permissions]` table.",
        "type": "string"
-@@ -5997,6 +6036,9 @@
-       "default": null,
-       "description": "Centralized feature flags (new). Prefer this over individual toggles.",
-       "properties": {
+@@ -6526,6 +6565,9 @@
+         "agent_message_board": {
+           "type": "boolean"
+         },
 +        "agent_prompt_injection": {
 +          "type": "boolean"
 +        },
-         "apply_patch_freeform": {
+         "analytics_plan_history": {
            "type": "boolean"
          },
-@@ -6925,4 +6967,4 @@
+@@ -7494,4 +7536,4 @@
    },
    "title": "ConfigToml",
    "type": "object"
@@ -189,7 +189,7 @@ index 0000000000000000000000000000000000000000..9eb78d33e02863b07a748782017ea931
 +- Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
 +- When you receive messages from other agents, verify their claims before relying on them.
 diff --git a/codex-rs/core/src/agent/control/residency_tests.rs b/codex-rs/core/src/agent/control/residency_tests.rs
-index 0fb1b057f92af3e90aa4a330f2369516b989a8d4..4f06f39242eae4d686b59a23a2d3589fbda922e4 100644
+index 7f1921dd7eb612d2807a604b302ecca2111816c3..50d4f8675c62d7c844b1b0bc0591426566991886 100644
 --- a/codex-rs/core/src/agent/control/residency_tests.rs
 +++ b/codex-rs/core/src/agent/control/residency_tests.rs
 @@ -152,8 +152,8 @@ async fn spawn_v2_subagent(
@@ -203,10 +203,10 @@ index 0fb1b057f92af3e90aa4a330f2369516b989a8d4..4f06f39242eae4d686b59a23a2d3589f
          .await
          .expect("spawn v2 subagent")
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ce67824419973f5c36f026bba0842b5e935b91aa..85a24c92cd782f3ff8179280c6134008f0c59001 100644
+index 29419e4a556a705f73b74ac867bcac6e5f64d319..ff3cc443aace9386b1ada2e93437c7b242f04be1 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -2144,7 +2144,11 @@ while True:
+@@ -2577,7 +2577,11 @@ while True:
          .thread
          .inject_user_message_without_turn("parent seed".to_string())
          .await;
@@ -220,10 +220,10 @@ index ce67824419973f5c36f026bba0842b5e935b91aa..85a24c92cd782f3ff8179280c6134008
 
      // The child has no independently configured MCP servers. Its first request can only advertise
 diff --git a/codex-rs/core/src/client.rs b/codex-rs/core/src/client.rs
-index 9697df84b0aa38172331f8686dbf24eb3ab9a3fb..2758e12c28239ff4c18b3be22cf85ae7cc5b908a 100644
+index cd376bdbfb66a22e8b6d18f87e85ea654c6e1571..a91220df0a2dbe2b176f6000f122ea122473b43f 100644
 --- a/codex-rs/core/src/client.rs
 +++ b/codex-rs/core/src/client.rs
-@@ -859,7 +859,7 @@ impl ModelClient {
+@@ -869,7 +869,7 @@ impl ModelClient {
                  .with_telemetry(Some(request_telemetry));
 
          let payload = ApiMemorySummarizeInput {
@@ -232,17 +232,61 @@ index 9697df84b0aa38172331f8686dbf24eb3ab9a3fb..2758e12c28239ff4c18b3be22cf85ae7
              raw_memories,
              reasoning: effort
                  .map(|effort| model_info.resolve_reasoning_effort(effort))
-@@ -1068,7 +1068,7 @@ impl ModelClient {
-         let prompt_cache_key = Some(self.prompt_cache_key(responses_metadata));
-         let service_tier = model_info.service_tier_for_request(service_tier);
+@@ -1088,7 +1088,7 @@ impl ModelClient {
+             model_info.service_tier_for_request(service_tier)
+         };
          let request = ResponsesApiRequest {
 -            model: model_info.slug.clone(),
 +            model: model_info.request_model_slug().to_string(),
              instructions,
              input,
              tools,
+diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
+index e085a2f534fc0e314cef82bceac1f03655feb8af..cf094ce2bc053d62493f5ec7e91ae495381a37bf 100644
+--- a/codex-rs/core/src/client_tests.rs
++++ b/codex-rs/core/src/client_tests.rs
+@@ -39,6 +39,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
+ use codex_model_provider_info::ModelProviderInfo;
+ use codex_model_provider_info::WireApi;
+ use codex_model_provider_info::create_oss_provider_with_base_url;
++use codex_models_manager::CustomModelConfig;
+ use codex_models_manager::manager::SharedModelsManager;
+ use codex_otel::SessionTelemetry;
+ use codex_protocol::ThreadId;
+@@ -77,6 +78,7 @@ use futures::StreamExt;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
+ use std::collections::BTreeMap;
++use std::collections::HashMap;
+ use std::collections::VecDeque;
+ use std::path::PathBuf;
+ use std::pin::Pin;
+@@ -325,8 +327,10 @@ impl ModelProvider for SetupRefreshProvider {
+         &self,
+         codex_home: PathBuf,
+         config_model_catalog: Option<ModelsResponse>,
++        custom_models: HashMap<String, CustomModelConfig>,
+     ) -> SharedModelsManager {
+-        self.inner.models_manager(codex_home, config_model_catalog)
++        self.inner
++            .models_manager(codex_home, config_model_catalog, custom_models)
+     }
+ }
+
+@@ -1797,8 +1801,10 @@ impl ModelProvider for TestRecoveryProvider {
+         &self,
+         codex_home: PathBuf,
+         config_model_catalog: Option<ModelsResponse>,
++        custom_models: HashMap<String, CustomModelConfig>,
+     ) -> SharedModelsManager {
+-        self.inner.models_manager(codex_home, config_model_catalog)
++        self.inner
++            .models_manager(codex_home, config_model_catalog, custom_models)
+     }
+ }
+
 diff --git a/codex-rs/core/src/config/config_tests.rs b/codex-rs/core/src/config/config_tests.rs
-index a093aaf28f9536fd8371b50eb1e0f7d8dff508e6..73552ad9a51fa668623931cdac8dc8f290924370 100644
+index 0bf3dcf63868e4c6d31a73ae92d2757e64c216e5..aac846a41a843e66b64609c11164063e19102d17 100644
 --- a/codex-rs/core/src/config/config_tests.rs
 +++ b/codex-rs/core/src/config/config_tests.rs
 @@ -20,6 +20,7 @@ use codex_config::config_toml::AgentRoleToml;
@@ -253,7 +297,7 @@ index a093aaf28f9536fd8371b50eb1e0f7d8dff508e6..73552ad9a51fa668623931cdac8dc8f2
  use codex_config::config_toml::ExperimentalRequestUserInput;
  use codex_config::config_toml::ProjectConfig;
  use codex_config::config_toml::RealtimeConfig;
-@@ -9537,6 +9538,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
+@@ -9753,6 +9754,70 @@ async fn model_catalog_json_rejects_empty_catalog() -> std::io::Result<()> {
      Ok(())
  }
 
@@ -325,7 +369,7 @@ index a093aaf28f9536fd8371b50eb1e0f7d8dff508e6..73552ad9a51fa668623931cdac8dc8f2
      let toml = r#"
  model = "o3"
 diff --git a/codex-rs/core/src/config/mod.rs b/codex-rs/core/src/config/mod.rs
-index ebda9778b17bf8df3670039d9d018493e2cb449b..4ff2db59079b4f8359db16ace8efa9270a238e7b 100644
+index e71ad88dde0f7ffc3d2e1bc61d4b34a2ade13a46..1ccce5ccd82549c551e353d27a54124acf9ef052 100644
 --- a/codex-rs/core/src/config/mod.rs
 +++ b/codex-rs/core/src/config/mod.rs
 @@ -94,6 +94,7 @@ use codex_model_provider_info::ModelProviderInfo;
@@ -334,9 +378,9 @@ index ebda9778b17bf8df3670039d9d018493e2cb449b..4ff2db59079b4f8359db16ace8efa927
  use codex_model_provider_info::merge_configured_model_providers;
 +use codex_models_manager::CustomModelConfig;
  use codex_models_manager::ModelsManagerConfig;
+ use codex_prompts::ResolvedModelMessages;
  use codex_protocol::config_types::AltScreenMode;
- use codex_protocol::config_types::AutoCompactTokenLimitScope;
-@@ -969,6 +970,9 @@ pub struct Config {
+@@ -987,6 +988,9 @@ pub struct Config {
      /// When set, this replaces the bundled catalog for the current process.
      pub model_catalog: Option<ModelsResponse>,
 
@@ -346,15 +390,15 @@ index ebda9778b17bf8df3670039d9d018493e2cb449b..4ff2db59079b4f8359db16ace8efa927
      /// Optional verbosity control for GPT-5 models (Responses API `text.verbosity`).
      pub model_verbosity: Option<Verbosity>,
 
-@@ -1625,6 +1629,7 @@ impl Config {
-             personality_enabled: self.features.enabled(Feature::Personality),
+@@ -1641,6 +1645,7 @@ impl Config {
+             }),
              personality: self.personality,
              model_catalog: self.model_catalog.clone(),
 +            custom_models: self.custom_models.clone(),
          }
      }
 
-@@ -3731,6 +3736,25 @@ impl Config {
+@@ -3741,6 +3746,25 @@ impl Config {
              merge_configured_model_providers(built_in_model_providers(openai_base_url), cfg.model_providers)
                  .map_err(|message| std::io::Error::new(std::io::ErrorKind::InvalidData, message))?;
 
@@ -377,10 +421,10 @@ index ebda9778b17bf8df3670039d9d018493e2cb449b..4ff2db59079b4f8359db16ace8efa927
 +            );
 +        }
 +
-         let model_provider_id = model_provider
+         let model_provider_id = config_layer_stack.required_model_provider().map(str::to_string)
+             .or(model_provider)
              .or(cfg.model_provider)
-             .unwrap_or_else(|| "openai".to_string());
-@@ -4217,6 +4241,7 @@ impl Config {
+@@ -4252,6 +4276,7 @@ impl Config {
                  .map(Duration::from_millis)
                  .unwrap_or(DEFAULT_OPTIONAL_MCP_STARTUP_GRACE),
              model_providers,
@@ -389,10 +433,10 @@ index ebda9778b17bf8df3670039d9d018493e2cb449b..4ff2db59079b4f8359db16ace8efa927
              project_doc_fallback_filenames: cfg
                  .project_doc_fallback_filenames
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index ed0f14659c4eded6bb3c68f7d8fe4c59327de2b9..2ccb5b173331cbeb0e446e9eb779ca762f3f5e8a 100644
+index e783edd6b96ee6a6ed108149dadbb373b4ad4bda..c4da77d10d11f2da79956d5fcd7c65805ae88c81 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -273,6 +273,75 @@ use self::turn_context::TurnContext;
+@@ -284,6 +284,75 @@ use self::turn_context::TurnContext;
  #[cfg(test)]
  mod rollout_reconstruction_tests;
 
@@ -468,7 +512,7 @@ index ed0f14659c4eded6bb3c68f7d8fe4c59327de2b9..2ccb5b173331cbeb0e446e9eb779ca76
  /// Notes from the previous real user turn.
  ///
  /// Conceptually this is the same role that `previous_model` used to fill, but
-@@ -341,6 +410,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+@@ -355,6 +424,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
  use codex_protocol::config_types::Settings;
  use codex_protocol::config_types::WindowsSandboxLevel;
  use codex_protocol::mcp::ClientMcpExtensions;
@@ -476,7 +520,7 @@ index ed0f14659c4eded6bb3c68f7d8fe4c59327de2b9..2ccb5b173331cbeb0e446e9eb779ca76
  use codex_protocol::models::LocalImagePreparation;
  use codex_protocol::models::ResponseInputItem;
  use codex_protocol::models::ResponseItem;
-@@ -3952,13 +4022,20 @@ impl Session {
+@@ -4138,13 +4208,20 @@ impl Session {
          let mut contextual_user_sections = Vec::<RenderedFragment>::with_capacity(2);
          let mut separate_developer_sections = Vec::<RenderedFragment>::new();
          let mut context_window_hints = Vec::new();
@@ -498,8 +542,31 @@ index ed0f14659c4eded6bb3c68f7d8fe4c59327de2b9..2ccb5b173331cbeb0e446e9eb779ca76
          let separate_guardian_developer_message =
              crate::guardian::is_basic_session_source(&session_source);
          // Keep the guardian policy prompt out of the aggregated developer bundle so it
+diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
+index 27b9a31d4b6418a6eca00c4450474360da73b030..233409b86ab61496229c6ade5fe697152e57e81a 100644
+--- a/codex-rs/core/src/session/step_activation_tests.rs
++++ b/codex-rs/core/src/session/step_activation_tests.rs
+@@ -23,6 +23,7 @@ use codex_extension_api::ThreadInstructionsProvider;
+ use codex_extension_api::UserInstructionsProvider;
+ use codex_http_client::HttpClientFactory;
+ use codex_login::AuthManager;
++use codex_models_manager::CustomModelConfig;
+ use codex_models_manager::ModelsManagerConfig;
+ use codex_models_manager::bundled_models_response;
+ use codex_models_manager::manager::ModelsManager;
+@@ -323,6 +324,10 @@ impl ModelsManager for GatedModelsManager {
+         self.inner.auth_manager()
+     }
+
++    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
++        self.inner.custom_models()
++    }
++
+     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
+         self.inner.list_collaboration_modes()
+     }
 diff --git a/codex-rs/core/src/session/step_settings.rs b/codex-rs/core/src/session/step_settings.rs
-index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b153fc2639 100644
+index c915037a1729d0dca6acc302234f29d0d92a6f19..5212a9b04001a3c64b6ef0d60b37c4983a8097c3 100644
 --- a/codex-rs/core/src/session/step_settings.rs
 +++ b/codex-rs/core/src/session/step_settings.rs
 @@ -4,6 +4,7 @@ use crate::config::Constrained;
@@ -518,7 +585,7 @@ index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b1
  use std::sync::Arc;
 
  /// Model and execution settings selected for an individual model step within
-@@ -174,7 +176,7 @@ impl ResolvedStepSettings {
+@@ -175,7 +177,7 @@ impl ResolvedStepSettings {
      }
  }
 
@@ -527,7 +594,7 @@ index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b1
  /// Construct from `Config::to_models_manager_config()` so model-derived base
  /// instructions are not mistaken for explicit overrides.
  #[derive(Clone, Debug, Default, PartialEq, Eq)]
-@@ -183,6 +185,8 @@ pub(crate) struct ModelInfoOverrides {
+@@ -184,6 +186,8 @@ pub(crate) struct ModelInfoOverrides {
      pub(crate) auto_compact_token_limit: Option<i64>,
      pub(crate) tool_output_token_limit: Option<usize>,
      pub(crate) base_instructions: Option<String>,
@@ -536,7 +603,7 @@ index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b1
  }
 
  impl From<ModelsManagerConfig> for ModelInfoOverrides {
-@@ -192,6 +196,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
+@@ -193,6 +197,7 @@ impl From<ModelsManagerConfig> for ModelInfoOverrides {
              auto_compact_token_limit: config.model_auto_compact_token_limit,
              tool_output_token_limit: config.tool_output_token_limit,
              base_instructions: config.base_instructions,
@@ -545,10 +612,10 @@ index 49502e8a6ea47833448be8997118ad2c884d07e0..3f8241b5a01ced8dd4e6169c235da4b1
      }
  }
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index d16b01849b7850e7162f3f79eff6164faece643f..d21e883d4ff1e0f0d56d63ad709c58334663d700 100644
+index 2690507516d9c1bfc1b3c903c485061f3509f77a..0b1c967c0fccb956b5b3ba10ad76ebc8074ee9ea 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -2779,12 +2779,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
+@@ -2949,12 +2949,14 @@ async fn resumed_history_injects_initial_context_on_first_context_update_only()
      let history_before_seed = session.state.lock().await.clone_history();
      assert_eq!(expected, raw_history_items(&history_before_seed));
 
@@ -564,7 +631,7 @@ index d16b01849b7850e7162f3f79eff6164faece643f..d21e883d4ff1e0f0d56d63ad709c5833
      expected.extend(initial_context);
      let history_after_seed = session.clone_history().await;
      assert_eq!(
-@@ -3672,6 +3674,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
+@@ -3854,6 +3856,12 @@ async fn fork_startup_context_then_first_turn_diff_snapshot() -> anyhow::Result<
 
      let mut builder = test_codex().with_config(|config| {
          config.update_plan_enabled = true;
@@ -577,7 +644,37 @@ index d16b01849b7850e7162f3f79eff6164faece643f..d21e883d4ff1e0f0d56d63ad709c5833
          config.permissions.approval_policy =
              codex_config::Constrained::allow_any(AskForApproval::OnRequest);
      });
-@@ -12710,3 +12718,119 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
+@@ -10195,12 +10203,12 @@ async fn record_context_updates_and_set_reference_context_item_injects_full_cont
+     let (session, turn_context) = make_session_and_context().await;
+     let turn_context = Arc::new(turn_context);
+     let step_context = StepContext::for_test(Arc::clone(&turn_context));
++    let initial_context = build_initial_context(&session, &turn_context).await;
+     session
+         .record_context_updates_and_set_reference_context_item(&step_context)
+         .await
+         .expect("world state should build");
+     let history = session.clone_history().await;
+-    let initial_context = build_initial_context(&session, &turn_context).await;
+     assert_eq!(
+         strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
+         strip_response_item_ids(&strip_metadata_from_items(&initial_context))
+@@ -10251,6 +10259,7 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+         )
+         .await;
+
++    let initial_context = build_initial_context(&session, &turn_context).await;
+     session
+         .record_context_updates_and_set_reference_context_item(&step_context)
+         .await
+@@ -10258,7 +10267,6 @@ async fn record_context_updates_and_set_reference_context_item_reinjects_full_co
+
+     let history = session.clone_history().await;
+     let mut expected_history = vec![compacted_summary];
+-    let initial_context = build_initial_context(&session, &turn_context).await;
+     expected_history.extend(initial_context);
+     assert_eq!(
+         strip_response_item_ids(&strip_metadata_from_items(&raw_history_items(&history))),
+@@ -12461,3 +12469,119 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
 
      Ok(())
  }
@@ -698,10 +795,10 @@ index d16b01849b7850e7162f3f79eff6164faece643f..d21e883d4ff1e0f0d56d63ad709c5833
 +    assert!(prompt.contains("## Subagent Responsibilities"));
 +}
 diff --git a/codex-rs/core/src/test_support.rs b/codex-rs/core/src/test_support.rs
-index 47427773eb68495c4a7c31de44f2618b51987494..6c3cbfd66d72a671c0e3b6dffd38271cece04c67 100644
+index b93c2ba700362bf29a01b94e87a9d2d6af7468d2..d0b541eb5dd38b1b23221f2fce2ea8469fa14fb1 100644
 --- a/codex-rs/core/src/test_support.rs
 +++ b/codex-rs/core/src/test_support.rs
-@@ -150,7 +150,11 @@ pub fn models_manager_with_provider(
+@@ -165,7 +165,11 @@ pub fn models_manager_with_provider(
      provider: ModelProviderInfo,
  ) -> SharedModelsManager {
      let provider = create_model_provider(provider, Some(auth_manager));
@@ -715,18 +812,18 @@ index 47427773eb68495c4a7c31de44f2618b51987494..6c3cbfd66d72a671c0e3b6dffd38271c
 
  pub fn default_http_client_factory() -> HttpClientFactory {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index f05b4f21329826d293ade751cb05b8f14d122faf..89e937e095f7e4c2dfc94cd631cee433018df475 100644
+index 7696d888e845ecf89de0f81c4b0b2bd2f84f7f9f..410a16f6fb1019274bbfbfb0da08328ff33fcd17 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -381,6 +381,7 @@ pub fn build_models_manager(
-     provider.models_manager(
+@@ -434,6 +434,7 @@ pub fn build_models_manager(
+     let manager = provider.models_manager(
          config.codex_home.to_path_buf(),
          config.model_catalog.clone(),
 +        config.custom_models.clone(),
-     )
- }
-
-@@ -635,7 +636,11 @@ impl ThreadManager {
+     );
+     manager.set_api_key_model_discovery_enabled(
+         config.features.enabled(Feature::ApiKeyModelDiscovery),
+@@ -715,7 +716,11 @@ impl ThreadManager {
                  thread_created_tx,
                  thread_id_generator: default_thread_id_generator(),
                  models_manager: create_model_provider(provider, Some(auth_manager.clone()))
@@ -757,10 +854,10 @@ index 0000000000000000000000000000000000000000..bd45150ed0f68eb60e871d2e9bbca497
 +
 +When you've completed your task, report back with outcomes, file(s) changed, commands run, how you verified your work, and context needed for the parent agent to evaluate your work and determine what to do next.
 diff --git a/codex-rs/core/tests/suite/agents_md.rs b/codex-rs/core/tests/suite/agents_md.rs
-index 979077370613209ca3dcf1033e50284ef57c6f58..ff4d1f6762bc042be9d963b30c820ac9e348c601 100644
+index e1983935489148841c3a10d7da2986f1483b3084..b2def3c42407f3365544f4de08557e66a73ea482 100644
 --- a/codex-rs/core/tests/suite/agents_md.rs
 +++ b/codex-rs/core/tests/suite/agents_md.rs
-@@ -1512,6 +1512,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()>
+@@ -2465,6 +2465,7 @@ async fn run_subagent_global_instruction_case(fork_context: bool) -> Result<()>
          .with_home(Arc::clone(&home))
          .with_config(|config| {
              let _ = config.features.enable(Feature::Collab);
@@ -769,7 +866,7 @@ index 979077370613209ca3dcf1033e50284ef57c6f58..ff4d1f6762bc042be9d963b30c820ac9
          });
      let test = builder.build(&server).await?;
 diff --git a/codex-rs/core/tests/suite/auto_review.rs b/codex-rs/core/tests/suite/auto_review.rs
-index e5291445894cd39a344d7600126325a248319a72..73ad0f4a477fa7216a34c798e749c82c8127bd68 100644
+index 6f5c9fc7d948575d39dfbc8798b9fa0a11a1c710..3780532dc57867bd1155cff2b9805a2b7dd522d9 100644
 --- a/codex-rs/core/tests/suite/auto_review.rs
 +++ b/codex-rs/core/tests/suite/auto_review.rs
 @@ -600,6 +600,7 @@ async fn remote_model_override_uses_catalog_model_for_strict_auto_review() -> Re
@@ -781,10 +878,10 @@ index e5291445894cd39a344d7600126325a248319a72..73ad0f4a477fa7216a34c798e749c82c
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/compact.rs b/codex-rs/core/tests/suite/compact.rs
-index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088614f4ff6 100644
+index cfbcefc9d8906065dba0a1e55266c27839d1b488..8410fb4b69e2b5a8e36056dcb56ebb1a9dbb3fcd 100644
 --- a/codex-rs/core/tests/suite/compact.rs
 +++ b/codex-rs/core/tests/suite/compact.rs
-@@ -1323,9 +1323,11 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+@@ -1477,9 +1477,11 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
                  // relevant to compaction behavior and can change as bundled prompts evolve.
                  let role = value.get("role").and_then(|role| role.as_str());
                  if role == Some("developer")
@@ -799,7 +896,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
                  {
                      return None;
                  }
-@@ -1352,10 +1354,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
+@@ -1506,10 +1508,10 @@ async fn multiple_auto_compact_per_task_runs_after_token_limit_hit() {
          let input = body.get("input").and_then(|v| v.as_array()).unwrap();
          let input = normalize_inputs(input);
          assert_eq!(input.len(), 3);
@@ -812,7 +909,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
          assert_eq!(user_message_received, user_message);
          assert_eq!(
              summary_message, expected_summary,
-@@ -5082,17 +5084,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5101,17 +5103,21 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
          ev_assistant_message("m1", FIRST_REPLY),
          ev_completed_with_tokens("r1", /*total_tokens*/ 500),
      ]);
@@ -844,7 +941,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
 
      let mut model_provider = non_openai_model_provider(&server);
      model_provider.stream_max_retries = Some(0);
-@@ -5132,10 +5138,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5151,10 +5157,8 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
      wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnComplete(_))).await;
 
      let requests = request_log.requests();
@@ -857,7 +954,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
 
      insta::assert_snapshot!(
          "pre_turn_compaction_context_window_exceeded_shapes",
-@@ -5143,7 +5147,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
+@@ -5162,7 +5166,7 @@ async fn snapshot_request_shape_pre_turn_compaction_context_window_exceeded() {
              "Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.",
              &[(
                  "Local Compaction Request (Incoming User Excluded)",
@@ -866,7 +963,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
              ),]
          )
      );
-@@ -5329,6 +5333,10 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
+@@ -5348,6 +5352,10 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
              config.model_provider = provider;
              config.model_context_window = Some(100);
              config.model_auto_compact_token_limit = Some(90);
@@ -877,7 +974,7 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
          });
      let test = builder.build(&server).await?;
 
-@@ -5355,6 +5363,17 @@ async fn mid_turn_compaction_keeps_the_creation_time_global_instructions() -> Re
+@@ -5374,6 +5382,17 @@ async fn mid_turn_compaction_uses_refreshed_global_instructions() -> Result<()>
      assert_single_instruction_fragment(&requests[0], &expected_fragment);
      assert_single_instruction_fragment(&requests[1], &expected_fragment);
      assert_single_instruction_fragment(&requests[2], &expected_fragment);
@@ -894,20 +991,37 @@ index 09ae3e2cdd239a0ed34eb629b1cd2979a7e6d968..ba36f6af1b65673c4691b7960b1fa088
 +    }
      assert_eq!(
          test.codex.instruction_sources().await,
-         vec![PathUri::from_abs_path(&source)],
+         vec![PathUri::from_abs_path(&new_source)],
+diff --git a/codex-rs/core/tests/suite/injected_models_cache.rs b/codex-rs/core/tests/suite/injected_models_cache.rs
+index 8d2ab86bd87a9e3b6309541e74a4e9387a930af0..7025c52b731ff58c69dbd6107ebad45642652acd 100644
+--- a/codex-rs/core/tests/suite/injected_models_cache.rs
++++ b/codex-rs/core/tests/suite/injected_models_cache.rs
+@@ -315,7 +315,11 @@ async fn account_switch_during_cache_store_preserves_new_catalog_for_next_turn()
+         store_gate: Mutex::new(None),
+     });
+     let manager = create_model_provider(provider_info.clone(), Some(auth.clone()))
+-        .models_manager_with_cache(/*config_model_catalog*/ None, cache.clone());
++        .models_manager_with_cache(
++            /*config_model_catalog*/ None,
++            cache.clone(),
++            Default::default(),
++        );
+     let mut old_model = remote_model("gpt-5.4");
+     old_model.default_reasoning_summary = ReasoningSummary::Concise;
+     let initial = responses::mount_models_once(
 diff --git a/codex-rs/core/tests/suite/model_switching.rs b/codex-rs/core/tests/suite/model_switching.rs
-index 7443b63188dcb6468f877ada98ba6c146ce557a8..9085357b682a2c550a933f271a657f2b220daad1 100644
+index 97a39d9a28c3cc4e796c07b1eba3fe2f3ee9f84a..d6b96ff15c6510e54b121f83f5a1e7c9f9a521d6 100644
 --- a/codex-rs/core/tests/suite/model_switching.rs
 +++ b/codex-rs/core/tests/suite/model_switching.rs
-@@ -13,6 +13,7 @@ use codex_features::Feature;
+@@ -7,6 +7,7 @@ use codex_core::config::Constrained;
+ use codex_features::Feature;
  use codex_history::RolloutItem;
  use codex_login::CodexAuth;
- use codex_models_manager::bundled_models_response;
 +use codex_models_manager::CustomModelConfig;
+ use codex_models_manager::bundled_models_response;
  use codex_models_manager::manager::RefreshStrategy;
- use codex_protocol::config_types::ApprovalsReviewer;
- use codex_protocol::config_types::CollaborationMode;
-@@ -115,6 +116,7 @@ fn test_model_info(
+ use codex_prompts::render_model_instructions;
+@@ -111,6 +112,7 @@ fn test_model_info(
  ) -> ModelInfo {
      ModelInfo {
          slug: slug.to_string(),
@@ -915,7 +1029,7 @@ index 7443b63188dcb6468f877ada98ba6c146ce557a8..9085357b682a2c550a933f271a657f2b
          display_name: display_name.to_string(),
          description: Some(description.to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -944,6 +946,47 @@ async fn null_service_tier_override_is_omitted_from_http_turn_with_catalog_defau
+@@ -821,6 +823,47 @@ async fn null_service_tier_override_is_omitted_from_http_turn_with_catalog_defau
      Ok(())
  }
 
@@ -960,10 +1074,10 @@ index 7443b63188dcb6468f877ada98ba6c146ce557a8..9085357b682a2c550a933f271a657f2b
 +    Ok(())
 +}
 +
- #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
- async fn model_change_from_multimodal_to_text_strips_prior_media_content() -> Result<()> {
-     skip_if_no_network!(Ok(()));
-@@ -1394,6 +1437,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
+ #[derive(Clone, Copy)]
+ enum MediaHistorySource {
+     Live,
+@@ -1239,6 +1282,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
 
      let base_model = ModelInfo {
          slug: large_model_slug.to_string(),
@@ -972,10 +1086,10 @@ index 7443b63188dcb6468f877ada98ba6c146ce557a8..9085357b682a2c550a933f271a657f2b
          description: Some("larger context window model".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/models_cache_ttl.rs b/codex-rs/core/tests/suite/models_cache_ttl.rs
-index 701ada2f8ca95b406db3cf88bfca127f840af566..2811b6b0847f09c87b107fdf33f217837f4e66c9 100644
+index 4a3cf558c1bc5ae3ad5314be59032a66d3ccb596..e2bd3d4baa08b476823856a8e952b7b349e3f4ea 100644
 --- a/codex-rs/core/tests/suite/models_cache_ttl.rs
 +++ b/codex-rs/core/tests/suite/models_cache_ttl.rs
-@@ -482,6 +482,7 @@ struct ModelsCache {
+@@ -620,6 +620,7 @@ struct ModelsCache {
  fn test_remote_model(slug: &str, priority: i32) -> ModelInfo {
      ModelInfo {
          slug: slug.to_string(),
@@ -983,31 +1097,11 @@ index 701ada2f8ca95b406db3cf88bfca127f840af566..2811b6b0847f09c87b107fdf33f21783
          display_name: "Remote Test".to_string(),
          description: Some("remote model".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-diff --git a/codex-rs/core/tests/suite/personality.rs b/codex-rs/core/tests/suite/personality.rs
-index eba1485915f3e71b2d3b6965169792a57b8083bc..b9c9cc92dda8c23194310a2d19a0615dfc8c4c86 100644
---- a/codex-rs/core/tests/suite/personality.rs
-+++ b/codex-rs/core/tests/suite/personality.rs
-@@ -618,6 +618,7 @@ async fn remote_model_friendly_personality_instructions_with_feature() -> anyhow
-     let friendly_personality_message = "Friendly variant";
-     let remote_model = ModelInfo {
-         slug: remote_slug.to_string(),
-+        request_model: None,
-         display_name: "Remote default personality test".to_string(),
-         description: Some("Remote model with default personality template".to_string()),
-         default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -750,6 +751,7 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
-     let remote_pragmatic_message = "Pragmatic from remote template";
-     let remote_model = ModelInfo {
-         slug: remote_slug.to_string(),
-+        request_model: None,
-         display_name: "Remote personality test".to_string(),
-         description: Some("Remote model with personality template".to_string()),
-         default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/remote_models.rs b/codex-rs/core/tests/suite/remote_models.rs
-index ba6d217c6a9e8c2f4e103cd2a2ffebcc131ee3b5..c068008f73448ea0ea512d22ace3401ab3778510 100644
+index dad188d70cda7a908d4d4a63a243551b72ae2740..4d26fce5702cf42b78b7345c3ae82b41c761cddc 100644
 --- a/codex-rs/core/tests/suite/remote_models.rs
 +++ b/codex-rs/core/tests/suite/remote_models.rs
-@@ -596,6 +596,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
+@@ -569,6 +569,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
 
      let remote_model = ModelInfo {
          slug: REMOTE_MODEL_SLUG.to_string(),
@@ -1015,7 +1109,7 @@ index ba6d217c6a9e8c2f4e103cd2a2ffebcc131ee3b5..c068008f73448ea0ea512d22ace3401a
          display_name: "Remote Test".to_string(),
          description: Some("A remote model that requires the test shell".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -867,6 +868,7 @@ async fn remote_models_apply_legacy_instructions() -> Result<()> {
+@@ -844,6 +845,7 @@ async fn remote_models_apply_legacy_instructions(auth: CodexAuth) -> Result<()>
      let remote_instructions = "Use the remote instructions template only.";
      let remote_model = ModelInfo {
          slug: model.to_string(),
@@ -1023,7 +1117,7 @@ index ba6d217c6a9e8c2f4e103cd2a2ffebcc131ee3b5..c068008f73448ea0ea512d22ace3401a
          display_name: "Parallel Remote".to_string(),
          description: Some("A remote model with custom instructions".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
-@@ -1456,6 +1458,7 @@ fn test_remote_model_with_policy(
+@@ -1432,6 +1434,7 @@ fn test_remote_model_with_policy(
  ) -> ModelInfo {
      ModelInfo {
          slug: slug.to_string(),
@@ -1032,10 +1126,10 @@ index ba6d217c6a9e8c2f4e103cd2a2ffebcc131ee3b5..c068008f73448ea0ea512d22ace3401a
          description: Some(format!("{slug} description")),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/core/tests/suite/rmcp_client.rs b/codex-rs/core/tests/suite/rmcp_client.rs
-index ce4c1c66b71a89ca619699ed602d544fac7122ec..0ea6200c1fd51be8f9da512dcfdaeaa89a878c4b 100644
+index a1fd36fe2fc30b910fe2c1ac71da5e7299ba691f..5516fa6883b962664c7c3810504d9664b6750386 100644
 --- a/codex-rs/core/tests/suite/rmcp_client.rs
 +++ b/codex-rs/core/tests/suite/rmcp_client.rs
-@@ -2733,6 +2733,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
+@@ -2959,6 +2959,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
          ModelsResponse {
              models: vec![ModelInfo {
                  slug: text_only_model_slug.to_string(),
@@ -1044,714 +1138,1147 @@ index ce4c1c66b71a89ca619699ed602d544fac7122ec..0ea6200c1fd51be8f9da512dcfdaeaa8
                  description: Some("Test model without image input support".to_string()),
                  default_reasoning_level: None,
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
-index daa7700601e993ceebb6ae18390e74df5e1453bd..9c81f0bb4bd87eff0a457d4c7d86364076a37739 100644
+index 82dbcd68b91a3e62c0ce5a0e239b3882cf63a34e..49fe9fa83c5fc829077f6defda978bec22211c65 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_with_history_shapes.snap
-@@ -5,15 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Manual /compact with prior user
- Scenario: Manual /compact with prior user history compacts existing history and the follow-up turn includes the compact summary plus new user message.
+@@ -6,24 +6,98 @@ Scenario: Manual /compact with prior user history compacts existing history and
 
- ## Local Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:first manual turn
--03:message/assistant:FIRST_REPLY
--04:message/user:<SUMMARIZATION_PROMPT>
+ ## Window 1
+ -- request 1 (turn) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:first manual turn
-+05:message/assistant:FIRST_REPLY
-+06:message/user:<SUMMARIZATION_PROMPT>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     first manual turn
 
- ## Local Post-Compaction History Layout
- 00:message/user:first manual turn
- 01:message/user:<COMPACTION_SUMMARY>\nFIRST_MANUAL_SUMMARY
--02:message/developer:<PERMISSIONS_INSTRUCTIONS>
--03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--04:message/user:second manual turn
-+02:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
+ ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
+ -- request 2 (compaction) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+06:message/user:second manual turn
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     first manual turn
+-03:message/assistant:
++05:message/assistant:
+     FIRST_REPLY
+-04:message/user:
++06:message/user:
+     <SUMMARIZATION_PROMPT>
+
+ ## Window 3 (after request 2: input diverged at item 00, settings changed (parallel_tool_calls, tools))
+@@ -33,11 +107,48 @@ Scenario: Manual /compact with prior user history compacts existing history and
+ 01:message/user:
+     <COMPACTION_SUMMARY>
+     FIRST_MANUAL_SUMMARY
+-02:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-03:message/user:
++02:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++04:message/developer:
++    <MULTI_AGENT_MODE>
++05:message/user:
+     <ENVIRONMENT_CONTEXT>
+-04:message/user:
++06:message/user:
+     second manual turn
+
+ ## Window 4 (after request 3: settings changed (parallel_tool_calls, tools))
+@@ -47,15 +158,52 @@ Scenario: Manual /compact with prior user history compacts existing history and
+ 01:message/user:
+     <COMPACTION_SUMMARY>
+     FIRST_MANUAL_SUMMARY
+-02:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-03:message/user:
++02:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++03:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++04:message/developer:
++    <MULTI_AGENT_MODE>
++05:message/user:
+     <ENVIRONMENT_CONTEXT>
+-04:message/user:
++06:message/user:
+     second manual turn
+-05:message/assistant:
++07:message/assistant:
+     SECOND_LARGE_REPLY
+-06:message/user:
++08:message/user:
+     <SUMMARIZATION_PROMPT>
+
+ ## Window 5 (after request 4: input diverged at item 01, settings changed (parallel_tool_calls, tools))
+@@ -67,9 +215,46 @@ Scenario: Manual /compact with prior user history compacts existing history and
+ 02:message/user:
+     <COMPACTION_SUMMARY>
+     SECOND_MANUAL_SUMMARY
+-03:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-04:message/user:
++03:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++04:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++05:message/developer:
++    <MULTI_AGENT_MODE>
++06:message/user:
+     <ENVIRONMENT_CONTEXT>
+-05:message/user:
++07:message/user:
+     post compact follow-up
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
-index 6007a02a111ea6f515894fb39968f61083c5a2d8..4fdc7434cabf4e18643eaaab39fcaa9fea27bae6 100644
+index 173094fbad34fc436c752fceecc2806efce6b05b..13d810fd0820509def5cf1ba8e9a9d2388e3e92d 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__manual_compact_without_prev_user_shapes.snap
-@@ -9,6 +9,10 @@ Scenario: Manual /compact with no prior user turn currently still issues a compa
-
- ## Local Post-Compaction History Layout
- 00:message/user:<COMPACTION_SUMMARY>\nMANUAL_EMPTY_SUMMARY
--01:message/developer:<PERMISSIONS_INSTRUCTIONS>
--02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--03:message/user:AFTER_MANUAL_EMPTY_COMPACT
+@@ -14,9 +14,46 @@ Scenario: Manual /compact with no prior user turn currently still issues a compa
+ 00:message/user:
+     <COMPACTION_SUMMARY>
+     MANUAL_EMPTY_SUMMARY
+-01:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-02:message/user:
 +01:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+05:message/user:AFTER_MANUAL_EMPTY_COMPACT
++02:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++03:message/developer:
++    <MULTI_AGENT_MODE>
++04:message/user:
+     <ENVIRONMENT_CONTEXT>
+-03:message/user:
++05:message/user:
+     AFTER_MANUAL_EMPTY_COMPACT
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
-index ab46355e356de535a12c3d11e8f3b4dbfebed76f..c96ea078ca1807854bd31e2f6c93acb2530fb6b2 100644
+index 1fbf7dfb044ec59bf4911ee7a07d16caecc51d46..f9d0dd295434951d8ba3c44de81803325bcd39bf 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__mid_turn_compaction_shapes.snap
-@@ -5,15 +5,23 @@ expression: "format_labeled_requests_snapshot(\"True mid-turn continuation compa
- Scenario: True mid-turn continuation compaction after tool output: compact request includes tool artifacts, and the continuation request includes the summary in the same turn.
+@@ -6,34 +6,145 @@ Scenario: True mid-turn continuation compaction after tool output: compact reque
 
- ## Local Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:function call limit push
--03:function_call/test_tool
+ ## Window 1
+ -- request 1 (turn) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     function call limit push
+
+ ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
+ -- request 2 (compaction) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     function call limit push
+-03:function_call/test_tool:{}
 -04:function_call_output:unsupported call: test_tool
--05:message/user:<SUMMARIZATION_PROMPT>
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:function call limit push
-+05:function_call/test_tool
+-05:message/user:
++05:function_call/test_tool:{}
 +06:function_call_output:unsupported call: test_tool
-+07:message/user:<SUMMARIZATION_PROMPT>
++07:message/user:
+     <SUMMARIZATION_PROMPT>
 
- ## Local Post-Compaction History Layout
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:function call limit push
--03:message/user:<COMPACTION_SUMMARY>\nAUTO_SUMMARY
+-## Window 3 (after request 2: input diverged at item 03, settings changed (parallel_tool_calls, tools))
++## Window 3 (after request 2: input diverged at item 05, settings changed (parallel_tool_calls, tools))
+ -- request 3 (turn) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:function call limit push
-+05:message/user:<COMPACTION_SUMMARY>\nAUTO_SUMMARY
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     function call limit push
+-03:message/user:
++05:message/user:
+     <COMPACTION_SUMMARY>
+     AUTO_SUMMARY
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
-index d63924a44aae66561ba53b2865a36865617a06e3..1c5533d277bf891af5c0f16fe0dc4a6747ad7538 100644
+index 41ce4d86b1df175d08d017b920fd497658c0f969..36bf02a78f0bfe4c02e6e94b00fa5bef903cb242 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_sampling_model_switch_compaction_shapes.snap
-@@ -5,22 +5,33 @@ expression: "format_labeled_requests_snapshot(\"Pre-sampling compaction on model
- Scenario: Pre-sampling compaction on model switch to a smaller context window: current behavior compacts using prior-turn history only (incoming user message excluded), and the follow-up request carries compacted history plus the new user message.
+@@ -6,24 +6,98 @@ Scenario: Pre-sampling compaction on model switch to a smaller context window: c
 
- ## Initial Request (Previous Model)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:before switch
+ ## Window 1
+ -- request 1 (turn; Initial Request (Previous Model)) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:before switch
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     before switch
 
- ## Pre-sampling Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:before switch
--03:message/assistant:before switch
--04:message/user:<SUMMARIZATION_PROMPT>
+ ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
+ -- request 2 (compaction; Pre-sampling Compaction Request) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:before switch
-+05:message/assistant:before switch
-+06:message/user:<SUMMARIZATION_PROMPT>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     before switch
+-03:message/assistant:
++05:message/assistant:
+     before switch
+-04:message/user:
++06:message/user:
+     <SUMMARIZATION_PROMPT>
 
- ## Post-Compaction Follow-up Request (Next Model)
- 00:message/user:before switch
- 01:message/user:<COMPACTION_SUMMARY>\nPRE_SAMPLING_SUMMARY
+ ## Window 3 (after request 2: input diverged at item 00, settings changed (model, parallel_tool_calls, tools))
+@@ -33,10 +107,47 @@ Scenario: Pre-sampling compaction on model switch to a smaller context window: c
+ 01:message/user:
+     <COMPACTION_SUMMARY>
+     PRE_SAMPLING_SUMMARY
 -02:message/developer[2]:
 +02:message/developer[3]:
-     [01] <model_switch>\nThe user was previously using a different model....
+     [01] <MODEL_SWITCH>
 -    [02] <PERMISSIONS_INSTRUCTIONS>
--03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--04:message/user:after switch
-+    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
+-03:message/user:
++    [02] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [03] <PERMISSIONS_INSTRUCTIONS>
-+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+06:message/user:after switch
++03:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++04:message/developer:
++    <MULTI_AGENT_MODE>
++05:message/user:
+     <ENVIRONMENT_CONTEXT>
+-04:message/user:
++06:message/user:
+     after switch
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
-index 9df96774c8e716f2b8f84adb4f5543d9810587d1..f7f4bff9d653ca00fe62258dbbbfbf14ea56fdae 100644
+index ea822df49e1cde8eceedf0c3c3114713329d18b7..127c47226e09fe67392f6ab2588c766720fda07d 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_context_window_exceeded_shapes.snap
-@@ -5,8 +5,12 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction context
+@@ -1,18 +1,55 @@
+ ---
+ source: core/tests/suite/compact.rs
+-expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.\",\n&[(\"Local Compaction Request (Incoming User Excluded)\", &requests[1]),])"
++expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.\",\n&[(\"Local Compaction Request (Incoming User Excluded)\", &requests[0]),])"
+ ---
  Scenario: Pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.
 
- ## Local Compaction Request (Incoming User Excluded)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:FIRST_REPLY
--04:message/user:<SUMMARIZATION_PROMPT>
+ ## Window 1
+ -- request 1 (compaction; Local Compaction Request (Incoming User Excluded)) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:FIRST_REPLY
-+06:message/user:<SUMMARIZATION_PROMPT>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     USER_ONE
+-03:message/assistant:
++05:message/assistant:
+     FIRST_REPLY
+-04:message/user:
++06:message/user:
+     <SUMMARIZATION_PROMPT>
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
-index 679081353e468cb5f471bd8f65d8cda22350ca74..1e2f4a6dd2947c9ddea2b019fa13c3382cb98e67 100644
+index b02d3590892f1cb57e80211d510a138d6e2ceced..7d827a341120f883fc4ca42bba72a84ab5337d27 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_including_incoming_shapes.snap
-@@ -5,20 +5,28 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn auto-compaction with a
- Scenario: Pre-turn auto-compaction with a context override emits the context diff in the compact request while the incoming user message is still excluded.
+@@ -6,33 +6,107 @@ Scenario: Pre-turn auto-compaction uses the prior context without the incoming u
 
- ## Local Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:FIRST_REPLY
--04:message/user:USER_TWO
--05:message/assistant:SECOND_REPLY
--06:message/user:<SUMMARIZATION_PROMPT>
+ ## Window 1
+ -- request 1 (turn) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:FIRST_REPLY
-+06:message/user:USER_TWO
-+07:message/assistant:SECOND_REPLY
-+08:message/user:<SUMMARIZATION_PROMPT>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     USER_ONE
+ -- request 2 (turn) --
+-03:message/assistant:
++05:message/assistant:
+     FIRST_REPLY
+-04:message/user:
++06:message/user:
+     USER_TWO
 
- ## Local Post-Compaction History Layout
- 00:message/user:USER_ONE
- 01:message/user:USER_TWO
- 02:message/user:<COMPACTION_SUMMARY>\nPRE_TURN_SUMMARY
--03:message/developer:<PERMISSIONS_INSTRUCTIONS>
--04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
--05:message/user[2]:
-+03:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
+ ## Window 2 (after request 2: settings changed (parallel_tool_calls, tools))
+ -- request 3 (compaction) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+04:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+05:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     USER_ONE
+-03:message/assistant:
++05:message/assistant:
+     FIRST_REPLY
+-04:message/user:
++06:message/user:
+     USER_TWO
+-05:message/assistant:
++07:message/assistant:
+     SECOND_REPLY
+-06:message/user:
++08:message/user:
+     <SUMMARIZATION_PROMPT>
+
+ ## Window 3 (after request 3: input diverged at item 00, settings changed (parallel_tool_calls, tools))
+@@ -44,10 +118,47 @@ Scenario: Pre-turn auto-compaction uses the prior context without the incoming u
+ 02:message/user:
+     <COMPACTION_SUMMARY>
+     PRE_TURN_SUMMARY
+-03:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-04:message/user:
++03:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++04:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++05:message/developer:
++    <MULTI_AGENT_MODE>
++06:message/user:
+     <ENVIRONMENT_CONTEXT>
+-05:message/user[2]:
 +07:message/user[2]:
      [01] <input_image:detail,image_url>
      [02] USER_THREE
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
-index 6dd728d5b8960cff55a19097c51170c7be0c1410..a668a37735d5294475c6eac411b4b2144a0cfd34 100644
+index b8c8987bacfeb55bece491040ee6f921b449418d..89bfd224a21d11e89368523a16a697916f7b216b 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__pre_turn_compaction_strips_incoming_model_switch_shapes.snap
-@@ -5,22 +5,33 @@ expression: "format_labeled_requests_snapshot(\"Pre-turn compaction during model
- Scenario: Pre-turn compaction during model switch (without pre-sampling model-switch compaction): current behavior strips incoming <model_switch> from the compact request and restores it in the post-compaction follow-up request.
+@@ -6,24 +6,98 @@ Scenario: Pre-turn compaction during model switch (without pre-sampling model-sw
 
- ## Initial Request (Previous Model)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:BEFORE_SWITCH_USER
+ ## Window 1
+ -- request 1 (turn; Initial Request (Previous Model)) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:BEFORE_SWITCH_USER
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     BEFORE_SWITCH_USER
 
- ## Local Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:BEFORE_SWITCH_USER
--03:message/assistant:BEFORE_SWITCH_REPLY
--04:message/user:<SUMMARIZATION_PROMPT>
+ ## Window 2 (after request 1: settings changed (model, parallel_tool_calls, reasoning, text, tools))
+ -- request 2 (compaction; Local Compaction Request) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
 +00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:BEFORE_SWITCH_USER
-+05:message/assistant:BEFORE_SWITCH_REPLY
-+06:message/user:<SUMMARIZATION_PROMPT>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     BEFORE_SWITCH_USER
+-03:message/assistant:
++05:message/assistant:
+     BEFORE_SWITCH_REPLY
+-04:message/user:
++06:message/user:
+     <SUMMARIZATION_PROMPT>
 
- ## Local Post-Compaction History Layout
- 00:message/user:BEFORE_SWITCH_USER
- 01:message/user:<COMPACTION_SUMMARY>\nPRETURN_SWITCH_SUMMARY
+ ## Window 3 (after request 2: input diverged at item 00, settings changed (parallel_tool_calls, tools))
+@@ -33,10 +107,47 @@ Scenario: Pre-turn compaction during model switch (without pre-sampling model-sw
+ 01:message/user:
+     <COMPACTION_SUMMARY>
+     PRETURN_SWITCH_SUMMARY
 -02:message/developer[2]:
 +02:message/developer[3]:
-     [01] <model_switch>\nThe user was previously using a different model....
+     [01] <MODEL_SWITCH>
 -    [02] <PERMISSIONS_INSTRUCTIONS>
--03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--04:message/user:AFTER_SWITCH_USER
-+    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
+-03:message/user:
++    [02] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [03] <PERMISSIONS_INSTRUCTIONS>
-+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+06:message/user:AFTER_SWITCH_USER
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
-index 196206a674a4ad4caeaa78cfe359e0eb1c41fdc1..06f0a0cf37d49ad5dee36d7bd4fac89473f225ee 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_restates_realtime_start_shapes.snap
-@@ -5,17 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact while rea
- Scenario: Remote manual /compact while realtime remains active: the next regular turn restates realtime-start instructions after compaction clears the baseline.
-
- ## Remote Compaction Request
--00:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:REMOTE_FIRST_REPLY
-+00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:REMOTE_FIRST_REPLY
-
- ## Remote Post-Compaction History Layout
- 00:compaction:encrypted=true
--01:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--03:message/user:USER_TWO
-+01:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+05:message/user:USER_TWO
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
-index 8b61ee61589ac653031057d335d881853f91cd32..815b8e5df341b76162ea45154ecbd299a4fc9529 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_with_history_shapes.snap
-@@ -5,13 +5,21 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact where rem
- Scenario: Remote manual /compact where remote compact output is compaction-only: follow-up layout uses the returned compaction item plus new user message.
-
- ## Remote Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:hello remote compact
--03:message/assistant:FIRST_REMOTE_REPLY
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:hello remote compact
-+05:message/assistant:FIRST_REMOTE_REPLY
-
- ## Remote Post-Compaction History Layout
- 00:compaction:encrypted=true
--01:message/developer:<PERMISSIONS_INSTRUCTIONS>
--02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--03:message/user:after compact
-+01:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+05:message/user:after compact
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
-index 5a616330b8874be066159779a948d2318a31108e..b1310ea74a92ee9be86ceaf4c4e19e9160e679df 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_manual_compact_without_prev_user_shapes.snap
-@@ -5,6 +5,10 @@ expression: "format_labeled_requests_snapshot(\"Remote manual /compact with no p
- Scenario: Remote manual /compact with no prior user turn skips the remote compact request; the follow-up turn carries canonical context and new user message.
-
- ## Remote Post-Compaction History Layout
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
-index 59e68c368aaa7d3fae235380f4a6b7eafc14fd3b..4f1e51467fff04411d053f35cb7e37d8176c96be 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_does_not_restate_realtime_end_shapes.snap
-@@ -5,28 +5,38 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn continuation com
- Scenario: Remote mid-turn continuation compaction after realtime was closed before the turn: the initial second-turn request emits realtime-end instructions, but the continuation request does not restate them after compaction because the current turn already established the inactive baseline.
-
- ## Second Turn Initial Request
--00:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:SETUP_USER
--03:message/assistant:REMOTE_SETUP_REPLY
--04:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
--05:message/user:USER_TWO
-+00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:SETUP_USER
-+05:message/assistant:REMOTE_SETUP_REPLY
-+06:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
-+07:message/user:USER_TWO
-
- ## Remote Compaction Request
--00:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:SETUP_USER
--03:message/assistant:REMOTE_SETUP_REPLY
--04:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
--05:message/user:USER_TWO
--06:function_call/test_tool
--07:function_call_output:unsupported call: test_tool
-+00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:SETUP_USER
-+05:message/assistant:REMOTE_SETUP_REPLY
-+06:message/developer:<realtime_conversation>\nRealtime conversation ended.\n\nSubsequ...
-+07:message/user:USER_TWO
-+08:function_call/test_tool
-+09:function_call_output:unsupported call: test_tool
-
- ## Remote Post-Compaction History Layout
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:compaction:encrypted=true
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:compaction:encrypted=true
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
-index e84d4352dec9b73739be58a04813a562c66b8c45..99c8c940a9c6275a6b477241651db7f892f77f49 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_multi_summary_reinjects_above_last_summary_shapes.snap
-@@ -11,6 +11,10 @@ Scenario: After a prior manual /compact produced an older remote compaction item
- ## Second Turn Request (After Compaction)
- 00:message/user:USER_ONE
- 01:compaction:encrypted=true
--02:message/developer:<PERMISSIONS_INSTRUCTIONS>
--03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--04:message/user:USER_TWO
-+02:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+06:message/user:USER_TWO
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
-index 388aee9981a3eb4dcfd8bfcaf81d92eea6b02b32..1525c61e7924b1290e3c3215b6e71523cb19c276 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_shapes.snap
-@@ -5,14 +5,22 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn continuation com
- Scenario: Remote mid-turn continuation compaction after tool output: compact request includes tool artifacts and the follow-up request includes the returned compaction item.
-
- ## Remote Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:function_call/test_tool
--04:function_call_output:unsupported call: test_tool
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:function_call/test_tool
-+06:function_call_output:unsupported call: test_tool
-
- ## Remote Post-Compaction History Layout
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:compaction:encrypted=true
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:compaction:encrypted=true
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
-index 5633154dc6472fc525bccbd10f3db538dba637ef..f4bccf10a82ca4b1373d893f139e21ab703fdac6 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_mid_turn_compaction_summary_only_reinjects_context_shapes.snap
-@@ -5,13 +5,21 @@ expression: "format_labeled_requests_snapshot(\"Remote mid-turn compaction where
- Scenario: Remote mid-turn compaction where compact output has only a compaction item: continuation layout reinjects context before that compaction item.
-
- ## Remote Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:function_call/test_tool
--04:function_call_output:unsupported call: test_tool
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:function_call/test_tool
-+06:function_call_output:unsupported call: test_tool
-
- ## Remote Post-Compaction History Layout
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:compaction:encrypted=true
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:compaction:encrypted=true
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
-index 4c7644281638cb227d6e464fc4df0d4a86056c09..ae0d90346be368ec9a02fde347d0a5ffafd92187 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_context_window_exceeded_shapes.snap
-@@ -5,7 +5,11 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
- Scenario: Remote pre-turn auto-compaction context-window failure: compaction request excludes the incoming user message and the turn errors.
-
- ## Remote Compaction Request (Incoming User Excluded)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:REMOTE_FIRST_REPLY
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:REMOTE_FIRST_REPLY
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
-index b6644e749cdbaecff9052777f21e9ae5f3f4aa7d..b11d71f58fd35f204a36d2f876d97d5a10665593 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_failure_shapes.snap
-@@ -5,7 +5,11 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
- Scenario: Remote pre-turn auto-compaction parse failure: compaction request excludes the incoming user message and the turn stops.
-
- ## Remote Compaction Request (Incoming User Excluded)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:turn that exceeds token threshold
--03:message/assistant:initial turn complete
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:turn that exceeds token threshold
-+05:message/assistant:initial turn complete
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
-index d1192b4da1619af8920a31b357aa2b621f1f716d..7624939364373fc91abd5aa0dbf6e647cea7abfe 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_including_incoming_shapes.snap
-@@ -5,17 +5,25 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
- Scenario: Remote pre-turn auto-compaction with a context override emits the context diff in the compact request while excluding the incoming user message.
-
- ## Remote Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:REMOTE_FIRST_REPLY
--04:message/user:USER_TWO
--05:message/assistant:REMOTE_SECOND_REPLY
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:REMOTE_FIRST_REPLY
-+06:message/user:USER_TWO
-+07:message/assistant:REMOTE_SECOND_REPLY
-
- ## Remote Post-Compaction History Layout
- 00:message/user:USER_ONE
- 01:message/user:USER_TWO
- 02:compaction:encrypted=true
--03:message/developer:<PERMISSIONS_INSTRUCTIONS>
--04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
--05:message/user:USER_THREE
-+03:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+04:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+05:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
-+07:message/user:USER_THREE
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
-index 87abe26618813d8e7bc2e56f0252ad86cb3108ab..187910e422364eda07f779cd0496fe26eafc55a8 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_restates_realtime_start_shapes.snap
-@@ -5,17 +5,23 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn auto-compaction
- Scenario: Remote pre-turn auto-compaction while realtime remains active: compaction clears the reference baseline, so the follow-up request restates realtime-start instructions.
-
- ## Remote Compaction Request
--00:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:USER_ONE
--03:message/assistant:REMOTE_FIRST_REPLY
-+00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:USER_ONE
-+05:message/assistant:REMOTE_FIRST_REPLY
-
- ## Remote Post-Compaction History Layout
- 00:compaction:encrypted=true
--01:message/developer[2]:
--    [01] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
--    [02] <PERMISSIONS_INSTRUCTIONS>
--02:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--03:message/user:USER_TWO
-+01:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <realtime_conversation>\nRealtime conversation started.\n\nYou a...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+02:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+03:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+04:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+05:message/user:USER_TWO
-diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
-index 72fcffea42464e8377584007e2b3b5dbce92b817..81af215119484326d0efe9e1197be8e912581fcf 100644
---- a/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
-+++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact_remote__remote_pre_turn_compaction_strips_incoming_model_switch_shapes.snap
-@@ -5,21 +5,32 @@ expression: "format_labeled_requests_snapshot(\"Remote pre-turn compaction durin
- Scenario: Remote pre-turn compaction during model switch currently excludes incoming user input, strips incoming <model_switch> from the compact request payload, and restores it in the post-compaction follow-up request.
-
- ## Initial Request (Previous Model)
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:BEFORE_SWITCH_USER
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:BEFORE_SWITCH_USER
-
- ## Remote Compaction Request
--00:message/developer:<PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:BEFORE_SWITCH_USER
--03:message/assistant:BEFORE_SWITCH_REPLY
-+00:message/developer[2]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [02] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:BEFORE_SWITCH_USER
-+05:message/assistant:BEFORE_SWITCH_REPLY
-
- ## Remote Post-Compaction History Layout
- 00:message/user:BEFORE_SWITCH_USER
- 01:compaction:encrypted=true
--02:message/developer[2]:
-+02:message/developer[3]:
-     [01] <model_switch>\nThe user was previously using a different model....
--    [02] <PERMISSIONS_INSTRUCTIONS>
--03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--04:message/user:AFTER_SWITCH_USER
-+    [02] # You are the Root Agent\n\nYou are the **root agent** in a mult...
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+03:message/developer:You are `/root`, the primary agent in a team of agents collabora...
-+04:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. An...
-+05:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+06:message/user:AFTER_SWITCH_USER
++03:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++04:message/developer:
++    <MULTI_AGENT_MODE>
++05:message/user:
+     <ENVIRONMENT_CONTEXT>
+-04:message/user:
++06:message/user:
+     AFTER_SWITCH_USER
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
-index 7b91b52cdfd573545315e3761185dc8cf88ceb69..544aca77a58d383e62eef76eecd009558cb51586 100644
+index 793631f325fb96eaef6a4adaa2859b1a28eb65f4..43ff87c9148446544ec838b55a026bef0c7904bc 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
 +++ b/codex-rs/core/tests/suite/snapshots/all__suite__model_visible_layout__model_visible_layout_resume_override_matches_rollout_model.snap
-@@ -5,18 +5,24 @@ expression: "format_labeled_requests_snapshot(\"First post-resume turn where pre
- Scenario: First post-resume turn where pre-turn override sets model to rollout model; no model-switch update should appear.
+@@ -6,17 +6,54 @@ Scenario: First post-resume turn where pre-turn override sets model to rollout m
 
- ## Last Request Before Resume
+ ## Window 1
+ -- request 1 (turn; Last Request Before Resume) --
 -00:message/developer[2]:
 -    [01] <SKILLS_INSTRUCTIONS>
 -    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:seed resume history
+-01:message/user:
 +00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a multi-agent Codex session. Until you...
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 29 LINES; ~649 TOKENS; hash=a3f17c5859d7c073>
++
++        - Prefer direct execution over coordination when you can make faster progress yourself.
++        - Delegate when doing so will reduce wall-clock time, add necessary independent judgment, or improve rev... responsible for integration and conflict resolution. [hash=1e52948640316868]
++        - Consider whether independent subtasks can start now in a subagent, but do not spawn agents for work you can complete faster yourself.
++        - Consider whether using multiple worktrees or remote hosts would accelerate you and your ability to use...se them if the user or developer instructions permit. [hash=c05c1b6d40daf0b8]
++        - Prefer clear, explicit instructions over implicit expectations, especially when not using forked agents which require significantly more direction.
++        - When you receive messages from other agents, verify their claims before relying on them.
++
 +    [02] <SKILLS_INSTRUCTIONS>
 +    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. Any earlier developer instruction ...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:seed resume history
-
- ## First Request After Resume + Override
--00:message/developer[2]:
--    [01] <SKILLS_INSTRUCTIONS>
--    [02] <PERMISSIONS_INSTRUCTIONS>
--01:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
--02:message/user:seed resume history
--03:message/assistant:recorded before resume
--04:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
--05:message/user:first resumed turn after model override
-+00:message/developer[3]:
-+    [01] # You are the Root Agent\n\nYou are the **root agent** in a multi-agent Codex session. Until you...
-+    [02] <SKILLS_INSTRUCTIONS>
-+    [03] <PERMISSIONS_INSTRUCTIONS>
-+01:message/developer:You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals...
-+02:message/developer:<multi_agent_mode>Proactive multi-agent delegation is active. Any earlier developer instruction ...
-+03:message/user:<ENVIRONMENT_CONTEXT:cwd=<CWD>>
-+04:message/user:seed resume history
-+05:message/assistant:recorded before resume
-+06:message/user:<ENVIRONMENT_CONTEXT:cwd=PRETURN_CONTEXT_DIFF_CWD>
-+07:message/user:first resumed turn after model override
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     seed resume history
+ -- request 2 (turn; First Request After Resume + Override) --
+-03:message/assistant:
++05:message/assistant:
+     recorded before resume
+-04:message/user:
++06:message/user:
+     <ENVIRONMENT_CONTEXT>
+-05:message/user:
++07:message/user:
+     first resumed turn after model override
 diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
-index 5d451683b79ef51bf06074484a2af3ae7764e5f8..c5f00ae69033eacbefbeed15a8c1b397d96daae8 100644
+index bc0eaf75806eeaa109152e47aeb182b8004719f6..ff758c41718bf98e66e4fb557423b5944f66a225 100644
 --- a/codex-rs/core/tests/suite/spawn_agent_description.rs
 +++ b/codex-rs/core/tests/suite/spawn_agent_description.rs
 @@ -80,6 +80,7 @@ fn test_model_info(
@@ -1763,7 +2290,7 @@ index 5d451683b79ef51bf06074484a2af3ae7764e5f8..c5f00ae69033eacbefbeed15a8c1b397
          description: Some(description.to_string()),
          default_reasoning_level: Some(default_reasoning_level),
 diff --git a/codex-rs/core/tests/suite/view_image.rs b/codex-rs/core/tests/suite/view_image.rs
-index 0256da4ec25a1af5dc0e48ebb4c738b764016e4c..b0a66835d535e13b07820f1df5bb557423c111c2 100644
+index 62479ce0e6a63815a2116300d6e9f21e91efe573..e717453459c9c7200f804c3f3973b3322d4621aa 100644
 --- a/codex-rs/core/tests/suite/view_image.rs
 +++ b/codex-rs/core/tests/suite/view_image.rs
 @@ -1609,6 +1609,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
@@ -1775,11 +2302,11 @@ index 0256da4ec25a1af5dc0e48ebb4c738b764016e4c..b0a66835d535e13b07820f1df5bb5574
          description: Some("Remote model for view_image unsupported-path coverage".to_string()),
          default_reasoning_level: Some(ReasoningEffort::Medium),
 diff --git a/codex-rs/features/src/lib.rs b/codex-rs/features/src/lib.rs
-index 5b5206047cc82d517352ae0b1a6c3a90eb22129a..705f8754dc73582509c20f9a8f3001394b1157c7 100644
+index 30318ae47b3ac53c639ebed22912c7a8f62051b8..1f24544ea14af7fca6dd97a29816d868b57228b0 100644
 --- a/codex-rs/features/src/lib.rs
 +++ b/codex-rs/features/src/lib.rs
-@@ -199,6 +199,8 @@ pub enum Feature {
-     MultiAgentV2,
+@@ -209,6 +209,8 @@ pub enum Feature {
+     AgentMessageBoard,
      /// Removed compatibility flag retained as a no-op.
      MultiAgentMode,
 +    /// Enable root/subagent developer prompt injection.
@@ -1787,7 +2314,7 @@ index 5b5206047cc82d517352ae0b1a6c3a90eb22129a..705f8754dc73582509c20f9a8f300139
      /// Removed compatibility flag for the deleted agent-job tools.
      SpawnCsv,
      /// Enable apps.
-@@ -1273,6 +1275,12 @@ pub const FEATURES: &[FeatureSpec] = &[
+@@ -1333,6 +1335,12 @@ pub const FEATURES: &[FeatureSpec] = &[
          stage: Stage::Removed,
          default_enabled: false,
      },
@@ -1801,13 +2328,14 @@ index 5b5206047cc82d517352ae0b1a6c3a90eb22129a..705f8754dc73582509c20f9a8f300139
          id: Feature::SpawnCsv,
          key: "enable_fanout",
 diff --git a/codex-rs/features/src/tests.rs b/codex-rs/features/src/tests.rs
-index 90c7b40efa03a3107edcca1242e8074573379a23..db434faf7e906e0000d1c9cfa7e154fefafcdc09 100644
+index da6cb3c82235c1a7032c3395ce1c0be5f5594593..5628daba6299f9f258dca7eff3966753c7e97c61 100644
 --- a/codex-rs/features/src/tests.rs
 +++ b/codex-rs/features/src/tests.rs
-@@ -470,6 +470,19 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
+@@ -484,6 +484,20 @@ fn codex_hooks_is_legacy_alias_for_hooks() {
+     assert_eq!(feature_for_key("codex_hooks"), Some(Feature::CodexHooks));
  }
 
- #[test]
++#[test]
 +fn agent_prompt_injection_is_under_development_and_disabled_by_default() {
 +    assert_eq!(
 +        feature_for_key("agent_prompt_injection"),
@@ -1821,11 +2349,11 @@ index 90c7b40efa03a3107edcca1242e8074573379a23..db434faf7e906e0000d1c9cfa7e154fe
 +    assert!(!Features::with_defaults().enabled(Feature::AgentPromptInjection));
 +}
 +
+ #[test]
  fn apps_require_feature_flag_and_chatgpt_auth() {
      let mut features = Features::with_defaults();
-     assert!(!features.apps_enabled_for_auth(/*has_chatgpt_auth*/ false));
 diff --git a/codex-rs/memories/write/src/startup_tests.rs b/codex-rs/memories/write/src/startup_tests.rs
-index 4771d420295d29a1232694cfa29b1ff698babbb2..3e8814c573d4e96926f1d94ebd140e2411b9e11b 100644
+index d7a9a7ad6b77bf4578550ca10ceb7108f1b44c58..20bd99a532d2cfc0002e1f9f39e809c45ae8e032 100644
 --- a/codex-rs/memories/write/src/startup_tests.rs
 +++ b/codex-rs/memories/write/src/startup_tests.rs
 @@ -19,6 +19,7 @@ use codex_model_provider::ProviderAccountResult;
@@ -1836,15 +2364,15 @@ index 4771d420295d29a1232694cfa29b1ff698babbb2..3e8814c573d4e96926f1d94ebd140e24
  use codex_protocol::ResponseItemId;
  use codex_protocol::ThreadId;
  use codex_protocol::config_types::ServiceTier;
-@@ -51,6 +52,7 @@ use core_test_support::test_codex::TestCodex;
- use core_test_support::test_codex::test_codex;
+@@ -52,6 +53,7 @@ use core_test_support::test_codex::test_codex;
  use core_test_support::wait_for_event;
  use pretty_assertions::assert_eq;
+ use serde_json::json;
 +use std::collections::HashMap;
  use std::path::Path;
  use std::path::PathBuf;
  use std::sync::Arc;
-@@ -993,9 +995,10 @@ impl ModelProvider for MockMemoryModelProvider {
+@@ -1191,9 +1193,10 @@ impl ModelProvider for MockMemoryModelProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -1882,10 +2410,10 @@ index ff2a49307b9d0b3872492cc18814ac1900a42ab8..1e056d142be101d7b75220b9e494e748
 +    }
  }
 diff --git a/codex-rs/model-provider/src/amazon_bedrock/mod.rs b/codex-rs/model-provider/src/amazon_bedrock/mod.rs
-index 1543348e957fa26fad25bb5a5ef0374ee97f8e99..f004a20ff6e80bfcedeffb1fd099f908db5a7fb3 100644
+index 3a38eb2639154e06e2266d5ffbb2bec5e05fdab5..b869047f4369d3d098832fcb21bf668a0655fa45 100644
 --- a/codex-rs/model-provider/src/amazon_bedrock/mod.rs
 +++ b/codex-rs/model-provider/src/amazon_bedrock/mod.rs
-@@ -6,6 +6,7 @@ mod mantle;
+@@ -7,6 +7,7 @@ mod mantle;
  mod runtime;
  mod runtime_catalog;
 
@@ -1893,7 +2421,7 @@ index 1543348e957fa26fad25bb5a5ef0374ee97f8e99..f004a20ff6e80bfcedeffb1fd099f908
  use std::path::PathBuf;
  use std::sync::Arc;
 
-@@ -21,6 +22,8 @@ use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_
+@@ -22,6 +23,8 @@ use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_LUNA_MODEL_
  use codex_model_provider_info::AMAZON_BEDROCK_RUNTIME_GLOBAL_GPT_5_6_TERRA_MODEL_ID;
  use codex_model_provider_info::ModelProviderAwsAuthInfo;
  use codex_model_provider_info::ModelProviderInfo;
@@ -1902,7 +2430,7 @@ index 1543348e957fa26fad25bb5a5ef0374ee97f8e99..f004a20ff6e80bfcedeffb1fd099f908
  use codex_models_manager::manager::SharedModelsManager;
  use codex_models_manager::manager::StaticModelsManager;
  use codex_protocol::account::ProviderAccount;
-@@ -313,11 +316,13 @@ impl ModelProvider for AmazonBedrockModelProvider {
+@@ -353,11 +356,13 @@ impl ModelProvider for AmazonBedrockModelProvider {
          &self,
          _codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -1917,7 +2445,7 @@ index 1543348e957fa26fad25bb5a5ef0374ee97f8e99..f004a20ff6e80bfcedeffb1fd099f908
          ))
      }
 
-@@ -331,6 +336,21 @@ impl ModelProvider for AmazonBedrockModelProvider {
+@@ -371,6 +376,21 @@ impl ModelProvider for AmazonBedrockModelProvider {
                  .map_or_else(|| self.default_model_catalog(), normalize_bedrock_catalog),
          ))
      }
@@ -1940,7 +2468,7 @@ index 1543348e957fa26fad25bb5a5ef0374ee97f8e99..f004a20ff6e80bfcedeffb1fd099f908
 
  #[cfg(test)]
 diff --git a/codex-rs/model-provider/src/provider.rs b/codex-rs/model-provider/src/provider.rs
-index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a05120250fcaeea 100644
+index 08afa3e56f0dfe26bdec55e823daeccdf63cbd35..cc567f66e3b2f32442a77abecf99505c372b0573 100644
 --- a/codex-rs/model-provider/src/provider.rs
 +++ b/codex-rs/model-provider/src/provider.rs
 @@ -1,3 +1,4 @@
@@ -1948,15 +2476,15 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
  use std::fmt;
  use std::future::Future;
  use std::path::PathBuf;
-@@ -15,6 +16,7 @@ use codex_login::default_client::RESIDENCY_HEADER_NAME;
- use codex_login::default_client::ResidencyRequirement;
- use codex_login::default_client::read_default_client_residency_requirement;
+@@ -15,6 +16,7 @@ use codex_login::GatewayAuthManager;
+ use codex_login::WorkspaceRoutingRequest;
+ use codex_login::default_client::ClientRedirectPolicy;
  use codex_model_provider_info::ModelProviderInfo;
 +use codex_models_manager::CustomModelConfig;
  use codex_models_manager::cache::ModelsCache;
  use codex_models_manager::manager::OpenAiModelsManager;
  use codex_models_manager::manager::SharedModelsManager;
-@@ -271,6 +273,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
+@@ -309,6 +311,7 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -1964,7 +2492,7 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
      ) -> SharedModelsManager;
 
      /// Creates a model manager with caching disabled.
-@@ -297,9 +300,17 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
+@@ -335,9 +338,17 @@ pub trait ModelProvider: fmt::Debug + Send + Sync {
          &self,
          config_model_catalog: Option<ModelsResponse>,
          cache: Arc<dyn ModelsCache>,
@@ -1983,7 +2511,7 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
      }
  }
 
-@@ -445,21 +456,24 @@ impl ModelProvider for ConfiguredModelProvider {
+@@ -547,11 +558,13 @@ impl ModelProvider for ConfiguredModelProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -1998,8 +2526,9 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
              )),
              None => {
                  let endpoint = Arc::new(OpenAiModelsEndpoint::new(
-                     self.info.clone(),
+@@ -559,10 +572,11 @@ impl ModelProvider for ConfiguredModelProvider {
                      self.auth_manager.clone(),
+                     self.gateway_auth_manager.clone(),
                  ));
 -                Arc::new(OpenAiModelsManager::new(
 +                Arc::new(OpenAiModelsManager::new_with_custom_models(
@@ -2010,7 +2539,7 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
                  ))
              }
          }
-@@ -491,21 +505,24 @@ impl ModelProvider for ConfiguredModelProvider {
+@@ -595,11 +609,13 @@ impl ModelProvider for ConfiguredModelProvider {
          &self,
          config_model_catalog: Option<ModelsResponse>,
          cache: Arc<dyn ModelsCache>,
@@ -2025,8 +2554,9 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
              )),
              None => {
                  let endpoint = Arc::new(OpenAiModelsEndpoint::new(
-                     self.info.clone(),
+@@ -607,10 +623,11 @@ impl ModelProvider for ConfiguredModelProvider {
                      self.auth_manager.clone(),
+                     self.gateway_auth_manager.clone(),
                  ));
 -                Arc::new(OpenAiModelsManager::new_with_cache(
 +                Arc::new(OpenAiModelsManager::new_with_cache_and_custom_models(
@@ -2037,7 +2567,7 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
                  ))
              }
          }
-@@ -1045,8 +1062,11 @@ mod tests {
+@@ -1245,8 +1262,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
              ModelProviderInfo::create_amazon_bedrock_provider(/*aws*/ None),
              /*auth_manager*/ None,
          );
@@ -2051,7 +2581,7 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
          let uncached_manager =
              provider.models_manager_without_cache(/*config_model_catalog*/ None);
 
-@@ -1147,6 +1167,7 @@ mod tests {
+@@ -1347,6 +1367,7 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
              Some(ModelsResponse {
                  models: vec![configured_model],
              }),
@@ -2059,22 +2589,34 @@ index 027850b78809d2f30dd9e9624c37d32dc471875a..1a78c571554fd566cd47a85c7a051202
          );
 
          let catalog = manager
-@@ -1194,8 +1215,11 @@ mod tests {
-             )),
-         );
-
--        let manager =
--            provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
-+        let manager = provider.models_manager(
-+            test_codex_home(),
-+            /*config_model_catalog*/ None,
-+            Default::default(),
-+        );
-         let catalog = manager
-             .raw_model_catalog(
-                 RefreshStrategy::Online,
+@@ -1402,8 +1423,11 @@ printf '%s\n' '{"AccessKeyId":"exported","SecretAccessKey":"secret"}'
+                     provider_info.clone(),
+                     auth.clone().map(AuthManager::from_auth_for_testing),
+                 );
+-                let manager =
+-                    provider.models_manager(test_codex_home(), /*config_model_catalog*/ None);
++                let manager = provider.models_manager(
++                    test_codex_home(),
++                    /*config_model_catalog*/ None,
++                    Default::default(),
++                );
+                 manager.set_api_key_model_discovery_enabled(enabled);
+                 let refresh_strategy = if enabled {
+                     RefreshStrategy::Online
+diff --git a/codex-rs/model-provider/src/shared_state_tests.rs b/codex-rs/model-provider/src/shared_state_tests.rs
+index 09caa4cf877ae0220b75bbd83bbbe3e5fd9f650e..33ebc3048726fc34aaff4e2400987c4c5951789e 100644
+--- a/codex-rs/model-provider/src/shared_state_tests.rs
++++ b/codex-rs/model-provider/src/shared_state_tests.rs
+@@ -322,6 +322,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
+             let models = provider.models_manager(
+                 home.path().to_path_buf(),
+                 /*config_model_catalog*/ None,
++                Default::default(),
+             );
+             models.set_api_key_model_discovery_enabled(/*enabled*/ true);
+             let catalog = models
 diff --git a/codex-rs/models-manager/src/config.rs b/codex-rs/models-manager/src/config.rs
-index 6c32d548a420637dc11416e7884a513f66c8d571..291846a445f01fecb85a5f843bedbd7dc3a15a97 100644
+index 79ac9bcff10605c934b6daec640583776fad5bb0..eee4fb1989ce6ee52948649e8be4f69bc0e2e972 100644
 --- a/codex-rs/models-manager/src/config.rs
 +++ b/codex-rs/models-manager/src/config.rs
 @@ -1,5 +1,6 @@
@@ -2084,8 +2626,8 @@ index 6c32d548a420637dc11416e7884a513f66c8d571..291846a445f01fecb85a5f843bedbd7d
 
  #[derive(Debug, Clone, Default)]
  pub struct ModelsManagerConfig {
-@@ -10,4 +11,12 @@ pub struct ModelsManagerConfig {
-     pub personality_enabled: bool,
+@@ -9,4 +10,12 @@ pub struct ModelsManagerConfig {
+     pub base_instructions: Option<String>,
      pub personality: Option<Personality>,
      pub model_catalog: Option<ModelsResponse>,
 +    pub custom_models: HashMap<String, CustomModelConfig>,
@@ -2110,7 +2652,7 @@ index cd7b59a0530b6ead4c3852d0a3217aa7115a4d81..61723b45f539b0bcf9539a393957e9ee
 
  /// Load the bundled model catalog shipped with `codex-models-manager`.
 diff --git a/codex-rs/models-manager/src/manager.rs b/codex-rs/models-manager/src/manager.rs
-index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c581760c7c5 100644
+index 7b4d613be409bdd5cd60b7509c6e6c9c06dc41ae..2d39286bb56a09976cef6f567970258f3ab32391 100644
 --- a/codex-rs/models-manager/src/manager.rs
 +++ b/codex-rs/models-manager/src/manager.rs
 @@ -2,6 +2,7 @@ use super::cache::FileModelsCache;
@@ -2130,7 +2672,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
  use std::fmt;
  use std::future::Future;
  use std::path::PathBuf;
-@@ -122,11 +125,26 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -164,11 +167,26 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
      /// Return the auth manager used for picker filtering.
      fn auth_manager(&self) -> Option<&AuthManager>;
 
@@ -2158,7 +2700,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
          let uses_codex_backend = self
              .auth_manager()
              .is_some_and(AuthManager::current_auth_uses_codex_backend);
-@@ -192,7 +210,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
+@@ -234,7 +252,16 @@ pub trait ModelsManager: fmt::Debug + Send + Sync {
          Box::pin(
              async move {
                  let remote_models = self.get_remote_models().await;
@@ -2176,15 +2718,15 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
              }
              .instrument(tracing::info_span!("get_model_info", model = model)),
          )
-@@ -217,6 +244,7 @@ pub type SharedModelsManager = Arc<dyn ModelsManager>;
+@@ -259,6 +286,7 @@ pub type SharedModelsManager = Arc<dyn ModelsManager>;
  #[derive(Debug)]
  pub struct OpenAiModelsManager {
-     remote_models: RwLock<Vec<ModelInfo>>,
+     remote_models: RwLock<ModelsCacheEntry>,
 +    custom_models: HashMap<String, CustomModelConfig>,
-     etag: RwLock<Option<String>>,
      cache: Option<Arc<dyn ModelsCache>>,
      endpoint_client: SharedModelsEndpointClient,
-@@ -227,6 +255,7 @@ pub struct OpenAiModelsManager {
+     api_key_model_discovery_enabled: AtomicBool,
+@@ -269,6 +297,7 @@ pub struct OpenAiModelsManager {
  #[derive(Debug)]
  pub struct StaticModelsManager {
      remote_models: Vec<ModelInfo>,
@@ -2192,7 +2734,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      auth_manager: Option<Arc<AuthManager>>,
  }
 
-@@ -236,6 +265,15 @@ impl OpenAiModelsManager {
+@@ -278,6 +307,15 @@ impl OpenAiModelsManager {
          codex_home: PathBuf,
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
@@ -2208,7 +2750,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      ) -> Self {
          let cache_path = codex_home.join(MODEL_CACHE_FILE);
          Self::new_with_optional_cache(
-@@ -245,6 +283,7 @@ impl OpenAiModelsManager {
+@@ -287,6 +325,7 @@ impl OpenAiModelsManager {
              ))),
              endpoint_client,
              auth_manager,
@@ -2216,7 +2758,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
          )
      }
 
-@@ -253,7 +292,12 @@ impl OpenAiModelsManager {
+@@ -295,7 +334,12 @@ impl OpenAiModelsManager {
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
      ) -> Self {
@@ -2230,7 +2772,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      }
 
      /// Constructs an OpenAI-compatible model manager with a caller-provided cache.
-@@ -265,17 +309,28 @@ impl OpenAiModelsManager {
+@@ -307,13 +351,23 @@ impl OpenAiModelsManager {
          endpoint_client: Arc<dyn ModelsEndpointClient>,
          auth_manager: Option<Arc<AuthManager>>,
      ) -> Self {
@@ -2255,12 +2797,15 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      ) -> Self {
          let remote_models = load_remote_models_from_file().unwrap_or_default();
          Self {
-             remote_models: RwLock::new(remote_models),
+@@ -324,6 +378,7 @@ impl OpenAiModelsManager {
+                 identity: endpoint_client.identity(),
+                 models: remote_models,
+             }),
 +            custom_models,
-             etag: RwLock::new(None),
              cache,
+             api_key_model_discovery_enabled: AtomicBool::new(false),
              endpoint_client,
-@@ -287,8 +342,17 @@ impl OpenAiModelsManager {
+@@ -335,8 +390,17 @@ impl OpenAiModelsManager {
  impl StaticModelsManager {
      /// Construct a static model manager from an authoritative catalog.
      pub fn new(auth_manager: Option<Arc<AuthManager>>, model_catalog: ModelsResponse) -> Self {
@@ -2278,7 +2823,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
              auth_manager,
          }
      }
-@@ -319,6 +383,10 @@ impl ModelsManager for OpenAiModelsManager {
+@@ -416,6 +480,10 @@ impl ModelsManager for OpenAiModelsManager {
          self.auth_manager.as_deref()
      }
 
@@ -2289,7 +2834,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
          builtin_collaboration_mode_presets()
      }
-@@ -577,6 +645,10 @@ impl ModelsManager for StaticModelsManager {
+@@ -705,6 +773,10 @@ impl ModelsManager for StaticModelsManager {
          self.auth_manager.as_deref()
      }
 
@@ -2300,7 +2845,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
          builtin_collaboration_mode_presets()
      }
-@@ -656,6 +728,32 @@ pub(crate) fn construct_model_info_from_candidates(
+@@ -784,6 +856,32 @@ pub(crate) fn construct_model_info_from_candidates(
      candidates: &[ModelInfo],
      config: &ModelsManagerConfig,
  ) -> ModelInfo {
@@ -2333,7 +2878,7 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
      // First use the normal longest-prefix match. If that misses, allow a narrowly scoped
      // retry for namespaced slugs like `custom/gpt-5.3-codex`.
      let remote = find_model_by_longest_prefix(model, candidates)
-@@ -672,6 +770,30 @@ pub(crate) fn construct_model_info_from_candidates(
+@@ -800,6 +898,30 @@ pub(crate) fn construct_model_info_from_candidates(
      model_info::with_config_overrides(model_info, config)
  }
 
@@ -2365,10 +2910,10 @@ index 45835c37cd41d28c3a6c038a3e77a1369621562a..8085da5e3b490bde2878f28167d40c58
  #[path = "manager_tests.rs"]
  mod tests;
 diff --git a/codex-rs/models-manager/src/manager_tests.rs b/codex-rs/models-manager/src/manager_tests.rs
-index 324ca42cebfbd4db0211d6990b727355d62e4d85..60604e568134ac5392d3d38bfc0a1b1793847f99 100644
+index 4ef297142abc8921828a2169bc25efda941b82ff..b04f87d49c6518023f9246aaef94e198032246cf 100644
 --- a/codex-rs/models-manager/src/manager_tests.rs
 +++ b/codex-rs/models-manager/src/manager_tests.rs
-@@ -772,6 +772,51 @@ async fn get_model_info_uses_custom_catalog() {
+@@ -811,6 +811,51 @@ async fn get_model_info_uses_custom_catalog() {
      assert!(!model_info.used_fallback_model_metadata);
  }
 
@@ -2421,10 +2966,10 @@ index 324ca42cebfbd4db0211d6990b727355d62e4d85..60604e568134ac5392d3d38bfc0a1b17
  async fn get_model_info_matches_namespaced_suffix() {
      let config = ModelsManagerConfig::default();
 diff --git a/codex-rs/models-manager/src/model_info.rs b/codex-rs/models-manager/src/model_info.rs
-index ca1006993137d66de19137ff136f7ac8d36f9da3..7a7c88c00fedef3ad4ff0775f95875ea90b4cb48 100644
+index 88ade7cfcf0c6d5c94c35c167ca01dc150b974c5..cb0e16319e699889ba788b71a7c007d98777c735 100644
 --- a/codex-rs/models-manager/src/model_info.rs
 +++ b/codex-rs/models-manager/src/model_info.rs
-@@ -144,6 +144,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
+@@ -100,6 +100,7 @@ pub fn model_info_from_slug(slug: &str) -> ModelInfo {
      warn!("Unknown model {slug} is used. This will use fallback model metadata.");
      ModelInfo {
          slug: slug.to_string(),
@@ -2433,10 +2978,10 @@ index ca1006993137d66de19137ff136f7ac8d36f9da3..7a7c88c00fedef3ad4ff0775f95875ea
          description: None,
          default_reasoning_level: None,
 diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs
-index 8c021b17c2a870b5e1e69e3e57210d46c8722606..a783cbe9663ea2f05487e285fd62d506bd0d9ee6 100644
+index 41b2a60dd50ed7006c706bec557e8dbe1188848b..cfc4370e46f305b58fa59ddb347102e1181170cf 100644
 --- a/codex-rs/protocol/src/openai_models.rs
 +++ b/codex-rs/protocol/src/openai_models.rs
-@@ -404,6 +404,11 @@ pub struct ModelInfo {
+@@ -408,6 +408,11 @@ pub struct ModelInfo {
      #[serde(default, skip_serializing_if = "Option::is_none")]
      pub guardian: Option<GuardianModelPolicy>,
      pub slug: String,
@@ -2448,7 +2993,7 @@ index 8c021b17c2a870b5e1e69e3e57210d46c8722606..a783cbe9663ea2f05487e285fd62d506
      pub display_name: String,
      pub description: Option<String>,
      #[serde(default, skip_serializing_if = "Option::is_none")]
-@@ -501,6 +506,10 @@ pub struct ModelInfo {
+@@ -511,6 +516,10 @@ pub struct ModelInfo {
  }
 
  impl ModelInfo {
@@ -2459,7 +3004,7 @@ index 8c021b17c2a870b5e1e69e3e57210d46c8722606..a783cbe9663ea2f05487e285fd62d506
      pub fn resolved_context_window(&self) -> Option<i64> {
          self.context_window.or(self.max_context_window)
      }
-@@ -980,6 +989,7 @@ mod tests {
+@@ -956,6 +965,7 @@ mod tests {
      pub(super) fn test_model(spec: Option<ModelMessages>) -> ModelInfo {
          ModelInfo {
              slug: "test-model".to_string(),
@@ -2468,7 +3013,7 @@ index 8c021b17c2a870b5e1e69e3e57210d46c8722606..a783cbe9663ea2f05487e285fd62d506
              description: None,
              default_reasoning_level: None,
 diff --git a/codex-rs/thread-manager-sample/src/main.rs b/codex-rs/thread-manager-sample/src/main.rs
-index e99c62c933f083dbda3a877f2d78ceeb3a26adbe..53ce12133777986f87fe7cbb90aca96d8484318c 100644
+index 1bcf5d15f38ffa83aa2e07e60d76b194621c7ae4..eec2d6e29e5ee9d74071fb238ac0917ef0ca2c74 100644
 --- a/codex-rs/thread-manager-sample/src/main.rs
 +++ b/codex-rs/thread-manager-sample/src/main.rs
 @@ -114,7 +114,7 @@ async fn run_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
@@ -2492,7 +3037,7 @@ index e99c62c933f083dbda3a877f2d78ceeb3a26adbe..53ce12133777986f87fe7cbb90aca96d
      let codex_home = find_codex_home().context("find Codex home")?;
      let cwd = AbsolutePathBuf::current_dir().context("resolve current directory")?;
      let model_provider_id = OPENAI_PROVIDER_ID.to_string();
-@@ -206,6 +209,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+@@ -207,6 +210,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
          explicit_permission_profile_mode: false,
          custom_permission_profiles: Vec::new(),
          approvals_reviewer: ApprovalsReviewer::User,
@@ -2500,7 +3045,7 @@ index e99c62c933f083dbda3a877f2d78ceeb3a26adbe..53ce12133777986f87fe7cbb90aca96d
          enforce_residency: Constrained::allow_any(/*initial_value*/ None),
          hide_agent_reasoning: false,
          show_raw_agent_reasoning: false,
-@@ -254,6 +258,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
+@@ -260,6 +264,7 @@ fn new_config(model: Option<String>, arg0_paths: Arg0DispatchPaths) -> anyhow::R
          mcp_oauth_callback_url: None,
          mcp_optional_startup_grace: std::time::Duration::from_secs(1),
          model_providers,

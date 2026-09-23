@@ -365,7 +365,7 @@ index 2de7cf0345bba62298075d4d91997b66eb00f151..520b32177c9fa39d748509d900ad1912
      Ok(())
  }
 diff --git a/codex-rs/state/src/migrations_tests.rs b/codex-rs/state/src/migrations_tests.rs
-index f9626a063574013de0728d4ab126c37233601419..63039a6810fad1967ed14563845c18273792301b 100644
+index 4200a814ccae155d82d599b51c0dcff30ce5558f..7fc06094ee4999d2880751c32683b2f322db4fe6 100644
 --- a/codex-rs/state/src/migrations_tests.rs
 +++ b/codex-rs/state/src/migrations_tests.rs
 @@ -2,7 +2,10 @@ use codex_utils_absolute_path::test_support::PathExt;
@@ -1701,7 +1701,7 @@ index f9626a063574013de0728d4ab126c37233601419..63039a6810fad1967ed14563845c1827
  }
 
  #[tokio::test]
-@@ -1165,34 +2192,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
+@@ -1191,34 +2218,7 @@ async fn repairs_recency_migration_that_was_applied_as_version_38() {
          .open_read_write_pool(&state_path)
          .await
          .expect("sqlite database should open");
@@ -1738,7 +1738,7 @@ index f9626a063574013de0728d4ab126c37233601419..63039a6810fad1967ed14563845c1827
      repair_legacy_recency_migration_version(&pool, &STATE_MIGRATOR)
          .await
 diff --git a/codex-rs/state/src/sqlite.rs b/codex-rs/state/src/sqlite.rs
-index d4a56af50c0e34fc13035449521ab89f4c41be46..bf4fe909bceba61e4e5e9487c76fc3b9d69ae693 100644
+index 8c7605612e0ffe8f54e293b91c3027ac2a693fbc..47019e1be5991281e9b41c791be60273143e22cf 100644
 --- a/codex-rs/state/src/sqlite.rs
 +++ b/codex-rs/state/src/sqlite.rs
 @@ -6,29 +6,30 @@
@@ -1936,7 +1936,7 @@ index d4a56af50c0e34fc13035449521ab89f4c41be46..bf4fe909bceba61e4e5e9487c76fc3b9
  }
 
  #[derive(Clone, Copy)]
-@@ -270,10 +376,17 @@ impl SqliteConfig {
+@@ -290,10 +396,17 @@ impl SqliteConfig {
      ) -> anyhow::Result<SqlitePool> {
          let path = spec.path(self.home());
          let started = Instant::now();
@@ -1958,7 +1958,7 @@ index d4a56af50c0e34fc13035449521ab89f4c41be46..bf4fe909bceba61e4e5e9487c76fc3b9
          telemetry::record_init_result(
              telemetry_override,
              spec.kind,
-@@ -286,18 +399,11 @@ impl SqliteConfig {
+@@ -306,18 +419,11 @@ impl SqliteConfig {
          })?;
          let started = Instant::now();
          let migrate_result = async {

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 33bb176c0764a608b6648fe9fbdc94efcb697daf..c2ee1db780aa970e16836b0395605f1fbb576673 100644
+index e3b3628c34b21cfd19618e33930eec1b7e290f0a..af202acf8bb792f2d538da192b5ec527f9364a0b 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2199,6 +2199,7 @@ dependencies = [
+@@ -2235,6 +2235,7 @@ dependencies = [
   "codex-git-utils",
   "codex-goal-extension",
   "codex-guardian-v2",
@@ -10,14 +10,6 @@ index 33bb176c0764a608b6648fe9fbdc94efcb697daf..c2ee1db780aa970e16836b0395605f1f
   "codex-history-notes-extension",
   "codex-home",
   "codex-hooks",
-@@ -2225,6 +2226,7 @@ dependencies = [
-  "codex-state",
-  "codex-thread-store",
-  "codex-tools",
-+ "codex-uds",
-  "codex-utils-absolute-path",
-  "codex-utils-cargo-bin",
-  "codex-utils-cli",
 diff --git a/codex-rs/app-server-protocol/src/export.rs b/codex-rs/app-server-protocol/src/export.rs
 index db5ff718b6a83ded8f519d913336896eaaadc186..b61ddcde19f1c0a548c74ccd8a73dd89e732c3b1 100644
 --- a/codex-rs/app-server-protocol/src/export.rs
@@ -60,7 +52,7 @@ index db5ff718b6a83ded8f519d913336896eaaadc186..b61ddcde19f1c0a548c74ccd8a73dd89
          let trimmed = entry.trim();
          if trimmed.is_empty() {
 diff --git a/codex-rs/app-server-protocol/src/protocol/common.rs b/codex-rs/app-server-protocol/src/protocol/common.rs
-index a692a2e3b8649a0369f51b2cdbd1581546592462..b21705a0db0a8bd862f3c4e13d474abf5a23f2fb 100644
+index 3df55b6434c1265f676051aaa8d2c618ace2aa87..e14e633326fcd370a52cd3731235e4e9dd98cc87 100644
 --- a/codex-rs/app-server-protocol/src/protocol/common.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/common.rs
 @@ -125,6 +125,16 @@ macro_rules! experimental_type_entry {
@@ -94,7 +86,7 @@ index a692a2e3b8649a0369f51b2cdbd1581546592462..b21705a0db0a8bd862f3c4e13d474abf
 
          #[cfg(test)]
          pub fn export_client_responses(
-@@ -567,6 +584,21 @@ client_request_definitions! {
+@@ -574,6 +591,21 @@ client_request_definitions! {
          serialization: thread_or_path(params.thread_id, params.path),
          response: v2::ThreadForkResponse,
      },
@@ -116,7 +108,7 @@ index a692a2e3b8649a0369f51b2cdbd1581546592462..b21705a0db0a8bd862f3c4e13d474abf
      ThreadArchive => "thread/archive" {
          params: v2::ThreadArchiveParams,
          serialization: thread_id(params.thread_id),
-@@ -1576,6 +1608,13 @@ macro_rules! server_request_definitions {
+@@ -1606,6 +1638,13 @@ macro_rules! server_request_definitions {
                  experimental_type_entry!($(#[experimental($reason)])? $response),
              )*
          ];
@@ -131,10 +123,10 @@ index a692a2e3b8649a0369f51b2cdbd1581546592462..b21705a0db0a8bd862f3c4e13d474abf
          #[cfg(test)]
          pub fn export_server_responses(
 diff --git a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-index ec93d389170d20277a5cddc870c3a19d16ee3e72..1658ba0bc9689c73913dfe5dc2fbbd499ddb9370 100644
+index 9ed550264b0adb97c698fb038cf90ea457c5b595..fce54d482b98b5f45f99135b414c587d2268a0d9 100644
 --- a/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
 +++ b/codex-rs/app-server-protocol/src/protocol/v2/thread.rs
-@@ -636,6 +636,24 @@ pub struct ThreadForkResponse {
+@@ -665,6 +665,24 @@ pub struct ThreadForkResponse {
      pub multi_agent_mode: MultiAgentMode,
  }
 
@@ -160,10 +152,10 @@ index ec93d389170d20277a5cddc870c3a19d16ee3e72..1658ba0bc9689c73913dfe5dc2fbbd49
      /// Parses valid absolute instruction source paths and omits malformed legacy values.
      pub fn instruction_source_path_uris(&self) -> Vec<PathUri> {
 diff --git a/codex-rs/app-server/Cargo.toml b/codex-rs/app-server/Cargo.toml
-index c64b15b998c5722651a7a4dafe0b0ca299a6a03b..f24c30320d275628c6803fa001bf1fa901f89edc 100644
+index bd47a54d084fb1eb8ea730ebeac5d4a7f4af600b..cde229a70e401a3ad2640f89daa5f7b891b4f3f9 100644
 --- a/codex-rs/app-server/Cargo.toml
 +++ b/codex-rs/app-server/Cargo.toml
-@@ -53,6 +53,7 @@ codex-goal-extension = { workspace = true }
+@@ -54,6 +54,7 @@ codex-goal-extension = { workspace = true }
  codex-git-attribution = { workspace = true }
  codex-guardian-v2 = { workspace = true }
  codex-git-utils = { workspace = true }
@@ -171,7 +163,7 @@ index c64b15b998c5722651a7a4dafe0b0ca299a6a03b..f24c30320d275628c6803fa001bf1fa9
  codex-file-watcher = { workspace = true }
  codex-hooks = { workspace = true }
  codex-history-notes-extension = { workspace = true }
-@@ -87,6 +88,7 @@ codex-sandboxing = { workspace = true }
+@@ -91,6 +92,7 @@ codex-sandboxing = { workspace = true }
  codex-state = { workspace = true }
  codex-thread-store = { workspace = true }
  codex-tools = { workspace = true }
@@ -180,13 +172,13 @@ index c64b15b998c5722651a7a4dafe0b0ca299a6a03b..f24c30320d275628c6803fa001bf1fa9
  codex-utils-json-to-toml = { workspace = true }
  codex-utils-path-uri = { workspace = true }
 diff --git a/codex-rs/app-server/src/in_process.rs b/codex-rs/app-server/src/in_process.rs
-index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d839af2725e 100644
+index b58bb0b266f3b1bd2ccb482eb468ff6f5b39ee61..54268dd0489819f16454be43a116d95bc1b27ecc 100644
 --- a/codex-rs/app-server/src/in_process.rs
 +++ b/codex-rs/app-server/src/in_process.rs
-@@ -794,8 +794,12 @@ mod tests {
-     use codex_app_server_protocol::ExternalAgentConfigImportCompletedNotification;
-     use codex_app_server_protocol::InitializeCapabilities;
+@@ -807,8 +807,12 @@ mod tests {
      use codex_app_server_protocol::SessionSource as ApiSessionSource;
+     use codex_app_server_protocol::ThreadAttachmentOperation;
+     use codex_app_server_protocol::ThreadAttachmentUpdatedNotification;
 +    use codex_app_server_protocol::ThreadDeleteParams;
 +    use codex_app_server_protocol::ThreadForkImportParams;
      use codex_app_server_protocol::ThreadForkParams;
@@ -196,7 +188,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
      use codex_app_server_protocol::ThreadQueueChangedNotification;
      use codex_app_server_protocol::ThreadStartParams;
      use codex_app_server_protocol::ThreadStartResponse;
-@@ -836,7 +840,7 @@ mod tests {
+@@ -849,7 +853,7 @@ mod tests {
          let codex_home = TempDir::new().expect("temp dir");
          let config = Arc::new(build_test_config(codex_home.path()).await);
          start_test_client_with_config_loader(
@@ -205,7 +197,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
              config,
              Arc::new(codex_config::NoopThreadConfigLoader),
              session_source,
-@@ -847,7 +851,7 @@ mod tests {
+@@ -860,7 +864,7 @@ mod tests {
      }
 
      async fn start_test_client_with_config_loader(
@@ -214,7 +206,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
          config: Arc<Config>,
          thread_config_loader: Arc<dyn ThreadConfigLoader>,
          session_source: SessionSource,
-@@ -886,7 +890,7 @@ mod tests {
+@@ -899,7 +903,7 @@ mod tests {
              channel_capacity,
          };
          let mut client = start(args).await.expect("in-process runtime should start");
@@ -223,7 +215,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
          client
      }
 
-@@ -1025,8 +1029,19 @@ mod tests {
+@@ -1038,8 +1042,19 @@ mod tests {
          const ROLLBACK_APPEND: &str = "append before rollback fork freeze";
          const ROLLBACK_TURN_ID: &str = "rollback-boundary";
 
@@ -244,7 +236,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
          let model_provider = config.model_provider_id.as_str();
          let interrupted_thread_id = app_test_support::create_fake_rollout(
              codex_home.path(),
-@@ -1080,8 +1095,8 @@ mod tests {
+@@ -1094,8 +1109,8 @@ mod tests {
 
          let config_loader = Arc::new(GatedThreadConfigLoader::default());
          let client = start_test_client_with_config_loader(
@@ -255,7 +247,7 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
              config_loader.clone(),
              SessionSource::Cli,
              DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
-@@ -1235,6 +1250,172 @@ mod tests {
+@@ -1249,6 +1264,172 @@ mod tests {
              rollback_error.message
          );
 
@@ -429,10 +421,10 @@ index 7726ef33bc66045985a54f1dbf9a8ce0a2087c2f..d2935c8d2b33776ff6bd99840f879d83
              .shutdown()
              .await
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 01332992461d56e73578c38319cee86f2ef4b521..5e2cd8dc07a936da53898bae8480c08fcd614ec2 100644
+index 24e34e1dfe61532ad063091f03b0c7cd2016ff92..5f077ef9ba960759d52da4f1b8c4fc6404cea834 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
-@@ -152,7 +152,7 @@ fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRP
+@@ -155,7 +155,7 @@ fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRP
  fn reject_removed_permission_profile(request: &JSONRPCRequest) -> Result<(), JSONRPCErrorError> {
      if matches!(
          request.method.as_str(),
@@ -441,7 +433,16 @@ index 01332992461d56e73578c38319cee86f2ef4b521..5e2cd8dc07a936da53898bae8480c08f
      ) && request
          .params
          .as_ref()
-@@ -1250,6 +1250,28 @@ impl MessageProcessor {
+@@ -1036,6 +1036,8 @@ impl MessageProcessor {
+         let (turn_admission, recheck_turn_admission) = match &codex_request {
+             ClientRequest::ThreadStart { .. }
+             | ClientRequest::ThreadFork { .. }
++            | ClientRequest::ThreadForkPrepare { .. }
++            | ClientRequest::ThreadForkImport { .. }
+             | ClientRequest::ThreadResume { .. }
+             | ClientRequest::ThreadRevert { .. }
+             | ClientRequest::ThreadSettingsUpdate { .. }
+@@ -1371,6 +1373,28 @@ impl MessageProcessor {
                      )
                      .await
              }
@@ -470,12 +471,109 @@ index 01332992461d56e73578c38319cee86f2ef4b521..5e2cd8dc07a936da53898bae8480c08f
              ClientRequest::ThreadArchive { params, .. } => {
                  self.thread_processor
                      .thread_archive(request_id.clone(), params)
+diff --git a/codex-rs/app-server/src/message_processor_tracing_tests.rs b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+index 6715805dc94a2df1eba63e60d06f2c838fb70eee..0f905ecc93b1880e36c4fee4600ff6f760fe1615 100644
+--- a/codex-rs/app-server/src/message_processor_tracing_tests.rs
++++ b/codex-rs/app-server/src/message_processor_tracing_tests.rs
+@@ -18,6 +18,8 @@ use codex_app_server_protocol::InitializeParams;
+ use codex_app_server_protocol::InitializeResponse;
+ use codex_app_server_protocol::JSONRPCRequest;
+ use codex_app_server_protocol::RequestId;
++use codex_app_server_protocol::ThreadForkImportParams;
++use codex_app_server_protocol::ThreadForkParams;
+ use codex_app_server_protocol::ThreadStartParams;
+ use codex_app_server_protocol::ThreadStartResponse;
+ use codex_app_server_protocol::TurnStartParams;
+@@ -33,6 +35,7 @@ use codex_feedback::CodexFeedback;
+ use codex_login::AuthManager;
+ use codex_protocol::protocol::SessionSource;
+ use codex_protocol::protocol::W3cTraceContext;
++use codex_utils_path_uri::LegacyAppPathString;
+ use opentelemetry::global;
+ use opentelemetry::trace::SpanId;
+ use opentelemetry::trace::SpanKind;
+@@ -432,6 +435,75 @@ fn assert_has_internal_descendant_at_min_depth(
+     );
+ }
+
++#[tokio::test(flavor = "current_thread")]
++#[serial(app_server_tracing)]
++async fn fork_handoff_requests_are_rejected_after_drain_starts() -> Result<()> {
++    let mut harness = TracingHarness::new().await?;
++    harness.processor.turn_admission.begin_drain();
++    for request in [
++        ClientRequest::ThreadForkPrepare {
++            request_id: RequestId::Integer(2),
++            params: ThreadForkParams {
++                thread_id: codex_protocol::ThreadId::new().to_string(),
++                exclude_turns: true,
++                ..Default::default()
++            },
++        },
++        ClientRequest::ThreadForkImport {
++            request_id: RequestId::Integer(3),
++            params: ThreadForkImportParams {
++                socket_path: LegacyAppPathString::from_path(
++                    &harness._codex_home.path().join("fork-pending.sock"),
++                ),
++            },
++        },
++    ] {
++        let request_id = request.id().clone();
++        harness
++            .processor
++            .process_request(
++                TEST_CONNECTION_ID,
++                request_from_client_request(request),
++                &AppServerTransport::Stdio,
++                Arc::clone(&harness.session),
++            )
++            .await;
++        let error = tokio::time::timeout(std::time::Duration::from_secs(5), async {
++            loop {
++                let envelope = harness.outgoing_rx.recv().await.expect("outgoing channel");
++                let crate::outgoing_message::OutgoingEnvelope::ToConnection {
++                    connection_id,
++                    message,
++                    ..
++                } = envelope
++                else {
++                    continue;
++                };
++                if connection_id != TEST_CONNECTION_ID {
++                    continue;
++                }
++                match message {
++                    crate::outgoing_message::OutgoingMessage::Error(error)
++                        if error.id == request_id =>
++                    {
++                        break error;
++                    }
++                    crate::outgoing_message::OutgoingMessage::Response(response)
++                        if response.id == request_id =>
++                    {
++                        panic!("handoff admitted after drain: {response:?}");
++                    }
++                    _ => {}
++                }
++            }
++        })
++        .await?;
++        assert_eq!(error.error, crate::error_code::server_draining_error());
++    }
++    harness.shutdown().await;
++    Ok(())
++}
++
+ async fn read_response<T: serde::de::DeserializeOwned>(
+     outgoing_rx: &mut mpsc::Receiver<crate::outgoing_message::OutgoingEnvelope>,
+     request_id: i64,
 diff --git a/codex-rs/app-server/src/request_processors.rs b/codex-rs/app-server/src/request_processors.rs
-index a906f7ff77174a37a314f4f3602d276cd4b53d94..42261fbf592c0c600a151e59294d743a057b4d68 100644
+index 816d52c60e66071c668cd2d59535d0763daeb2e0..a5fa417204fb30f3d6357656a68a8e9e4f62fb47 100644
 --- a/codex-rs/app-server/src/request_processors.rs
 +++ b/codex-rs/app-server/src/request_processors.rs
-@@ -560,6 +560,7 @@ mod remote_control_processor;
- mod search;
+@@ -562,6 +562,7 @@ mod search;
+ mod thread_attachments;
  mod thread_enrichment;
  mod thread_fork_goal;
 +mod thread_fork_handoff;
@@ -497,10 +595,10 @@ index b7ca46ec0702e3fcbecbfb0e353d600c49f9c5d8..7d21d97e78da0fae4db112662eae2868
      pub(super) approvals_reviewer: Option<ApprovalsReviewer>,
 diff --git a/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9b608a8cb
+index 0000000000000000000000000000000000000000..30cab360ee2e1440031f8598913595e6c07aae11
 --- /dev/null
 +++ b/codex-rs/app-server/src/request_processors/thread_fork_handoff.rs
-@@ -0,0 +1,456 @@
+@@ -0,0 +1,473 @@
 +//! Source-owned, one-shot fork transfer. Preparing a pane never starts a temporary runtime.
 +
 +use super::persisted_resume_settings::PersistedResumeSettings;
@@ -511,6 +609,7 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +use codex_protocol::mcp::ClientMcpExtensions;
 +use codex_protocol::models::ResponseItem;
 +use codex_protocol::protocol::HistoryPosition;
++use codex_protocol::protocol::ThreadHistoryMode;
 +use codex_rollout::ResponseItemEnvelope;
 +use codex_thread_store::FrozenRolloutSegment;
 +use codex_thread_store::PreparedFork;
@@ -550,6 +649,8 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +    version: u32,
 +    params: ThreadForkParams,
 +    source: StoredThread,
++    /// Selected immediate-source cutoff; legacy sources have no native ordinal.
++    source_end_ordinal_exclusive: Option<u64>,
 +    history_base: Option<HistoryPosition>,
 +    frozen_segment: Option<FrozenRolloutSegment>,
 +    model_context: Arc<Vec<RolloutItem>>,
@@ -666,6 +767,7 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +        );
 +        Ok(PreparedFork::new(
 +            source.thread_id,
++            /*source_end_ordinal_exclusive*/ None,
 +            /*history_base*/ None,
 +            /*frozen_segment*/ None,
 +            Arc::clone(&context),
@@ -719,6 +821,7 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +            version: HANDOFF_VERSION,
 +            params,
 +            source,
++            source_end_ordinal_exclusive: prepared.source_end_ordinal_exclusive,
 +            history_base: prepared.history_base,
 +            frozen_segment: prepared.frozen_segment.clone(),
 +            // Latest-only, excludeTurns preparation uses this same context for response replay
@@ -851,6 +954,13 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +                    "fork handoff version or source identity does not match",
 +                ));
 +            }
++            if matches!(seed.source.history_mode, ThreadHistoryMode::Paginated)
++                != seed.source_end_ordinal_exclusive.is_some()
++            {
++                return Err(invalid_request(
++                    "fork handoff source cutoff does not match its history mode",
++                ));
++            }
 +            let store = self
 +                .thread_store
 +                .as_any()
@@ -901,6 +1011,7 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +            stream.write_u8(1).await.map_err(handoff_error)?;
 +            let mut prepared = PreparedFork::new(
 +                seed.source.thread_id,
++                seed.source_end_ordinal_exclusive,
 +                seed.history_base,
 +                seed.frozen_segment,
 +                Arc::clone(&seed.model_context),
@@ -957,11 +1068,129 @@ index 0000000000000000000000000000000000000000..c42a9bfbc6bf6c0e8534681b7d17f0b9
 +fn handoff_error(error: impl std::fmt::Display) -> JSONRPCErrorError {
 +    internal_error(format!("fork handoff failed: {error}"))
 +}
++
++#[cfg(test)]
++#[path = "thread_fork_handoff_tests.rs"]
++mod tests;
+diff --git a/codex-rs/app-server/src/request_processors/thread_fork_handoff_tests.rs b/codex-rs/app-server/src/request_processors/thread_fork_handoff_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..47b3b03fdfae15efeb1a9141fb626a7579f90615
+--- /dev/null
++++ b/codex-rs/app-server/src/request_processors/thread_fork_handoff_tests.rs
+@@ -0,0 +1,108 @@
++use super::*;
++use chrono::Utc;
++use codex_protocol::models::PermissionProfile;
++use codex_protocol::protocol::AskForApproval;
++use codex_protocol::protocol::SessionSource;
++use pretty_assertions::assert_eq;
++
++#[test]
++fn fork_seed_preserves_immediate_source_cutoff_separately_from_ancestor() {
++    let source_id = ThreadId::new();
++    let ancestor_id = ThreadId::new();
++    let created_at = Utc::now();
++    let source = StoredThread {
++        originator: None,
++        thread_id: source_id,
++        extra_config: None,
++        rollout_path: None,
++        forked_from_id: Some(ancestor_id),
++        parent_thread_id: None,
++        preview: "source".to_string(),
++        name: None,
++        model_provider: "openai".to_string(),
++        model: None,
++        reasoning_effort: None,
++        created_at,
++        updated_at: created_at,
++        recency_at: created_at,
++        archived_at: None,
++        section: None,
++        section_position: None,
++        section_entered_at: None,
++        project_id: None,
++        daybreak_enabled: None,
++        cwd: PathBuf::from("/tmp"),
++        cli_version: "0.0.0".to_string(),
++        source: SessionSource::Cli,
++        history_mode: ThreadHistoryMode::Paginated,
++        thread_source: None,
++        agent_nickname: None,
++        agent_role: None,
++        agent_path: None,
++        git_info: None,
++        approval_mode: AskForApproval::OnRequest,
++        permission_profile: PermissionProfile::read_only(),
++        token_usage: None,
++        first_user_message: None,
++        history: None,
++    };
++    let ancestor_position = HistoryPosition {
++        thread_id: ancestor_id,
++        end_ordinal_exclusive: 900,
++        end_byte_offset: 4096,
++    };
++    let mut seed = ForkSeed {
++        version: HANDOFF_VERSION,
++        params: ThreadForkParams {
++            thread_id: source_id.to_string(),
++            exclude_turns: true,
++            ..Default::default()
++        },
++        source,
++        source_end_ordinal_exclusive: Some(23),
++        history_base: Some(ancestor_position),
++        frozen_segment: None,
++        model_context: Arc::new(Vec::new()),
++        shared_model_response_items: None,
++        copied_history: None,
++        settings: PersistedResumeSettings {
++            approval_policy: AskForApproval::OnRequest,
++            approvals_reviewer: None,
++            active_permission_profile: None,
++        },
++    };
++    for history_mode in [ThreadHistoryMode::Paginated, ThreadHistoryMode::Legacy] {
++        seed.source.history_mode = history_mode;
++        seed.source_end_ordinal_exclusive = match history_mode {
++            ThreadHistoryMode::Paginated => Some(23),
++            ThreadHistoryMode::Legacy => None,
++        };
++        seed.history_base = match history_mode {
++            ThreadHistoryMode::Paginated => Some(ancestor_position),
++            ThreadHistoryMode::Legacy => None,
++        };
++        let expected = serde_json::to_value(&seed).expect("serialize seed");
++        let bytes = serde_json::to_vec(&seed).expect("encode seed");
++        let value = serde_json::from_slice(&bytes).expect("decode seed JSON");
++        let decoded: ForkSeed<'static> = serde_json::from_value(value).expect("decode seed");
++        assert_eq!(
++            serde_json::to_value(&decoded).expect("serialize decoded seed"),
++            expected
++        );
++        let prepared = PreparedFork::new(
++            decoded.source.thread_id,
++            decoded.source_end_ordinal_exclusive,
++            decoded.history_base,
++            decoded.frozen_segment,
++            Arc::clone(&decoded.model_context),
++            Arc::clone(&decoded.model_context),
++            decoded.model_context,
++            /*interrupt_if_open*/ true,
++            (),
++        );
++        assert_eq!(
++            (prepared.source_end_ordinal_exclusive, prepared.history_base),
++            (seed.source_end_ordinal_exclusive, seed.history_base)
++        );
++    }
++}
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6df3413a5 100644
+index b417b76a99dc34ca6be761572cbf243a48bcd5b3..deaa414f269a4e0420f3515e46efd984b3d383e3 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -2,6 +2,7 @@ use super::persisted_resume_settings::PersistedResumeSettings;
+@@ -8,6 +8,7 @@ use super::persisted_resume_settings::PersistedResumeSettings;
  use super::persisted_resume_settings::latest_persisted_resume_settings;
  use super::thread_enrichment::enrich_loaded_threads;
  use super::thread_fork_goal::inherit_thread_goal_snapshot;
@@ -969,7 +1198,7 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
  use super::thread_input::can_accept_direct_input;
  use super::thread_input::ensure_direct_input_allowed;
  use super::*;
-@@ -702,6 +703,7 @@ pub(crate) struct ThreadRequestProcessor {
+@@ -707,6 +708,7 @@ pub(crate) struct ThreadRequestProcessor {
      pub(super) thread_state_manager: ThreadStateManager,
      pub(super) thread_watch_manager: ThreadWatchManager,
      pub(super) thread_list_state_permit: Arc<Semaphore>,
@@ -977,7 +1206,7 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
      pub(super) thread_goal_processor: ThreadGoalRequestProcessor,
      pub(super) state_db: Option<StateDbHandle>,
      pub(super) log_db: Option<LogDbLayer>,
-@@ -760,6 +762,7 @@ impl ThreadRequestProcessor {
+@@ -771,6 +773,7 @@ impl ThreadRequestProcessor {
              thread_state_manager,
              thread_watch_manager,
              thread_list_state_permit,
@@ -985,15 +1214,15 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
              thread_goal_processor,
              state_db,
              log_db,
-@@ -840,6 +843,7 @@ impl ThreadRequestProcessor {
+@@ -852,6 +855,7 @@ impl ThreadRequestProcessor {
              app_server_client_name,
              app_server_client_version,
              client_mcp_extensions,
 +            ForkHandoff::Local,
-         )
+         ))
          .await
          .map(|()| None)
-@@ -6661,14 +6665,42 @@ impl ThreadRequestProcessor {
+@@ -6683,14 +6687,42 @@ impl ThreadRequestProcessor {
          }
      }
 
@@ -1037,7 +1266,7 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
          let ThreadForkParams {
              thread_id,
              last_turn_id,
-@@ -6706,15 +6738,20 @@ impl ThreadRequestProcessor {
+@@ -6728,15 +6760,20 @@ impl ThreadRequestProcessor {
                  "`permissions` cannot be combined with `sandbox`",
              ));
          }
@@ -1066,18 +1295,18 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
          if last_turn_id.is_some() && before_turn_id.is_some() {
              return Err(invalid_request(
                  "`beforeTurnId` cannot be combined with `lastTurnId`",
-@@ -6744,7 +6781,9 @@ impl ThreadRequestProcessor {
+@@ -6766,7 +6803,9 @@ impl ThreadRequestProcessor {
              .and_then(codex_core::util::normalize_thread_name);
          let mut source_approvals_reviewer = None;
          let mut source_token_usage_info = None;
--        let prepared_fork = if paginated_source {
-+        let prepared_fork = if let Some(imported) = imported {
+-        let mut prepared_fork = if paginated_source {
++        let mut prepared_fork = if let Some(imported) = imported {
 +            Some(imported.prepared)
 +        } else if paginated_source {
              let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                  (Some(turn_id), None) => {
                      codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
-@@ -6894,9 +6933,21 @@ impl ThreadRequestProcessor {
+@@ -6916,9 +6955,21 @@ impl ThreadRequestProcessor {
                  }
              }
              Some(prepared)
@@ -1099,22 +1328,22 @@ index 4d2a1eb17907b9c5ddbd3d24d685d7a124ded9d8..17674bc95b98422be5811290d26318d6
          let projected_response_turns = prepared_fork
              .as_ref()
              .and_then(|prepared| prepared.projected_response_turns.clone());
-@@ -7010,7 +7061,9 @@ impl ThreadRequestProcessor {
-             !has_permission_override(request_overrides.as_ref(), &typesafe_overrides);
+@@ -7032,7 +7083,9 @@ impl ThreadRequestProcessor {
          let needs_latest_settings =
              restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
+         let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
 -        let loaded_parent_settings = if paginated_source && needs_latest_settings {
 +        let loaded_parent_settings = if let Some(settings) = imported_settings {
 +            Some(settings)
 +        } else if paginated_source && needs_latest_settings {
-             if let Ok(parent) = self.thread_manager.get_thread(source_thread_id).await {
+             if let Some(parent) = loaded_parent.as_ref() {
                  let snapshot = parent.thread_settings_snapshot().await;
                  Some(PersistedResumeSettings {
 diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
-index 7ab5bb73a0d9fa97c29238bc9e296f240dd8a3ce..ad3ca7cf939c246a9f6d8f770e91c073a0e64674 100644
+index 81bd0ae343b7084ab2a124d19d97635aded2402d..77a43a57730e09502274f54941baa34b786181bb 100644
 --- a/codex-rs/app-server/tests/common/test_app_server.rs
 +++ b/codex-rs/app-server/tests/common/test_app_server.rs
-@@ -1575,6 +1575,27 @@ impl TestAppServer {
+@@ -1581,6 +1581,27 @@ impl TestAppServer {
          tokio::time::timeout(DEFAULT_REQUEST_TIMEOUT, self.read_response(request_id)).await?
      }
 
@@ -1143,17 +1372,17 @@ index 7ab5bb73a0d9fa97c29238bc9e296f240dd8a3ce..ad3ca7cf939c246a9f6d8f770e91c073
          &mut self,
          method: &str,
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index 6784ddca6594161d1d7f39a1d5cdc6ccd1961faf..8a26f702bf7f8db5cf639a1f7e4fdae7ea47485d 100644
+index 15aabcd1e7d7bb42b630a3cb0b87bd39463d82e7..2e3ba1ed350ac0718160179da13fff64803bdbf5 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -104,6 +104,7 @@ mod thread_archive;
+@@ -126,6 +126,7 @@ mod thread_attachments;
  mod thread_delete;
  mod thread_environments;
  mod thread_fork;
 +mod thread_fork_handoff;
- mod thread_inject_items;
- mod thread_list;
- mod thread_list_current_agents;
+ #[path = "thread_fork_multi_agent_tests.rs"]
+ mod thread_fork_multi_agent;
+ mod thread_goal_empty_responses;
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_fork_handoff.rs b/codex-rs/app-server/tests/suite/v2/thread_fork_handoff.rs
 new file mode 100644
 index 0000000000000000000000000000000000000000..03997e5e163f4b428d26a29849ec0901c2439e92
@@ -1425,46 +1654,24 @@ index 0000000000000000000000000000000000000000..03997e5e163f4b428d26a29849ec0901
 +    assert_eq!(completed.turn.status, TurnStatus::Completed);
 +    Ok(())
 +}
+diff --git a/codex-rs/core/src/agent/control_continuity_restoration_tests.rs b/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
+index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1ac68ea21 100644
+--- a/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
++++ b/codex-rs/core/src/agent/control_continuity_restoration_tests.rs
+@@ -92,7 +92,7 @@ async fn indexed_supervisor_continuity_uses_projected_parent_completion_inner()
+     ))]);
+     let mut prepared = PreparedFork::new(
+         parent_id,
+-        /*source_end_ordinal_exclusive*/ 1,
++        /*source_end_ordinal_exclusive*/ Some(1),
+         /*history_base*/ None,
+         /*frozen_segment*/ None,
+         Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index ec21219c018a2b89af165b5e33f55942a18a64fb..409372049fcd6c97e3e830218a7cd678284493f9 100644
+index 13b88b28be15747d20f867c35c4451d96bd820db..7ab25e2fc5c7b0a3acbbbe1afed445568b768df5 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1289,6 +1289,34 @@ impl ThreadManager {
-             .multi_agent_version()
-             .unwrap_or(MultiAgentVersion::V1);
-         let source_history_mode = fork_source.config_snapshot().await.history_mode;
-+        if !self.state.thread_store.as_any().is::<LocalThreadStore>() {
-+            fork_source.ensure_rollout_materialized().await;
-+            fork_source.flush_rollout().await?;
-+            let stored_thread = fork_source
-+                .read_thread(
-+                    /*include_archived*/ true, /*include_history*/ true,
-+                )
-+                .await
-+                .map_err(|err| {
-+                    CodexErr::Fatal(format!(
-+                        "failed to read subagent fork source {forked_from_thread_id}: {err}"
-+                    ))
-+                })?;
-+            let history =
-+                stored_thread_to_initial_history(stored_thread, fork_source.rollout_path())?;
-+            options.initial_history = fork_history_from_snapshot(
-+                ForkSnapshot::Interrupted,
-+                history,
-+                InterruptedTurnHistoryMarker::from_config_and_version(
-+                    &options.config,
-+                    inherited_multi_agent_version,
-+                ),
-+            );
-+            return self
-+                .start_thread_inner(options, Some(forked_from_thread_id), agent_control)
-+                .await;
-+        }
-+
-         let (initial_history, _response_history, source_reservation) = self
-             .state
-             .reference_backed_snapshot_history(
-@@ -1712,7 +1740,9 @@ impl ThreadManager {
+@@ -1833,7 +1833,9 @@ impl ThreadManager {
          };
          model_history_override.extend_from_slice(synthesized_suffix);
          let shared_model_response_items = prepared.shared_model_response_items.clone();
@@ -1475,96 +1682,77 @@ index ec21219c018a2b89af165b5e33f55942a18a64fb..409372049fcd6c97e3e830218a7cd678
              if let Ok(source) = self.state.get_thread(source_thread_id).await {
                  Some(
                      source
-@@ -1817,32 +1847,41 @@ impl ThreadManager {
-             InterruptedTurnHistoryMarker::from_config_and_version(&config, multi_agent_version);
-         let (history, response_history, source_reservation) = if let Some(snapshot) = snapshot {
-             if let Some(source_thread_id) = source_thread_id {
--                let expected_source_items = match snapshot {
--                    ForkSnapshot::Interrupted => None,
--                    ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
--                        Some(history.get_rollout_items().to_vec())
--                    }
--                };
--                let (history, response_history, reservation) = self
--                    .state
--                    .reference_backed_snapshot_history(
--                        source_thread_id,
--                        config.codex_home.as_path(),
--                        history
--                            .get_rollout_items()
--                            .iter()
--                            .find_map(|item| match item {
--                                RolloutItem::SessionMeta(meta) => Some(meta.meta.history_mode),
--                                _ => None,
--                            })
--                            .unwrap_or_default(),
--                        snapshot,
--                        interrupted_marker,
--                        expected_source_items,
--                        expected_source_rollout_id,
--                    )
--                    .await?;
--                (history, response_history, Some(reservation))
-+                if self.state.thread_store.as_any().is::<LocalThreadStore>() {
-+                    // Interrupted forks linearize at the store freeze because the source turn can
-+                    // append after app-server reads its history. Rollback keeps the equality check
-+                    // because its user-message boundary was derived from that earlier history.
-+                    let expected_source_items = match snapshot {
-+                        ForkSnapshot::Interrupted => None,
-+                        ForkSnapshot::TruncateBeforeNthUserMessage(_) => {
-+                            Some(history.get_rollout_items().to_vec())
-+                        }
-+                    };
-+                    let (history, response_history, reservation) = self
-+                        .state
-+                        .reference_backed_snapshot_history(
-+                            source_thread_id,
-+                            config.codex_home.as_path(),
-+                            history
-+                                .get_rollout_items()
-+                                .iter()
-+                                .find_map(|item| match item {
-+                                    RolloutItem::SessionMeta(meta) => Some(meta.meta.history_mode),
-+                                    _ => None,
-+                                })
-+                                .unwrap_or_default(),
-+                            snapshot,
-+                            interrupted_marker,
-+                            expected_source_items,
-+                            expected_source_rollout_id,
-+                        )
-+                        .await?;
-+                    (history, response_history, Some(reservation))
-+                } else {
-+                    let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
-+                    let response_history = Arc::new(history.get_rollout_items().to_vec());
-+                    (history, response_history, None)
-+                }
-             } else {
-                 let history = match &history {
-                     InitialHistory::New | InitialHistory::Cleared => {
+@@ -1878,7 +1880,7 @@ impl ThreadManager {
+                 ForkHistory {
+                     snapshot: None,
+                     initial_history: history,
+-                    forked_from_ordinal_exclusive: Some(prepared.source_end_ordinal_exclusive),
++                    forked_from_ordinal_exclusive: prepared.source_end_ordinal_exclusive,
+                     model_history_override: Some(model_history_override),
+                     settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
+                     shared_model_response_items,
+@@ -2377,7 +2379,7 @@ impl ThreadManagerState {
+                         "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
+                     ))
+                 })?;
+-            let forked_from_ordinal_exclusive = Some(prepared.source_end_ordinal_exclusive);
++            let forked_from_ordinal_exclusive = prepared.source_end_ordinal_exclusive;
+             if let Some(copied_history) = &prepared.copied_history {
+                 let logical_history = copied_history.as_ref().clone();
+                 let model_history = prepared.model_context.as_ref().clone();
+diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
+index cbc2c5cdb31329e7c945c4a20a22259fda6b41d6..d70196870ef0ec084c8e44fdaa85fd22e053a063 100644
+--- a/codex-rs/core/src/thread_manager_tests.rs
++++ b/codex-rs/core/src/thread_manager_tests.rs
+@@ -642,7 +642,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+     };
+     let prepared = PreparedFork::new(
+         source_thread_id,
+-        /*source_end_ordinal_exclusive*/ 1,
++        /*source_end_ordinal_exclusive*/ Some(1),
+         /*history_base*/ None,
+         Some(frozen_segment),
+         Arc::new(boundary_context.clone()),
+@@ -3525,7 +3525,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+     let source_items = Arc::new(source_history.get_rollout_items().to_vec());
+     let prepared = PreparedFork::new(
+         source.thread_id,
+-        source_end_ordinal_exclusive,
++        Some(source_end_ordinal_exclusive),
+         /*history_base*/ None,
+         /*frozen_segment*/ None,
+         Arc::clone(&source_items),
 diff --git a/codex-rs/rollout/src/writer_lock.rs b/codex-rs/rollout/src/writer_lock.rs
-index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2a3f77c5d 100644
+index e723bc63905c1bc4d1dce652720f1de141f8e4b8..abc4b476311f6ccb8fd4f2cd32ce5efafcacd695 100644
 --- a/codex-rs/rollout/src/writer_lock.rs
 +++ b/codex-rs/rollout/src/writer_lock.rs
-@@ -21,16 +21,27 @@ const WRITER_LOCK_DIR: &str = "thread-writer-locks";
+@@ -11,6 +11,7 @@ use std::io;
+ use std::path::Path;
+ use std::path::PathBuf;
+ use std::sync::Arc;
++use std::sync::Mutex;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+
+@@ -21,16 +22,28 @@ const WRITER_LOCK_DIR: &str = "thread-writer-locks";
  const COORDINATION_LOCK_FILE: &str = ".coordination.lock";
 
- /// Acquires per-thread writer locks and removes stale lock files on first use.
+ /// Coordinates writer ownership within one Codex home.
 +#[derive(Debug)]
- pub struct RolloutWriterLockCoordinator {
+ pub struct WriterLockCoordinator {
      directory: PathBuf,
      cleanup_attempted: AtomicBool,
  }
 
--/// Exclusive cross-process ownership of one thread's mutable rollout files.
-+/// Cross-process ownership of one thread's mutable rollout files or frozen fork history.
+-/// Keeps a thread owned until all file work has finished.
++/// Keeps writer or immutable fork-reader ownership until all shared guard users finish.
 +#[derive(Debug)]
- pub struct RolloutWriterLockGuard {
-     coordinator: Arc<RolloutWriterLockCoordinator>,
+ pub struct WriterLockGuard {
+     coordinator: Arc<WriterLockCoordinator>,
      path: PathBuf,
 -    file: Option<File>,
-+    state: WriterLockState,
++    // Recorder tasks share this guard, so conversions must serialize without unique Arc access.
++    state: Mutex<WriterLockState>,
 +}
 +
 +/// A shared lock excludes new writers while the existing owner admits immutable fork readers.
@@ -1576,22 +1764,26 @@ index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2
 +    Unreserved,
  }
 
- impl RolloutWriterLockCoordinator {
-@@ -90,7 +101,33 @@ impl RolloutWriterLockCoordinator {
-         Ok(Some(RolloutWriterLockGuard {
+ impl WriterLockCoordinator {
+@@ -90,7 +103,7 @@ impl WriterLockCoordinator {
+         Ok(WriterLockGuard {
              coordinator: Arc::clone(self),
              path,
 -            file: Some(file),
-+            state: WriterLockState::Exclusive(file),
-+        }))
-+    }
-+
++            state: Mutex::new(WriterLockState::Exclusive(file)),
+         })
+     }
+
+@@ -114,6 +127,37 @@ impl WriterLockCoordinator {
+         }
+     }
+
 +    /// Reserves immutable fork history without receiving writer authority. Sharing the existing
 +    /// lock inode also excludes compression and older binaries' deletion operations.
-+    pub fn try_acquire_fork_reader(
++    pub fn acquire_fork_reader(
 +        self: &Arc<Self>,
 +        thread_id: ThreadId,
-+    ) -> io::Result<Option<RolloutWriterLockGuard>> {
++    ) -> io::Result<WriterLockGuard> {
 +        let _coordination = self.lock_coordination()?;
 +        let path = self.directory.join(format!("{thread_id}.lock"));
 +        let file = OpenOptions::new()
@@ -1602,35 +1794,47 @@ index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2
 +            .open(&path)?;
 +        match file.try_lock_shared() {
 +            Ok(()) => {}
-+            Err(std::fs::TryLockError::WouldBlock) => return Ok(None),
++            Err(std::fs::TryLockError::WouldBlock) => {
++                return Err(io::Error::new(
++                    io::ErrorKind::WouldBlock,
++                    format!("thread {thread_id} has not exported a fork snapshot"),
++                ));
++            }
 +            Err(std::fs::TryLockError::Error(error)) => return Err(error),
 +        }
-+        Ok(Some(RolloutWriterLockGuard {
++        Ok(WriterLockGuard {
 +            coordinator: Arc::clone(self),
 +            path,
-+            state: WriterLockState::Shared(file),
-         }))
-     }
-
-@@ -182,6 +219,62 @@ impl RolloutWriterLockCoordinator {
++            state: Mutex::new(WriterLockState::Shared(file)),
++        })
++    }
++
+     fn lock_coordination(&self) -> io::Result<File> {
+         fs::create_dir_all(&self.directory).map_err(|err| {
+             io::Error::new(
+@@ -202,9 +246,92 @@ impl WriterLockCoordinator {
      }
  }
 
-+impl RolloutWriterLockGuard {
++impl WriterLockGuard {
 +    /// Retains the sole logical writer, but admits read-only fork lifetime reservations.
 +    /// The coordination lock excludes acquisition and cleanup across the explicit unlock/relock;
 +    /// converting an already-locked handle is not portable.
-+    pub fn share_for_fork(&mut self) -> io::Result<()> {
++    pub fn share_for_fork(&self) -> io::Result<()> {
++        let mut state = self
++            .state
++            .lock()
++            .map_err(|_| io::Error::other("writer lock state is poisoned"))?;
 +        let _coordination = self.coordinator.lock_coordination()?;
-+        match std::mem::replace(&mut self.state, WriterLockState::Unreserved) {
++        match std::mem::replace(&mut *state, WriterLockState::Unreserved) {
 +            WriterLockState::Exclusive(file) => {
 +                file.unlock()?;
 +                file.try_lock_shared().map_err(io::Error::from)?;
-+                self.state = WriterLockState::Shared(file);
++                *state = WriterLockState::Shared(file);
 +                Ok(())
 +            }
 +            WriterLockState::Shared(file) => {
-+                self.state = WriterLockState::Shared(file);
++                *state = WriterLockState::Shared(file);
 +                Ok(())
 +            }
 +            WriterLockState::Unreserved => Err(io::Error::other("writer lock is closed")),
@@ -1639,25 +1843,29 @@ index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2
 +
 +    /// Destruction requires exclusive ownership, unlike appending to the mutable source tail.
 +    /// Returns WouldBlock if an initializing fork still holds a reader reservation.
-+    pub fn require_exclusive(&mut self) -> io::Result<()> {
++    pub fn require_exclusive(&self) -> io::Result<()> {
++        let mut state = self
++            .state
++            .lock()
++            .map_err(|_| io::Error::other("writer lock state is poisoned"))?;
 +        let _coordination = self.coordinator.lock_coordination()?;
-+        match std::mem::replace(&mut self.state, WriterLockState::Unreserved) {
++        match std::mem::replace(&mut *state, WriterLockState::Unreserved) {
 +            WriterLockState::Exclusive(file) => {
-+                self.state = WriterLockState::Exclusive(file);
++                *state = WriterLockState::Exclusive(file);
 +                Ok(())
 +            }
 +            WriterLockState::Shared(file) => {
 +                file.unlock()?;
 +                match file.try_lock() {
 +                    Ok(()) => {
-+                        self.state = WriterLockState::Exclusive(file);
++                        *state = WriterLockState::Exclusive(file);
 +                        Ok(())
 +                    }
 +                    Err(error) => {
 +                        // Restore exclusion before returning. Failed restoration leaves an
 +                        // unreserved guard so the caller can fence its drained recorder.
 +                        file.try_lock_shared().map_err(io::Error::from)?;
-+                        self.state = WriterLockState::Shared(file);
++                        *state = WriterLockState::Shared(file);
 +                        Err(error.into())
 +                    }
 +                }
@@ -1668,22 +1876,42 @@ index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2
 +
 +    /// Callers must stop using their recorder when a failed conversion loses its reservation.
 +    pub fn is_reserved(&self) -> bool {
-+        !matches!(self.state, WriterLockState::Unreserved)
++        self.state
++            .lock()
++            .is_ok_and(|state| !matches!(*state, WriterLockState::Unreserved))
 +    }
 +}
 +
- impl Drop for RolloutWriterLockGuard {
+ impl Drop for WriterLockGuard {
      fn drop(&mut self) {
-         let coordination_lock = match self.coordinator.lock_coordination() {
-@@ -193,7 +286,27 @@ impl Drop for RolloutWriterLockGuard {
+-        let coordination_lock = match self.coordinator.lock_coordination() {
++        let state = self
++            .state
++            .get_mut()
++            .unwrap_or_else(|error| error.into_inner());
++        let file = match std::mem::replace(state, WriterLockState::Unreserved) {
++            WriterLockState::Exclusive(file) | WriterLockState::Shared(file) => Some(file),
++            WriterLockState::Unreserved => None,
++        };
++        let coordination = self.coordinator.lock_coordination();
++        // Closing only this descriptor does not release locks inherited by a forked process.
++        // Unlock explicitly, then close before deletion so cleanup also works on Windows.
++        if let Some(file) = file {
++            if let Err(error) = file.unlock() {
++                warn!("failed to unlock thread writer reservation: {error}");
++            }
++            drop(file);
++        }
++        let coordination_lock = match coordination {
+             Ok(lock) => lock,
+             Err(err) => {
+                 warn!("failed to coordinate thread writer lock cleanup: {err}");
+@@ -212,8 +339,23 @@ impl Drop for WriterLockGuard {
+             }
          };
 
-         // Close the writer lock before deleting it so cleanup works on Windows too.
+-        // Close the writer lock before deleting it so cleanup works on Windows too.
 -        drop(self.file.take());
-+        drop(std::mem::replace(
-+            &mut self.state,
-+            WriterLockState::Unreserved,
-+        ));
 +        // An imported fork may outlive the source process. Keep its inode so compression and
 +        // subsequent writers cannot acquire a different lock file for the same thread.
 +        match OpenOptions::new().read(true).write(true).open(&self.path) {
@@ -1704,11 +1932,157 @@ index 0d7e0bdb0b9cd4077807b55b61d7470008998ce4..95c0e63e8cc62f2269868f820fe149f2
          if let Err(err) = fs::remove_file(&self.path)
              && err.kind() != io::ErrorKind::NotFound
          {
+diff --git a/codex-rs/rollout/src/writer_lock_tests.rs b/codex-rs/rollout/src/writer_lock_tests.rs
+index 9fad0aea36fa433dcd8fad14d1712ee9dfeb3102..f8db8e86be4cdee1905ea7176e3a76f154434625 100644
+--- a/codex-rs/rollout/src/writer_lock_tests.rs
++++ b/codex-rs/rollout/src/writer_lock_tests.rs
+@@ -7,6 +7,7 @@ use tempfile::TempDir;
+ use super::COORDINATION_LOCK_FILE;
+ use super::WRITER_LOCK_DIR;
+ use super::WriterLockCoordinator;
++use super::WriterLockState;
+ use pretty_assertions::assert_eq;
+ use std::io::ErrorKind;
+
+@@ -18,7 +19,7 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
+     let thread_id = ThreadId::default();
+     let other_thread_id = ThreadId::default();
+
+-    let owner = primary.acquire(thread_id).expect("acquire writer lock");
++    let owner = Arc::new(primary.acquire(thread_id).expect("acquire writer lock"));
+     let lock_path = home
+         .path()
+         .join(WRITER_LOCK_DIR)
+@@ -34,7 +35,44 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
+         .acquire(other_thread_id)
+         .expect("other thread should acquire its own lock");
+
++    owner.share_for_fork().expect("admit immutable fork reader");
++    let publisher = Arc::new(WriterLockCoordinator::new(home.path()));
++    assert!(
++        publisher
++            .try_acquire_for_publication(thread_id)
++            .expect("probe shared writer")
++            .is_none()
++    );
++    let reader = secondary
++        .acquire_fork_reader(thread_id)
++        .expect("reserve imported fork");
++    assert_eq!(
++        owner
++            .require_exclusive()
++            .expect_err("fork reader is active")
++            .kind(),
++        ErrorKind::WouldBlock
++    );
++    assert!(owner.is_reserved());
+     drop(owner);
++    assert!(
++        lock_path.exists(),
++        "source exit retains the reader's lock inode"
++    );
++    assert_eq!(
++        primary
++            .acquire(thread_id)
++            .expect_err("fork reader excludes writers")
++            .kind(),
++        ErrorKind::WouldBlock
++    );
++    assert!(
++        publisher
++            .try_acquire_for_publication(thread_id)
++            .expect("probe imported fork")
++            .is_none()
++    );
++    drop(reader);
+     assert!(!lock_path.exists());
+     let next_owner = secondary
+         .acquire(thread_id)
+@@ -49,6 +87,79 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
+     assert_eq!(entries, vec![COORDINATION_LOCK_FILE]);
+ }
+
++#[test]
++fn fork_reader_release_restores_exclusive_deletion() {
++    let home = TempDir::new().expect("temp dir");
++    let primary = Arc::new(WriterLockCoordinator::new(home.path()));
++    let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
++    let thread_id = ThreadId::default();
++    let owner = Arc::new(primary.acquire(thread_id).expect("writer"));
++    assert_eq!(
++        secondary
++            .acquire_fork_reader(thread_id)
++            .expect_err("writer is exclusive")
++            .kind(),
++        ErrorKind::WouldBlock
++    );
++    let recorder_owner = Arc::clone(&owner);
++    owner.share_for_fork().expect("export");
++    let reader = secondary.acquire_fork_reader(thread_id).expect("import");
++    assert_eq!(
++        recorder_owner
++            .require_exclusive()
++            .expect_err("reader is active")
++            .kind(),
++        ErrorKind::WouldBlock
++    );
++    assert!(owner.is_reserved());
++    drop(reader);
++    recorder_owner
++        .require_exclusive()
++        .expect("delete after import finishes");
++    assert_eq!(
++        secondary
++            .acquire_fork_reader(thread_id)
++            .expect_err("writer is exclusive again")
++            .kind(),
++        ErrorKind::WouldBlock
++    );
++}
++
++#[test]
++fn final_guard_drop_unlocks_inherited_descriptors() {
++    for shared in [false, true] {
++        let home = TempDir::new().expect("temp dir");
++        let primary = Arc::new(WriterLockCoordinator::new(home.path()));
++        let secondary = Arc::new(WriterLockCoordinator::new(home.path()));
++        let thread_id = ThreadId::default();
++        let owner = Arc::new(primary.acquire(thread_id).expect("writer"));
++        if shared {
++            owner.share_for_fork().expect("export");
++        }
++        let inherited = match &*owner.state.lock().expect("writer state") {
++            WriterLockState::Exclusive(file) | WriterLockState::Shared(file) => {
++                file.try_clone().expect("inherited descriptor")
++            }
++            WriterLockState::Unreserved => panic!("writer must own a reservation"),
++        };
++        let recorder_owner = Arc::clone(&owner);
++        drop(owner);
++        assert_eq!(
++            secondary
++                .acquire(thread_id)
++                .expect_err("recorder still owns writer")
++                .kind(),
++            ErrorKind::WouldBlock
++        );
++        drop(recorder_owner);
++        let next = secondary
++            .acquire(thread_id)
++            .expect("released despite inherited descriptor");
++        drop(inherited);
++        drop(next);
++    }
++}
++
+ #[test]
+ fn first_acquisition_removes_stale_locks_without_removing_active_locks() {
+     let home = TempDir::new().expect("temp dir");
 diff --git a/codex-rs/thread-store/src/lib.rs b/codex-rs/thread-store/src/lib.rs
-index 21470b7a0d3cbc11dd330c4497cde4cb3faa1277..95c7a3a4d27c184f8d7b0c186d1a92842fa400fa 100644
+index 8adfa382afb2e67172e061aa4b0ee3fef11039f6..8e11454280483cd1a6e7222ab0abcc90e0536c59 100644
 --- a/codex-rs/thread-store/src/lib.rs
 +++ b/codex-rs/thread-store/src/lib.rs
-@@ -76,6 +76,7 @@ pub use types::DeleteThreadsOutcome;
+@@ -85,6 +85,7 @@ pub use types::DeleteThreadsOutcome;
  pub use types::DeleteThreadsParams;
  pub use types::ExtraConfig;
  pub use types::ForkBoundary;
@@ -1717,10 +2091,10 @@ index 21470b7a0d3cbc11dd330c4497cde4cb3faa1277..95c7a3a4d27c184f8d7b0c186d1a9284
  pub use types::FrozenRolloutSegment;
  pub use types::GitInfoPatch;
 diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
-index f41d32a6db27d6107fed44c30ffd619c94566707..cb9f557fb801ecdbd5c4dbb044afc4ef33cc25ba 100644
+index 49fdb47e7b56317ee80eb719badd106b73c5d304..08e9340499686b9d1cf1cc8d33f02cef3ea4f7f7 100644
 --- a/codex-rs/thread-store/src/local/delete_thread.rs
 +++ b/codex-rs/thread-store/src/local/delete_thread.rs
-@@ -42,7 +42,7 @@ pub(super) async fn delete_thread(
+@@ -45,7 +45,7 @@ pub(super) async fn delete_thread(
      let thread_id = params.thread_id;
      let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
      let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
@@ -1729,7 +2103,7 @@ index f41d32a6db27d6107fed44c30ffd619c94566707..cb9f557fb801ecdbd5c4dbb044afc4ef
      let owned_rollouts = owned_rollouts_for_thread(store, thread_id).await?;
      let reference_index = scan_reference_index(store).await?;
      let targeted_rollout_ids = owned_rollouts
-@@ -113,7 +113,9 @@ where
+@@ -134,7 +134,9 @@ where
      for &thread_id in &lock_thread_ids {
          _live_writer_guards.push(store.live_writer_locks.lock(thread_id).await);
      }
@@ -1737,15 +2111,15 @@ index f41d32a6db27d6107fed44c30ffd619c94566707..cb9f557fb801ecdbd5c4dbb044afc4ef
 +    let mut writer_guards = store
 +        .acquire_destructive_writer_locks(&lock_thread_ids)
 +        .await?;
-
      let mut owned_rollouts_by_thread = HashMap::new();
      let mut targeted_rollout_ids = HashSet::new();
+     for thread_id in &deletion_set {
 diff --git a/codex-rs/thread-store/src/local/fork_handoff.rs b/codex-rs/thread-store/src/local/fork_handoff.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..5508f1e23e414a72c3c309a5352a2d5eca8ff108
+index 0000000000000000000000000000000000000000..fafc43f73766fc5afc29d27d1b71fb9e4e146f94
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/fork_handoff.rs
-@@ -0,0 +1,183 @@
+@@ -0,0 +1,184 @@
 +//! Validation of immutable fork snapshots after the receiver acquires its own source lease.
 +
 +use super::LocalThreadStore;
@@ -1819,6 +2193,7 @@ index 0000000000000000000000000000000000000000..5508f1e23e414a72c3c309a5352a2d5e
 +        );
 +        Ok(crate::PreparedFork::new(
 +            thread_id,
++            frozen.next_rollout_ordinal,
 +            /*history_base*/ None,
 +            Some(frozen),
 +            Arc::clone(&context),
@@ -1930,13 +2305,13 @@ index 0000000000000000000000000000000000000000..5508f1e23e414a72c3c309a5352a2d5e
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs
-index c17fca78c28f58ee4889999f21cdf6fe694b7fbc..2e58fc5e18960e488288dedf204c85bb0ed3bda7 100644
+index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd5873343b 100644
 --- a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs
-@@ -1190,8 +1190,7 @@ async fn repaired_history_remains_writer_reserved_until_access_is_dropped() {
+@@ -1189,8 +1189,7 @@ async fn repaired_history_remains_writer_reserved_until_access_is_dropped() {
+         .expect("repair rollout");
      let conflict = competing
-         .writer_lock_coordinator
-         .acquire(thread_id)
+         .acquire_writer_lock(thread_id)
 -        .err()
 -        .expect("repair access retains cross-process writer lock");
 +        .expect_err("repair access retains cross-process writer lock");
@@ -1944,7 +2319,7 @@ index c17fca78c28f58ee4889999f21cdf6fe694b7fbc..2e58fc5e18960e488288dedf204c85bb
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df195bd1f0a 100644
+index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf9635440c 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -1955,7 +2330,26 @@ index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df1
  mod goal_supervisor_history_repair;
  mod goal_supervisor_runtime_repair;
  #[cfg(test)]
-@@ -752,6 +753,50 @@ impl LocalThreadStore {
+@@ -187,6 +188,18 @@ type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()>
+
+ type WriterLockGuard = Arc<codex_rollout::WriterLockGuard>;
+
++fn writer_lock_error(error: std::io::Error) -> ThreadStoreError {
++    if error.kind() == std::io::ErrorKind::WouldBlock {
++        ThreadStoreError::Conflict {
++            message: error.to_string(),
++        }
++    } else {
++        ThreadStoreError::Internal {
++            message: error.to_string(),
++        }
++    }
++}
++
+ struct LiveRecorderEntry {
+     recorder: RolloutRecorder,
+     /// Reopens the committed stable rollout before the next live operation.
+@@ -779,6 +792,66 @@ impl LocalThreadStore {
          )
      }
 
@@ -1977,17 +2371,32 @@ index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df1
 +                    "failed to flush fork source before sharing its reservation: {error}"
 +                ),
 +            })?;
-+        let mut recorders = self.live_recorders.lock().await;
-+        let entry = recorders
-+            .get_mut(&thread_id)
-+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-+        let result = entry.writer_lock.share_for_fork();
-+        if !entry.writer_lock.is_reserved() {
-+            // A failed lock conversion cannot leave an active recorder authorized to write.
-+            recorders.remove(&thread_id);
++        let (result, unreserved) = {
++            let mut recorders = self.live_recorders.lock().await;
++            let entry = recorders
++                .get(&thread_id)
++                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++            let result = entry.writer_lock.share_for_fork();
++            let unreserved = if entry.writer_lock.is_reserved() {
++                None
++            } else {
++                recorders.remove(&thread_id)
++            };
++            (result, unreserved)
++        };
++        if let Some(entry) = unreserved {
++            // Keep per-thread serialization until the unauthorized recorder has stopped. The
++            // registry mutex is released before waiting so unrelated writers remain available.
++            entry
++                .recorder
++                .discard()
++                .await
++                .map_err(helpers::thread_store_io_error)?;
 +        }
-+        result?;
-+        self.writer_lock_coordinator.acquire_fork_reader(thread_id)
++        result.map_err(writer_lock_error)?;
++        self.writer_lock_coordinator
++            .acquire_fork_reader(thread_id)
++            .map_err(writer_lock_error)
 +    }
 +
 +    /// Acquires independent deletion protection before validating an imported immutable snapshot.
@@ -1999,14 +2408,34 @@ index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df1
 +        let lifecycle = self.reserve_thread_lifecycle(thread_id).await;
 +        let reader = self
 +            .writer_lock_coordinator
-+            .acquire_fork_reader(thread_id)?;
++            .acquire_fork_reader(thread_id)
++            .map_err(writer_lock_error)?;
 +        Ok((lifecycle, reader))
 +    }
 +
      pub(crate) async fn live_persistence_mode(
          &self,
          thread_id: ThreadId,
-@@ -789,6 +834,35 @@ impl LocalThreadStore {
+@@ -806,17 +879,7 @@ impl LocalThreadStore {
+         self.writer_lock_coordinator
+             .acquire(thread_id)
+             .map(Arc::new)
+-            .map_err(|err| {
+-                if err.kind() == std::io::ErrorKind::WouldBlock {
+-                    ThreadStoreError::Conflict {
+-                        message: err.to_string(),
+-                    }
+-                } else {
+-                    ThreadStoreError::Internal {
+-                        message: err.to_string(),
+-                    }
+-                }
+-            })
++            .map_err(writer_lock_error)
+     }
+
+     async fn acquire_writer_locks(
+@@ -833,6 +896,56 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 
@@ -2026,15 +2455,36 @@ index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df1
 +                .map_err(|error| ThreadStoreError::Internal {
 +                    message: format!("failed to flush thread before exclusive deletion: {error}"),
 +                })?;
-+            let mut recorders = self.live_recorders.lock().await;
-+            let entry = recorders
-+                .get_mut(&thread_id)
-+                .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
-+            let result = entry.writer_lock.require_exclusive();
-+            if !entry.writer_lock.is_reserved() {
-+                recorders.remove(&thread_id);
++            let (result, unreserved) = {
++                let mut recorders = self.live_recorders.lock().await;
++                let entry = recorders
++                    .get(&thread_id)
++                    .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++                let result = entry.writer_lock.require_exclusive();
++                let unreserved = if entry.writer_lock.is_reserved() {
++                    None
++                } else {
++                    recorders.remove(&thread_id)
++                };
++                (result, unreserved)
++            };
++            if let Some(entry) = unreserved {
++                // The caller retains this thread's writer mutex through recorder shutdown.
++                entry
++                    .recorder
++                    .discard()
++                    .await
++                    .map_err(helpers::thread_store_io_error)?;
 +            }
-+            result?;
++            result.map_err(|error| {
++                if error.kind() == std::io::ErrorKind::WouldBlock {
++                    ThreadStoreError::Conflict {
++                        message: "thread history is reserved by an initializing fork".to_string(),
++                    }
++                } else {
++                    writer_lock_error(error)
++                }
++            })?;
 +        }
 +        self.acquire_writer_locks(thread_ids).await
 +    }
@@ -2043,10 +2493,21 @@ index 1af68f9098c64ed30a09967c9c79da9b4b2517eb..74f015a6ef0c2648a8009842887c7df1
          &self,
          thread_ids: &[ThreadId],
 diff --git a/codex-rs/thread-store/src/local/paginated_fork.rs b/codex-rs/thread-store/src/local/paginated_fork.rs
-index cc903b57d74a88a5b988b9b189a48ca37102dd52..e703ed378678789488a73d1f09d46b414bfa97d4 100644
+index 8456222f1968f2398638650e92ba0c6159d12e7c..05c0da7d19bd3957f2f8aef54c6a20cc23840c00 100644
 --- a/codex-rs/thread-store/src/local/paginated_fork.rs
 +++ b/codex-rs/thread-store/src/local/paginated_fork.rs
-@@ -464,6 +464,28 @@ async fn prepare_with_response_history(
+@@ -429,6 +429,10 @@ async fn prepare_with_response_history(
+             resolve_compatibility_fork_lineage(store, thread_id, expected_rollout_id).await?
+         };
+     trace_fork_stage("resolved_reference_lineage");
++    let source_end_ordinal_exclusive = lineage
++        .segments()
++        .last()
++        .and_then(super::rollout_lineage::RolloutLineageSegment::end_ordinal);
+     let mut frozen_before_projection = None;
+     if matches!(boundary, ForkBoundary::Latest) && persistence == ForkPersistence::ReferenceBacked {
+         let writer_reservation =
+@@ -464,6 +468,34 @@ async fn prepare_with_response_history(
          frozen_before_projection = Some(frozen);
          trace_fork_stage("froze_latest_prefix_before_projection");
      }
@@ -2063,6 +2524,12 @@ index cc903b57d74a88a5b988b9b189a48ca37102dd52..e703ed378678789488a73d1f09d46b41
 +            .and_then(|frozen| frozen.history_base);
 +        return Ok(PreparedFork::new(
 +            thread_id,
++            Some(
++                source_end_ordinal_exclusive.ok_or_else(|| ThreadStoreError::Internal {
++                    message: "prepared same-thread lineage is missing its ordinal boundary"
++                        .to_string(),
++                })?,
++            ),
 +            history_base,
 +            frozen_before_projection,
 +            Arc::clone(context),
@@ -2075,11 +2542,47 @@ index cc903b57d74a88a5b988b9b189a48ca37102dd52..e703ed378678789488a73d1f09d46b41
      let source_segment = lineage
          .segments()
          .last()
+@@ -730,7 +762,7 @@ async fn prepare_with_response_history(
+     trace_fork_stage("loaded_response_history");
+     let mut prepared = PreparedFork::new(
+         thread_id,
+-        position.end_ordinal_exclusive,
++        Some(position.end_ordinal_exclusive),
+         history_base,
+         frozen_segment,
+         model_context,
+@@ -999,7 +1031,7 @@ async fn try_prepare_indexed_explicit_model_context_fork(
+     drop(history_access);
+     Ok(IndexedForkAttempt::Prepared(Box::new(PreparedFork::new(
+         thread_id,
+-        position.end_ordinal_exclusive,
++        Some(position.end_ordinal_exclusive),
+         Some(position),
+         frozen_segment,
+         Arc::clone(&model_context),
+@@ -1544,7 +1576,7 @@ async fn try_prepare_indexed_latest_fork(
+     drop(history_access);
+     let mut prepared = PreparedFork::new(
+         thread_id,
+-        position.end_ordinal_exclusive,
++        Some(position.end_ordinal_exclusive),
+         Some(position),
+         frozen_segment,
+         Arc::clone(&model_context),
+@@ -1673,7 +1705,7 @@ async fn try_prepare_certified_latest_model_context_fork(
+     let model_context = Arc::new(active_scan.items);
+     Ok(IndexedForkAttempt::Prepared(Box::new(PreparedFork::new(
+         thread_id,
+-        end_ordinal_exclusive,
++        Some(end_ordinal_exclusive),
+         Some(position),
+         frozen_segment,
+         Arc::clone(&model_context),
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 51c403877ebb623926754e23b9bdb09f43054765..824f6daa9e1114c028fde7c5251ac6a11cb12a56 100644
+index 7245e4eb2070d4cc03ecb49055ec94178ee5338f..060adc24948805b6eeb8894fd2f797ee9ef04166 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-@@ -2005,19 +2005,23 @@ async fn active_turn_stores_only_its_start_position() {
+@@ -2035,19 +2035,23 @@ async fn active_turn_stores_only_its_start_position() {
      assert!(prepared.model_context.iter().any(|item| {
          matches!(item, RolloutItem::EventMsg(EventMsg::TurnStarted(event)) if event.turn_id == "turn-1")
      }));
@@ -2112,181 +2615,23 @@ index 51c403877ebb623926754e23b9bdb09f43054765..824f6daa9e1114c028fde7c5251ac6a1
 +        .expect("validate imported snapshot");
 +    drop(import);
 +    drop(export);
-     assert_eq!(
-         prepare_paginated_fork(
-             &store,
-diff --git a/codex-rs/thread-store/src/local/writer_lock.rs b/codex-rs/thread-store/src/local/writer_lock.rs
-index d1cb03aecfd34b347ef6c785c6cf767c0c97c897..570cd4e76a00dc2be92e00c566a7658770a26d80 100644
---- a/codex-rs/thread-store/src/local/writer_lock.rs
-+++ b/codex-rs/thread-store/src/local/writer_lock.rs
-@@ -1,5 +1,6 @@
- //! Maps shared rollout writer ownership to thread-store errors.
-
-+use std::io;
- use std::path::Path;
- use std::sync::Arc;
-
-@@ -19,7 +20,11 @@ pub(super) struct WriterLockCoordinator {
-     inner: Arc<RolloutWriterLockCoordinator>,
+     let before_first_turn = prepare_paginated_fork(
+         &store,
+         thread_id,
+@@ -2055,7 +2059,7 @@ async fn active_turn_stores_only_its_start_position() {
+     )
+     .await;
+     assert_eq!(before_first_turn.history_base, None);
+-    assert_eq!(before_first_turn.source_end_ordinal_exclusive, 1);
++    assert_eq!(before_first_turn.source_end_ordinal_exclusive, Some(1));
  }
 
--pub(super) type WriterLockGuard = codex_rollout::RolloutWriterLockGuard;
-+/// Translates ownership and fork-reader reservation errors into thread-store errors.
-+#[derive(Debug)]
-+pub(super) struct WriterLockGuard {
-+    inner: codex_rollout::RolloutWriterLockGuard,
-+}
-
- impl WriterLockCoordinator {
-     pub(super) fn new(codex_home: &Path) -> Self {
-@@ -31,13 +36,53 @@ impl WriterLockCoordinator {
-     pub(super) fn acquire(&self, thread_id: ThreadId) -> ThreadStoreResult<WriterLockGuard> {
-         self.inner
-             .try_acquire(thread_id)
--            .map_err(|error| ThreadStoreError::Internal {
--                message: error.to_string(),
--            })?
-+            .map_err(lifecycle_lock_error)?
-+            .map(|inner| WriterLockGuard { inner })
-             .ok_or_else(|| ThreadStoreError::Conflict {
-                 message: format!("thread {thread_id} already has an active writer"),
-             })
-     }
-+
-+    pub(super) fn acquire_fork_reader(
-+        &self,
-+        thread_id: ThreadId,
-+    ) -> ThreadStoreResult<WriterLockGuard> {
-+        self.inner
-+            .try_acquire_fork_reader(thread_id)
-+            .map_err(lifecycle_lock_error)?
-+            .map(|inner| WriterLockGuard { inner })
-+            .ok_or_else(|| ThreadStoreError::Conflict {
-+                message: format!("thread {thread_id} has not exported a fork snapshot"),
-+            })
-+    }
-+}
-+
-+impl WriterLockGuard {
-+    pub(super) fn share_for_fork(&mut self) -> ThreadStoreResult<()> {
-+        self.inner.share_for_fork().map_err(lifecycle_lock_error)
-+    }
-+
-+    pub(super) fn require_exclusive(&mut self) -> ThreadStoreResult<()> {
-+        self.inner.require_exclusive().map_err(|error| {
-+            if error.kind() == io::ErrorKind::WouldBlock {
-+                ThreadStoreError::Conflict {
-+                    message: "thread history is reserved by an initializing fork".to_string(),
-+                }
-+            } else {
-+                lifecycle_lock_error(error)
-+            }
-+        })
-+    }
-+
-+    pub(super) fn is_reserved(&self) -> bool {
-+        self.inner.is_reserved()
-+    }
-+}
-+
-+fn lifecycle_lock_error(error: io::Error) -> ThreadStoreError {
-+    ThreadStoreError::Internal {
-+        message: format!("failed to reserve fork source: {error}"),
-+    }
- }
-
- #[cfg(test)]
-diff --git a/codex-rs/thread-store/src/local/writer_lock_tests.rs b/codex-rs/thread-store/src/local/writer_lock_tests.rs
-index 64063142251ab9d55d12add61f61b3936b4bf1a7..3d9fc742cc3a633d8f40ceee2a84774d9abc6dac 100644
---- a/codex-rs/thread-store/src/local/writer_lock_tests.rs
-+++ b/codex-rs/thread-store/src/local/writer_lock_tests.rs
-@@ -2,6 +2,8 @@ use std::fs;
- use std::sync::Arc;
-
- use codex_protocol::ThreadId;
-+use codex_rollout::RolloutWriterLockCoordinator;
-+use pretty_assertions::assert_eq;
- use tempfile::TempDir;
-
- use super::COORDINATION_LOCK_FILE;
-@@ -17,7 +19,7 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
-     let thread_id = ThreadId::default();
-     let other_thread_id = ThreadId::default();
-
--    let owner = primary.acquire(thread_id).expect("acquire writer lock");
-+    let mut owner = primary.acquire(thread_id).expect("acquire writer lock");
-     let lock_path = home
-         .path()
-         .join(WRITER_LOCK_DIR)
-@@ -33,7 +35,37 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
-         .acquire(other_thread_id)
-         .expect("other thread should acquire its own lock");
-
-+    owner.share_for_fork().expect("admit immutable fork reader");
-+    let compression = Arc::new(RolloutWriterLockCoordinator::new(home.path()));
-+    assert!(
-+        compression
-+            .try_acquire(thread_id)
-+            .expect("compression lock")
-+            .is_none()
-+    );
-+    let reader = secondary
-+        .acquire_fork_reader(thread_id)
-+        .expect("reserve imported fork");
-+    assert!(matches!(
-+        owner.require_exclusive(),
-+        Err(ThreadStoreError::Conflict { message: _ })
-+    ));
-     drop(owner);
-+    assert!(
-+        lock_path.exists(),
-+        "source exit must preserve the reader's lock inode"
-+    );
-+    assert!(matches!(
-+        primary.acquire(thread_id),
-+        Err(ThreadStoreError::Conflict { message: _ })
-+    ));
-+    assert!(
-+        compression
-+            .try_acquire(thread_id)
-+            .expect("compression lock")
-+            .is_none()
-+    );
-+    drop(reader);
-     assert!(!lock_path.exists());
-     let next_owner = secondary
-         .acquire(thread_id)
-@@ -48,6 +80,25 @@ fn writer_locks_reject_competing_owners_and_release_their_files() {
-     assert_eq!(entries, vec![COORDINATION_LOCK_FILE]);
- }
-
-+#[test]
-+fn fork_reader_release_restores_exclusive_deletion() {
-+    let home = TempDir::new().expect("temp dir");
-+    let primary = WriterLockCoordinator::new(home.path());
-+    let secondary = WriterLockCoordinator::new(home.path());
-+    let thread_id = ThreadId::default();
-+    let mut owner = primary.acquire(thread_id).expect("writer");
-+    assert!(secondary.acquire_fork_reader(thread_id).is_err());
-+    owner.share_for_fork().expect("export");
-+    let reader = secondary.acquire_fork_reader(thread_id).expect("import");
-+    assert!(owner.require_exclusive().is_err());
-+    assert!(owner.is_reserved());
-+    drop(reader);
-+    owner
-+        .require_exclusive()
-+        .expect("delete after import finishes");
-+    assert!(secondary.acquire_fork_reader(thread_id).is_err());
-+}
-+
- #[test]
- fn first_acquisition_removes_stale_locks_without_removing_active_locks() {
-     let home = TempDir::new().expect("temp dir");
+ #[tokio::test]
 diff --git a/codex-rs/thread-store/src/types.rs b/codex-rs/thread-store/src/types.rs
-index a1caffd0b2b6880552df5f886afbe3e64b421965..1364bb61d12a3de3c0548769d05219b5b677c83e 100644
+index 00d1183b84ed89acd8cd7b1cbfdf7b406dcace67..2afc2b0bcf37ea7a51d440d245f396127a1673fc 100644
 --- a/codex-rs/thread-store/src/types.rs
 +++ b/codex-rs/thread-store/src/types.rs
-@@ -280,7 +280,7 @@ impl FreezeRolloutSegmentParams {
+@@ -284,7 +284,7 @@ impl FreezeRolloutSegmentParams {
  /// Segmentation shares immutable inherited history across full-history forks and bounds the
  /// mutable live rollout after compaction. It is independent of [`ThreadHistoryMode`] and is not a
  /// legacy compatibility mechanism.
@@ -2295,7 +2640,7 @@ index a1caffd0b2b6880552df5f886afbe3e64b421965..1364bb61d12a3de3c0548769d05219b5
  pub struct FrozenRolloutSegment {
      /// Reference to the immutable source prefix.
      pub reference: RolloutReferenceItem,
-@@ -357,6 +357,15 @@ pub struct RevertThreadParams {
+@@ -361,6 +361,15 @@ pub struct RevertThreadParams {
      pub multi_agent_version: Option<MultiAgentVersion>,
  }
 
@@ -2311,7 +2656,17 @@ index a1caffd0b2b6880552df5f886afbe3e64b421965..1364bb61d12a3de3c0548769d05219b5
  /// Frozen source history and model context for a reference-backed fork.
  #[derive(Debug)]
  pub struct PreparedFork {
-@@ -383,6 +392,8 @@ pub struct PreparedFork {
+@@ -368,7 +377,8 @@ pub struct PreparedFork {
+     pub source_thread_id: ThreadId,
+     /// Exclusive ordinal selected in the source before normalizing a boundary into its ancestor.
+     /// Context-only forks retain this cutoff even when they do not freeze a source segment.
+-    pub source_end_ordinal_exclusive: u64,
++    /// Legacy sources have no rollout ordinals and use `None`.
++    pub source_end_ordinal_exclusive: Option<u64>,
+     /// Compatibility position selected while normalizing the paginated lineage.
+     pub history_base: Option<HistoryPosition>,
+     /// Canonical immutable rollout prefix inherited by a durable child.
+@@ -390,6 +400,8 @@ pub struct PreparedFork {
      pub projected_response_turns: Option<Arc<Vec<StoredTurn>>>,
      /// Authoritative copy-on-write model history retained without copying parent response items.
      pub shared_model_response_items: Option<Arc<Vec<ResponseItemEnvelope>>>,
@@ -2320,7 +2675,16 @@ index a1caffd0b2b6880552df5f886afbe3e64b421965..1364bb61d12a3de3c0548769d05219b5
      /// Whether a latest-state fork should synthesize an interruption for an open turn.
      pub interrupt_if_open: bool,
      /// Blocks source deletion until the child's history reference is durable.
-@@ -424,6 +435,7 @@ impl PreparedFork {
+@@ -413,7 +425,7 @@ impl PreparedFork {
+     #[allow(clippy::too_many_arguments)]
+     pub fn new(
+         source_thread_id: ThreadId,
+-        source_end_ordinal_exclusive: u64,
++        source_end_ordinal_exclusive: Option<u64>,
+         history_base: Option<HistoryPosition>,
+         frozen_segment: Option<FrozenRolloutSegment>,
+         model_context: Arc<Vec<RolloutItem>>,
+@@ -433,6 +445,7 @@ impl PreparedFork {
              copied_history: None,
              projected_response_turns: None,
              shared_model_response_items: None,
@@ -2329,10 +2693,10 @@ index a1caffd0b2b6880552df5f886afbe3e64b421965..1364bb61d12a3de3c0548769d05219b5
              _source_reservation: Box::new(source_reservation),
          }
 diff --git a/codex-rs/tui/src/app/event_dispatch.rs b/codex-rs/tui/src/app/event_dispatch.rs
-index 3246a0031675c5b6135cbe269cace022c1b55aa0..63762d930a8e62f971cbbb565938f5808cfa8171 100644
+index 8baea55336eb426f4aa9a1402142efba7c40c763..efa820f7ee4f038464f7fd9110f7bab08cb106ab 100644
 --- a/codex-rs/tui/src/app/event_dispatch.rs
 +++ b/codex-rs/tui/src/app/event_dispatch.rs
-@@ -421,12 +421,21 @@ impl App {
+@@ -529,12 +529,21 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2354,7 +2718,7 @@ index 3246a0031675c5b6135cbe269cace022c1b55aa0..63762d930a8e62f971cbbb565938f580
                          )
                          .await
                          {
-@@ -457,11 +466,20 @@ impl App {
+@@ -565,11 +574,20 @@ impl App {
                              tui.frame_requester().schedule_frame();
                              return Ok(AppRunControl::Continue);
                          }
@@ -2375,7 +2739,7 @@ index 3246a0031675c5b6135cbe269cace022c1b55aa0..63762d930a8e62f971cbbb565938f580
                          )
                          .await
                          {
-@@ -2916,8 +2934,15 @@ impl App {
+@@ -2822,8 +2840,15 @@ impl App {
                  parent_thread_id,
                  placement,
              } => {
@@ -2817,7 +3181,7 @@ index 959e08ca5ae8e6a967ead6d271e4b885f9a3498d..20abcf2c022d2f4d04506088cebe7a7e
 -Failed to open a new pane for /side: tmux exited with status 1
 +Could not open a side pane: tmux exited with status 1 Opening /side in this terminal instead.
 diff --git a/codex-rs/tui/src/app/standalone_side.rs b/codex-rs/tui/src/app/standalone_side.rs
-index ddafb49806fd29e16a3e8664f287199cb91151fd..6e000f1bb28f68e1894d00890ef0aa7277de35be 100644
+index ddafb49806fd29e16a3e8664f287199cb91151fd..3cd824cf50de49ddd5c9865c6234498e69fdfd44 100644
 --- a/codex-rs/tui/src/app/standalone_side.rs
 +++ b/codex-rs/tui/src/app/standalone_side.rs
 @@ -1,8 +1,7 @@
@@ -2840,7 +3204,7 @@ index ddafb49806fd29e16a3e8664f287199cb91151fd..6e000f1bb28f68e1894d00890ef0aa72
          let mut side_config = config.clone();
          side_config.ephemeral = true;
          side_config.developer_instructions =
-@@ -37,17 +34,23 @@ impl App {
+@@ -37,17 +34,27 @@ impl App {
          app_server: &mut AppServerSession,
          config: Config,
          target_session: &SessionTarget,
@@ -2857,7 +3221,11 @@ index ddafb49806fd29e16a3e8664f287199cb91151fd..6e000f1bb28f68e1894d00890ef0aa72
 -                )
 -            })?;
 +        let mut side = match handoff_socket {
-+            Some(path) => app_server.import_fork_handoff(config, path).await,
++            Some(path) => {
++                app_server
++                    .import_fork_handoff(&local_settings, config, path)
++                    .await
++            }
 +            None => {
 +                app_server
 +                    .fork_side_thread(&local_settings, config, target_session.thread_id)
@@ -3009,10 +3377,10 @@ index 9cb912221be6fd58570a48202859b33e803250c4..35b972a442714dd39e27824c19754930
      Ok(())
  }
 diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
-index fa59cab77bd31f949f11af59806a4db6b2a2eb7e..a1ae5d26f9f03a7f218a9f1fe1288f639b7623c2 100644
+index 79ef76871dbc92732ae43f8ccdb460fcd2aa0a3a..92a18abfe8a0f1303b5b853106078cb44c38b826 100644
 --- a/codex-rs/tui/src/app/startup.rs
 +++ b/codex-rs/tui/src/app/startup.rs
-@@ -140,6 +140,7 @@ impl App {
+@@ -167,6 +167,7 @@ impl App {
          initial_prompt: Option<String>,
          initial_images: Vec<PathBuf>,
          session_selection: SessionSelection,
@@ -3020,7 +3388,7 @@ index fa59cab77bd31f949f11af59806a4db6b2a2eb7e..a1ae5d26f9f03a7f218a9f1fe1288f63
          feedback: codex_feedback::CodexFeedback,
          is_first_run: bool,
          should_prompt_windows_sandbox_nux_at_startup: bool,
-@@ -565,15 +566,23 @@ impl App {
+@@ -611,15 +612,25 @@ impl App {
                      &[("source", "cli_subcommand")],
                  );
                  let forked = match startup_draft
@@ -3036,7 +3404,9 @@ index fa59cab77bd31f949f11af59806a4db6b2a2eb7e..a1ae5d26f9f03a7f218a9f1fe1288f63
 +                    .run_until(tui, async {
 +                        match fork_handoff_socket.as_deref() {
 +                            Some(path) => {
-+                                app_server.import_fork_handoff(config.clone(), path).await
++                                app_server
++                                    .import_fork_handoff(&local_settings, config.clone(), path)
++                                    .await
 +                            }
 +                            None => {
 +                                app_server
@@ -3053,7 +3423,7 @@ index fa59cab77bd31f949f11af59806a4db6b2a2eb7e..a1ae5d26f9f03a7f218a9f1fe1288f63
                      .await
                  {
                      Ok(forked) => forked,
-@@ -647,6 +656,7 @@ impl App {
+@@ -704,6 +715,7 @@ impl App {
                              &mut app_server,
                              side_config.clone(),
                              &target_session,
@@ -3062,10 +3432,10 @@ index fa59cab77bd31f949f11af59806a4db6b2a2eb7e..a1ae5d26f9f03a7f218a9f1fe1288f63
                      )
                      .await
 diff --git a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be985780044a4904a 100644
+index 8e908d5695839b21e033d6ed0c5695854d874b55..fc3ea8fee6bcb0464c11d22daa5ee921eeea6e2d 100644
 --- a/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
 +++ b/codex-rs/tui/src/app/tests/session_lifecycle_requests.rs
-@@ -2271,6 +2271,79 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
+@@ -2610,6 +2610,97 @@ async fn paginated_fork_survives_post_response_hydration_failure() -> Result<()>
      Ok(())
  }
 
@@ -3089,13 +3459,21 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
 +}
 +
 +async fn durable_fork_import_hydrates_bounded_history_and_keeps_parent_title_inner() -> Result<()> {
-+    let (app, _codex_home) = make_history_test_app().await?;
++    let (mut app, _codex_home) = make_history_test_app().await?;
++    app.local_settings.transcript_mode = crate::transcript_mode::TranscriptMode::Terminal;
++    app.local_settings.tui.alternate_screen = codex_config::types::AltScreenMode::Never;
++    app.local_settings.tui.terminal_resize_reflow_max_rows = Some(1);
 +    let parent_thread_id = create_history_rollout(
 +        &app.config,
 +        ThreadHistoryMode::Paginated,
 +        "durable fork import parent",
 +    )?;
-+    let mut source = crate::start_embedded_app_server_for_picker(&app.config).await?;
++    let (mut source, source_requests, source_proxy) = start_recording_app_server(
++        &app.config,
++        /*blocked_thread_list*/ None,
++        /*failed_thread_name*/ None,
++    )
++    .await?;
 +    source
 +        .resume_thread(
 +            &app.local_settings,
@@ -3110,6 +3488,13 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
 +    let handoff = source
 +        .prepare_fork_handoff(app.config.clone(), parent_thread_id)
 +        .await?;
++    let prepared = recorded_params(&source_requests, "thread/fork/prepare");
++    assert_eq!(prepared.len(), 1);
++    assert_eq!(prepared[0]["excludeTurns"], true);
++    assert_eq!(
++        prepared[0]["runtimeWorkspaceRoots"],
++        serde_json::to_value(&app.config.workspace_roots)?
++    );
 +    let (mut receiver, requests, proxy) = start_recording_app_server(
 +        &app.config,
 +        /*blocked_thread_list*/ None,
@@ -3118,7 +3503,7 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
 +    .await?;
 +
 +    let imported = receiver
-+        .import_fork_handoff(app.config.clone(), handoff.as_path())
++        .import_fork_handoff(&app.local_settings, app.config.clone(), handoff.as_path())
 +        .await?;
 +
 +    assert_ne!(imported.session.thread_id, parent_thread_id);
@@ -3129,7 +3514,9 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
 +    assert!(!imported.turns.is_empty());
 +    assert_eq!(recorded_params(&requests, "thread/fork/import").len(), 1);
 +    assert_eq!(recorded_params(&requests, "thread/turns/list").len(), 1);
-+    assert!(!recorded_params(&requests, "thread/items/list").is_empty());
++    let item_requests = recorded_params(&requests, "thread/items/list");
++    assert!(!item_requests.is_empty());
++    assert_eq!(item_requests[0]["limit"], 1);
 +    let reads = recorded_params(&requests, "thread/read");
 +    assert!(
 +        reads.iter().all(|params| params["includeTurns"] != true),
@@ -3139,6 +3526,7 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
 +    receiver.shutdown().await?;
 +    source.shutdown().await?;
 +    proxy.await??;
++    source_proxy.await??;
 +    Ok(())
 +}
 +
@@ -3146,7 +3534,7 @@ index 2e829ced95839533a5e9e3ebf871df84559899ba..e5a06920e55178dcb287954be9857800
  async fn underfilled_scrollback_fetches_older_pages_without_opening_the_transcript() -> Result<()> {
      let (mut app, mut app_event_rx, _op_rx) = make_test_app_with_channels().await;
 diff --git a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
-index 984058d03fdb0decba3f8ecfebf26038be12152c..b8de9bb8e9cb26657929c0f700906c3845d7bf9e 100644
+index 4c789caf5e6458450ca2881c648761a69e73b782..654c91ae34121c69e05838941fc7c7cd6b3de6f6 100644
 --- a/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 +++ b/codex-rs/tui/src/app/tests/startup_defaults_tests.rs
 @@ -24,6 +24,7 @@ async fn run_startup_for_test(
@@ -3158,10 +3546,10 @@ index 984058d03fdb0decba3f8ecfebf26038be12152c..b8de9bb8e9cb26657929c0f700906c38
          /*is_first_run*/ false,
          /*should_prompt_windows_sandbox_nux_at_startup*/ false,
 diff --git a/codex-rs/tui/src/app_server_session.rs b/codex-rs/tui/src/app_server_session.rs
-index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b958774bada 100644
+index f1cbb902feff828a19939dd83c2577d6e1bdad3d..6e6d6b3fcf1e2990650e17c6f73c3fc61bc8276e 100644
 --- a/codex-rs/tui/src/app_server_session.rs
 +++ b/codex-rs/tui/src/app_server_session.rs
-@@ -149,6 +149,7 @@ use color_eyre::eyre::Result;
+@@ -152,6 +152,7 @@ use color_eyre::eyre::Result;
  use color_eyre::eyre::WrapErr;
  use std::collections::HashMap;
  use std::collections::HashSet;
@@ -3169,7 +3557,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
  use std::path::PathBuf;
  use std::sync::Arc;
  use std::sync::atomic::AtomicBool;
-@@ -930,6 +931,67 @@ impl AppServerSession {
+@@ -958,6 +959,76 @@ impl AppServerSession {
          .await
      }
 
@@ -3178,13 +3566,22 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
 +        config: Config,
 +        thread_id: ThreadId,
 +    ) -> Result<PathBuf> {
++        let session_config = if config.model.is_none() {
++            config.clone()
++        } else {
++            self.session_config_with_effective_service_tier(&config)
++        };
 +        let mut params = thread_fork_params_from_config(
-+            self.session_config_with_effective_service_tier(&config),
++            session_config,
 +            thread_id,
 +            self.thread_params_mode(),
 +            self.remote_cwd_override.as_deref(),
 +        );
 +        params.exclude_turns = true;
++        // Pane handoffs originate from an active session, whose roots are already resolved.
++        params.runtime_workspace_roots = Some(config.workspace_roots.clone());
++        self.thread_tool_transport()
++            .configure_mcp(&mut params.config);
 +        let request_id = self.next_request_id();
 +        let response: codex_app_server_protocol::ThreadForkPrepareResponse = self
 +            .client
@@ -3202,10 +3599,10 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
 +
 +    pub(crate) async fn import_fork_handoff(
 +        &mut self,
++        local_settings: &LocalSettings,
 +        config: Config,
 +        socket_path: &Path,
 +    ) -> Result<AppServerStartedThread> {
-+        let local_settings = LocalSettings::from(&config);
 +        let request_id = self.next_request_id();
 +        let response: ThreadForkResponse = self
 +            .client
@@ -3228,7 +3625,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
 +            .then(|| response.thread.name.clone())
 +            .flatten();
 +        let mut started = self
-+            .finish_fork_response(response, &local_settings, &config, presentation)
++            .finish_fork_response(response, local_settings, &config, presentation)
 +            .await?;
 +        started.session.fork_parent_title = parent_title;
 +        Ok(started)
@@ -3237,7 +3634,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
      #[expect(
          clippy::too_many_arguments,
          reason = "keep local preferences separate while the legacy Config parameter is still required"
-@@ -1015,6 +1077,12 @@ impl AppServerSession {
+@@ -1049,6 +1120,12 @@ impl AppServerSession {
                      .await
                      .map_err(|err| {
                          bootstrap_request_error("thread/fork failed during TUI bootstrap", err)
@@ -3250,7 +3647,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
                      })?
              }
              Err(err) => {
-@@ -1024,7 +1092,24 @@ impl AppServerSession {
+@@ -1058,7 +1135,24 @@ impl AppServerSession {
                  ));
              }
          };
@@ -3276,7 +3673,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
          if presentation == ForkPresentation::Regular
              && !response.thread.ephemeral
              && let Err(error) = self
-@@ -1032,7 +1117,7 @@ impl AppServerSession {
+@@ -1066,7 +1160,7 @@ impl AppServerSession {
                      &mut response.thread,
                      /*turn_cursor*/ None,
                      /*item_cursor*/ None,
@@ -3285,7 +3682,7 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
                      Some(local_settings),
                      HistoryHydrationScope::Initial,
                  )
-@@ -1044,19 +1129,13 @@ impl AppServerSession {
+@@ -1078,19 +1172,13 @@ impl AppServerSession {
                  "preserving the created fork after bounded history hydration failed"
              );
          }
@@ -3309,10 +3706,10 @@ index 88b69ce7d6d3b79c613e727106cdf9dd32444c30..a2d0aab77f87a851a304b058f1ba1b95
 
      pub(crate) fn thread_params_mode(&self) -> ThreadParamsMode {
 diff --git a/codex-rs/tui/src/cli.rs b/codex-rs/tui/src/cli.rs
-index 7a47def541ca2dda10de9488c6e46d514cb39f3a..337b23d3154c28a1d466af1ac2b798fa8d0ec6cf 100644
+index 4a3f3310b98361c6eed5ec2cc3bb3431a94cb223..5593e868f3ba1d13a3e0690266f541b047c8ed97 100644
 --- a/codex-rs/tui/src/cli.rs
 +++ b/codex-rs/tui/src/cli.rs
-@@ -69,6 +69,11 @@ pub struct Cli {
+@@ -74,6 +74,11 @@ pub struct Cli {
      )]
      pub side_session_id: Option<String>,
 
@@ -3446,12 +3843,12 @@ index aef73cb4b8b423f4e4af28b9f68222514d683bb9..42db5f78a427a831ca0f4f9a0513b151
      .expect_err("NUL must fail shell quoting");
      assert!(err.contains("failed to quote fork command for Ghostty"));
 diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
-index 0f1e41674442682defea0237ed1ac1b7853684ac..1be58dbfcc0481f4ab61d771137d03f4d0c7b5ca 100644
+index 1d9547ce285fde518730fea1b10e04e98c1fdb91..52af734ab5e3ae3baf1050725d3c61e99da5317b 100644
 --- a/codex-rs/tui/src/lib.rs
 +++ b/codex-rs/tui/src/lib.rs
-@@ -1397,6 +1397,23 @@ async fn run_ratatui_app(
+@@ -1425,6 +1425,23 @@ async fn run_ratatui_app(
      let use_fork = cli.fork_picker || cli.fork_last || cli.fork_session_id.is_some();
-     let session_selection = if cli.agents_overview {
+     let mut session_selection = if cli.agents_overview {
          resume_picker::SessionSelection::AgentsOverview
 +    } else if cli.fork_handoff_socket.is_some() {
 +        let id = cli
@@ -3473,7 +3870,7 @@ index 0f1e41674442682defea0237ed1ac1b7853684ac..1be58dbfcc0481f4ab61d771137d03f4
      } else if let Some(id_str) = cli.side_session_id.as_deref() {
          let Some(startup_app_server) = app_server.as_mut() else {
              unreachable!("app server should be initialized for an internal side session");
-@@ -1628,39 +1645,43 @@ async fn run_ratatui_app(
+@@ -1661,39 +1678,43 @@ async fn run_ratatui_app(
      }
 
      let current_cwd = config.cwd.clone();
@@ -3550,15 +3947,15 @@ index 0f1e41674442682defea0237ed1ac1b7853684ac..1be58dbfcc0481f4ab61d771137d03f4
          }
      };
 
-@@ -1752,6 +1773,7 @@ async fn run_ratatui_app(
-     #[cfg(not(target_os = "windows"))]
-     let should_prompt_windows_sandbox_nux_at_startup = false;
-
-+    let fork_handoff_socket = cli.fork_handoff_socket;
-     let Cli {
+@@ -1951,6 +1972,7 @@ async fn run_ratatui_app(
          prompt,
          shared,
-@@ -1884,6 +1906,7 @@ async fn run_ratatui_app(
+         daemon_cli_executable,
++        fork_handoff_socket,
+         ..
+     } = cli;
+     let images = shared.into_inner().images;
+@@ -2029,6 +2051,7 @@ async fn run_ratatui_app(
          prompt,
          images,
          session_selection,
@@ -3567,10 +3964,10 @@ index 0f1e41674442682defea0237ed1ac1b7853684ac..1be58dbfcc0481f4ab61d771137d03f4
          should_show_trust_screen, // Proxy to: is it a first run in this directory?
          should_prompt_windows_sandbox_nux_at_startup,
 diff --git a/codex-rs/tui/src/startup_orchestration.rs b/codex-rs/tui/src/startup_orchestration.rs
-index a8e38fffd7a7919bf0c23f989cb88b2861cfdcbb..cfa17c633ad1ebeda0cf2e00bed9c0c016e9daa9 100644
+index d5a92e2a8fde4f459564067eab60e4ff8fc06046..1fc54d712a5975b0748d1046bdba8a5f983f492d 100644
 --- a/codex-rs/tui/src/startup_orchestration.rs
 +++ b/codex-rs/tui/src/startup_orchestration.rs
-@@ -78,7 +78,7 @@ pub(super) async fn run_main_inner(
+@@ -100,7 +100,7 @@ pub(super) async fn run_main_inner(
          launch_loader_overrides.user_config_profile = Some(profile_v2.clone());
      }
      let workload_identity_selected = is_workload_identity_selected();

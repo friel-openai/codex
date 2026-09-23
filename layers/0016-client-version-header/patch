@@ -1,8 +1,8 @@
 diff --git a/codex-rs/model-provider-info/src/lib.rs b/codex-rs/model-provider-info/src/lib.rs
-index 3fb3e87a2aa9b034713687b20b7f11c38b182389..0a20a06ed373799892806d5a97d54a3f792b5f2c 100644
+index 3be93a68306ce2a4c934048c6312d1fa3976222e..5a502e2d4aed0efbce5d07e47dd87f1bd9ea320b 100644
 --- a/codex-rs/model-provider-info/src/lib.rs
 +++ b/codex-rs/model-provider-info/src/lib.rs
-@@ -59,6 +59,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
+@@ -96,6 +96,18 @@ const CHAT_WIRE_API_REMOVED_ERROR: &str = "`wire_api = \"chat\"` is no longer su
  pub const LEGACY_OLLAMA_CHAT_PROVIDER_ID: &str = "ollama-chat";
  pub const OLLAMA_CHAT_PROVIDER_REMOVED_ERROR: &str = "`ollama-chat` is no longer supported.\nHow to fix: replace `ollama-chat` with `ollama` in `model_provider`, `oss_provider`, or `--local-provider`.\nMore info: https://github.com/openai/codex/discussions/7782";
 
@@ -21,7 +21,7 @@ index 3fb3e87a2aa9b034713687b20b7f11c38b182389..0a20a06ed373799892806d5a97d54a3f
  /// Wire protocol that the provider speaks.
  #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, JsonSchema)]
  #[serde(rename_all = "lowercase")]
-@@ -395,9 +407,14 @@ impl ModelProviderInfo {
+@@ -523,9 +535,14 @@ other non-default provider fields are not supported"
              wire_api: WireApi::Responses,
              query_params: None,
              http_headers: Some(
@@ -40,15 +40,16 @@ index 3fb3e87a2aa9b034713687b20b7f11c38b182389..0a20a06ed373799892806d5a97d54a3f
              env_http_headers: Some(
                  [
 diff --git a/codex-rs/model-provider-info/src/model_provider_info_tests.rs b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-index d08af0ffb54c266d81465cd056944e2085889b97..3e3523756c0ba36ab521daf44e42346243500cf2 100644
+index c0c3971936531696f618fb435d9ec151117e22d5..699dad7ada0cb7a55dcc539fb7b16694e90ae566 100644
 --- a/codex-rs/model-provider-info/src/model_provider_info_tests.rs
 +++ b/codex-rs/model-provider-info/src/model_provider_info_tests.rs
-@@ -167,6 +167,36 @@ fn codex_backend_routes_require_codex_base_url() {
+@@ -221,6 +221,37 @@ fn codex_backend_routes_require_codex_base_url() {
      }
  }
 
 +#[test]
 +fn openai_client_version_header_preserves_prerelease_and_strips_build_metadata() {
++    assert_eq!(openai_client_version_header("0.156.1+frodex.0"), "0.156.1");
 +    assert_eq!(
 +        openai_client_version_header("0.148.0-alpha.20+frodex.0"),
 +        "0.148.0-alpha.20"

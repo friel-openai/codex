@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index 026db3848f66fdf980f319c1b8e1344465d66f04..ca0ecfa8b6eae5a62eb062e17d5214ad1888c53d 100644
+index db3339924ce3a25cce399ab780e4724d36bcb7b2..d339e24467aa0d96c5c31dd8f366c076b1b30162 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -4589,6 +4589,7 @@ dependencies = [
+@@ -4750,6 +4750,7 @@ dependencies = [
  name = "codex-thread-store"
  version = "0.154.0"
  dependencies = [
@@ -121,7 +121,7 @@ index 07eab7908e99f3b5e8cc37256d3ea6ae4d3dc3f2..1f1aa8357c70746a1387b3355abf37be
 
  async fn init_mcp(codex_home: &Path) -> Result<TestAppServer> {
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_live.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_live.rs
-index 316756dd6ecc7663205fa3e9c9ad9f368c762364..4ce8e0070f7594da5adc37493826825b1a52a1f4 100644
+index e8a11055f3a7277e686b0a2bcb6ef5b343bbe77c..02d838e80e031cc0b756bfada5b7d4cb16179806 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_live.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_live.rs
 @@ -144,13 +144,9 @@ async fn thread_list_relation_matches_list_agents_immediately_after_spawn_starte
@@ -382,7 +382,7 @@ index 316756dd6ecc7663205fa3e9c9ad9f368c762364..4ce8e0070f7594da5adc37493826825b
          .await?
          .data
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
-index 076e8338188cc3f68192850f1cc039fe17754e29..a4c9264471d236b1a1dc6fc44ca057ab0e04bb3a 100644
+index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e374f608f 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_list_current_agents_pagination.rs
 @@ -65,10 +65,10 @@ async fn thread_list_relation_includes_explicitly_resumed_archived_v1_agent() ->
@@ -649,10 +649,10 @@ index 076e8338188cc3f68192850f1cc039fe17754e29..a4c9264471d236b1a1dc6fc44ca057ab
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c8719eb9fb7 100644
+index e42886feabf28b1e798d41bcb84f00553e7dbc0b..1792ed3414e9bf04e4769fe9e2ada2b961d3fbd8 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -392,6 +392,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -411,6 +411,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
          .get_thread(helper_thread_id)
          .await
          .expect("supervisor helper should be registered");
@@ -660,7 +660,7 @@ index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c87
      assert_eq!(
          helper_thread.session.prompt_cache_key(),
          parent.thread.session.prompt_cache_key(),
-@@ -447,31 +448,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
+@@ -466,31 +467,14 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
              if name == "list_agents" && call_id == SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID
      )));
 
@@ -700,7 +700,7 @@ index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c87
  }
 
  fn spawn_agent_call(call_id: &str) -> ResponseItem {
-@@ -729,6 +713,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -748,6 +732,7 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          .get_thread(helper_thread_id)
          .await
          .expect("goal supervisor helper should be registered");
@@ -708,7 +708,7 @@ index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c87
      let helper_snapshot = helper_thread.config_snapshot().await;
      let helper_source = helper_snapshot.session_source.clone();
      let expected_path = AgentPath::root()
-@@ -759,32 +744,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
+@@ -778,32 +763,16 @@ async fn goal_supervisor_full_history_bootstrap_survives_cold_resume_inner() {
          &supervisor_prompt,
          GENERIC_SUBAGENT_HINT,
      );
@@ -750,7 +750,7 @@ index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c87
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -8003,18 +7972,52 @@ while True:
+@@ -8783,18 +8752,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -805,7 +805,7 @@ index 6883eb2f73185ca8f4ddf2fd71a18cc034a784d7..0d46ed8f4d8ea26e2b8a90bed4a77c87
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -8025,13 +8028,8 @@ while True:
+@@ -8805,13 +8808,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -852,10 +852,10 @@ index 75024bbe0fb952b58b3fb4c9f13b9e2ebb71c4ff..6e15c5fe5b22a75a06bc48c93bdf7efc
  tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
  uuid = { workspace = true }
 diff --git a/codex-rs/thread-store/src/local/delete_thread.rs b/codex-rs/thread-store/src/local/delete_thread.rs
-index 0bc8234d285053004a23f3800b1b2575a4def870..f41d32a6db27d6107fed44c30ffd619c94566707 100644
+index da69eeee1c464dae5fac85a9d2ea5d1bfd35f49c..49fdb47e7b56317ee80eb719badd106b73c5d304 100644
 --- a/codex-rs/thread-store/src/local/delete_thread.rs
 +++ b/codex-rs/thread-store/src/local/delete_thread.rs
-@@ -45,13 +45,22 @@ pub(super) async fn delete_thread(
+@@ -48,13 +48,22 @@ pub(super) async fn delete_thread(
      let mut writer_guards = store.acquire_writer_locks(&[thread_id]).await?;
      let owned_rollouts = owned_rollouts_for_thread(store, thread_id).await?;
      let reference_index = scan_reference_index(store).await?;
@@ -882,8 +882,8 @@ index 0bc8234d285053004a23f3800b1b2575a4def870..f41d32a6db27d6107fed44c30ffd619c
 +    }) {
          return Err(referenced_thread_error(thread_id));
      }
-     delete_thread_after_reference_check(store, thread_id, owned_rollouts, &mut writer_guards)
-@@ -116,26 +125,13 @@ where
+     if let Some(cleanup) = &store.thread_data_cleanup {
+@@ -136,26 +145,13 @@ where
      let reference_index = scan_reference_index(store).await?;
      // References from children in this delete set are removed by the same request, so only
      // references from children outside the set should block it.
@@ -917,8 +917,8 @@ index 0bc8234d285053004a23f3800b1b2575a4def870..f41d32a6db27d6107fed44c30ffd619c
      for thread_id in &thread_ids {
          let rollout_ids = owned_rollouts_by_thread
              .get(thread_id)
-@@ -197,6 +193,27 @@ where
-     })
+@@ -246,6 +242,27 @@ async fn delete_state_rows(
+         })
  }
 
 +fn internal_reference_counts(
@@ -945,7 +945,7 @@ index 0bc8234d285053004a23f3800b1b2575a4def870..f41d32a6db27d6107fed44c30ffd619c
  async fn scan_reference_index(
      store: &LocalThreadStore,
  ) -> ThreadStoreResult<RolloutReferenceIndex> {
-@@ -1078,9 +1095,16 @@ mod tests {
+@@ -1305,9 +1322,16 @@ mod tests {
          let sibling_link = imported_path.with_extension("jsonl.zst");
          symlink(&outside_sibling, &sibling_link).expect("link outside sibling");
          let store = LocalThreadStore::new(config, Some(state_db));
@@ -1741,10 +1741,10 @@ index 0000000000000000000000000000000000000000..af1b45cefab963dcbed25c24ff20b3f1
 +mod tests;
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_history_repair_tests.rs b/codex-rs/thread-store/src/local/goal_supervisor_history_repair_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..b2fb5e1a6ed1bfde358944e75a9435b9f8a2d9c4
+index 0000000000000000000000000000000000000000..b82fda4f0f533fcd873e2bde44aa6d861df2f98c
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_history_repair_tests.rs
-@@ -0,0 +1,671 @@
+@@ -0,0 +1,699 @@
 +use std::collections::HashSet;
 +
 +use base64::Engine as _;
@@ -2352,11 +2352,27 @@ index 0000000000000000000000000000000000000000..b2fb5e1a6ed1bfde358944e75a9435b9
 +
 +#[test]
 +fn rewrite_preserves_unterminated_tail_and_projection() {
-+    let lines = vec![
++    let mut lines = vec![
 +        session_meta(AFFECTED_CLI_VERSION),
 +        delivery(/*ordinal*/ 1, /*trigger_turn*/ true),
 +        poisoned_message(/*ordinal*/ 2, "synthetic unterminated instruction"),
 +    ];
++    let RolloutItem::ResponseItem(envelope) = &mut lines[2].item else {
++        panic!("response envelope");
++    };
++    let metadata = envelope.metadata.get_or_insert_default();
++    metadata.client_authored = true;
++    metadata.history_truncation_token_limit = Some(512);
++    let mut expected = lines[2].clone();
++    let RolloutItem::ResponseItem(envelope) = &mut expected.item else {
++        panic!("expected response envelope");
++    };
++    let ResponseItem::AgentMessage { content, .. } = &mut envelope.item else {
++        panic!("expected goal-supervisor message");
++    };
++    *content = vec![AgentMessageInputContent::InputText {
++        text: "Message Type: NEW_TASK\nTask name: /root\nSender: /root/goal_supervisor\nPayload:\nsynthetic unterminated instruction".to_string(),
++    }];
 +    let mut source = encode_jsonl(&lines);
 +    assert_eq!(source.pop(), Some(b'\n'));
 +
@@ -2366,6 +2382,18 @@ index 0000000000000000000000000000000000000000..b2fb5e1a6ed1bfde358944e75a9435b9
 +
 +    assert_eq!(rewritten.len(), source.len());
 +    assert!(!rewritten.ends_with(b"\n"));
++    let repaired = codex_rollout::parse_rollout_line_bytes(
++        rewritten
++            .rsplit(|byte| *byte == b'\n')
++            .next()
++            .expect("unterminated response record"),
++    )
++    .expect("decode repaired response envelope");
++    assert_eq!(
++        serde_json::to_value(repaired).expect("serialize repaired record"),
++        serde_json::to_value(expected).expect("serialize expected record"),
++        "repair must preserve envelope metadata, sender, recipient, turn ID, timestamp, and ordinal",
++    );
 +}
 +
 +#[test]
@@ -2418,7 +2446,7 @@ index 0000000000000000000000000000000000000000..b2fb5e1a6ed1bfde358944e75a9435b9
 +}
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..c5d6e8218beb1b6e48c9d2bf51ca330e075a05f6
+index 0000000000000000000000000000000000000000..9ffd8f5c4051f6a0de4b7397a4cb75f91c47ad53
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair.rs
 @@ -0,0 +1,1627 @@
@@ -2440,6 +2468,7 @@ index 0000000000000000000000000000000000000000..c5d6e8218beb1b6e48c9d2bf51ca330e
 +
 +use super::LocalThreadStore;
 +use super::RolloutWriterReservation;
++use super::WriterLockGuard;
 +use super::goal_supervisor_history_repair::GoalSupervisorLineageProvenance;
 +use super::goal_supervisor_history_repair::SELECTED_MISSING_MESSAGE_ID;
 +use super::goal_supervisor_history_repair::reject_malformed_goal_supervisor_supplied_history;
@@ -2463,7 +2492,6 @@ index 0000000000000000000000000000000000000000..c5d6e8218beb1b6e48c9d2bf51ca330e
 +use super::segment::history_repair_publication::reserve_history_repair_lifecycle;
 +use super::segment::history_repair_publication::reserve_history_repair_maintenance;
 +use super::segment::history_repair_publication::validate_legacy_initial_repair_path;
-+use super::writer_lock::WriterLockGuard;
 +use crate::ThreadStoreError;
 +use crate::ThreadStoreResult;
 +use codex_protocol::SegmentId;
@@ -4051,10 +4079,10 @@ index 0000000000000000000000000000000000000000..c5d6e8218beb1b6e48c9d2bf51ca330e
 +}
 diff --git a/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..8616e254fe36a759311b40e66fee564542dc9a49
+index 0000000000000000000000000000000000000000..1b3798604529e140cc1fb887a7a41c8e73ae54a5
 --- /dev/null
 +++ b/codex-rs/thread-store/src/local/goal_supervisor_runtime_repair_tests.rs
-@@ -0,0 +1,1169 @@
+@@ -0,0 +1,1161 @@
 +use std::path::Path;
 +
 +use chrono::Utc;
@@ -5183,15 +5211,13 @@ index 0000000000000000000000000000000000000000..8616e254fe36a759311b40e66fee5645
 +        .await
 +        .expect("repair rollout");
 +    let conflict = competing
-+        .writer_lock_coordinator
-+        .acquire(thread_id)
++        .acquire_writer_lock(thread_id)
 +        .err()
 +        .expect("repair access retains cross-process writer lock");
 +    assert!(conflict.to_string().contains("active writer"));
 +    drop(access);
 +    competing
-+        .writer_lock_coordinator
-+        .acquire(thread_id)
++        .acquire_writer_lock(thread_id)
 +        .expect("dropping access releases writer lock");
 +}
 +
@@ -5212,16 +5238,10 @@ index 0000000000000000000000000000000000000000..8616e254fe36a759311b40e66fee5645
 +        .await
 +        .expect("validate clean rollout");
 +    assert!(access.is_reserved());
-+    assert!(
-+        competing
-+            .writer_lock_coordinator
-+            .acquire(thread_id)
-+            .is_err()
-+    );
++    assert!(competing.acquire_writer_lock(thread_id).is_err());
 +    drop(access);
 +    competing
-+        .writer_lock_coordinator
-+        .acquire(thread_id)
++        .acquire_writer_lock(thread_id)
 +        .expect("dropping access releases clean writer lock");
 +}
 diff --git a/codex-rs/thread-store/src/local/helpers.rs b/codex-rs/thread-store/src/local/helpers.rs
@@ -5249,7 +5269,7 @@ index 333ad1782198ff4a802eebf2e2f73bb720ff3150..6b035bf50f140eeeddbfe477e1013ae3
          codex_rollout::SESSIONS_SUBDIR,
          codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
 diff --git a/codex-rs/thread-store/src/local/live_writer.rs b/codex-rs/thread-store/src/local/live_writer.rs
-index fec6fa5c30389ab4d777b99fcd279447cf4c2d0f..ee40838bb419c43f3db671b7be560155c2fa30a4 100644
+index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8d1f88def 100644
 --- a/codex-rs/thread-store/src/local/live_writer.rs
 +++ b/codex-rs/thread-store/src/local/live_writer.rs
 @@ -68,9 +68,11 @@ pub(super) async fn resume_thread(
@@ -5259,7 +5279,7 @@ index fec6fa5c30389ab4d777b99fcd279447cf4c2d0f..ee40838bb419c43f3db671b7be560155
 -    let _live_writer_guard = store.live_writer_locks.lock(params.thread_id).await;
 +    // Keep the duplicate-writer error ahead of history inspection.
      store.ensure_live_recorder_absent(params.thread_id).await?;
--    let writer_lock = store.writer_lock_coordinator.acquire(params.thread_id)?;
+-    let writer_lock = store.acquire_writer_lock(params.thread_id)?;
 +    if let Some(history) = params.history.as_deref() {
 +        super::goal_supervisor_runtime_repair::reject_malformed_supplied_history(history)?;
 +    }
@@ -5284,7 +5304,7 @@ index fec6fa5c30389ab4d777b99fcd279447cf4c2d0f..ee40838bb419c43f3db671b7be560155
                  },
              )
              .await?;
-@@ -126,6 +130,60 @@ pub(super) async fn resume_thread(
+@@ -126,6 +130,64 @@ pub(super) async fn resume_thread(
                  })?
          }
      };
@@ -5297,7 +5317,11 @@ index fec6fa5c30389ab4d777b99fcd279447cf4c2d0f..ee40838bb419c43f3db671b7be560155
 +                message: format!("failed to resume local thread recorder: {error}"),
 +            })?;
 +        let rollout_id =
-+            codex_rollout::rollout_id_from_path(rollout_path.as_path()).unwrap_or(params.thread_id);
++            super::thread_rollout_resolver::rollout_id_from_path_or_authenticated_thread_id(
++                rollout_path.as_path(),
++                params.thread_id,
++                session_meta.meta.id,
++            )?;
 +        if super::model_context::scan_projected_active_model_context(
 +            store,
 +            rollout_id,
@@ -5340,13 +5364,13 @@ index fec6fa5c30389ab4d777b99fcd279447cf4c2d0f..ee40838bb419c43f3db671b7be560155
 +                ),
 +            })?
 +    } else {
-+        store.writer_lock_coordinator.acquire(params.thread_id)?
++        store.acquire_writer_lock(params.thread_id)?
 +    };
      let cwd = params
          .metadata
          .cwd
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d56524b66 100644
+index ebe64bf9e11b391a3ce22a4dbdeb71de7d650bb6..fea4ae7c1069aaf980bda0cf6e09c9c0ac30df4a 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5360,7 +5384,7 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
  mod helpers;
  mod list_threads;
  mod live_writer;
-@@ -193,15 +197,24 @@ struct LiveRecorderRecovery {
+@@ -206,15 +210,24 @@ struct LiveRecorderRecovery {
  /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
  /// entry supplies that half of the reservation until the in-process mutex is released.
  struct RolloutWriterReservation {
@@ -5387,7 +5411,7 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
  }
 
  #[derive(Default)]
-@@ -406,7 +419,36 @@ impl LocalThreadStore {
+@@ -431,7 +444,36 @@ impl LocalThreadStore {
          thread_id: ThreadId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
@@ -5425,7 +5449,7 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
      }
 
      /// Freezes a thread only while the expected physical rollout remains selected.
-@@ -416,13 +458,43 @@ impl LocalThreadStore {
+@@ -441,13 +483,43 @@ impl LocalThreadStore {
          expected_rollout_id: codex_protocol::RolloutId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
@@ -5473,7 +5497,7 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
      }
 
      /// Freezes a paginated fork without reading history excluded from its response.
-@@ -598,13 +670,21 @@ impl LocalThreadStore {
+@@ -640,13 +712,20 @@ impl LocalThreadStore {
          thread_ids.dedup();
          let mut in_process_guards = Vec::with_capacity(thread_ids.len());
          for &thread_id in &thread_ids {
@@ -5485,8 +5509,7 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
 +            if self.live_recorders.lock().await.contains_key(&thread_id) {
 +                continue;
 +            }
-+            cross_process_guards
-+                .push((thread_id, self.writer_lock_coordinator.acquire(thread_id)?));
++            cross_process_guards.push((thread_id, self.acquire_writer_lock(thread_id)?));
          }
 -        let cross_process_guards = self.acquire_writer_locks(thread_ids.as_slice()).await?;
          Ok(RolloutWriterReservation {
@@ -5498,11 +5521,29 @@ index 0b30d3f3c26020f8910cd8ca236b2073e65dff2e..02b7188cd9bf8e5b725b6bc7a1efdb8d
          })
      }
 
+@@ -1273,7 +1352,7 @@ mod tests {
+             .expect("recover recorder");
+         drop(store);
+
+-        let locks = WriterLockCoordinator::new(home.path());
++        let locks = Arc::new(WriterLockCoordinator::new(home.path()));
+         assert!(
+             matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+         );
+@@ -2240,7 +2319,7 @@ mod tests {
+             drop(recorder);
+
+             // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
+-            let locks = WriterLockCoordinator::new(home.path());
++            let locks = Arc::new(WriterLockCoordinator::new(home.path()));
+             let _guard = locks
+                 .acquire(thread_id)
+                 .expect("writer lock must be released");
 diff --git a/codex-rs/thread-store/src/local/model_context.rs b/codex-rs/thread-store/src/local/model_context.rs
-index 84bc2acb048bce027b0186e8f955dca9d7c22be7..043189b71a64fc6cb45d3a8db4a21495f54b2d33 100644
+index c3bb20b6405a8a72813b5ad687df1d0c49a9a4dd..a1375058a7a523c3ade198026d9a2544d4652d4d 100644
 --- a/codex-rs/thread-store/src/local/model_context.rs
 +++ b/codex-rs/thread-store/src/local/model_context.rs
-@@ -53,10 +53,10 @@ pub(super) async fn load_latest_model_context(
+@@ -55,10 +55,10 @@ pub(super) async fn load_latest_model_context(
      .ok_or_else(|| ThreadStoreError::InvalidRequest {
          message: format!("no rollout found for thread id {}", params.thread_id),
      })?;
@@ -5515,7 +5556,7 @@ index 84bc2acb048bce027b0186e8f955dca9d7c22be7..043189b71a64fc6cb45d3a8db4a21495
          .await
          .map_err(|err| ThreadStoreError::Internal {
              message: format!("failed to read session metadata {}: {err}", path.display()),
-@@ -72,13 +72,72 @@ pub(super) async fn load_latest_model_context(
+@@ -74,13 +74,72 @@ pub(super) async fn load_latest_model_context(
          });
      }
 
@@ -6110,7 +6151,7 @@ index 4a9add451d84ef6a6e75160d6ab5c718cd879e3b..208497c2a8977352d635ef13bd24bb39
      thread.history = Some(StoredThreadHistory { thread_id, items });
      Ok(())
 diff --git a/codex-rs/thread-store/src/local/revert_thread.rs b/codex-rs/thread-store/src/local/revert_thread.rs
-index c96cac26b3bff8e9199778f67fd5d1d55bb602af..ab3197c858b04e1e7ebfd35b88fb205acc788c5e 100644
+index 9f6e8f139d11563c64b552951a51a157aeb57b98..ca94371c3cd9a16cf49fe541afa7437ef1a58df1 100644
 --- a/codex-rs/thread-store/src/local/revert_thread.rs
 +++ b/codex-rs/thread-store/src/local/revert_thread.rs
 @@ -92,6 +92,9 @@ pub(super) async fn revert(
@@ -6488,15 +6529,15 @@ index db6b7191f8306e77a035416ba9a53c31678667ca..ecfb007156bba76ac3328c6ac83911cf
      HistoryPosition {
          thread_id,
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 8b261ec13e9ff8878cbdc538c61fce81699259e6..30d3054e5b0613343f4fb05c3b171f9467428aad 100644
+index 8b261ec13e9ff8878cbdc538c61fce81699259e6..c352ca8a6546250370040f8b96c781063395a889 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
 @@ -46,6 +46,9 @@ use crate::ThreadPersistenceMode;
  use crate::ThreadStoreError;
  use crate::ThreadStoreResult;
 
-+pub(super) mod history_repair_publication;
 +pub(crate) mod confined_publication;
++pub(super) mod history_repair_publication;
 +
  #[cfg(test)]
  static SEGMENT_REOPEN_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =
@@ -11459,7 +11500,7 @@ index ff17cfc7a6674e8d6da5fb038e381de9816aa1e2..6339dec4ee1ede3abd6388ef34e09158
              filter_texts: Vec::new(),
          }
 diff --git a/codex-rs/thread-store/src/local/unarchive_thread.rs b/codex-rs/thread-store/src/local/unarchive_thread.rs
-index 4ef1bdb0afab39a179f45cdc42b2b4aea151ff75..a1d4fb07bfcd165faf7670a1d47c6b4ba65cb84b 100644
+index 017d18ad00a3739dbc1188dd4faee35d8957c1c7..d49d7eaa4ca7bcb5fb6220e0b22f4612edd3ee96 100644
 --- a/codex-rs/thread-store/src/local/unarchive_thread.rs
 +++ b/codex-rs/thread-store/src/local/unarchive_thread.rs
 @@ -21,9 +21,11 @@ pub(super) async fn unarchive_thread(
@@ -11468,12 +11509,12 @@ index 4ef1bdb0afab39a179f45cdc42b2b4aea151ff75..a1d4fb07bfcd165faf7670a1d47c6b4b
      let _lifecycle_guard = store.live_writer_locks.lock_lifecycle(thread_id).await;
 -    // Archive, delete, and revert use the same cross-process lock while moving or selecting
 -    // rollout files. Unarchive must participate before it moves those files back.
--    let _writer_lock = store.writer_lock_coordinator.acquire(thread_id)?;
+-    let _writer_lock = store.acquire_writer_lock(thread_id)?;
 +    let _live_writer_guard = store.live_writer_locks.lock(thread_id).await;
 +    store.ensure_live_recorder_absent(thread_id).await?;
 +    // Archive, delete, revert, and history repair use the same cross-process lock while moving,
 +    // selecting, or publishing rollout files. Unarchive must participate before moving them.
-+    let _writer_guard = store.writer_lock_coordinator.acquire(thread_id)?;
++    let _writer_guard = store.acquire_writer_lock(thread_id)?;
      let state_db_ctx = store.state_db().await;
      let selected_archived_path =
          thread_rollout_resolver::resolve_current_including_archived(store, thread_id)

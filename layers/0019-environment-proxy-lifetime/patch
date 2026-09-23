@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index e6b456bb046e8852394f6ad3f5795da7c06360fb..50ccad129c5ffb85b631fe8e08a28182712c19e1 100644
+index b9b26bef27bc0d02af3fc72ca27b48d4ace2a30a..475a866e2c21b832fdfffc5bed13e2140fcdcefc 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2455,6 +2455,7 @@ dependencies = [
+@@ -2500,6 +2500,7 @@ dependencies = [
   "codex-windows-sandbox",
   "dotenvy",
   "pathdiff",
@@ -25,10 +25,10 @@ index 4619d6203b122124af465b11ddf9fa7c3c9966d4..54a92a51fca889e2d6e2a41486c30522
  codex-windows-sandbox = { workspace = true }
  pathdiff = { workspace = true }
 diff --git a/codex-rs/arg0/src/lib.rs b/codex-rs/arg0/src/lib.rs
-index 4673f84e4280c2cf4a8f1998a939eb13105c4f11..0811235375d2e9cc353849676b1257a5f845f24d 100644
+index 6b0d99a4372414409e2cdfd220c944b8190e51cc..3f4cbe30011b3105ba800b481683c6eb426f4113 100644
 --- a/codex-rs/arg0/src/lib.rs
 +++ b/codex-rs/arg0/src/lib.rs
-@@ -154,6 +154,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+@@ -157,6 +157,9 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
          std::process::exit(exit_code);
      }
 
@@ -38,7 +38,7 @@ index 4673f84e4280c2cf4a8f1998a939eb13105c4f11..0811235375d2e9cc353849676b1257a5
      // This modifies the environment, which is not thread-safe, so do this
      // before creating any threads/the Tokio runtime.
      load_dotenv();
-@@ -173,6 +176,38 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
+@@ -176,6 +179,38 @@ pub fn arg0_dispatch() -> Option<Arg0PathEntryGuard> {
      path_entry_guard
  }
 
@@ -78,10 +78,10 @@ index 4673f84e4280c2cf4a8f1998a939eb13105c4f11..0811235375d2e9cc353849676b1257a5
      install_context: &InstallContext,
      existing_path: Option<OsString>,
 diff --git a/codex-rs/core/src/exec.rs b/codex-rs/core/src/exec.rs
-index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3cbb3dfe39 100644
+index fa458ed1b71b74805a096df0862e4e3412be21fc..342f11be1f1fd1e4d0c0345df51dfd68c4dfe864 100644
 --- a/codex-rs/core/src/exec.rs
 +++ b/codex-rs/core/src/exec.rs
-@@ -348,8 +348,9 @@ pub fn build_exec_request(
+@@ -373,8 +373,9 @@ pub fn build_exec_request(
      );
      tracing::debug!("Sandbox type: {sandbox_type:?}");
 
@@ -92,9 +92,9 @@ index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3c
              .apply_to_env_for_optional_environment(&mut env, network_environment_id.as_deref())
              .map_err(|err| {
                  network_proxy_environment_error(network_environment_id.as_deref(), err)
-@@ -397,7 +398,10 @@ pub fn build_exec_request(
+@@ -439,7 +440,10 @@ pub fn build_exec_request(
      } else {
-         windows_sandbox_workspace_roots.to_vec()
+         Vec::new()
      };
 -    ExecRequest::from_sandbox_exec_request(request, options, windows_sandbox_workspace_roots)
 +    let mut request =
@@ -104,7 +104,7 @@ index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3c
  }
 
  pub(crate) async fn execute_exec_request(
-@@ -422,6 +426,7 @@ pub(crate) async fn execute_exec_request(
+@@ -463,6 +467,7 @@ pub(crate) async fn execute_exec_request(
          permission_profile,
          windows_sandbox_filesystem_overrides,
          network_environment_id,
@@ -112,8 +112,8 @@ index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3c
          arg0,
          exec_server_sandbox: _,
          exec_server_enforce_managed_network: _,
-@@ -591,13 +596,15 @@ async fn exec_windows_sandbox(
-         windows_sandbox_private_desktop,
+@@ -630,13 +635,15 @@ async fn exec_windows_sandbox(
+         windows_sandbox_level,
          ..
      } = params;
 -    if let Some(network) = network.as_ref() {
@@ -131,7 +131,7 @@ index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3c
      let network_proxy_restricting_sid = network
          .as_ref()
          .map(|network| {
-@@ -902,13 +909,15 @@ async fn exec(
+@@ -941,13 +948,15 @@ async fn exec(
          sandbox_permissions: _,
          justification: _,
      } = params;
@@ -151,7 +151,7 @@ index 46c24421be1d46a3cf2e029852b09d0e11e4e4a0..db9a14e6263cf31eccbcdb3cc7289c3c
      let (program, args) = command.split_first().ok_or_else(|| {
          CodexErr::Io(io::Error::new(
 diff --git a/codex-rs/core/src/sandboxing/mod.rs b/codex-rs/core/src/sandboxing/mod.rs
-index fae02bf120d4187b6270dbcc2a380c0ce604b54a..4450ad5ff97eaa166e4cba90829da65d823c84f1 100644
+index 43003e8ad09666b4ebdd3630375b304591c9a64e..9369060ff0d20c3ef04dc2ff72c494d93195e80f 100644
 --- a/codex-rs/core/src/sandboxing/mod.rs
 +++ b/codex-rs/core/src/sandboxing/mod.rs
 @@ -15,6 +15,7 @@ use crate::exec::execute_exec_request;
@@ -171,7 +171,7 @@ index fae02bf120d4187b6270dbcc2a380c0ce604b54a..4450ad5ff97eaa166e4cba90829da65d
      pub expiration: ExecExpiration,
      pub capture_policy: ExecCapturePolicy,
      pub sandbox: SandboxType,
-@@ -100,6 +103,7 @@ impl ExecRequest {
+@@ -98,6 +101,7 @@ impl ExecRequest {
              exec_server_shell_snapshot: None,
              network,
              network_environment_id,
@@ -179,7 +179,7 @@ index fae02bf120d4187b6270dbcc2a380c0ce604b54a..4450ad5ff97eaa166e4cba90829da65d
              expiration,
              capture_policy,
              sandbox,
-@@ -189,6 +193,7 @@ impl ExecRequest {
+@@ -185,6 +189,7 @@ impl ExecRequest {
              exec_server_shell_snapshot: None,
              network,
              network_environment_id,
@@ -187,11 +187,61 @@ index fae02bf120d4187b6270dbcc2a380c0ce604b54a..4450ad5ff97eaa166e4cba90829da65d
              expiration,
              capture_policy,
              sandbox,
+diff --git a/codex-rs/core/src/shell_snapshot_sandbox.rs b/codex-rs/core/src/shell_snapshot_sandbox.rs
+index 1da6854995147d6ef526175aaf6625f8715dcf58..085f5e023898911f0fb3ff516c969413d4c20581 100644
+--- a/codex-rs/core/src/shell_snapshot_sandbox.rs
++++ b/codex-rs/core/src/shell_snapshot_sandbox.rs
+@@ -126,15 +126,19 @@ impl ShellSnapshotSandbox {
+             bail!("shell snapshot sandbox cannot be enforced on this host");
+         }
+
+-        let managed_network = if let Some(network) = self.network.as_ref() {
+-            let prepared = network
+-                .prepare_for_optional_environment(env, Some(&self.environment_id))
+-                .context("failed to prepare managed network for shell snapshot")?;
+-            env = prepared.env;
+-            Some(prepared.sandbox_context)
+-        } else {
+-            None
+-        };
++        let (managed_network, environment_proxy_lease) =
++            if let Some(network) = self.network.as_ref() {
++                let prepared = network
++                    .prepare_for_optional_environment(env, Some(&self.environment_id))
++                    .context("failed to prepare managed network for shell snapshot")?;
++                env = prepared.env;
++                (
++                    Some(prepared.sandbox_context),
++                    prepared.environment_proxy_lease,
++                )
++            } else {
++                (None, None)
++            };
+         let (program, args) = args
+             .split_first()
+             .ok_or_else(|| anyhow!("shell snapshot command is empty"))?;
+@@ -189,7 +193,7 @@ impl ShellSnapshotSandbox {
+             timeout: snapshot_timeout,
+             cancellation,
+         };
+-        let request = ExecRequest::from_sandbox_exec_request(
++        let mut request = ExecRequest::from_sandbox_exec_request(
+             request,
+             ExecOptions {
+                 expiration,
+@@ -198,6 +202,7 @@ impl ShellSnapshotSandbox {
+             workspace_roots,
+         )
+         .context("failed to prepare shell snapshot execution")?;
++        request.environment_proxy_lease = environment_proxy_lease;
+         // Caller cancellation must leave execution alive long enough to clean up its process group.
+         let output = tokio::spawn(execute_env(request, /*stdout_stream*/ None))
+             .await
 diff --git a/codex-rs/core/src/tasks/user_shell.rs b/codex-rs/core/src/tasks/user_shell.rs
-index ad7097126ee692b59ff350370831a83f24316c50..bf593a13f7d4d378354e46c0374e2664ed9934d9 100644
+index 80cbeef4855354e404ee9c7c31076975fcf84aa8..96c415f17d0bb5168410eb8b167239118570428a 100644
 --- a/codex-rs/core/src/tasks/user_shell.rs
 +++ b/codex-rs/core/src/tasks/user_shell.rs
-@@ -218,6 +218,7 @@ pub(crate) async fn execute_user_shell_command(
+@@ -220,6 +220,7 @@ pub(crate) async fn execute_user_shell_command(
          // inherit a managed proxy from the surrounding session or turn.
          network: None,
          network_environment_id: None,
@@ -200,18 +250,18 @@ index ad7097126ee692b59ff350370831a83f24316c50..bf593a13f7d4d378354e46c0374e2664
          capture_policy: ExecCapturePolicy::ShellTool,
          sandbox: SandboxType::None,
 diff --git a/codex-rs/core/src/tools/runtimes/unified_exec.rs b/codex-rs/core/src/tools/runtimes/unified_exec.rs
-index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f91ec2f88c 100644
+index 354e9324d9c7e584f203d32abac18f4ea33b6543..f2d523d31e77bb5c6cdfa4b7ee90927099d7ed5c 100644
 --- a/codex-rs/core/src/tools/runtimes/unified_exec.rs
 +++ b/codex-rs/core/src/tools/runtimes/unified_exec.rs
-@@ -41,6 +41,7 @@ use crate::unified_exec::UnifiedExecError;
- use crate::unified_exec::UnifiedExecProcess;
+@@ -44,6 +44,7 @@ use crate::unified_exec::UnifiedExecProcess;
  use crate::unified_exec::UnifiedExecProcessManager;
  use codex_core_plugins::PluginMetricsSidecar;
+ use codex_network_proxy::CREDENTIAL_BROKER_ACTIVE_ENV_KEY;
 +use codex_network_proxy::EnvironmentProxyLease;
  use codex_network_proxy::ManagedNetworkSandboxContext;
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::error::CodexErr;
-@@ -109,6 +110,8 @@ pub(crate) struct UnifiedExecAttempt {
+@@ -113,6 +114,8 @@ pub(crate) struct UnifiedExecAttempt {
      pub(crate) process: UnifiedExecProcess,
      pub(crate) metrics_sidecar: Option<PluginMetricsSidecar>,
      pub(crate) permissions: TerminalPermissions,
@@ -220,19 +270,27 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
  }
 
  fn unified_exec_options(
-@@ -287,35 +290,37 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
-             launch_sandbox_permissions,
-         ));
-         let env = exec_env_for_sandbox_permissions(&req.env, launch_sandbox_permissions);
+@@ -352,43 +355,46 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+         } else {
+             None
+         };
 -        let (mut env, managed_network_context, network_proxy_launch) = match managed_network {
 -            Some(network) if environment_is_remote => {
--                let mut launch = network.remote_launch_config().await.map_err(|err| {
--                    ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
--                })?;
+-                let mut launch = network
+-                    .remote_launch_config(crate::windows_sandbox::local_binding_policy_for_sandbox(
+-                        req.turn_environment.config().windows_sandbox_type,
+-                        req.turn_environment.executor_platform_os.as_deref(),
+-                    ))
+-                    .await
+-                    .map_err(|err| {
+-                        ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
+-                    })?;
 -                if routes_approval_policy_to_guardian(
 -                    ctx.step_context.settings.approval_policy(),
 -                    ctx.step_context.settings.approvals_reviewer(),
--                ) && network.remote_policy_decider().is_some()
+-                ) && network
+-                    .remote_policy_decider(launch.proxy.allow_local_binding)
+-                    .is_some()
 -                {
 -                    let timeout = ctx
 -                        .session
@@ -256,14 +314,23 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
 +        let (mut env, managed_network_context, network_proxy_launch, environment_proxy_lease) =
 +            match managed_network {
 +                Some(network) if environment_is_remote => {
-+                    let mut launch = network.remote_launch_config().await.map_err(|err| {
-+                        ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
-+                    })?;
++                    let mut launch = network
++                        .remote_launch_config(
++                            crate::windows_sandbox::local_binding_policy_for_sandbox(
++                                req.turn_environment.config().windows_sandbox_type,
++                                req.turn_environment.executor_platform_os.as_deref(),
++                            ),
++                        )
++                        .await
++                        .map_err(|err| {
++                            ToolError::Codex(CodexErr::Io(io::Error::other(err.to_string())))
++                        })?;
 +                    if routes_approval_policy_to_guardian(
 +                        ctx.step_context.settings.approval_policy(),
 +                        ctx.step_context.settings.approvals_reviewer(),
-+                    )
-+                        && network.remote_policy_decider().is_some()
++                    ) && network
++                        .remote_policy_decider(launch.proxy.allow_local_binding)
++                        .is_some()
 +                    {
 +                        let timeout = ctx
 +                            .session
@@ -287,7 +354,7 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
                              .environment
                              .info()
                              .await
-@@ -324,31 +329,36 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -397,33 +403,38 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                                      "failed to query exec-server capabilities: {err}"
                                  ))))
                              })?;
@@ -305,13 +372,17 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
                  }
 -            }
 -            Some(network) => {
--                let prepared = network
--                    .prepare_for_optional_environment(
+-                let prepared = snapshot_credential_context
+-                    .unwrap_or_default()
+-                    .prepare_child_environment(
+-                        network,
 -                        env,
 -                        Some(&req.turn_environment.selection.environment_id),
 +                Some(network) => {
-+                    let prepared = network
-+                        .prepare_for_optional_environment(
++                    let prepared = snapshot_credential_context
++                        .unwrap_or_default()
++                        .prepare_child_environment(
++                            network,
 +                            env,
 +                            Some(&req.turn_environment.selection.environment_id),
 +                        )
@@ -340,10 +411,18 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
 +                }
 +                None => (env, None, None, None),
 +            };
-         let explicit_env_overrides = req.explicit_env_overrides.clone();
-         let metrics_sidecar = sidecar_for_command(
-             ctx,
-@@ -497,6 +507,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+         if let Some(snapshot) = shell_snapshot.as_ref() {
+             snapshot.restore_fail_open_aliases(
+                 &mut env,
+@@ -643,6 +654,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+                 )
+                 .map_err(ToolError::Codex)?;
+             exec_env.exec_server_env_config = req.exec_server_env_config.clone();
++            exec_env.environment_proxy_lease = environment_proxy_lease.clone();
+             match zsh_fork::maybe_prepare_unified_exec(req, attempt, ctx, exec_env, zsh_fork_config)
+                 .await?
+             {
+@@ -680,6 +692,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
                          process,
                          metrics_sidecar,
                          permissions,
@@ -351,7 +430,7 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
                      });
                  }
                  None => {
-@@ -543,6 +554,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
+@@ -727,6 +740,7 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecAttempt> for UnifiedExecRunt
              process,
              metrics_sidecar,
              permissions,
@@ -360,7 +439,7 @@ index 83926d3f666f471bdb7e8c5a18d913693f35beb3..5ec06748bb6a51ecbcce122f9e8711f9
      }
  }
 diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
-index dfd66f583c0164449fc59e5aa78227ae595730d3..e7246c3161c0925167c7f8e2e70b9e793cf7f6c0 100644
+index 1849e8c2d23afda9efca7175e78c25f6917ba384..c358cf9cc080202d7b2fd1c1fe45efce1fda4b8f 100644
 --- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
 +++ b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation.rs
 @@ -16,6 +16,7 @@ use codex_execpolicy::Evaluation;
@@ -368,10 +447,10 @@ index dfd66f583c0164449fc59e5aa78227ae595730d3..e7246c3161c0925167c7f8e2e70b9e79
  use codex_execpolicy::Policy;
  use codex_execpolicy::RuleMatch;
 +use codex_network_proxy::EnvironmentProxyLease;
+ use codex_prompts::ResolvedModelMessages;
  use codex_protocol::config_types::WindowsSandboxLevel;
  use codex_protocol::error::CodexErr;
- use codex_protocol::models::AdditionalPermissionProfile;
-@@ -136,6 +137,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
+@@ -137,6 +138,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
          env: exec_request.env.clone(),
          network: exec_request.network.clone(),
          network_environment_id: exec_request.network_environment_id.clone(),
@@ -379,7 +458,7 @@ index dfd66f583c0164449fc59e5aa78227ae595730d3..e7246c3161c0925167c7f8e2e70b9e79
          windows_sandbox_level: exec_request.windows_sandbox_level,
          arg0: exec_request.arg0.clone(),
          sandbox_policy_cwd,
-@@ -574,6 +576,8 @@ struct CoreShellCommandExecutor {
+@@ -579,6 +581,8 @@ struct CoreShellCommandExecutor {
      env: HashMap<String, String>,
      network: Option<codex_network_proxy::NetworkProxy>,
      network_environment_id: Option<String>,
@@ -388,14 +467,24 @@ index dfd66f583c0164449fc59e5aa78227ae595730d3..e7246c3161c0925167c7f8e2e70b9e79
      windows_sandbox_level: WindowsSandboxLevel,
      arg0: Option<String>,
      sandbox_policy_cwd: AbsolutePathBuf,
-@@ -646,6 +650,7 @@ impl CoreShellCommandExecutor {
+@@ -651,6 +655,7 @@ impl CoreShellCommandExecutor {
                  exec_server_shell_snapshot: None,
                  network: self.network.clone(),
                  network_environment_id: self.network_environment_id.clone(),
-+                environment_proxy_lease: None,
++                environment_proxy_lease: self._environment_proxy_lease.clone(),
                  expiration: ExecExpiration::Cancellation(cancel_rx),
                  capture_policy: ExecCapturePolicy::ShellTool,
                  sandbox: self.sandbox,
+@@ -802,7 +807,8 @@ impl CoreShellCommandExecutor {
+             self.windows_sandbox_workspace_roots.clone(),
+         )?;
+         if let Some(network) = exec_request.network.as_ref() {
+-            network
++            // The executor retains the same environment's lease for the escalation session.
++            let _environment_proxy_lease = network
+                 .apply_to_env_for_optional_environment(
+                     &mut exec_request.env,
+                     self.network_environment_id.as_deref(),
 diff --git a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs b/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
 index 9d3c5e8ade2d4a8cf065457e1ac03f327bddd374..2eee21c7eeedda637a8ec91a674f5a213b9da401 100644
 --- a/codex-rs/core/src/tools/runtimes/zsh_fork/unix_escalation_tests.rs
@@ -409,7 +498,7 @@ index 9d3c5e8ade2d4a8cf065457e1ac03f327bddd374..2eee21c7eeedda637a8ec91a674f5a21
          arg0: None,
          sandbox_policy_cwd: workdir.clone(),
 diff --git a/codex-rs/core/src/unified_exec/async_watcher.rs b/codex-rs/core/src/unified_exec/async_watcher.rs
-index 366f6310523b46114d8672c29bc96652a54c78dd..6f9c7e593def14aabd3eba9b5a9ab7ab2c0252f9 100644
+index 245bdb0d54fb8c8d8bd32c97429c232e8ea4ac1c..6fd32f38bf74b3b5e31b4e3c2e8424445f72764a 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher.rs
 @@ -22,6 +22,7 @@ use crate::tools::events::ToolEventFailure;
@@ -419,15 +508,16 @@ index 366f6310523b46114d8672c29bc96652a54c78dd..6f9c7e593def14aabd3eba9b5a9ab7ab
 +use codex_network_proxy::EnvironmentProxyLease;
  use codex_protocol::exec_output::ExecToolCallOutput;
  use codex_protocol::exec_output::StreamOutput;
- use codex_protocol::protocol::EventMsg;
-@@ -175,12 +176,15 @@ pub(crate) fn spawn_exit_watcher(
+ use codex_protocol::openai_models::ModelInfo;
+@@ -174,6 +175,7 @@ pub(crate) fn spawn_exit_watcher(
      started_at: Instant,
      network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
      plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
 +    environment_proxy_lease: Option<EnvironmentProxyLease>,
  ) {
-     let exit_token = process.cancellation_token();
-     let output_drained = process.output_drained_notify();
+     let session_ref = Arc::clone(&context.session);
+     let turn_ref = Arc::clone(&context.step_context.turn);
+@@ -185,6 +187,8 @@ pub(crate) fn spawn_exit_watcher(
      let interaction_lock = process.interaction_lock();
 
      tokio::spawn(async move {
@@ -437,10 +527,10 @@ index 366f6310523b46114d8672c29bc96652a54c78dd..6f9c7e593def14aabd3eba9b5a9ab7ab
          output_drained.notified().await;
          // Deferred network denial deliberately remains observable for a short
 diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-index aada95e966dff9ea7fb6ff8b496a6a5532344627..701f602040fc185dda4d8ae1e9585314acdecbf5 100644
+index f919ee369459b5c930ea627eed793b27895f0174..8ff0a179c4cd31bfce45dbb9cc2d209c7992f7c1 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-@@ -239,6 +239,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
+@@ -243,6 +243,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
          Instant::now(),
          Some(network_denial_monitor),
          /*plugin_metrics_sidecar*/ None,
@@ -449,10 +539,10 @@ index aada95e966dff9ea7fb6ff8b496a6a5532344627..701f602040fc185dda4d8ae1e9585314
 
      let exited_at = Instant::now();
 diff --git a/codex-rs/core/src/unified_exec/process_manager.rs b/codex-rs/core/src/unified_exec/process_manager.rs
-index f19147f6605db85cff4932eb72c4b922a968490a..03c9792edfd30939526afeb9426b079464150ebf 100644
+index 105783518d33132887ee9ab3eb88b1487a52b53f..48f6297ec24feb620f35e641269fc9fed8a5dff3 100644
 --- a/codex-rs/core/src/unified_exec/process_manager.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager.rs
-@@ -71,6 +71,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
+@@ -73,6 +73,7 @@ use codex_core_plugins::PLUGIN_METRICS_OUTPUT_ENV_VAR;
  use codex_core_plugins::PluginCommandAttribution;
  use codex_core_plugins::PluginMetricsSidecar;
  use codex_core_plugins::strip_output_env;
@@ -460,7 +550,7 @@ index f19147f6605db85cff4932eb72c4b922a968490a..03c9792edfd30939526afeb9426b0794
  use codex_network_proxy::NetworkPolicyDecider;
  use codex_network_proxy::NetworkProxy;
  use codex_protocol::config_types::ShellEnvironmentPolicy;
-@@ -515,6 +516,7 @@ impl UnifiedExecProcessManager {
+@@ -542,6 +543,7 @@ impl UnifiedExecProcessManager {
              process,
              metrics_sidecar,
              permissions,
@@ -468,7 +558,7 @@ index f19147f6605db85cff4932eb72c4b922a968490a..03c9792edfd30939526afeb9426b0794
          } = attempt;
          let process = Arc::new(process);
          if let Some(completion) = completion.as_ref() {
-@@ -585,6 +587,7 @@ impl UnifiedExecProcessManager {
+@@ -615,6 +617,7 @@ impl UnifiedExecProcessManager {
                  deferred_network_approval.clone(),
                  network_denial_monitor,
                  metrics_sidecar,
@@ -476,7 +566,7 @@ index f19147f6605db85cff4932eb72c4b922a968490a..03c9792edfd30939526afeb9426b0794
                  Arc::clone(&transcript),
                  Arc::clone(&initial_exec_command_active),
              )
-@@ -1140,6 +1143,7 @@ impl UnifiedExecProcessManager {
+@@ -1204,6 +1207,7 @@ impl UnifiedExecProcessManager {
          network_approval: Option<DeferredNetworkApproval>,
          network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
          metrics_sidecar: Option<PluginMetricsSidecar>,
@@ -484,19 +574,43 @@ index f19147f6605db85cff4932eb72c4b922a968490a..03c9792edfd30939526afeb9426b0794
          transcript: Arc<tokio::sync::Mutex<HeadTailBuffer>>,
          initial_exec_command_active: Arc<AtomicBool>,
      ) {
-@@ -1186,6 +1190,7 @@ impl UnifiedExecProcessManager {
+@@ -1230,13 +1234,8 @@ impl UnifiedExecProcessManager {
+             store.processes.insert(process_id, entry);
+             pruned_entry
+         };
+-        // prune_processes_if_needed runs while holding process_store; do async
+-        // network-approval cleanup only after dropping that lock.
+-        if let Some(pruned_entry) = pruned_entry {
+-            unregister_network_approval_for_entry(&pruned_entry).await;
+-            pruned_entry.process.terminate();
+-        }
+-
++        // Transfer the lease before awaiting cleanup: cancellation must not leave
++        // the newly stored process without its proxy listeners.
+         spawn_exit_watcher(
+             Arc::clone(&process),
+             context,
+@@ -1248,7 +1247,15 @@ impl UnifiedExecProcessManager {
              started_at,
              network_denial_monitor,
              plugin_metrics_sidecar,
 +            environment_proxy_lease,
          );
++
++        // prune_processes_if_needed runs while holding process_store; do async
++        // network-approval cleanup only after dropping that lock.
++        if let Some(pruned_entry) = pruned_entry {
++            unregister_network_approval_for_entry(&pruned_entry).await;
++            pruned_entry.process.terminate();
++        }
      }
 
+     #[allow(clippy::too_many_arguments)]
 diff --git a/codex-rs/core/src/unified_exec/process_manager_tests.rs b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-index 29f9e8839cd1ffa5d05e7879ee5042c2c4934a56..1736c22bdfbc832ad33fa95561ae91854acda914 100644
+index 297c84fa76f397567ec806f4be7b3cefd3984dd0..dba258a20f61c9ba0009f23929f32098eb7c5586 100644
 --- a/codex-rs/core/src/unified_exec/process_manager_tests.rs
 +++ b/codex-rs/core/src/unified_exec/process_manager_tests.rs
-@@ -211,6 +211,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
+@@ -222,6 +222,7 @@ fn exec_server_params_use_path_uri_and_env_policy_overlay_contract() {
          exec_server_shell_snapshot: None,
          network: None,
          network_environment_id: None,
@@ -504,23 +618,143 @@ index 29f9e8839cd1ffa5d05e7879ee5042c2c4934a56..1736c22bdfbc832ad33fa95561ae9185
          expiration: crate::exec::ExecExpiration::DefaultTimeout,
          capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
          sandbox: codex_sandboxing::SandboxType::None,
+diff --git a/codex-rs/network-proxy/src/connection_lifecycle/lifecycle_tests.rs b/codex-rs/network-proxy/src/connection_lifecycle/lifecycle_tests.rs
+index 09c4606b629f0cab7c3952c01b73468700d99d54..7ba1faacbd3e977c4c454e8ab986e0101e91f8b3 100644
+--- a/codex-rs/network-proxy/src/connection_lifecycle/lifecycle_tests.rs
++++ b/codex-rs/network-proxy/src/connection_lifecycle/lifecycle_tests.rs
+@@ -52,6 +52,7 @@ enum StopProxy {
+     Shutdown,
+     Drop,
+     CancelWait,
++    IdleRetirement,
+ }
+
+ #[tokio::test]
+@@ -69,6 +70,11 @@ async fn canceling_wait_closes_proxy_connections() -> Result<()> {
+     assert_stop_closes_connections(StopProxy::CancelWait).await
+ }
+
++#[tokio::test]
++async fn idle_retirement_closes_environment_proxy_connections() -> Result<()> {
++    assert_stop_closes_connections(StopProxy::IdleRetirement).await
++}
++
+ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+     let mut config = NetworkProxyConfig {
+         allow_local_binding: Some(true),
+@@ -77,17 +83,20 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+         ..NetworkProxyConfig::default()
+     };
+     config.set_allowed_domains(vec![Ipv4Addr::LOCALHOST.to_string()]);
+-    let proxy = NetworkProxy::builder()
++    let mut builder = NetworkProxy::builder()
+         .state(Arc::new(network_proxy_state_for_policy(config)))
+         .managed_by_codex(!cfg!(target_os = "windows"))
+         .http_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+-        .socks_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+-        .build()
+-        .await?;
++        .socks_addr(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)));
++    if matches!(stop, StopProxy::IdleRetirement) {
++        builder = builder.environment_proxy_idle_timeout(Duration::from_millis(25));
++    }
++    let proxy = builder.build().await?;
+     let handle = proxy.run().await?;
+     // Environment listeners reserve ephemeral ports on every platform. Managed main
+     // listeners do so off Windows, whose shared ingress has separate route tests.
+     let prepared = proxy.prepare_for_remote_environment(HashMap::new(), "lifecycle-test")?;
++    let mut environment_proxy_lease = prepared.environment_proxy_lease;
+     let scopes = [
+         ("environment", prepared.env),
+         #[cfg(not(target_os = "windows"))]
+@@ -99,7 +108,11 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+         ),
+     ];
+     let mut connections = Vec::new();
++    let mut environment_proxy_addrs = Vec::new();
+     for (scope, env) in scopes {
++        if matches!(stop, StopProxy::IdleRetirement) && scope != "environment" {
++            continue;
++        }
+         for kind in [
+             ConnectionKind::HttpConnect(TunnelState::Open),
+             ConnectionKind::HttpConnect(TunnelState::ClientWriteClosed),
+@@ -119,6 +132,9 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+                 .strip_prefix(prefix)
+                 .context("proxy URL scheme")?
+                 .parse()?;
++            if scope == "environment" && !environment_proxy_addrs.contains(&addr) {
++                environment_proxy_addrs.push(addr);
++            }
+             let connection = timeout(Duration::from_secs(5), open_connection(kind, addr))
+                 .await
+                 .with_context(|| format!("{scope} {kind:?} connection did not become ready"))??;
+@@ -126,6 +142,7 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+         }
+     }
+
++    let mut idle_handle = None;
+     match stop {
+         StopProxy::Shutdown => timeout(Duration::from_secs(2), handle.shutdown())
+             .await
+@@ -140,6 +157,15 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+             );
+             drop(wait);
+         }
++        StopProxy::IdleRetirement => {
++            // Keep global shutdown from masking failure to close the retired environment.
++            idle_handle = Some(handle);
++            drop(
++                environment_proxy_lease
++                    .take()
++                    .expect("environment listeners must have a lease"),
++            );
++        }
+     }
+
+     // Retain every endpoint until all checks finish: dropping a test peer could
+@@ -171,6 +197,24 @@ async fn assert_stop_closes_connections(stop: StopProxy) -> Result<()> {
+             }
+         }
+     }
++    if let Some(handle) = idle_handle {
++        for addr in environment_proxy_addrs {
++            timeout(Duration::from_secs(2), async {
++                while TcpStream::connect(addr).await.is_ok() {
++                    tokio::time::sleep(Duration::from_millis(10)).await;
++                }
++            })
++            .await
++            .with_context(|| format!("retired environment listener {addr} remained open"))?;
++        }
++        #[cfg(not(target_os = "windows"))]
++        for addr in [proxy.http_addr(), proxy.socks_addr()] {
++            timeout(Duration::from_secs(2), TcpStream::connect(addr))
++                .await
++                .context("main listener did not respond after environment retirement")??;
++        }
++        handle.shutdown().await?;
++    }
+     Ok(())
+ }
+
 diff --git a/codex-rs/network-proxy/src/lib.rs b/codex-rs/network-proxy/src/lib.rs
-index b2affe0b8c2c8b7ecddcefdf7e3777796853c30d..78c07d2246e09664c82121f2f4fcf34d753e7c2e 100644
+index bd4307f34b25b31e092e1c4d070f7031370b081d..83aff88bf22fb89de5e8ee13f62287687767292b 100644
 --- a/codex-rs/network-proxy/src/lib.rs
 +++ b/codex-rs/network-proxy/src/lib.rs
-@@ -73,6 +73,7 @@ pub use proxy::Args;
+@@ -86,6 +86,7 @@ pub use proxy::Args;
  #[cfg(target_os = "macos")]
  pub use proxy::CODEX_PROXY_GIT_SSH_COMMAND_MARKER;
  pub use proxy::DEFAULT_NO_PROXY_VALUE;
 +pub use proxy::EnvironmentProxyLease;
  pub use proxy::ManagedNetworkSandboxContext;
+ pub use proxy::ManagedProxyRouting;
  pub use proxy::NO_PROXY_ENV_KEYS;
- pub use proxy::NetworkProxy;
 diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
-index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8a40d8b2e 100644
+index 574dcba407f618e4e5974245e18a21b38231e344..260463d3847f5946ec3e7314006973f9d5fc5754 100644
 --- a/codex-rs/network-proxy/src/proxy.rs
 +++ b/codex-rs/network-proxy/src/proxy.rs
-@@ -35,6 +35,11 @@ use std::ops::RangeInclusive;
+@@ -39,6 +39,12 @@ use std::ops::RangeInclusive;
  use std::sync::Arc;
  use std::sync::Mutex;
  use std::sync::RwLock;
@@ -529,10 +763,11 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +use std::sync::atomic::AtomicUsize;
 +use std::sync::atomic::Ordering;
 +use std::time::Duration;
- use tokio::task::JoinHandle;
++use tokio::task::JoinHandle;
  use tracing::warn;
 
-@@ -45,6 +50,12 @@ const WINDOWS_MANAGED_HTTP_PROXY_PORTS: RangeInclusive<u16> = 3128..=3159;
+ use self::execution_scope::ExecutionScope;
+@@ -48,6 +54,12 @@ const WINDOWS_MANAGED_HTTP_PROXY_PORTS: RangeInclusive<u16> = 3128..=3159;
  #[cfg(target_os = "windows")]
  const WINDOWS_MANAGED_SOCKS_PROXY_PORTS: RangeInclusive<u16> = 8081..=8112;
 
@@ -545,28 +780,28 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
  #[derive(Debug, Clone, Parser)]
  #[command(name = "codex-network-proxy", about = "Codex network sandbox proxy")]
  pub struct Args {}
-@@ -132,6 +143,7 @@ pub struct NetworkProxyBuilder {
-     managed_by_codex: bool,
+@@ -144,6 +156,7 @@ pub struct NetworkProxyBuilder {
+     managed_proxy_routing: ManagedProxyRouting,
      policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
      blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
 +    environment_proxy_idle_timeout: Duration,
  }
 
  impl Default for NetworkProxyBuilder {
-@@ -143,6 +155,7 @@ impl Default for NetworkProxyBuilder {
-             managed_by_codex: true,
+@@ -156,6 +169,7 @@ impl Default for NetworkProxyBuilder {
+             managed_proxy_routing: ManagedProxyRouting::default(),
              policy_decider: None,
              blocked_request_observer: None,
 +            environment_proxy_idle_timeout: DEFAULT_ENVIRONMENT_PROXY_IDLE_TIMEOUT,
          }
      }
  }
-@@ -197,6 +210,12 @@ impl NetworkProxyBuilder {
+@@ -215,6 +229,12 @@ impl NetworkProxyBuilder {
          self
      }
 
 +    #[cfg(test)]
-+    fn environment_proxy_idle_timeout(mut self, idle_timeout: Duration) -> Self {
++    pub(crate) fn environment_proxy_idle_timeout(mut self, idle_timeout: Duration) -> Self {
 +        self.environment_proxy_idle_timeout = idle_timeout;
 +        self
 +    }
@@ -574,15 +809,15 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
      pub async fn build(self) -> Result<NetworkProxy> {
          let state = self.state.ok_or_else(|| {
              anyhow::anyhow!(
-@@ -296,6 +315,7 @@ impl NetworkProxyBuilder {
-             reserved_listeners,
+@@ -323,6 +343,7 @@ impl NetworkProxyBuilder {
+             managed_proxy_routing: self.managed_proxy_routing,
              policy_decider: self.policy_decider,
              environment_proxies: Arc::new(Mutex::new(HashMap::new())),
 +            environment_proxy_idle_timeout: self.environment_proxy_idle_timeout,
              execution_scope: None,
              #[cfg(target_os = "windows")]
              windows_runtime,
-@@ -466,11 +486,144 @@ pub struct PreparedManagedNetwork {
+@@ -499,11 +520,147 @@ pub struct PreparedManagedNetwork {
      pub env: HashMap<String, String>,
      /// Matching portable sandbox inputs for the command environment.
      pub sandbox_context: ManagedNetworkSandboxContext,
@@ -592,7 +827,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 
  struct EnvironmentProxy {
      addrs: EnvironmentProxyAddrs,
-     runtime: EnvironmentProxyRuntime,
+     runtime: ProxyRuntime,
 +    lease_state: Arc<EnvironmentProxyLeaseState>,
 +}
 +
@@ -635,6 +870,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +    }
 +}
 +
++/// Counts execution owners and rejects retirement timers superseded by later reuse.
 +struct EnvironmentProxyLeaseState {
 +    /// Cache key for the listener pair owned by this state.
 +    environment_id: String,
@@ -720,46 +956,48 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +                .then(|| proxies.remove(&self.environment_id))
 +                .flatten()
 +        };
-+        if let Some(proxy) = retired {
-+            abort_environment_proxy(proxy).await;
++        if let Some(proxy) = retired
++            && let Some(listeners) = proxy.runtime.stop()
++        {
++            listeners.shutdown().await;
 +        }
 +    }
  }
 
  #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-@@ -517,6 +670,7 @@ pub struct NetworkProxy {
-     reserved_listeners: Option<Arc<ReservedListeners>>,
+@@ -570,6 +727,7 @@ pub struct NetworkProxy {
+     managed_proxy_routing: ManagedProxyRouting,
      policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
      environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
 +    environment_proxy_idle_timeout: Duration,
      execution_scope: Option<Arc<ExecutionScope>>,
      #[cfg(target_os = "windows")]
      windows_runtime: Option<Arc<WindowsSharedProxyRuntime>>,
-@@ -1005,6 +1159,7 @@ impl NetworkProxy {
+@@ -1100,6 +1258,7 @@ impl NetworkProxy {
          &self,
          mut env: HashMap<String, String>,
          addrs: EnvironmentProxyAddrs,
 +        environment_proxy_lease: Option<EnvironmentProxyLease>,
          #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
          client: EnvironmentProxyClient,
-     ) -> PreparedManagedNetwork {
-@@ -1074,6 +1229,7 @@ impl NetworkProxy {
-                 loopback_ports,
-                 allow_local_binding: runtime_settings.allow_local_binding,
+         environment_id: Option<&str>,
+@@ -1179,6 +1338,7 @@ impl NetworkProxy {
+                 dangerously_allow_all_unix_sockets: runtime_settings
+                     .dangerously_allow_all_unix_sockets,
              },
 +            environment_proxy_lease,
          }
      }
 
-@@ -1085,6 +1241,7 @@ impl NetworkProxy {
+@@ -1191,6 +1351,7 @@ impl NetworkProxy {
          let prepared = self.prepare_for_addrs(
              std::mem::take(env),
              addrs,
 +            /*environment_proxy_lease*/ None,
              EnvironmentProxyClient::SandboxedProcess,
+             environment_id,
          );
-         *env = prepared.env;
-@@ -1122,23 +1279,25 @@ impl NetworkProxy {
+@@ -1316,23 +1477,25 @@ impl NetworkProxy {
          &self,
          env: &mut HashMap<String, String>,
          environment_id: &str,
@@ -768,7 +1006,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +    ) -> Result<EnvironmentProxyLease> {
 +        let (addrs, lease) =
              self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::SandboxedProcess)?;
-         self.apply_to_env_for_addrs(env, addrs);
+         self.apply_to_env_for_addrs(env, addrs, Some(environment_id));
 -        Ok(())
 +        Ok(lease)
      }
@@ -791,7 +1029,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
              }
          }
      }
-@@ -1150,17 +1309,23 @@ impl NetworkProxy {
+@@ -1344,19 +1507,26 @@ impl NetworkProxy {
          env: HashMap<String, String>,
          environment_id: Option<&str>,
      ) -> Result<PreparedManagedNetwork> {
@@ -820,29 +1058,28 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +                None,
 +            ),
          };
--        Ok(self.prepare_for_addrs(env, addrs, EnvironmentProxyClient::SandboxedProcess))
-+        Ok(self.prepare_for_addrs(env, addrs, lease, EnvironmentProxyClient::SandboxedProcess))
-     }
-
-     /// Prepares proxy settings for a remote executor whose connection reaches this process through
-@@ -1170,9 +1335,14 @@ impl NetworkProxy {
+         Ok(self.prepare_for_addrs(
+             env,
+             addrs,
++            lease,
+             EnvironmentProxyClient::SandboxedProcess,
+             environment_id,
+         ))
+@@ -1369,11 +1539,12 @@ impl NetworkProxy {
          env: HashMap<String, String>,
          environment_id: &str,
      ) -> Result<PreparedManagedNetwork> {
 -        let addrs =
 +        let (addrs, lease) =
              self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::TrustedBridge)?;
--        Ok(self.prepare_for_addrs(env, addrs, EnvironmentProxyClient::TrustedBridge))
-+        Ok(self.prepare_for_addrs(
-+            env,
-+            addrs,
+         Ok(self.prepare_for_addrs(
+             env,
+             addrs,
 +            Some(lease),
-+            EnvironmentProxyClient::TrustedBridge,
-+        ))
-     }
-
-     fn environment_proxy_addrs(
-@@ -1180,7 +1350,7 @@ impl NetworkProxy {
+             EnvironmentProxyClient::TrustedBridge,
+             Some(environment_id),
+         ))
+@@ -1384,7 +1555,7 @@ impl NetworkProxy {
          environment_id: &str,
          #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
          client: EnvironmentProxyClient,
@@ -851,7 +1088,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
          if let Some(execution_scope) = self.execution_scope.as_ref() {
              anyhow::ensure!(
                  execution_scope.environment_id == environment_id,
-@@ -1206,9 +1376,13 @@ impl NetworkProxy {
+@@ -1410,9 +1581,13 @@ impl NetworkProxy {
                  ),
                  "network proxy for environment `{environment_id}` was prepared for a different client type"
              );
@@ -866,7 +1103,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
          #[cfg(target_os = "windows")]
          if client == EnvironmentProxyClient::SandboxedProcess
              && let Some(windows_runtime) = self.windows_runtime.as_ref()
-@@ -1240,19 +1414,27 @@ impl NetworkProxy {
+@@ -1444,19 +1619,27 @@ impl NetworkProxy {
                  http_addr: self.http_addr,
                  socks_addr: self.socks_addr,
              };
@@ -884,7 +1121,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
                  environment_id,
                  EnvironmentProxy {
                      addrs,
-                     runtime: EnvironmentProxyRuntime::SharedIngress { _route: route },
+                     runtime: ProxyRuntime::SharedIngress { route },
 +                    lease_state,
                  },
              );
@@ -892,15 +1129,15 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +            return Ok((addrs, lease));
          }
 
--        let runtime = tokio::runtime::Handle::try_current().with_context(|| {
+-        tokio::runtime::Handle::try_current().with_context(|| {
 -            format!("failed to create network proxy for environment `{environment_id}`")
 -        })?;
          let listeners =
              reserve_loopback_ephemeral_listeners(self.socks_enabled).with_context(|| {
                  format!("failed to reserve network proxy for environment `{environment_id}`")
-@@ -1273,6 +1455,16 @@ impl NetworkProxy {
-         } = listeners;
+@@ -1478,6 +1661,16 @@ impl NetworkProxy {
 
+         let mut listeners = ProxyListeners::new();
          let environment_id = environment_id.to_string();
 +        let lease_state = Arc::new(EnvironmentProxyLeaseState {
 +            environment_id: environment_id.clone(),
@@ -915,10 +1152,10 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
          let http_state = self.state.clone();
          let http_decider = self.policy_decider.clone();
          let http_environment_id = Some(environment_id.clone());
-@@ -1315,9 +1507,10 @@ impl NetworkProxy {
-                     http_task,
-                     socks_task,
-                 },
+@@ -1517,9 +1710,10 @@ impl NetworkProxy {
+             EnvironmentProxy {
+                 addrs,
+                 runtime: ProxyRuntime::Listeners(listeners),
 +                lease_state,
              },
          );
@@ -927,39 +1164,7 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
      }
 
      pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
-@@ -1573,17 +1766,21 @@ async fn abort_environment_proxies(
-         guard.drain().map(|(_, proxy)| proxy).collect::<Vec<_>>()
-     };
-     for proxy in proxies {
--        match proxy.runtime {
--            EnvironmentProxyRuntime::ListenerTasks {
--                http_task,
--                socks_task,
--            } => {
--                abort_task(Some(http_task)).await;
--                abort_task(socks_task).await;
--            }
--            #[cfg(target_os = "windows")]
--            EnvironmentProxyRuntime::SharedIngress { .. } => {}
-+        abort_environment_proxy(proxy).await;
-+    }
-+}
-+
-+async fn abort_environment_proxy(proxy: EnvironmentProxy) {
-+    match proxy.runtime {
-+        EnvironmentProxyRuntime::ListenerTasks {
-+            http_task,
-+            socks_task,
-+        } => {
-+            abort_task(Some(http_task)).await;
-+            abort_task(socks_task).await;
-         }
-+        #[cfg(target_os = "windows")]
-+        EnvironmentProxyRuntime::SharedIngress { .. } => {}
-     }
- }
-
-@@ -2092,6 +2289,232 @@ mod tests {
+@@ -2343,6 +2537,237 @@ mod tests {
          Ok(())
      }
 
@@ -1012,7 +1217,12 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +            }
 +        })
 +        .await?;
-+        assert!(tokio::net::TcpStream::connect(http_addr).await.is_err());
++        tokio::time::timeout(Duration::from_secs(2), async {
++            while tokio::net::TcpStream::connect(http_addr).await.is_ok() {
++                tokio::time::sleep(Duration::from_millis(10)).await;
++            }
++        })
++        .await?;
 +
 +        handle.shutdown().await?;
 +        Ok(())
@@ -1190,5 +1400,5 @@ index 8172645e1325db658c3bf702509f90fb64230611..e43264204c788031ecaa9feab667dbf8
 +    }
 +
      #[tokio::test]
-     async fn remote_launch_config_carries_execution_scope() -> Result<()> {
+     async fn private_credential_context_prepares_spawn_ready_env() -> Result<()> {
          #[cfg(target_os = "windows")]

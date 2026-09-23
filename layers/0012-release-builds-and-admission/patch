@@ -230,10 +230,10 @@ index 0000000000000000000000000000000000000000..f466fdf6bafd1c437a968f1929e7d790
 +          files: dist/**
 +          prerelease: true
 diff --git a/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py b/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-index f23da4fc86990f9c9a7fd2ab633fc5493e07d5e8..d701c133327c7825aec734d73be6d6371f8d75b9 100644
+index 65432a219e7a0902e5e17eac1a6f5e7f53e24bd5..d771c2cf2d9107b9de4c37d0a81de319d020c98d 100644
 --- a/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
 +++ b/codex-rs/app-server-protocol/scripts/write_schema_fixtures.py
-@@ -39,15 +39,15 @@ def main() -> None:
+@@ -40,15 +40,15 @@ def main() -> None:
 
      subprocess.run(
          [
@@ -255,10 +255,10 @@ index f23da4fc86990f9c9a7fd2ab633fc5493e07d5e8..d701c133327c7825aec734d73be6d637
          cwd=workspace_root,
          env=env,
 diff --git a/codex-rs/app-server/tests/common/test_app_server.rs b/codex-rs/app-server/tests/common/test_app_server.rs
-index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f240dd8a3ce 100644
+index bacff82e0765e967e1e198fb4f3e8f2da92927f4..81bd0ae343b7084ab2a124d19d97635aded2402d 100644
 --- a/codex-rs/app-server/tests/common/test_app_server.rs
 +++ b/codex-rs/app-server/tests/common/test_app_server.rs
-@@ -182,6 +182,7 @@ impl TestAppServer {
+@@ -181,6 +181,7 @@ impl TestAppServer {
              codex_home: None,
              environment: TestAppServerEnvironment::Auto,
              program: None,
@@ -266,7 +266,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
              env_overrides: Vec::new(),
              args: vec![DISABLE_PLUGIN_STARTUP_TASKS_ARG.to_string()],
              exec_server_delay: None,
-@@ -1856,11 +1857,20 @@ pub struct TestAppServerBuilder {
+@@ -1862,12 +1863,21 @@ pub struct TestAppServerBuilder {
      codex_home: Option<PathBuf>,
      environment: TestAppServerEnvironment,
      program: Option<PathBuf>,
@@ -274,6 +274,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
      env_overrides: Vec<(String, Option<String>)>,
      args: Vec<String>,
      exec_server_delay: Option<Duration>,
+     mock_chatgpt_backend: bool,
  }
 
 +fn command_arguments<'a>(prefix_args: &'a [String], args: &'a [String]) -> Vec<&'a str> {
@@ -287,7 +288,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
  enum TestAppServerEnvironment {
      Auto,
      None,
-@@ -1882,6 +1892,20 @@ impl TestAppServerBuilder {
+@@ -1894,6 +1904,20 @@ impl TestAppServerBuilder {
      /// Uses this app-server binary instead of the standard test binary.
      pub fn with_program(mut self, program: &Path) -> Self {
          self.program = Some(program.to_path_buf());
@@ -308,7 +309,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
          self
      }
 
-@@ -1958,6 +1982,7 @@ impl TestAppServerBuilder {
+@@ -1970,6 +1994,7 @@ impl TestAppServerBuilder {
              codex_home,
              environment,
              program,
@@ -316,7 +317,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
              mut env_overrides,
              args,
              exec_server_delay,
-@@ -2120,7 +2145,7 @@ impl TestAppServerBuilder {
+@@ -2135,7 +2160,7 @@ impl TestAppServerBuilder {
              .iter()
              .map(|(key, value)| (key.as_str(), value.as_deref()))
              .collect::<Vec<_>>();
@@ -325,7 +326,7 @@ index 47c86653a7dcbb69d07aad6f268aeb6540a59219..7ab5bb73a0d9fa97c29238bc9e296f24
          let mut app_server = TestAppServer::new_with_program_env_and_args(
              &codex_home,
              &program,
-@@ -2137,6 +2162,10 @@ impl TestAppServerBuilder {
+@@ -2152,6 +2177,10 @@ impl TestAppServerBuilder {
      }
  }
 
@@ -377,10 +378,10 @@ index 0000000000000000000000000000000000000000..4a31a28a6f09f17c12db0a55ab17a7ee
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c6fe7b651
+index 0000000000000000000000000000000000000000..95e92cde2a9f1d6d411855562bf6214cf5e0585f
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
-@@ -0,0 +1,339 @@
+@@ -0,0 +1,342 @@
 +use std::path::Path;
 +use std::path::PathBuf;
 +
@@ -501,7 +502,7 @@ index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c
 +    let mut lines = std::fs::read(path.as_path())?
 +        .split(|byte| *byte == b'\n')
 +        .filter(|line| !line.is_empty())
-+        .map(serde_json::from_slice::<RolloutLine>)
++        .map(codex_rollout::parse_rollout_line_bytes)
 +        .collect::<Result<Vec<_>, _>>()?;
 +    let segment_id = SegmentId::new();
 +    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
@@ -550,10 +551,13 @@ index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c
 +            | RolloutItem::InterAgentCommunication(_)
 +            | RolloutItem::Compacted(_)
 +            | RolloutItem::TurnContext(_)
++            | RolloutItem::TokenUsageRecord(_)
 +            | RolloutItem::EventMsg(_)
 +            | RolloutItem::InterAgentCommunicationMetadata { .. }
 +            | RolloutItem::WorldState(_)
 +            | RolloutItem::SecurityRiskScore(_)
++            | RolloutItem::RetainedContext(_)
++            | RolloutItem::RealtimeItem(_)
 +            | RolloutItem::RolloutReference(_) => None,
 +        })
 +        .expect("agent message must remain in repaired rollout")
@@ -563,7 +567,7 @@ index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c
 +    Ok(std::fs::read(path)?
 +        .split(|byte| *byte == b'\n')
 +        .filter(|line| !line.is_empty())
-+        .map(serde_json::from_slice::<RolloutLine>)
++        .map(codex_rollout::parse_rollout_line_bytes)
 +        .collect::<Result<Vec<_>, _>>()?)
 +}
 +
@@ -598,7 +602,7 @@ index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c
 +    .await;
 +    let codex_home = TempDir::new()?;
 +    write_acceptance_config(codex_home.path(), &server.uri())?;
-+    write_models_cache(codex_home.path())?;
++    write_models_cache(codex_home.path()).await?;
 +    let (thread_id, original_segment_id, rollout_path, original) =
 +        prepare_poisoned_rollout(codex_home.path())?;
 +
@@ -721,10 +725,10 @@ index 0000000000000000000000000000000000000000..33f50675df70c607087510e287f5639c
 +    Ok(())
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/mod.rs b/codex-rs/app-server/tests/suite/v2/mod.rs
-index af98dd73894f15eb0e550e458b0a5950bc83082b..0c916f7e4faee67ea93731a409fa7671c1bf42ec 100644
+index fc6fc554ebad8801d670d01189fa6774c901308d..b704b9921f5044ee92f7dc42b57511e3d63a14db 100644
 --- a/codex-rs/app-server/tests/suite/v2/mod.rs
 +++ b/codex-rs/app-server/tests/suite/v2/mod.rs
-@@ -39,6 +39,7 @@ mod experimental_feature_list;
+@@ -51,6 +51,7 @@ mod experimental_feature_list;
  mod external_agent_config;
  mod external_agent_import_sync;
  mod feedback;
@@ -732,77 +736,6 @@ index af98dd73894f15eb0e550e458b0a5950bc83082b..0c916f7e4faee67ea93731a409fa7671
  mod fs;
  mod git_attribution;
  mod guardian_v2;
-diff --git a/justfile b/justfile
-index f85f1c0338b7df5c7f87e8bbbc09e3047a634876..d12e1d673c455dfdbace3317cb4e57e4ea26a406 100644
---- a/justfile
-+++ b/justfile
-@@ -1,11 +1,13 @@
- set working-directory := "codex-rs"
--set positional-arguments
-+set positional-arguments := true
-+
- export CODEX_REPO_ROOT := justfile_directory()
- export JUST_SHELL := justfile_directory() / "scripts/just-shell.py"
-+
- set shell := ["python3", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
- set windows-shell := ["python", "-c", 'import os, runpy; runpy.run_path(os.environ["JUST_SHELL"], run_name="__main__")']
-
--rust_min_stack := "8388608" # 8 MiB
-+rust_min_stack := "8388608"
- python := if os_family() == "windows" { "python" } else { "python3" }
-
- # Display help
-@@ -13,7 +15,9 @@ help:
-     just -l
-
- # `codex`
-+
- alias c := codex
-+
- codex *args:
-     cargo run --bin codex -- {args}
-
-@@ -82,6 +86,7 @@ install:
- #
- # Run `cargo install --locked cargo-nextest` if you don't have it installed.
- # Prefer this for routine local runs. Workspace crate features are banned, so
-+
- # there should be no need to add `--all-features`.
- [unix]
- test *args:
-@@ -92,6 +97,7 @@ test *args:
-     $env:RUST_MIN_STACK = "{{ rust_min_stack }}"; $env:NEXTEST_PROFILE = "local"; cargo nextest run --no-fail-fast @($args | Select-Object -Skip 1)
-
- # Run from the repository root so scripts that resolve paths from `cwd` see
-+
- # the same layout they use in GitHub Actions.
- [no-cd]
- test-github-scripts:
-@@ -111,6 +117,7 @@ bench-e2e:
-     bazel test --compilation_mode=opt --cache_test_results=no --test_output=streamed //codex-rs:e2e-benchmarks
-
- # Run Bazel-backed end-to-end macrobenchmarks once per case with release-like
-+
- # Rust cfg paths but fastbuild codegen.
- bench-e2e-smoke:
-     # Avoid optimizer cost because smoke runs only check that benchmarks work.
-@@ -120,6 +127,7 @@ bench-e2e-smoke:
-
- # Build and run Codex from source using Bazel.
- # On Unix, use `[no-cd]` and `--run_under="cd $PWD &&"` to ensure Bazel runs
-+
- # the command in the current working directory.
- [no-cd]
- [unix]
-@@ -175,7 +183,7 @@ write-config-schema:
-
- # Regenerate vendored app-server protocol schema artifacts.
- write-app-server-schema *args:
--    cargo run -p codex-app-server-protocol --bin write_schema_fixtures -- {args}
-+    {{ python }} app-server-protocol/scripts/write_schema_fixtures.py {args}
-
- [no-cd]
- write-hooks-schema:
 diff --git a/scripts/frodex_admission.py b/scripts/frodex_admission.py
 new file mode 100644
 index 0000000000000000000000000000000000000000..fe11c846f2f1485d7780952aad51d1cfb775c466
