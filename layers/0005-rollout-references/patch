@@ -6081,7 +6081,7 @@ index 3af590c3121a9bbdedf768d049cb37acfc58ee41..78ceabe51b4100458bc8c850dffc9fdb
              runtime_workspace_roots: None,
              metadata: ThreadPersistenceMetadata {
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4df34e7b0 100644
+index afa27ef3f54411b3bad9f59d863640348dba78bc..60fd362e311230e61d8ab8340cb93c4bd106ebd5 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -18,6 +18,7 @@ use crate::context::ManagedDeveloperInstructions;
@@ -6104,7 +6104,7 @@ index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4
      }
  }
 
-@@ -910,28 +914,87 @@ impl LocalAgentControl {
+@@ -910,28 +914,89 @@ impl LocalAgentControl {
 
          let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
              .then_some(ThreadHistoryMode::Paginated);
@@ -6130,7 +6130,9 @@ index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4
 +            forked_from_ordinal_exclusive,
 +        ) = match fork_mode {
 +            SpawnAgentForkMode::FullHistory
-+                if state
++                if parent_thread
++                    .session
++                    .services
 +                    .thread_store
 +                    .as_any()
 +                    .is::<codex_thread_store::LocalThreadStore>() =>
@@ -6212,7 +6214,7 @@ index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4
          let multi_agent_v2_usage_hint_texts_to_filter: Vec<String> =
              if multi_agent_version == MultiAgentVersion::V2 {
                  let parent_config = parent_thread.session.get_config().await;
-@@ -1099,12 +1162,19 @@ impl LocalAgentControl {
+@@ -1099,12 +1164,19 @@ impl LocalAgentControl {
                  | RolloutItem::SessionMeta(_)
                  | RolloutItem::TurnContext(_)
                  | RolloutItem::InterAgentCommunication(_)
@@ -6233,7 +6235,7 @@ index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4
          // Full forks reuse the parent's reference context instead of rebuilding it. If that
          // context omitted the parent's developer fragment, append the child's override so its
          // instructions still reach the model exactly once.
-@@ -1158,7 +1228,7 @@ impl LocalAgentControl {
+@@ -1158,7 +1230,7 @@ impl LocalAgentControl {
              )
              .build();
 
@@ -6242,7 +6244,7 @@ index afa27ef3f54411b3bad9f59d863640348dba78bc..15f219880e5bf91bd19db34c57afaad4
              .fork_thread_with_source(
                  config.clone(),
                  InitialHistory::Forked(forked_rollout_items),
-@@ -1173,8 +1243,15 @@ impl LocalAgentControl {
+@@ -1173,8 +1245,15 @@ impl LocalAgentControl {
                  options.environments.clone(),
                  inherited_thread_state,
                  thread_extension_init,
@@ -7417,6 +7419,54 @@ index 3d612714723594286dcd4daff88c1cf0d9b83dce..f9ba3c001a29736aa3a5c85fc78d42cb
  mod tools;
  pub(crate) mod turn_diff_tracker;
  mod turn_metadata;
+diff --git a/codex-rs/core/src/session/guardian_checkpoint_tests.rs b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+index 88d26dc04bb2947a56f39c7e6debedd00b26d6bc..f31c1c6e0be85469cd30f87e73450c5d5576aa8d 100644
+--- a/codex-rs/core/src/session/guardian_checkpoint_tests.rs
++++ b/codex-rs/core/src/session/guardian_checkpoint_tests.rs
+@@ -5,9 +5,11 @@ use crate::session::tests::make_session_and_context;
+ use codex_history::InitialHistory;
+ use codex_protocol::models::ResponseItem;
+ use codex_protocol::protocol::SessionSource;
++use codex_protocol::protocol::ThreadSource;
+ use codex_protocol::protocol::TokenUsage;
+ use pretty_assertions::assert_eq;
+ use serde_json::json;
++use std::sync::Arc;
+ use test_case::test_case;
+
+ #[test_case(GuardianContextMode::Legacy; "legacy")]
+@@ -30,6 +32,9 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
+     let world_state = WorldStateSnapshot::from(baseline.as_object().unwrap());
+     {
+         let mut state = session.state.lock().await;
++        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
++        state.session_configuration.thread_source =
++            Some(ThreadSource::Feature("system".to_string()));
+         state.history = ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
+         state
+             .history
+@@ -90,10 +95,18 @@ async fn guardian_checkpoint_preserves_live_context_without_storage(mode: Guardi
+     // Replay into a fresh session so preserved live state cannot mask missing checkpoint data.
+     let (mut fork, _) = make_session_and_context().await;
+     fork.guardian_context_mode = mode;
+-    fork.state.lock().await.history =
+-        ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
++    {
++        let mut state = fork.state.lock().await;
++        // Only system-ephemeral startup is allowed to replay without a durable writer.
++        Arc::make_mut(&mut state.session_configuration.original_config_do_not_use).ephemeral = true;
++        state.session_configuration.thread_source =
++            Some(ThreadSource::Feature("system".to_string()));
++        state.history = ContextManager::with_guardian_context_mode(mode, &SessionSource::default());
++    }
+     fork.record_initial_history(InitialHistory::Forked(items))
+-        .await;
++        .await
++        .expect("guardian checkpoint history must replay successfully");
++    assert!(fork.live_thread().is_none());
+     let restored = fork.clone_history().await;
+     assert_eq!(restored.annotated_items(), expected.annotated_items());
+     assert_eq!(restored.retained_context(), expected.retained_context());
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
 index c9e0fe08541c7da00ce0b770c4d55f3b51283b83..1b8667d6d1c013c90bb3705dc0c5af28b07b2e9c 100644
 --- a/codex-rs/core/src/session/mod.rs
@@ -8392,6 +8442,22 @@ index c9e0fe08541c7da00ce0b770c4d55f3b51283b83..1b8667d6d1c013c90bb3705dc0c5af28
          let rollout_path = match self.current_rollout_path().await {
              Ok(Some(path)) => path,
              Ok(None) => return None,
+diff --git a/codex-rs/core/src/session/reasoning_effort_tests.rs b/codex-rs/core/src/session/reasoning_effort_tests.rs
+index bee5f9f2a31519a82958c5e888f9f95947a2a598..2252a91cd9d2914189884008efa89a303c4e339d 100644
+--- a/codex-rs/core/src/session/reasoning_effort_tests.rs
++++ b/codex-rs/core/src/session/reasoning_effort_tests.rs
+@@ -48,7 +48,10 @@ async fn initial_replay_preserves_prewarmed_effort(history: InitialHistory) {
+             .await,
+         Some(ReasoningEffort::Medium),
+     );
+-    session.record_initial_history(history).await;
++    session
++        .record_initial_history(history)
++        .await
++        .expect("initial history must replay successfully");
+
+     selected.collaboration_mode.settings.reasoning_effort = Some(ReasoningEffort::High);
+     let turn_settings = ResolvedStepSettings::new(
 diff --git a/codex-rs/core/src/session/rollout_reconstruction.rs b/codex-rs/core/src/session/rollout_reconstruction.rs
 index 8860d4c36abf10182e487e36f0887266ad3c11f2..9dd6273e62b23a5c74437b8d5e5b69309413e5ab 100644
 --- a/codex-rs/core/src/session/rollout_reconstruction.rs
@@ -8824,7 +8890,7 @@ index f958893c299c49b20f0cc0d209e9a2b94cd9df63..e2a2f0ec36f177a897a8e4237a270c47
                  let mut state = sess.state.lock().await;
                  state.queue_pending_session_start_source(session_start_source);
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 228152a4341a02f5d8fd447772b24f3268c968b7..66edbdc880c3031bb6fea56f764311c80e5b5908 100644
+index 228152a4341a02f5d8fd447772b24f3268c968b7..a03d7fb9739c3c39378fbd8c106c9502a609bf50 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -49,6 +49,7 @@ use codex_config::types::McpServerConfig;
@@ -9222,7 +9288,7 @@ index 228152a4341a02f5d8fd447772b24f3268c968b7..66edbdc880c3031bb6fea56f764311c8
 +async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_parent_state()
 +-> anyhow::Result<()> {
 +    let home = tempfile::tempdir()?;
-+    let mut config = test_config().await;
++    let mut config = crate::config::test_config().await;
 +    config.codex_home = home.path().join("codex-home").abs();
 +    config.cwd = config.codex_home.abs();
 +    std::fs::create_dir_all(&config.codex_home)?;
@@ -9646,7 +9712,7 @@ index 228152a4341a02f5d8fd447772b24f3268c968b7..66edbdc880c3031bb6fea56f764311c8
 +    let (child, _) = test
 +        .thread_manager
 +        .fork_prepared_thread(
-+            crate::StartThreadOptions::new(test.config.clone()),
++            core_test_support::test_codex::StartThreadOptions::new(test.config.clone()),
 +            prepared,
 +        )
 +        .await?;
@@ -10039,7 +10105,7 @@ index 4fdc831fc73a177af5eff0c2211d2049303925b3..4fe8a83a86f2cf32f345051b9952dd61
              GUARDIAN_REVIEWER_NAME.to_string(),
          )),
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 44bcb3768a52c5af24759c87f431fe0f401d67c8..36068708c7be777c977131cc8fbbdd8f09530782 100644
+index 284df7ca21050bc1c2c4acbe71f40599b6534ffd..beff862b6c591472627424fccb99f555b9f392f5 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -190,6 +190,11 @@ pub(crate) async fn run_turn(
@@ -12440,7 +12506,7 @@ index a51aa68d07c0971dcf869bf6aaa3fc8200da9ca8..7d33c6a0c33f2198c32df4e3b48a5d40
 +        .collect()
 +}
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index 94badeabc30c4d4c11532ff3396cd6dd57df1073..10598494da20e4c5c87ff38f8a1ab3b17ee60960 100644
+index 94badeabc30c4d4c11532ff3396cd6dd57df1073..c19fe7248377247f8e30658eda4af9d7d2b65528 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -129,6 +129,7 @@ async fn guardian_history_survives_restart_and_user_fork(
@@ -12451,6 +12517,35 @@ index 94badeabc30c4d4c11532ff3396cd6dd57df1073..10598494da20e4c5c87ff38f8a1ab3b1
      } else {
          initial
              .thread_manager
+@@ -535,7 +536,27 @@ async fn guardian_history_survives_compaction_and_eviction_but_not_legacy_rollba
+                 .thread;
+         } else {
+             assert!(!transcript.contains(">>> TRUSTED USER ANSWERS START"));
+-            assert!(!transcript.contains("Do not publish anything."));
++            assert!(
++                !transcript.contains("Do not publish anything."),
++                "rolled-back answer remains in Guardian input: {:?}",
++                guardian
++                    .input()
++                    .iter()
++                    .enumerate()
++                    .filter_map(|(index, item)| {
++                        let serialized = item.to_string();
++                        let offset = serialized.find("Do not publish anything.")?;
++                        let start = serialized[..offset]
++                            .char_indices()
++                            .rev()
++                            .nth(160)
++                            .map_or(0, |(offset, _)| offset);
++                        let excerpt = serialized[start..].chars().take(640).collect::<String>();
++                        Some((index, item["type"].clone(), item["role"].clone(), excerpt))
++                    })
++                    .take(4)
++                    .collect::<Vec<_>>()
++            );
+             assert!(!transcript.contains("Only publish to a private repository."));
+             assert!(!transcript.contains("tool update_plan call"));
+             assert!(!transcript.contains("tool update_plan result"));
 diff --git a/codex-rs/core/tests/suite/guardian_retained_context.rs b/codex-rs/core/tests/suite/guardian_retained_context.rs
 index 53274954cd9fbaaa03d4bde56cff0d022a0f5682..ed5d8c0e23e853f422c2e5ab700a4443caa0dbb1 100644
 --- a/codex-rs/core/tests/suite/guardian_retained_context.rs
@@ -12905,6 +13000,74 @@ index 1fa128c2f5d2eb96730553092992949079c2e725..1fe9bfa4c9c6b59325fa44a7b57e87f1
                  | RolloutItem::InterAgentCommunicationMetadata { .. }
                  | RolloutItem::Compacted(_)
                  | RolloutItem::TurnContext(_)
+diff --git a/codex-rs/memories/write/src/rollout_input.rs b/codex-rs/memories/write/src/rollout_input.rs
+index 7a1d1d94c3e0c7efde98993dd128722dde2bf627..c9f6534a8f1639bf1b6987b67d3540a80ea60ed6 100644
+--- a/codex-rs/memories/write/src/rollout_input.rs
++++ b/codex-rs/memories/write/src/rollout_input.rs
+@@ -46,6 +46,7 @@ pub(crate) fn serialize_tiered_input(
+             RolloutItem::ResponseItem(item) => sanitize_response_item_for_memories(&item.item),
+             RolloutItem::InterAgentCommunication(message) => Some(message.to_model_input_item()),
+             RolloutItem::SessionMeta(_)
++            | RolloutItem::RolloutReference(_)
+             | RolloutItem::InterAgentCommunicationMetadata { .. }
+             | RolloutItem::Compacted(_)
+             | RolloutItem::TurnContext(_)
+diff --git a/codex-rs/memories/write/src/rollout_input_tests.rs b/codex-rs/memories/write/src/rollout_input_tests.rs
+index 5cdd2baeb581d3cd241cad98f8001e4d207e3a48..9b7d5e777dbf684e6c32ad558256e09a6c4fb802 100644
+--- a/codex-rs/memories/write/src/rollout_input_tests.rs
++++ b/codex-rs/memories/write/src/rollout_input_tests.rs
+@@ -1,6 +1,51 @@
+ use super::*;
+ use pretty_assertions::assert_eq;
+
++#[test]
++fn tiered_memory_input_preserves_messages_around_rollout_references() {
++    let message = ResponseItem::Message {
++        id: None,
++        role: "user".to_string(),
++        content: vec![ContentItem::InputText {
++            text: "Keep the inherited decision.".to_string(),
++        }],
++        phase: None,
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let reply = ResponseItem::Message {
++        id: None,
++        role: "assistant".to_string(),
++        content: vec![ContentItem::OutputText {
++            text: "And keep the new result.".to_string(),
++        }],
++        phase: Some(MessagePhase::FinalAnswer),
++        internal_chat_message_metadata_passthrough: None,
++    };
++    let reference = RolloutItem::RolloutReference(codex_protocol::protocol::RolloutReferenceItem {
++        rollout_path: "structural-reference-not-memory-evidence.jsonl".into(),
++        thread_id: None,
++        rollout_id: None,
++        rollout_timestamp: None,
++        segment_id: None,
++        max_depth: 2,
++        nth_user_message: None,
++        compacted_replacement_history_filter_texts: None,
++    });
++    let expected = format!(
++        "[human user]\n{}\n[assistant final]\n{}\n",
++        serde_json::to_string(&message).unwrap(),
++        serde_json::to_string(&reply).unwrap(),
++    );
++    let items = [
++        reference.clone(),
++        RolloutItem::ResponseItem(message.into()),
++        reference,
++        RolloutItem::ResponseItem(reply.into()),
++    ];
++
++    assert_eq!(serialize_tiered_input(&items, 1_000).unwrap(), expected);
++}
++
+ #[test]
+ fn extraction_chunks_preserve_unicode_evidence_with_bounded_messages() {
+     let evidence = "User correction: 🐈\n".repeat(2_000);
 diff --git a/codex-rs/protocol/src/items.rs b/codex-rs/protocol/src/items.rs
 index ccdf2f205502de07fe1c8bef55e4ed2cde1122c8..778d33e937d4e5c6351c4c68c233abc573a3ebbf 100644
 --- a/codex-rs/protocol/src/items.rs
@@ -17451,10 +17614,10 @@ index 0000000000000000000000000000000000000000..694b2333267aca4fb18062835b1f31de
 +mod tests;
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..cfe12d5a602fc78d57c6a168723188ee087a1737
+index 0000000000000000000000000000000000000000..20059cae9bba080e56f1e7f078913be5a35c5f84
 --- /dev/null
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -0,0 +1,2721 @@
+@@ -0,0 +1,2722 @@
 +use std::collections::HashSet;
 +use std::fs;
 +use std::io;
@@ -17637,6 +17800,7 @@ index 0000000000000000000000000000000000000000..cfe12d5a602fc78d57c6a168723188ee
 +            comp_hash: None,
 +            personality: None,
 +            collaboration_mode: None,
++            disabled_plugin_ids: None,
 +            multi_agent_version: None,
 +            multi_agent_mode: None,
 +            realtime_active: None,
@@ -38484,7 +38648,7 @@ index 34eeede51b4169b0fc4978b2501a8216bcea9983..c53f90b2388a5c55e038f651f0725c80
      ThreadStoreError::Internal {
          message: err.to_string(),
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 3f6fcbf6158e730135019e4f674f69d104e7bef0..35d0a8a7226d7dc45f359be56ea8b8a29969027c 100644
+index 3f6fcbf6158e730135019e4f674f69d104e7bef0..e84e381d0f9b6d31189f3bdfa5b6f0278617eb25 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 @@ -1,10 +1,17 @@
@@ -38523,13 +38687,19 @@ index 3f6fcbf6158e730135019e4f674f69d104e7bef0..35d0a8a7226d7dc45f359be56ea8b8a2
  use codex_protocol::protocol::TokenCountEvent;
  use codex_protocol::protocol::TurnCompleteEvent;
  use codex_protocol::protocol::TurnStartedEvent;
-@@ -42,11 +52,14 @@ use tempfile::TempDir;
+@@ -36,17 +46,20 @@ use codex_rollout::RolloutItem;
+ use codex_rollout::RolloutLine;
+ use codex_rollout::RolloutRecorder;
+ use codex_rollout::RolloutRecorderParams;
++use codex_rollout::WriterLockCoordinator;
+ use codex_utils_absolute_path::test_support::PathExt;
+ use pretty_assertions::assert_eq;
+ use tempfile::TempDir;
 
  use super::super::LocalThreadStore;
  use super::super::LocalThreadStoreConfig;
 +use super::super::paginated_fork::inject_lineage_persistence_pause;
  use super::super::test_support::test_config;
-+use super::super::writer_lock::WriterLockCoordinator;
  use crate::AppendThreadItemsParams;
  use crate::CreateThreadParams;
  use crate::DeleteThreadParams;

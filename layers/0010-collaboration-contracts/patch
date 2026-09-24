@@ -2503,10 +2503,10 @@ index 87d8ed5d2ece756951c52fa934f33f927cc06fba..dd45091dd7273c4f2737835e1f13d71e
          # are relying on the presence of this file as a repo root marker. When
          # running tests locally, this "just works," but in remote execution,
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index 03b2fc766d84945712917920dc842edca8a91113..b13768038ce459ef0c285ae5564f0bdd38baa39b 100644
+index a8201a30b4ce91fabbbc68909b7110083e825a56..98795b5d71dd5621e324547ec1505f8695711363 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -752,6 +752,83 @@ impl LocalAgentControl {
+@@ -751,6 +751,83 @@ impl LocalAgentControl {
          Ok(agents)
      }
 
@@ -2997,7 +2997,7 @@ index d81f4503bef9989c135c1a1d36f74a03d1ab45ce..34e9f42893f83421be3bf0344139f6a3
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 78ded5a75667f4acea8e560941698239bd4defe0..dee5b222916b3dfef5a16f78b9c90511124caa0c 100644
+index 983f4105b1d7504aca69f66229f7c1f54120d7c0..1a3e6d7f54a06e7a4d290bec010d8b5128b4ff61 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -12676,6 +12676,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
@@ -19041,7 +19041,7 @@ index 43d597b89a4720509e3da724fa1906c1f1bab6ef..5d62d45b1e4f056a64b5de356add1806
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 6641eeb7508f70864dda1e936e84c127ac86d5b6..acced9307cf2d965412edd97c58798f473adeed6 100644
+index 3d302397842c1081dd9eb11c2ac90d628a6d2bec..210efa83632e801963c90a56aa85767b7d2e0daf 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -20,6 +20,7 @@ use crate::session::turn_context::TurnContext;

@@ -1,1 +1,3 @@
-Resolve workspace dependencies after all feature crates are introduced
+Resolve workspace dependencies and regenerate schemas and the Python SDK
+
+Resolve the workspace after all feature crates are present. Regenerate config.schema.json, the stable and experimental app-server export bundles, and the Python SDK from the complete protocol declarations. The export bundles contain declarations owned by several earlier features and cannot be redistributed as independent text hunks.

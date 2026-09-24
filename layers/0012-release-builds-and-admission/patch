@@ -378,10 +378,10 @@ index 0000000000000000000000000000000000000000..4a31a28a6f09f17c12db0a55ab17a7ee
 +}
 diff --git a/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..95e92cde2a9f1d6d411855562bf6214cf5e0585f
+index 0000000000000000000000000000000000000000..8dc623b1ec1df1279b1e2722bc5426aae2c25d01
 --- /dev/null
 +++ b/codex-rs/app-server/tests/suite/v2/frodex_runtime_recovery.rs
-@@ -0,0 +1,342 @@
+@@ -0,0 +1,347 @@
 +use std::path::Path;
 +use std::path::PathBuf;
 +
@@ -612,8 +612,13 @@ index 0000000000000000000000000000000000000000..95e92cde2a9f1d6d411855562bf6214c
 +    resume(&mut first, thread_id).await?;
 +    assert_eq!(response_mock.requests().len(), 0);
 +
-+    let repaired_prefix = std::fs::read(rollout_path.as_path())?;
-+    assert_eq!(repaired_prefix.len(), original.len());
++    // Resume may append session metadata after the repaired historical bytes.
++    let repaired_rollout = std::fs::read(rollout_path.as_path())?;
++    let repaired_prefix = repaired_rollout
++        .get(..original.len())
++        .context("repair must preserve the original byte boundary")?
++        .to_vec();
++    assert_eq!(repaired_prefix.last(), Some(&b'\n'));
 +    assert_ne!(repaired_prefix, original);
 +    let repaired_lines = parse_rollout(rollout_path.as_path())?;
 +    let ResponseItem::AgentMessage {

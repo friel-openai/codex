@@ -649,7 +649,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index e42886feabf28b1e798d41bcb84f00553e7dbc0b..1792ed3414e9bf04e4769fe9e2ada2b961d3fbd8 100644
+index 632b96a71c1c93542a6d1d68dc6bda3199edc8c6..7326952cf8c066cf86054b5f8a815e345df84697 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -411,6 +411,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
@@ -750,7 +750,7 @@ index e42886feabf28b1e798d41bcb84f00553e7dbc0b..1792ed3414e9bf04e4769fe9e2ada2b9
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -8783,18 +8752,52 @@ while True:
+@@ -8785,18 +8754,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -805,7 +805,7 @@ index e42886feabf28b1e798d41bcb84f00553e7dbc0b..1792ed3414e9bf04e4769fe9e2ada2b9
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -8805,13 +8808,8 @@ while True:
+@@ -8807,13 +8810,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [

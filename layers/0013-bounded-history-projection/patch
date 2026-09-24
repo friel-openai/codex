@@ -1729,10 +1729,10 @@ index 694b2333267aca4fb18062835b1f31decc31dcd6..3848de08975211b514d2755aa7d06228
          }
      }
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f17a5c8e9 100644
+index 20059cae9bba080e56f1e7f078913be5a35c5f84..f201ffe41f9c9563d5e33fe7e954a6fe14a298bd 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -2444,6 +2444,8 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2445,6 +2445,8 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
      let home = TempDir::new()?;
      let thread_id = ThreadId::new();
      let deepest_segment = SegmentId::new();
@@ -1741,7 +1741,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
      let old_segment = SegmentId::new();
      let middle_segment = SegmentId::new();
      let current_segment = SegmentId::new();
-@@ -2456,19 +2458,27 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2457,19 +2459,27 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
          deepest_segment,
          "2026-07-13T00-00-00",
      );
@@ -1772,7 +1772,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
      );
      let fork_path = home.path().join("fork.jsonl");
 
-@@ -2491,16 +2501,58 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2492,16 +2502,58 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
      };
      reference.max_depth = MAX_ROLLOUT_REFERENCE_DEPTH;
      write_rollout(
@@ -1836,7 +1836,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
      let RolloutItem::RolloutReference(reference) = &mut old_reference.item else {
          unreachable!();
      };
-@@ -2508,9 +2560,9 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2509,9 +2561,9 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
      write_rollout(
          middle_path.as_path(),
          &[
@@ -1848,7 +1848,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
          ],
      )?;
 
-@@ -2518,7 +2570,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2519,7 +2571,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
          middle_path.clone(),
          thread_id,
          middle_segment,
@@ -1857,7 +1857,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
      );
      let RolloutItem::RolloutReference(reference) = &mut middle_reference.item else {
          unreachable!();
-@@ -2527,14 +2579,17 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2528,14 +2580,17 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
      write_rollout(
          current_path.as_path(),
          &[
@@ -1878,7 +1878,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
 
      let bounded_window = materialize_bounded_rollout_lines(
          home.path(),
-@@ -2564,7 +2619,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2565,7 +2620,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
          current_path.clone(),
          thread_id,
          current_segment,
@@ -1887,7 +1887,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
      );
      let RolloutItem::RolloutReference(reference) = &mut fork_reference.item else {
          unreachable!();
-@@ -2573,7 +2628,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
+@@ -2574,7 +2629,7 @@ async fn recent_materialization_bounds_existing_deep_reference_chains() -> io::R
      write_rollout(
          fork_path.as_path(),
          &[
@@ -1897,7 +1897,7 @@ index cfe12d5a602fc78d57c6a168723188ee087a1737..a2a8361864e3d43f7c1f0decb4262f4f
          ],
      )?;
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 35d0a8a7226d7dc45f359be56ea8b8a29969027c..3182b704ce32e4dace88198faa6a3c2a1ac06521 100644
+index e84e381d0f9b6d31189f3bdfa5b6f0278617eb25..b3bf4912f1fe337b452ef952ab8f48e182f3186b 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 @@ -1415,10 +1415,10 @@ async fn paginated_realtime_items_materialize_separately_in_rollout_order() {

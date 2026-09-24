@@ -242,7 +242,7 @@ index cd376bdbfb66a22e8b6d18f87e85ea654c6e1571..a91220df0a2dbe2b176f6000f122ea12
              input,
              tools,
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index e085a2f534fc0e314cef82bceac1f03655feb8af..cf094ce2bc053d62493f5ec7e91ae495381a37bf 100644
+index 84417cf1fdc48d85d57c68e309faeca5fb2dc510..e43445832d8278095226bf5d489141e964724b90 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
 @@ -39,6 +39,7 @@ use codex_model_provider_info::CHATGPT_CODEX_BASE_URL;
@@ -273,7 +273,7 @@ index e085a2f534fc0e314cef82bceac1f03655feb8af..cf094ce2bc053d62493f5ec7e91ae495
      }
  }
 
-@@ -1797,8 +1801,10 @@ impl ModelProvider for TestRecoveryProvider {
+@@ -1796,8 +1800,10 @@ impl ModelProvider for TestRecoveryProvider {
          &self,
          codex_home: PathBuf,
          config_model_catalog: Option<ModelsResponse>,
@@ -2975,6 +2975,18 @@ index 88ade7cfcf0c6d5c94c35c167ca01dc150b974c5..cb0e16319e699889ba788b71a7c007d9
          slug: slug.to_string(),
 +        request_model: None,
          display_name: slug.to_string(),
+         description: None,
+         default_reasoning_level: None,
+diff --git a/codex-rs/prompts/src/model_instructions_tests.rs b/codex-rs/prompts/src/model_instructions_tests.rs
+index 540cbabc79752eff5739abb8f2d41af7c6b39feb..247d02bdb3384d217a8ac358544b36dcae11e9a1 100644
+--- a/codex-rs/prompts/src/model_instructions_tests.rs
++++ b/codex-rs/prompts/src/model_instructions_tests.rs
+@@ -11,6 +11,7 @@ use pretty_assertions::assert_eq;
+ fn test_model(model_messages: Option<ModelMessages>) -> ModelInfo {
+     ModelInfo {
+         slug: "test-model".to_string(),
++        request_model: None,
+         display_name: "Test Model".to_string(),
          description: None,
          default_reasoning_level: None,
 diff --git a/codex-rs/protocol/src/openai_models.rs b/codex-rs/protocol/src/openai_models.rs

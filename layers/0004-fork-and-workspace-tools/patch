@@ -590,12 +590,12 @@ index c9872397fc496e5f821c960df001821e22b1d862..afa27ef3f54411b3bad9f59d86364034
                  Some(parent_environments.clone()),
                  Some(Arc::clone(&parent.session.services.exec_policy)),
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index ed4880bb3863e1ddc3b3346322ad456f37826eb2..d72fd481587793dee9edaab329c4487b161dac95 100644
+index b497904bb2ecf896ad2d3bff8a0af85004aaa79c..778928098c99f2c39c291df86065c8b1102d2bed 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -1184,6 +1184,18 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest()
-             output_message("msg-latest", "assistant output"),
-         ]
+@@ -1183,6 +1183,18 @@ fn response_continuation_for_fork_drops_historical_reasoning_but_keeps_latest()
+         response_continuation.last_response.items_added,
+         expected_latest_items
      );
 +    let mut websocket = super::WebsocketSession::from_response_continuation(response_continuation);
 +    assert!(websocket.connection.is_none());
@@ -803,18 +803,37 @@ index 48052b44feb78341a7d676bbbc8e5641f8cb56ee..f958893c299c49b20f0cc0d209e9a2b9
          let state_db_fut = async {
              if config.ephemeral {
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9a0737ac7 100644
+index 843d558e7212875201829e9dd29c3bc8ae811bc4..ed7eb89875072392c3c124da41ad3e06834e0933 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -47,6 +47,7 @@ use codex_protocol::protocol::AskForApproval;
+@@ -3,6 +3,8 @@ use crate::agents_md_manager::AgentsMdManager;
+ use crate::agents_md_manager::SessionInstructions;
+ use crate::environment_selection::TurnEnvironmentState;
+ use crate::session::handlers::submission_loop;
++use crate::session::session::SessionSettingsCommit;
++use crate::session::session::SessionSettingsUpdate;
+ use crate::session::step_context::StepContext;
+ use crate::session::step_context::StepInputs;
+ use crate::session::step_settings::StepSettings;
+@@ -37,6 +39,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
+ use codex_protocol::config_types::CollaborationModeMask;
+ use codex_protocol::config_types::ReasoningSummary;
+ use codex_protocol::config_types::ServiceTier;
++use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::openai_models::AutoReviewMessages;
+ use codex_protocol::openai_models::GuardianV2ModelConfig;
+ use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
+@@ -47,6 +50,9 @@ use codex_protocol::protocol::AskForApproval;
  use codex_protocol::protocol::Op;
  use codex_protocol::protocol::Submission;
  use codex_protocol::protocol::TurnAbortReason;
 +use codex_protocol::protocol::TurnEnvironmentSelections;
++use codex_utils_absolute_path::AbsolutePathBuf;
++use codex_utils_path_uri::PathUri;
  use pretty_assertions::assert_eq;
  use std::collections::BTreeSet;
  use std::collections::HashMap;
-@@ -672,6 +673,10 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -672,6 +678,10 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          finish,
          ..
      } = activation_fixture(activation_models()).await;
@@ -825,7 +844,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9
      {
          let mut state = session.state.lock().await;
          let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
-@@ -680,6 +685,13 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -680,6 +690,13 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
                  .collaboration_mode
                  .with_updates(Some(MODEL_B.to_string()), None, None);
      }
@@ -839,7 +858,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9
      let future = desired_step_settings(&session).await;
      let prepared = session
          .prepare_turn_context_replacement(&turn)
-@@ -693,6 +705,20 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -693,6 +710,20 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          prepared.inputs.settings.selected()
      );
      assert_eq!(refreshed.model_info().slug, MODEL_A);
@@ -860,7 +879,7 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9
      assert!(
          session
              .try_replace_active_turn_context(&prepared, &refreshed)
-@@ -714,6 +740,186 @@ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
+@@ -714,6 +745,187 @@ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
      )
  }
 
@@ -1001,12 +1020,11 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9
 +    };
 +    let current = current_turn.next_step_input.load_full();
 +    let selections = session.services.turn_environments.selections();
-+    assert!(matches!(
-+        session
-+            .activate_workspace_environments(&turn, &commit.configuration)
-+            .await,
-+        Err(CodexErr::TurnAborted)
-+    ));
++    let error = session
++        .activate_workspace_environments(&turn, &commit.configuration)
++        .await
++        .expect_err("cancelled or replaced task must not activate workspace settings");
++    assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
 +    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
 +    assert!(Arc::ptr_eq(
 +        &current_turn.next_step_input.load_full(),
@@ -1032,11 +1050,13 @@ index 843d558e7212875201829e9dd29c3bc8ae811bc4..d4fc0c6f7d6aed8987a0a558e952dbd9
 +    commit_workspace_for_activation(&session, &turn, &second_cwd).await;
 +    let original = turn.next_step_input.load_full();
 +    let selections = session.services.turn_environments.selections();
++    let error = session
++        .activate_workspace_environments(&turn, &commit.configuration)
++        .await
++        .expect_err("superseded workspace settings must not activate");
 +    assert!(matches!(
-+        session
-+            .activate_workspace_environments(&turn, &commit.configuration)
-+            .await,
-+        Err(CodexErr::InvalidRequest(message))
++        error.details(),
++        CodexErrorDetails::InvalidRequest(message)
 +            if message == "workspace settings changed while preparing the transition"
 +    ));
 +    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
@@ -1144,7 +1164,7 @@ index c0831ed4ba8db06a7af654a13243928203603565..399577a8138aa8ae37196da2c67adb89
          thread_id: Some(session.thread_id()),
          thread_settings: session.thread_settings_snapshot().await,
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f401d67c8 100644
+index 483fe079198886bb1a3e867f735022772753f5c6..284df7ca21050bc1c2c4acbe71f40599b6534ffd 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -61,6 +61,7 @@ use crate::stream_events_utils::record_completed_response_item_with_finalized_fa
@@ -1155,21 +1175,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -539,11 +540,9 @@ pub(crate) async fn run_turn(
-             })
-         };
-         if execution_settings_refresh_requested {
-+            let inputs = turn_context.next_step_input.load_full();
-             let refreshed_turn_context = sess
--                .refresh_active_turn_context(
--                    turn_context.as_ref(),
--                    &turn_context.next_step_input.load_full(),
--                )
-+                .refresh_active_turn_context(turn_context.as_ref(), &inputs)
-                 .await;
-             let refreshed_step_context = sess
-                 .capture_step_context_with_required_mcp_servers(
-@@ -706,7 +705,33 @@ pub(crate) async fn run_turn(
+@@ -677,7 +678,33 @@ pub(crate) async fn run_turn(
                  let SamplingRequestResult {
                      needs_follow_up: model_needs_follow_up,
                      last_agent_message: sampling_request_last_agent_message,
@@ -1203,7 +1209,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
                  if model_needs_follow_up {
                      sess.input_queue
                          .accept_mailbox_delivery_for_current_turn(
-@@ -2340,6 +2365,7 @@ pub(crate) async fn built_tools(
+@@ -2311,6 +2338,7 @@ pub(crate) async fn built_tools(
  struct SamplingRequestResult {
      needs_follow_up: bool,
      last_agent_message: Option<String>,
@@ -1211,7 +1217,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
  }
 
  /// Ephemeral per-response state for streaming a single proposed plan.
-@@ -3264,6 +3290,8 @@ async fn try_run_sampling_request(
+@@ -3235,6 +3263,8 @@ async fn try_run_sampling_request(
          .or_cancel(&cancellation_token)
          .await??;
      let mut in_flight: FuturesOrdered<InFlightFuture<'static>> = FuturesOrdered::new();
@@ -1220,7 +1226,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
      let mut active_item: Option<TurnItem> = None;
-@@ -3448,6 +3476,10 @@ async fn try_run_sampling_request(
+@@ -3419,6 +3449,10 @@ async fn try_run_sampling_request(
                  if let Some(tool_future) = output_result.tool_future {
                      in_flight.push_back(tool_future);
                  }
@@ -1231,7 +1237,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
                  if let Some(agent_message) = output_result.last_agent_message {
                      last_agent_message = Some(agent_message);
                  }
-@@ -3457,6 +3489,7 @@ async fn try_run_sampling_request(
+@@ -3428,6 +3462,7 @@ async fn try_run_sampling_request(
                      break Ok(SamplingRequestResult {
                          needs_follow_up: true,
                          last_agent_message,
@@ -1239,7 +1245,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
                      });
                  }
              }
-@@ -3644,6 +3677,7 @@ async fn try_run_sampling_request(
+@@ -3615,6 +3650,7 @@ async fn try_run_sampling_request(
                  break Ok(SamplingRequestResult {
                      needs_follow_up,
                      last_agent_message,
@@ -1247,7 +1253,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
                  });
              }
              ResponseEvent::OutputTextDelta(delta) => {
-@@ -3928,6 +3962,9 @@ async fn try_run_sampling_request(
+@@ -3899,6 +3935,9 @@ async fn try_run_sampling_request(
      } else {
          Some(turn_context.turn_timing_state.begin_tool_blocking())
      };
@@ -1257,7 +1263,7 @@ index 7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e..44bcb3768a52c5af24759c87f431fe0f
      if let Err(err) = drain_in_flight(&mut in_flight, sess.clone(), &step_context).await {
          reroute_safe.store(false, Ordering::Relaxed);
          return Err(err);
-@@ -3957,7 +3994,10 @@ async fn try_run_sampling_request(
+@@ -3928,7 +3967,10 @@ async fn try_run_sampling_request(
          }
      }
 
@@ -1360,7 +1366,7 @@ index 38cc41c7482ec99e242d69d990552038afe6efab..0012213fa8073c59251cad6fa326f811
  where
 diff --git a/codex-rs/core/src/tools/handlers/workspace.rs b/codex-rs/core/src/tools/handlers/workspace.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..78d4858f90e8bc9bb2ef91db2ce8545c4abe54d9
+index 0000000000000000000000000000000000000000..650734db9f676ff16caabb87d2f012994a775f24
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/workspace.rs
 @@ -0,0 +1,913 @@
@@ -1466,7 +1472,7 @@ index 0000000000000000000000000000000000000000..78d4858f90e8bc9bb2ef91db2ce8545c
 +                        "instruction"
 +                    ],
 +                    "additionalProperties": false
-+                })),
++                }).into()),
 +            })],
 +        })
 +    }
@@ -3295,11 +3301,11 @@ index 0000000000000000000000000000000000000000..a24ec764716a3e8e54dc8a9856e06ea3
 +    Ok(())
 +}
 diff --git a/codex-rs/exec/src/lib_tests.rs b/codex-rs/exec/src/lib_tests.rs
-index 66ac5736629760c49bd3136f79921a31602d494d..d6181d3edc4de45a1b2af125ab935b5cf459dc69 100644
+index c9ef4296bb1db81f160a54a525e0aef29f342efd..a617e81ba8d867077869cf8adfe20e2ffde434e0 100644
 --- a/codex-rs/exec/src/lib_tests.rs
 +++ b/codex-rs/exec/src/lib_tests.rs
-@@ -965,6 +965,8 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
-             project_id: None,
+@@ -969,6 +969,8 @@ async fn session_configured_from_thread_fork_response_preserves_permission_profi
+             daybreak_enabled: None,
              history_mode: Default::default(),
              model_provider: "openai".to_string(),
 +            model: None,
@@ -4676,6 +4682,22 @@ index 2e82c78975cc2167e94fa45e9f7592e01b8f4b96..19baea6b7a7dfb9a570af1c1a7d4fa16
      let control = Box::pin(app.handle_event(
          &mut tui,
          &mut app_server,
+-        AppEvent::ForkCurrentSession { name: None },
++        AppEvent::ForkCurrentSession {
++            name: None,
++            placement: None,
++        },
+     ))
+     .await?;
+
+diff --git a/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs b/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs
+index b18a99ebae7fd4a8c220f61534a2012379d43749..6d16d5376db57b7ef3a0ae454bbe3c048e2842f5 100644
+--- a/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs
++++ b/codex-rs/tui/src/app/tests/fork_workspace_roots_tests.rs
+@@ -64,7 +64,10 @@ async fn remote_fork_dispatch_preserves_server_workspace_roots() -> Result<()> {
+     Box::pin(app.handle_event(
+         &mut tui,
+         &mut server,
 -        AppEvent::ForkCurrentSession { name: None },
 +        AppEvent::ForkCurrentSession {
 +            name: None,

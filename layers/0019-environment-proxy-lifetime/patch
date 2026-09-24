@@ -527,10 +527,10 @@ index 245bdb0d54fb8c8d8bd32c97429c232e8ea4ac1c..6fd32f38bf74b3b5e31b4e3c2e842444
          output_drained.notified().await;
          // Deferred network denial deliberately remains observable for a short
 diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-index f919ee369459b5c930ea627eed793b27895f0174..8ff0a179c4cd31bfce45dbb9cc2d209c7992f7c1 100644
+index 4faff91b9f3c9c18c19349dc79d11dde2edbd5d7..556279c79b092487580ff3db79db9bda5459a096 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-@@ -243,6 +243,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
+@@ -292,6 +292,7 @@ async fn exit_watcher_waits_for_late_network_denial_before_classifying_end() ->
          Instant::now(),
          Some(network_denial_monitor),
          /*plugin_metrics_sidecar*/ None,
@@ -751,7 +751,7 @@ index bd4307f34b25b31e092e1c4d070f7031370b081d..83aff88bf22fb89de5e8ee13f6228768
  pub use proxy::ManagedProxyRouting;
  pub use proxy::NO_PROXY_ENV_KEYS;
 diff --git a/codex-rs/network-proxy/src/proxy.rs b/codex-rs/network-proxy/src/proxy.rs
-index 574dcba407f618e4e5974245e18a21b38231e344..260463d3847f5946ec3e7314006973f9d5fc5754 100644
+index 574dcba407f618e4e5974245e18a21b38231e344..c2a265f7ac623c8c0ba29d08a50bce84340f42c8 100644
 --- a/codex-rs/network-proxy/src/proxy.rs
 +++ b/codex-rs/network-proxy/src/proxy.rs
 @@ -39,6 +39,12 @@ use std::ops::RangeInclusive;
@@ -1142,7 +1142,7 @@ index 574dcba407f618e4e5974245e18a21b38231e344..260463d3847f5946ec3e7314006973f9
 +        let lease_state = Arc::new(EnvironmentProxyLeaseState {
 +            environment_id: environment_id.clone(),
 +            environment_proxies: Arc::downgrade(&self.environment_proxies),
-+            runtime: runtime.clone(),
++            runtime,
 +            idle_timeout: self.environment_proxy_idle_timeout,
 +            active_leases: AtomicUsize::new(0),
 +            generation: AtomicU64::new(0),

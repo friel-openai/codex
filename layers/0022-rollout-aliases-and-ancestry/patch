@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index af202acf8bb792f2d538da192b5ec527f9364a0b..833e847348f45ed4d4ce8aad4fb5a0b08e38903b 100644
+index 4452c93651268b6149ac31f0566e74b636ef450f..af91e2d72e8c48268ef5bbb6c1232029decb4448 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2306,6 +2306,7 @@ dependencies = [
+@@ -2307,6 +2307,7 @@ dependencies = [
   "url",
   "uuid",
   "wiremock",
@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 9da00b6f06515c4b0e00aba1a6ad1a221862ff56..8502898e14b2d3dd710ddc6a3caf1b3ae6f766e5 100644
+index 70c2a52102fe54565778165f42db60601625e440..e7e8b25a49beb9c90f3ebd4dd613a33af52f6d9a 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -8300,6 +8300,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -8297,6 +8297,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,7 +271,7 @@ index 9da00b6f06515c4b0e00aba1a6ad1a221862ff56..8502898e14b2d3dd710ddc6a3caf1b3a
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index fa098af50272654f54a995283a9a22d3261f280e..2efff66dd8c6a6657445728c63e4c78b61b1d3df 100644
+index 407c7d2bb784c0b7ffe1ab9e44a1b6159b3ab8a8..6732fc850af302bdeee91e1004b4ec0b8efb5e80 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -3195,7 +3195,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {
@@ -288,10 +288,10 @@ index fa098af50272654f54a995283a9a22d3261f280e..2efff66dd8c6a6657445728c63e4c78b
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 7ab25e2fc5c7b0a3acbbbe1afed445568b768df5..9dbb47c1fca30b912162c46851ce1a541a73cee1 100644
+index e39a98201c187b4224df92dc71bef6e69af712fe..953e2e2b8bf43ecd336a089ae88354debc8a4d32 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1701,7 +1701,6 @@ impl ThreadManager {
+@@ -1707,7 +1707,6 @@ impl ThreadManager {
          &self,
          rollout_path: PathBuf,
      ) -> CodexResult<InitialHistory> {
@@ -299,7 +299,7 @@ index 7ab25e2fc5c7b0a3acbbbe1afed445568b768df5..9dbb47c1fca30b912162c46851ce1a54
          let stored_thread = self
              .state
              .thread_store
-@@ -1712,7 +1711,7 @@ impl ThreadManager {
+@@ -1718,7 +1717,7 @@ impl ThreadManager {
              })
              .await
              .map_err(thread_store_rollout_read_error)?;
@@ -454,10 +454,10 @@ index bb868f8ec93fb186d90b5f80356fb6ce9e83266e..8aec2d8fcdfa09191635f3a3d1d23e53
                  .file_type()
                  .is_symlink()
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index e94398e1b764a4c73942853d958793b927b9c1b6..2ac0a80ec5b1f7a8914641f5adcfadbe5c6ec37b 100644
+index 09186465a7d5d7aa0279a73fd0a2ef392bfebe0e..05dd951dc8e3667eabaf4e07e390988a3baf6f97 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -2837,7 +2837,7 @@ async fn resolver_requires_the_referenced_physical_rollout_id() -> io::Result<()
+@@ -2838,7 +2838,7 @@ async fn resolver_requires_the_referenced_physical_rollout_id() -> io::Result<()
      };
      assert_eq!(
          resolve_rollout_reference_path(home.path(), &reference).await?,
@@ -466,7 +466,7 @@ index e94398e1b764a4c73942853d958793b927b9c1b6..2ac0a80ec5b1f7a8914641f5adcfadbe
      );
 
      fs::remove_file(referenced_path)?;
-@@ -2886,7 +2886,7 @@ async fn resolver_uses_validated_rotated_compressed_segment() -> io::Result<()>
+@@ -2887,7 +2887,7 @@ async fn resolver_uses_validated_rotated_compressed_segment() -> io::Result<()>
      };
      assert_eq!(
          resolve_rollout_reference_path(home.path(), &reference).await?,
@@ -475,7 +475,7 @@ index e94398e1b764a4c73942853d958793b927b9c1b6..2ac0a80ec5b1f7a8914641f5adcfadbe
      );
      Ok(())
  }
-@@ -2911,7 +2911,7 @@ async fn legacy_reference_accepts_matching_recorded_path() -> io::Result<()> {
+@@ -2912,7 +2912,7 @@ async fn legacy_reference_accepts_matching_recorded_path() -> io::Result<()> {
 
      assert_eq!(
          resolve_rollout_reference_path(home.path(), &reference).await?,
@@ -484,7 +484,7 @@ index e94398e1b764a4c73942853d958793b927b9c1b6..2ac0a80ec5b1f7a8914641f5adcfadbe
      );
      Ok(())
  }
-@@ -2950,7 +2950,7 @@ async fn legacy_reference_uses_initial_after_stable_path_is_replaced() -> io::Re
+@@ -2951,7 +2951,7 @@ async fn legacy_reference_uses_initial_after_stable_path_is_replaced() -> io::Re
      };
      assert_eq!(
          resolve_rollout_reference_path(home.path(), &reference).await?,
@@ -493,7 +493,7 @@ index e94398e1b764a4c73942853d958793b927b9c1b6..2ac0a80ec5b1f7a8914641f5adcfadbe
      );
      Ok(())
  }
-@@ -3011,7 +3011,7 @@ async fn legacy_reference_resolves_archived_initial_segment() -> io::Result<()>
+@@ -3012,7 +3012,7 @@ async fn legacy_reference_resolves_archived_initial_segment() -> io::Result<()>
 
      assert_eq!(
          resolve_rollout_reference_path(home.path(), &reference).await?,
@@ -1673,7 +1673,7 @@ index e87dea9fbfdfb2a468ef61c436a7b71cd7e19511..10e173c4d55d3a353077812a3e00eae2
      let publication =
          publish_history_repair_replacement(home.path(), path.as_path(), replacement.as_slice())
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index dd76c32f80545f89044370e8e3990c0b32d938d3..eb5f71a1bc7147c31a803d0ad1a964b9367f8969 100644
+index 06dd56c449d645cc1b2b871acf5b704012f18cac..c42a896db3cd99ff34a391a2aab28262ba785bf9 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -75,6 +75,79 @@ use crate::ThreadPersistenceMode;
@@ -1790,7 +1790,7 @@ index daa914237d8bd0db1a2faa8b213485e6a9713a98..74cc5020eb3cbe13b1b42f366e8e2c43
      .await
      .expect("seed complete projection checkpoint");
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 060adc24948805b6eeb8894fd2f797ee9ef04166..0c9df9d7278154f96768bfde27c20a8b6d285217 100644
+index 817499c4ab6e541b9912caec44ab9e386e3fc419..14da48f847ed8ff9e1cfb952ed6b155185336f01 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 @@ -1793,6 +1793,130 @@ async fn referenced_paginated_rollout_projects_inherited_ordinal_range() {

@@ -1,8 +1,8 @@
 diff --git a/codex-rs/Cargo.lock b/codex-rs/Cargo.lock
-index e3b3628c34b21cfd19618e33930eec1b7e290f0a..af202acf8bb792f2d538da192b5ec527f9364a0b 100644
+index 34ffbcb1b5681728ce7c3ca216f11b81ac5faea0..4452c93651268b6149ac31f0566e74b636ef450f 100644
 --- a/codex-rs/Cargo.lock
 +++ b/codex-rs/Cargo.lock
-@@ -2235,6 +2235,7 @@ dependencies = [
+@@ -2236,6 +2236,7 @@ dependencies = [
   "codex-git-utils",
   "codex-goal-extension",
   "codex-guardian-v2",
@@ -421,7 +421,7 @@ index b58bb0b266f3b1bd2ccb482eb468ff6f5b39ee61..54268dd0489819f16454be43a116d95b
              .shutdown()
              .await
 diff --git a/codex-rs/app-server/src/message_processor.rs b/codex-rs/app-server/src/message_processor.rs
-index 24e34e1dfe61532ad063091f03b0c7cd2016ff92..5f077ef9ba960759d52da4f1b8c4fc6404cea834 100644
+index 148cea5444d070f6ee199db4ef4a5a98ea21af21..badf0c9417bc9e44b7c9f51e5b00486c252718eb 100644
 --- a/codex-rs/app-server/src/message_processor.rs
 +++ b/codex-rs/app-server/src/message_processor.rs
 @@ -155,7 +155,7 @@ fn reject_obsolete_request_fields(request: &JSONRPCRequest) -> Result<(), JSONRP
@@ -1668,10 +1668,10 @@ index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 13b88b28be15747d20f867c35c4451d96bd820db..7ab25e2fc5c7b0a3acbbbe1afed445568b768df5 100644
+index 13dc917213fb912154c9373239e5b9d94d44d7f1..e39a98201c187b4224df92dc71bef6e69af712fe 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
-@@ -1833,7 +1833,9 @@ impl ThreadManager {
+@@ -1839,7 +1839,9 @@ impl ThreadManager {
          };
          model_history_override.extend_from_slice(synthesized_suffix);
          let shared_model_response_items = prepared.shared_model_response_items.clone();
@@ -1682,7 +1682,7 @@ index 13b88b28be15747d20f867c35c4451d96bd820db..7ab25e2fc5c7b0a3acbbbe1afed44556
              if let Ok(source) = self.state.get_thread(source_thread_id).await {
                  Some(
                      source
-@@ -1878,7 +1880,7 @@ impl ThreadManager {
+@@ -1884,7 +1886,7 @@ impl ThreadManager {
                  ForkHistory {
                      snapshot: None,
                      initial_history: history,
@@ -1691,7 +1691,7 @@ index 13b88b28be15747d20f867c35c4451d96bd820db..7ab25e2fc5c7b0a3acbbbe1afed44556
                      model_history_override: Some(model_history_override),
                      settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                      shared_model_response_items,
-@@ -2377,7 +2379,7 @@ impl ThreadManagerState {
+@@ -2383,7 +2385,7 @@ impl ThreadManagerState {
                          "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                      ))
                  })?;
@@ -1701,10 +1701,10 @@ index 13b88b28be15747d20f867c35c4451d96bd820db..7ab25e2fc5c7b0a3acbbbe1afed44556
                  let logical_history = copied_history.as_ref().clone();
                  let model_history = prepared.model_context.as_ref().clone();
 diff --git a/codex-rs/core/src/thread_manager_tests.rs b/codex-rs/core/src/thread_manager_tests.rs
-index cbc2c5cdb31329e7c945c4a20a22259fda6b41d6..d70196870ef0ec084c8e44fdaa85fd22e053a063 100644
+index 41c2c183be0d1985ea4bf179068cb37e80bf7b8c..2c3cd115a25cfce554f8b679fb64b590133c1339 100644
 --- a/codex-rs/core/src/thread_manager_tests.rs
 +++ b/codex-rs/core/src/thread_manager_tests.rs
-@@ -642,7 +642,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
+@@ -641,7 +641,7 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
      };
      let prepared = PreparedFork::new(
          source_thread_id,
@@ -1713,15 +1713,49 @@ index cbc2c5cdb31329e7c945c4a20a22259fda6b41d6..d70196870ef0ec084c8e44fdaa85fd22
          /*history_base*/ None,
          Some(frozen_segment),
          Arc::new(boundary_context.clone()),
-@@ -3525,7 +3525,7 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
-     let source_items = Arc::new(source_history.get_rollout_items().to_vec());
-     let prepared = PreparedFork::new(
-         source.thread_id,
--        source_end_ordinal_exclusive,
-+        Some(source_end_ordinal_exclusive),
-         /*history_base*/ None,
-         /*frozen_segment*/ None,
-         Arc::clone(&source_items),
+@@ -3607,20 +3607,24 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+     assert!(source_snapshot_state.ends_mid_turn);
+     let expected_turn_id = source_snapshot_state.active_turn_id.clone();
+     assert_eq!(expected_turn_id, None);
++    assert_eq!(
++        source_history.get_history_mode(ThreadHistoryMode::Paginated),
++        ThreadHistoryMode::Legacy,
++    );
+
++    // A live legacy source is not migrated, so its prepared fork has no ordinal cutoff.
+     let source_end_ordinal_exclusive = std::fs::read_to_string(&source_path)
+         .expect("read source rollout")
+         .lines()
+         .filter(|line| !line.trim().is_empty())
+-        .map(|line| {
++        .filter_map(|line| {
+             codex_rollout::parse_rollout_line(line)
+                 .expect("parse source rollout line")
+                 .ordinal
+-                .expect("source rollout ordinal")
+         })
+         .max()
+-        .expect("source rollout has items")
+-        + 1;
++        .map(|ordinal| ordinal.checked_add(1).expect("source ordinal overflow"));
++    assert_eq!(source_end_ordinal_exclusive, None);
+
+     let forked = manager
+         .fork_thread(
+@@ -3709,10 +3713,11 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
+             .count(),
+         1,
+     );
+-    let ephemeral_history = ephemeral_fork.thread.conversation_history_snapshot().await;
++    // ConversationHistorySnapshot omits contextual user messages, including the interrupt marker.
++    let ephemeral_history = ephemeral_fork.thread.session.clone_history().await;
+     assert_eq!(
+         ephemeral_history
+-            .items()
++            .raw_items()
+             .filter(|item| {
+                 strip_response_item_ids_from_json(
+                     serde_json::to_value(RolloutItem::ResponseItem((*item).clone().into()))
 diff --git a/codex-rs/rollout/src/writer_lock.rs b/codex-rs/rollout/src/writer_lock.rs
 index e723bc63905c1bc4d1dce652720f1de141f8e4b8..abc4b476311f6ccb8fd4f2cd32ce5efafcacd695 100644
 --- a/codex-rs/rollout/src/writer_lock.rs
@@ -2319,7 +2353,7 @@ index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf9635440c 100644
+index c40afb3c3ed21e7a64274257e38aadbcc6328c09..ab532f30928523aa902438dddbb7e23c723e7799 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -2349,7 +2383,7 @@ index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf
  struct LiveRecorderEntry {
      recorder: RolloutRecorder,
      /// Reopens the committed stable rollout before the next live operation.
-@@ -779,6 +792,66 @@ impl LocalThreadStore {
+@@ -779,6 +792,68 @@ impl LocalThreadStore {
          )
      }
 
@@ -2391,7 +2425,9 @@ index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf
 +                .recorder
 +                .discard()
 +                .await
-+                .map_err(helpers::thread_store_io_error)?;
++                .map_err(|error| ThreadStoreError::Internal {
++                    message: error.to_string(),
++                })?;
 +        }
 +        result.map_err(writer_lock_error)?;
 +        self.writer_lock_coordinator
@@ -2416,7 +2452,7 @@ index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf
      pub(crate) async fn live_persistence_mode(
          &self,
          thread_id: ThreadId,
-@@ -806,17 +879,7 @@ impl LocalThreadStore {
+@@ -806,17 +881,7 @@ impl LocalThreadStore {
          self.writer_lock_coordinator
              .acquire(thread_id)
              .map(Arc::new)
@@ -2435,7 +2471,7 @@ index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf
      }
 
      async fn acquire_writer_locks(
-@@ -833,6 +896,56 @@ impl LocalThreadStore {
+@@ -833,6 +898,58 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 
@@ -2474,7 +2510,9 @@ index c40afb3c3ed21e7a64274257e38aadbcc6328c09..758f36bc4c8d9eb68303d76a12032cbf
 +                    .recorder
 +                    .discard()
 +                    .await
-+                    .map_err(helpers::thread_store_io_error)?;
++                    .map_err(|error| ThreadStoreError::Internal {
++                        message: error.to_string(),
++                    })?;
 +            }
 +            result.map_err(|error| {
 +                if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -2579,7 +2617,7 @@ index 8456222f1968f2398638650e92ba0c6159d12e7c..05c0da7d19bd3957f2f8aef54c6a20cc
          frozen_segment,
          Arc::clone(&model_context),
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 7245e4eb2070d4cc03ecb49055ec94178ee5338f..060adc24948805b6eeb8894fd2f797ee9ef04166 100644
+index 44f342fc1d3c35fccf5680f42dc5d7542f997dd5..817499c4ab6e541b9912caec44ab9e386e3fc419 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 @@ -2035,19 +2035,23 @@ async fn active_turn_stores_only_its_start_position() {

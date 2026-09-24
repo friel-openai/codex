@@ -1380,7 +1380,7 @@ index 55e735aa0b80e1f5b664a9d5d1ecbcdd8d57d8e3..a64a77a1709c06c4e9b9fab89705d4ad
  mod otel;
  mod output_schema;
 diff --git a/codex-rs/app-server/tests/suite/v2/model_list.rs b/codex-rs/app-server/tests/suite/v2/model_list.rs
-index 5d26c68e78ec9db424a11a747909f9b6fec55688..d2d527d62ec050906f7f401ec4c9e4b833163c44 100644
+index 5d26c68e78ec9db424a11a747909f9b6fec55688..15445ccdf93ce36cbd0434bcba0f70f5d30b6731 100644
 --- a/codex-rs/app-server/tests/suite/v2/model_list.rs
 +++ b/codex-rs/app-server/tests/suite/v2/model_list.rs
 @@ -258,6 +258,33 @@ async fn list_models_returns_all_models_with_large_limit() -> Result<()> {
@@ -1393,7 +1393,7 @@ index 5d26c68e78ec9db424a11a747909f9b6fec55688..d2d527d62ec050906f7f401ec4c9e4b8
 +    const RENAMED_ALIAS: &str = "test-route-renamed";
 +
 +    let codex_home = TempDir::new()?;
-+    write_models_cache(codex_home.path())?;
++    write_models_cache(codex_home.path()).await?;
 +    write_custom_alias_config(codex_home.path(), FIRST_ALIAS)?;
 +    let mut app = TestAppServer::builder()
 +        .with_codex_home(codex_home.path())
@@ -4503,10 +4503,10 @@ index a91220df0a2dbe2b176f6000f122ea122473b43f..d94491bb4062d3b45a2dde8561313d70
      /// Builds shared Responses API transport options and request-body options.
      ///
 diff --git a/codex-rs/core/src/client_tests.rs b/codex-rs/core/src/client_tests.rs
-index cf094ce2bc053d62493f5ec7e91ae495381a37bf..ed4880bb3863e1ddc3b3346322ad456f37826eb2 100644
+index e43445832d8278095226bf5d489141e964724b90..b497904bb2ecf896ad2d3bff8a0af85004aaa79c 100644
 --- a/codex-rs/core/src/client_tests.rs
 +++ b/codex-rs/core/src/client_tests.rs
-@@ -1457,6 +1457,89 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
+@@ -1456,6 +1456,89 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
      assert_ne!(child.fork_prompt_cache_key().to_string(), key);
  }
 
@@ -7265,7 +7265,7 @@ index 0b1c967c0fccb956b5b3ba10ad76ebc8074ee9ea..b0ab465f2f8ee50bd075f12e49069f62
      .await
      .expect("compaction succeeds");
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b85ebf635e 100644
+index 360607f3f49e718bba1d529b7707ec07ca210e91..483fe079198886bb1a3e867f735022772753f5c6 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -2,25 +2,31 @@ use std::collections::HashMap;
@@ -7494,7 +7494,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
 +            .capture_step_context_with_required_mcp_servers(
 +                Arc::clone(&turn_context),
 +                &cancellation_token,
-+                &required_servers,
++                required_servers,
 +                required_plugins,
 +            )
 +            .await?;
@@ -7513,45 +7513,16 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
      {
          let mut state = sess.state.lock().await;
          if state.shell_snapshot_prewarm.is_none() {
-@@ -420,7 +531,36 @@ pub(crate) async fn run_turn(
+@@ -420,7 +531,7 @@ pub(crate) async fn run_turn(
 
      let mut next_step_context = Some(first_step_context);
      let mut guardian_budget_compacted = false;
 -    loop {
 +    'turn: loop {
-+        let execution_settings_refresh_requested = {
-+            let mut active_turn = sess.active_turn.lock().await;
-+            active_turn.as_mut().is_some_and(|active_turn| {
-+                std::mem::take(&mut active_turn.execution_settings_refresh_requested)
-+            })
-+        };
-+        if execution_settings_refresh_requested {
-+            let refreshed_turn_context = sess
-+                .refresh_active_turn_context(
-+                    turn_context.as_ref(),
-+                    &turn_context.next_step_input.load_full(),
-+                )
-+                .await;
-+            let refreshed_step_context = sess
-+                .capture_step_context_with_required_mcp_servers(
-+                    Arc::clone(&refreshed_turn_context),
-+                    &cancellation_token,
-+                    required_servers,
-+                    required_plugins,
-+                )
-+                .await?;
-+            world_state = sess
-+                .record_context_updates_and_set_reference_context_item(
-+                    refreshed_step_context.as_ref(),
-+                )
-+                .await?;
-+            turn_context = refreshed_turn_context;
-+            next_step_context = Some(refreshed_step_context);
-+        }
          // Note that pending_input would be something like a message the user
          // submitted through the UI while the model was running. Though the UI
          // may support this, the model might not.
-@@ -456,9 +596,12 @@ pub(crate) async fn run_turn(
+@@ -456,9 +567,12 @@ pub(crate) async fn run_turn(
          .await;
 
          // Capture once so context, advertised tools, and tool calls share one request view.
@@ -7567,7 +7538,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  sess.capture_step_context_with_required_mcp_servers(
                      Arc::clone(&turn_context),
                      &cancellation_token,
-@@ -467,7 +610,7 @@ pub(crate) async fn run_turn(
+@@ -467,7 +581,7 @@ pub(crate) async fn run_turn(
                  )
                  .await?
              }
@@ -7576,7 +7547,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  let pending_user_input = turn_user_input(&pending_input);
                  if allow_plugin_mentions {
                      required_plugins.extend(crate::plugins::collect_explicit_plugin_ids(
-@@ -482,6 +625,13 @@ pub(crate) async fn run_turn(
+@@ -482,6 +596,13 @@ pub(crate) async fn run_turn(
                  .or_cancel(&cancellation_token)
                  .await?;
                  required_servers.extend(pending_required_servers);
@@ -7590,7 +7561,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  required_servers.sort_unstable();
                  required_servers.dedup();
                  sess.capture_step_context_with_required_mcp_servers(
-@@ -493,7 +643,7 @@ pub(crate) async fn run_turn(
+@@ -493,7 +614,7 @@ pub(crate) async fn run_turn(
                  .await?
              }
          };
@@ -7599,7 +7570,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
              super::time_reminder::maybe_record_current_time_reminder(
                  sess.as_ref(),
                  turn_context.as_ref(),
-@@ -530,6 +680,7 @@ pub(crate) async fn run_turn(
+@@ -530,6 +651,7 @@ pub(crate) async fn run_turn(
                  &responses_metadata,
                  sampling_request_input,
                  cancellation_token.child_token(),
@@ -7607,7 +7578,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
              )
              .await
          }
-@@ -537,6 +688,21 @@ pub(crate) async fn run_turn(
+@@ -537,6 +659,21 @@ pub(crate) async fn run_turn(
          match sampling_request_result {
              Ok((sampling_request_output, sampling_request_input)) => {
                  guardian_budget_compacted = false;
@@ -7629,7 +7600,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  let SamplingRequestResult {
                      needs_follow_up: model_needs_follow_up,
                      last_agent_message: sampling_request_last_agent_message,
-@@ -623,6 +789,7 @@ pub(crate) async fn run_turn(
+@@ -623,6 +760,7 @@ pub(crate) async fn run_turn(
                          },
                          CompactionReason::ContextLimit,
                          CompactionPhase::MidTurn,
@@ -7637,7 +7608,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                      )
                      .await
                      {
-@@ -722,6 +889,7 @@ pub(crate) async fn run_turn(
+@@ -722,6 +860,7 @@ pub(crate) async fn run_turn(
                              InitialContextInjection::DoNotInject,
                              CompactionReason::ContextLimit,
                              CompactionPhase::PostTurn,
@@ -7645,7 +7616,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                          )
                          .await
                      {
-@@ -737,9 +905,11 @@ pub(crate) async fn run_turn(
+@@ -737,9 +876,11 @@ pub(crate) async fn run_turn(
                  }
                  continue;
              }
@@ -7660,7 +7631,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                      && !turn_context.config.features.enabled(Feature::TokenBudget)
                      && sess
                          .services
-@@ -766,20 +936,22 @@ pub(crate) async fn run_turn(
+@@ -766,20 +907,22 @@ pub(crate) async fn run_turn(
                      },
                      CompactionReason::ContextLimit,
                      CompactionPhase::MidTurn,
@@ -7687,7 +7658,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  sess.track_turn_codex_error(turn_context.as_ref(), &codex_error);
                  let error = CodexErrorInfo::BadRequest;
                  sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
-@@ -793,7 +965,211 @@ pub(crate) async fn run_turn(
+@@ -793,7 +936,211 @@ pub(crate) async fn run_turn(
                  sess.send_event(&turn_context, event).await;
                  break;
              }
@@ -7900,7 +7871,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  info!("Turn error: {e:#}");
                  if matches!(
                      e.details(),
-@@ -816,6 +1192,22 @@ pub(crate) async fn run_turn(
+@@ -816,6 +1163,22 @@ pub(crate) async fn run_turn(
      Ok(last_agent_message)
  }
 
@@ -7923,7 +7894,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  #[instrument(level = "trace", skip_all)]
  async fn turn_diff_display_roots(step_context: &StepContext) -> Vec<(String, PathUri)> {
      let mut display_roots = Vec::new();
-@@ -1296,6 +1688,7 @@ async fn run_pre_sampling_compact(
+@@ -1296,6 +1659,7 @@ async fn run_pre_sampling_compact(
              InitialContextInjection::DoNotInject,
              CompactionReason::ContextLimit,
              CompactionPhase::PreTurn,
@@ -7931,7 +7902,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          )
          .await?;
      }
-@@ -1384,6 +1777,7 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1384,6 +1748,7 @@ async fn maybe_run_previous_model_inline_compact(
              InitialContextInjection::DoNotInject,
              CompactionReason::CompHashChanged,
              CompactionPhase::PreTurn,
@@ -7939,7 +7910,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          )
          .await?;
          return Ok(());
-@@ -1432,17 +1826,86 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1432,17 +1797,86 @@ async fn maybe_run_previous_model_inline_compact(
              InitialContextInjection::DoNotInject,
              CompactionReason::ModelDownshift,
              CompactionPhase::PreTurn,
@@ -8026,7 +7997,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  async fn run_auto_compact(
      sess: &Arc<Session>,
      step_context: Arc<StepContext>,
-@@ -1451,6 +1914,7 @@ async fn run_auto_compact(
+@@ -1451,6 +1885,7 @@ async fn run_auto_compact(
      initial_context_injection: InitialContextInjection,
      reason: CompactionReason,
      phase: CompactionPhase,
@@ -8034,7 +8005,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  ) -> CodexResult<()> {
      let turn_context = &step_context.turn;
      let _profile_guard = turn_context.turn_timing_state.begin_compaction();
-@@ -1461,6 +1925,7 @@ async fn run_auto_compact(
+@@ -1461,6 +1896,7 @@ async fn run_auto_compact(
              Arc::clone(sess),
              step_context,
              initial_context_injection,
@@ -8042,7 +8013,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          )
          .await?;
          return Ok(());
-@@ -1481,6 +1946,7 @@ async fn run_auto_compact(
+@@ -1481,6 +1917,7 @@ async fn run_auto_compact(
                  initial_context_injection,
                  reason,
                  phase,
@@ -8050,7 +8021,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
              )
              .await?;
          }
-@@ -1493,9 +1959,11 @@ async fn run_auto_compact(
+@@ -1493,9 +1930,11 @@ async fn run_auto_compact(
              run_inline_auto_compact_task(
                  Arc::clone(sess),
                  Arc::clone(turn_context),
@@ -8062,7 +8033,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
              )
              .await?;
          }
-@@ -1593,7 +2061,8 @@ async fn run_sampling_request(
+@@ -1593,7 +2032,8 @@ async fn run_sampling_request(
      responses_metadata: &CodexResponsesMetadata,
      input: Vec<ResponseItem>,
      cancellation_token: CancellationToken,
@@ -8072,7 +8043,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
      let turn_context = Arc::clone(&step_context.turn);
      let base_instructions = sess.get_prompt_base_instructions().await;
 
-@@ -1615,6 +2084,10 @@ async fn run_sampling_request(
+@@ -1615,6 +2055,10 @@ async fn run_sampling_request(
      loop {
          // Running code-mode cells can request review while this response is in flight.
          // Keep the latest received ID until response.created replaces it.
@@ -8083,7 +8054,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          let prompt_input = if let Some(input) = initial_input.take() {
              input
          } else {
-@@ -1650,6 +2123,8 @@ async fn run_sampling_request(
+@@ -1650,6 +2094,8 @@ async fn run_sampling_request(
              Arc::clone(&turn_diff_tracker),
              &prompt,
              cancellation_token.child_token(),
@@ -8092,7 +8063,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          )
          .await
          {
-@@ -1659,23 +2134,51 @@ async fn run_sampling_request(
+@@ -1659,23 +2105,51 @@ async fn run_sampling_request(
              Err(err) => match err.details() {
                  CodexErrorDetails::ContextWindowExceeded => {
                      sess.set_total_tokens_full(&turn_context).await;
@@ -8146,7 +8117,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          handle_response_stream_error(
              &mut retry_state,
              max_retries,
-@@ -1685,7 +2188,16 @@ async fn run_sampling_request(
+@@ -1685,7 +2159,16 @@ async fn run_sampling_request(
              &turn_context,
              ResponsesStreamRequest::Sampling,
          )
@@ -8164,7 +8135,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
          turn_context.turn_timing_state.record_sampling_retry();
      }
  }
-@@ -2392,6 +2904,150 @@ async fn handle_assistant_item_done_in_plan_mode(
+@@ -2392,6 +2875,150 @@ async fn handle_assistant_item_done_in_plan_mode(
      false
  }
 
@@ -8315,7 +8286,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  #[instrument(level = "trace", skip_all)]
  async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
-@@ -2417,6 +3073,7 @@ async fn drain_in_flight(
+@@ -2417,6 +3044,7 @@ async fn drain_in_flight(
              }
              Err(err) => {
                  error_or_panic(format!("in-flight tool future failed during drain: {err}"));
@@ -8323,7 +8294,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
              }
          }
      }
-@@ -2438,6 +3095,110 @@ fn assign_missing_streamed_response_item_id(
+@@ -2438,6 +3066,110 @@ fn assign_missing_streamed_response_item_id(
      Session::assign_missing_response_item_id(item);
  }
 
@@ -8434,7 +8405,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  #[allow(clippy::too_many_arguments)]
  #[instrument(level = "trace",
      skip_all,
-@@ -2456,6 +3217,8 @@ async fn try_run_sampling_request(
+@@ -2456,6 +3188,8 @@ async fn try_run_sampling_request(
      turn_diff_tracker: SharedTurnDiffTracker,
      prompt: &Prompt,
      cancellation_token: CancellationToken,
@@ -8443,7 +8414,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
  ) -> CodexResult<SamplingRequestResult> {
      let turn_context = Arc::clone(&step_context.turn);
      feedback_tags!(
-@@ -2504,6 +3267,7 @@ async fn try_run_sampling_request(
+@@ -2504,6 +3238,7 @@ async fn try_run_sampling_request(
      let mut needs_follow_up = false;
      let mut last_agent_message: Option<String> = None;
      let mut active_item: Option<TurnItem> = None;
@@ -8451,7 +8422,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
      let mut active_tool_argument_diff_consumer: Option<(
          String,
          Box<dyn ToolArgumentDiffConsumer>,
-@@ -2528,6 +3292,7 @@ async fn try_run_sampling_request(
+@@ -2528,6 +3263,7 @@ async fn try_run_sampling_request(
      let defer_streamed_turn_items_for_contributors =
          !sess.services.extensions.turn_item_contributors().is_empty();
      let mut active_item_is_streaming_to_client = false;
@@ -8459,7 +8430,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
      let receiving_span = trace_span!("receiving_stream");
      let outcome: CodexResult<SamplingRequestResult> = loop {
          let handle_responses = trace_span!(
-@@ -2581,7 +3346,10 @@ async fn try_run_sampling_request(
+@@ -2581,7 +3317,10 @@ async fn try_run_sampling_request(
                  }
              }
              ResponseEvent::OutputItemDone(mut item) => {
@@ -8470,7 +8441,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  if analytics_tool_call_ids.len() < MAX_ANALYTICS_TOOL_CALL_IDS_PER_RESPONSE {
                      let call_id = match &item {
                          ResponseItem::FunctionCall { call_id, .. }
-@@ -2694,6 +3462,9 @@ async fn try_run_sampling_request(
+@@ -2694,6 +3433,9 @@ async fn try_run_sampling_request(
              }
              ResponseEvent::OutputItemAdded(mut item) => {
                  assign_missing_streamed_response_item_id(&mut item, /*active_item*/ None);
@@ -8480,7 +8451,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  if let ResponseItem::CustomToolCall {
                      call_id,
                      name,
-@@ -2876,6 +3647,8 @@ async fn try_run_sampling_request(
+@@ -2876,6 +3618,8 @@ async fn try_run_sampling_request(
                  });
              }
              ResponseEvent::OutputTextDelta(delta) => {
@@ -8489,7 +8460,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  // In review child threads, suppress assistant text deltas; the
                  // UI will show a selection popup from the final ReviewOutput.
                  if let Some(active) = active_item.as_ref() {
-@@ -2912,6 +3685,8 @@ async fn try_run_sampling_request(
+@@ -2912,6 +3656,8 @@ async fn try_run_sampling_request(
                  call_id,
                  delta,
              } => {
@@ -8498,7 +8469,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  let Some((active_call_id, consumer)) = active_tool_argument_diff_consumer.as_mut()
                  else {
                      continue;
-@@ -2929,9 +3704,11 @@ async fn try_run_sampling_request(
+@@ -2929,9 +3675,11 @@ async fn try_run_sampling_request(
                  delta,
                  summary_index,
              } => {
@@ -8510,7 +8481,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  if let Some(active) = active_item.as_ref() {
                      if !active_item_is_streaming_to_client {
                          continue;
-@@ -2950,6 +3727,7 @@ async fn try_run_sampling_request(
+@@ -2950,6 +3698,7 @@ async fn try_run_sampling_request(
                  }
              }
              ResponseEvent::ReasoningSummaryPartAdded { summary_index } => {
@@ -8518,7 +8489,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  if uses_sequential_cutoff_reasoning_summaries {
                      continue;
                  }
-@@ -2972,9 +3750,11 @@ async fn try_run_sampling_request(
+@@ -2972,9 +3721,11 @@ async fn try_run_sampling_request(
                  text,
                  summary_index,
              } => {
@@ -8530,7 +8501,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  let Some(active) = active_item.as_ref() else {
                      continue;
                  };
-@@ -3005,6 +3785,8 @@ async fn try_run_sampling_request(
+@@ -3005,6 +3756,8 @@ async fn try_run_sampling_request(
                  delta,
                  content_index,
              } => {
@@ -8539,7 +8510,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
                  if let Some(active) = active_item.as_ref() {
                      if !active_item_is_streaming_to_client {
                          continue;
-@@ -3026,6 +3808,113 @@ async fn try_run_sampling_request(
+@@ -3026,6 +3779,113 @@ async fn try_run_sampling_request(
      };
      drop(sampling_timing_guard);
 
@@ -8653,7 +8624,7 @@ index 360607f3f49e718bba1d529b7707ec07ca210e91..7fdd7555dd8dfcc724ed9e7d6225f0b8
      flush_assistant_text_segments_all(
          &sess,
          &turn_context,
-@@ -3039,7 +3928,10 @@ async fn try_run_sampling_request(
+@@ -3039,7 +3899,10 @@ async fn try_run_sampling_request(
      } else {
          Some(turn_context.turn_timing_state.begin_tool_blocking())
      };

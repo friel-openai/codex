@@ -1611,7 +1611,7 @@ index 6e8852b0ea32c63b89841f440d9cab49caee1b25..d9e50411c067b79306f18e6dcc05c206
              statuses.insert(name.clone(), status);
          }
 diff --git a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
-index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d5cd35fb2 100644
+index 58b810366cb7a64581e91475e4ba2aff8ce09faa..bc09f8a46d4598a1ebd9b3c024fc35cb5fae747b 100644
 --- a/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
 +++ b/codex-rs/codex-mcp/src/connection_manager/tool_catalog.rs
 @@ -1,7 +1,6 @@
@@ -1663,7 +1663,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
  /// Returns whether a tool may be included in model-facing tool declarations.
  ///
  /// Tools without visibility metadata remain visible. Tools with visibility
-@@ -60,7 +81,7 @@ pub fn tool_is_model_visible(tool: &ToolInfo) -> bool {
+@@ -60,74 +81,80 @@ pub fn tool_is_model_visible(tool: &ToolInfo) -> bool {
  }
 
  /// Catalog identity within one published connection set, including dormant servers.
@@ -1672,7 +1672,12 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
  pub(crate) enum BindingCatalogRevision {
      Ready(ClientToolCatalogRevision),
      Dormant(u64),
-@@ -72,62 +93,67 @@ impl McpConnectionSet {
+ }
+
+ impl McpConnectionSet {
++    #[cfg(test)]
+     pub(crate) async fn stable_catalog_revisions(
+         &self,
          required_servers: &[String],
          required_plugins: &HashSet<String>,
      ) -> Option<HashMap<String, BindingCatalogRevision>> {
@@ -1789,7 +1794,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
      }
 
      /// Returns all tools with model-visible names normalized.
-@@ -142,15 +168,25 @@ impl McpConnectionSet {
+@@ -142,15 +169,25 @@ impl McpConnectionSet {
          let mut available_server_count = 0;
          let mut unavailable_server_count = 0;
          let server_results = join_all(self.servers.iter().map(|(server_name, view)| async move {
@@ -1823,7 +1828,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
                  .instrument(trace_span!(
                      "list_tools_for_server",
                      server_name = %server_name,
-@@ -214,20 +250,13 @@ impl McpConnectionSet {
+@@ -214,20 +251,13 @@ impl McpConnectionSet {
          let mut clients = HashMap::new();
          let optional_mcp_startup_grace = config.optional_mcp_startup_grace;
          let server_snapshots = join_all(self.servers.iter().map(|(server_name, view)| async move {
@@ -1847,7 +1852,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
                      || required_servers
                          .iter()
                          .any(|required| required == server_name)
-@@ -240,16 +269,12 @@ impl McpConnectionSet {
+@@ -240,16 +270,12 @@ impl McpConnectionSet {
                      return (server_name, view, cached_tools);
                  }
                  if !must_wait_for_startup && optional_mcp_startup_grace.is_zero() {
@@ -1869,7 +1874,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
                          tokio::time::Instant::now() + optional_mcp_startup_grace
                      } else {
                          *self.optional_startup_deadline.get_or_init(|| {
-@@ -258,71 +283,73 @@ impl McpConnectionSet {
+@@ -258,71 +284,73 @@ impl McpConnectionSet {
                      };
                      let startup_deadline = view
                          .connection
@@ -1996,7 +2001,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
          .await;
          for (server_name, client, server_tools) in server_results.into_iter().flatten() {
              if let Some((client, snapshot)) = client {
-@@ -347,7 +374,7 @@ impl McpConnectionSet {
+@@ -347,7 +375,7 @@ impl McpConnectionSet {
              };
              let Some(call) = self.prepare_call(
                  &tool_info,
@@ -2005,7 +2010,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
                  Arc::clone(&config),
                  Arc::clone(snapshot),
              ) else {
-@@ -388,7 +415,7 @@ impl McpConnectionSet {
+@@ -388,7 +416,7 @@ impl McpConnectionSet {
      fn prepare_call(
          self: &Arc<Self>,
          tool_info: &ToolInfo,
@@ -2014,7 +2019,7 @@ index 58b810366cb7a64581e91475e4ba2aff8ce09faa..7ab4d0f2c742b08e1b33ea426902150d
          config: Arc<crate::McpConfig>,
          tool_catalog_snapshot: Arc<ToolCatalogSnapshot>,
      ) -> Option<PreparedMcpCall> {
-@@ -477,62 +504,72 @@ impl McpConnectionSet {
+@@ -477,62 +505,72 @@ impl McpConnectionSet {
              .servers
              .get(CODEX_APPS_MCP_SERVER_NAME)
              .ok_or_else(|| anyhow!("unknown MCP server '{CODEX_APPS_MCP_SERVER_NAME}'"))?;
@@ -4002,10 +4007,10 @@ index 3d8875caf38c40905b934cb698e4005fdf707317..66a9f43ccabf9323c77a653a84a1e9da
  }
 diff --git a/codex-rs/codex-mcp/src/connection_pool.rs b/codex-rs/codex-mcp/src/connection_pool.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..6f2dd584bec0a74839b7b2f96f809d82724b520c
+index 0000000000000000000000000000000000000000..77defc4d63c2f6b13bd1e694f123f96d2bbb9afd
 --- /dev/null
 +++ b/codex-rs/codex-mcp/src/connection_pool.rs
-@@ -0,0 +1,1367 @@
+@@ -0,0 +1,1368 @@
 +//! Agent-tree-scoped ownership for reusable MCP connections.
 +
 +use std::future::Future;
@@ -4551,6 +4556,7 @@ index 0000000000000000000000000000000000000000..6f2dd584bec0a74839b7b2f96f809d82
 +}
 +
 +impl McpPooledClient {
++    #[cfg(test)]
 +    pub(crate) fn connection_id(&self) -> u64 {
 +        self.connection.id
 +    }
@@ -5091,7 +5097,7 @@ index 0000000000000000000000000000000000000000..6f2dd584bec0a74839b7b2f96f809d82
 +                .client
 +                .tool_catalog_cache_context
 +                .as_ref()
-+                .and_then(|cache| cache.current_revision())
++                .and_then(super::tool_catalog_cache::McpToolCatalogCacheContext::current_revision)
 +            {
 +                Some(catalog_revision) => StableMcpConnectionState::Dormant {
 +                    connection_id: connection.id,
@@ -10302,10 +10308,10 @@ index 9c9334aa70662eb3d07f10601e5a1381e9d1944e..6ed3f8376462eee6922c18e04fe4fdb1
          .await
  }
 diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
-index b13768038ce459ef0c285ae5564f0bdd38baa39b..af1c6e83644d504fd901623f94b95175dc9415b9 100644
+index 98795b5d71dd5621e324547ec1505f8695711363..3986bdeb665e09921adbf231ed08b2a096e62a21 100644
 --- a/codex-rs/core/src/agent/control.rs
 +++ b/codex-rs/core/src/agent/control.rs
-@@ -29,6 +29,7 @@ use codex_extension_api::ThreadInstructionsProvider;
+@@ -28,6 +28,7 @@ use codex_extension_api::ThreadInstructionsProvider;
  use codex_history::InitialHistory;
  use codex_history::ResumedHistory;
  use codex_history::RolloutItem;
@@ -10313,7 +10319,7 @@ index b13768038ce459ef0c285ae5564f0bdd38baa39b..af1c6e83644d504fd901623f94b95175
  use codex_protocol::AgentPath;
  use codex_protocol::SessionId;
  use codex_protocol::ThreadId;
-@@ -162,6 +163,8 @@ pub(crate) struct LocalAgentControl {
+@@ -161,6 +162,8 @@ pub(crate) struct LocalAgentControl {
      pub(super) state: Arc<AgentRegistry>,
      agent_residency: Arc<AgentResidency>,
      agent_execution_limiter: Arc<AgentExecutionLimiter>,
@@ -10322,7 +10328,7 @@ index b13768038ce459ef0c285ae5564f0bdd38baa39b..af1c6e83644d504fd901623f94b95175
      /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
      rollout_budget: Arc<RolloutBudget>,
      /// The user-selected root routing tier, shared by the entire agent tree.
-@@ -233,6 +236,7 @@ impl LocalAgentControl {
+@@ -232,6 +235,7 @@ impl LocalAgentControl {
              state: Arc::default(),
              agent_residency: Arc::default(),
              agent_execution_limiter: Arc::default(),
@@ -10330,7 +10336,7 @@ index b13768038ce459ef0c285ae5564f0bdd38baa39b..af1c6e83644d504fd901623f94b95175
              rollout_budget: Arc::default(),
              root_service_tier: Arc::new(ArcSwapOption::from(None)),
              shared_thread_instructions_provider: Arc::default(),
-@@ -277,6 +281,10 @@ impl LocalAgentControl {
+@@ -276,6 +280,10 @@ impl LocalAgentControl {
          provider
      }
 
@@ -10466,7 +10472,7 @@ index 2bbee2d5edb3730cf1e2efbb3fdd71791f394bf6..a16f889142eac4e801ebe58bf45d2339
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index dee5b222916b3dfef5a16f78b9c90511124caa0c..0b06e6bda2c7938826db3bd8a676dac0d66de9dd 100644
+index 1a3e6d7f54a06e7a4d290bec010d8b5128b4ff61..7f3047ca9b5373458433dbcf3305bafe78b6b056 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -9890,6 +9890,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {

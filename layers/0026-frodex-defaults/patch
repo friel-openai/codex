@@ -221,10 +221,10 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 
      match &turn_context.session_source {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index fbc982187b3940cef6213877bc07cf83be1b6f72..9a51d99b276f3f0a95d1b24f5b18c63f85939aee 100644
+index 842fa496db0a42ba4d575b96a43a2fd39b246069..a31e217c6882d37db502ce77c9ca54d37c9f638b 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -11807,6 +11807,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+@@ -11814,6 +11814,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
          |config| {
              if enable_multi_agent_v2 {
                  let _ = config.features.enable(Feature::MultiAgentV2);
@@ -236,7 +236,7 @@ index fbc982187b3940cef6213877bc07cf83be1b6f72..9a51d99b276f3f0a95d1b24f5b18c63f
              }
              config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
              config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
-@@ -14629,16 +14634,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -14636,16 +14641,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
  async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
      let mut config = build_test_config(codex_home.path()).await;
@@ -258,7 +258,7 @@ index fbc982187b3940cef6213877bc07cf83be1b6f72..9a51d99b276f3f0a95d1b24f5b18c63f
      let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
          .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index acced9307cf2d965412edd97c58798f473adeed6..5be5569a1cbc7b2cd3f2689cd2a3342579b5fe51 100644
+index 210efa83632e801963c90a56aa85767b7d2e0daf..fbd14e974dd85bddcd496ec3c0484fa3a301e6ff 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -989,7 +989,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
@@ -512,6 +512,260 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
              config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
          })
          .build(&server)
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
+index 005c98b51ccc52967f587a0da1e8d1620dbe9686..da7af3fccdd5e39d6bb3e00f61d617a732764cc7 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
+@@ -6,13 +6,50 @@ Scenario: /responses POST bodies with pending input
+
+ ## Window 1
+ -- request 1 (request; First request) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     first prompt
+ -- request 2 (request; Second request) --
+-03:message/assistant:
++05:message/assistant:
+     first answer
+-04:agent_message
++06:agent_message
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_reasoning.snap b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_reasoning.snap
+index 2613053248ea0597ed37eb8882cbf2b0f7f2f21d..655b846153b750e607e84a49e4361fa5d9b19e25 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_reasoning.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_reasoning.snap
+@@ -6,12 +6,49 @@ Scenario: /responses POST bodies with pending input
+
+ ## Window 1
+ -- request 1 (request; First request) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     first prompt
+ -- request 2 (request; Second request) --
+-03:reasoning:summary=thinking:encrypted=true
+-04:agent_message
++05:reasoning:summary=thinking:encrypted=true
++06:agent_message
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_user_input_no_preempt_after_reasoning.snap b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_user_input_no_preempt_after_reasoning.snap
+index c0276b691e7d3dab0854ccbbad99fd07ae2b9b73..f93747743e6864f826836363479e35f8d1b505ef 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_user_input_no_preempt_after_reasoning.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_user_input_no_preempt_after_reasoning.snap
+@@ -6,17 +6,54 @@ Scenario: /responses POST bodies with pending input
+
+ ## Window 1
+ -- request 1 (request; First request) --
+-00:message/developer:
+-    <PERMISSIONS_INSTRUCTIONS>
+-01:message/user:
++00:message/developer[2]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++01:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++02:message/developer:
++    <MULTI_AGENT_MODE>
++03:message/user:
+     <ENVIRONMENT_CONTEXT>
+-02:message/user:
++04:message/user:
+     first prompt
+ -- request 2 (request; Second request) --
+-03:reasoning:summary=thinking:encrypted=true
+-04:function_call/shell:{"command":"echo preserved tool call"}
+-05:message/assistant:
++05:reasoning:summary=thinking:encrypted=true
++06:function_call/shell:{"command":"echo preserved tool call"}
++07:message/assistant:
+     first answer
+-06:function_call_output:unsupported call: shell
+-07:message/user:
++08:function_call_output:unsupported call: shell
++09:message/user:
+     second prompt
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap b/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
+index 53d4630412e7f4e766f4b23de23a7ba84d70c045..9ebc53844bef754739d49269a7ff5f2b53192c6a 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__token_budget__token_budget_new_context_window_tool_full_context.snap
+@@ -6,9 +6,26 @@ Scenario: New context window tool installs fresh full context before the next fo
+
+ ## Window 1
+ -- request 1 (turn; Final Follow-Up Request) --
+-00:message/developer[2]:
+-    [01] <SKILLS_INSTRUCTIONS>
+-    [02] <PERMISSIONS_INSTRUCTIONS>
++00:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <SKILLS_INSTRUCTIONS>
++    [03] <PERMISSIONS_INSTRUCTIONS>
+ 01:message/developer:
+     <context_window>
+     Agent name: /root
+@@ -16,7 +33,27 @@ Scenario: New context window tool installs fresh full context before the next fo
+     Current context window id: <UUID 2>
+     Previous context window id: <UUID 1>
+     </context_window>
+-02:message/user:
++02:message/developer:
++    You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
++
++    At the start of your turn, you are the active agent.
++    You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
++    All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
++
++    You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
++    Child agents can also spawn their own sub-agents.
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
++    - All agents use the same current working directory.
++    - As a result, edits made by one agent are immediately visible to all other agents.
++
++    When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
++
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
++
++    Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
++03:message/developer:
++    <MULTI_AGENT_MODE>
++04:message/user:
+     <ENVIRONMENT_CONTEXT>
+-03:function_call/update_plan:{"plan":[{"status":"in_progress","step":"Continue in the new context window"}]}
+-04:function_call_output:Plan updated
++05:function_call/update_plan:{"plan":[{"status":"in_progress","step":"Continue in the new context window"}]}
++06:function_call_output:Plan updated
 diff --git a/codex-rs/core/tests/suite/spawn_agent_description.rs b/codex-rs/core/tests/suite/spawn_agent_description.rs
 index ff758c41718bf98e66e4fb557423b5944f66a225..13a462efa1e54acfa8a2fa03de507ac2cb85c8e7 100644
 --- a/codex-rs/core/tests/suite/spawn_agent_description.rs

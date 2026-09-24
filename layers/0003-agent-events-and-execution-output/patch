@@ -660,10 +660,66 @@ index e4e027cc8b90038147a5734d8d3647b359d1a907..21a3c65744fcd7d63765599c97421bec
  async fn resume_agent_rejects_invalid_id() {
      let (session, turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/unified_exec/async_watcher_tests.rs b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-index c2019a70ab8c375359381ade4be55e2d2f05c2f3..f919ee369459b5c930ea627eed793b27895f0174 100644
+index c2019a70ab8c375359381ade4be55e2d2f05c2f3..4faff91b9f3c9c18c19349dc79d11dde2edbd5d7 100644
 --- a/codex-rs/core/src/unified_exec/async_watcher_tests.rs
 +++ b/codex-rs/core/src/unified_exec/async_watcher_tests.rs
-@@ -310,6 +310,37 @@ fn utf8_boundary_batches_malformed_output() {
+@@ -114,6 +114,55 @@ async fn streaming_output_preserves_multibyte_characters_across_chunks() -> anyh
+     Ok(())
+ }
+
++#[tokio::test]
++async fn streaming_output_buffers_multibyte_characters_across_chunks() {
++    let (session, turn, rx_event) = make_session_and_context_with_rx().await;
++    let transcript = Arc::new(tokio::sync::Mutex::new(HeadTailBuffer::default()));
++    let mut output: Buffer = Buffer {
++        pending: Vec::new(),
++        transcript: Arc::clone(&transcript),
++        emitter: Emitter {
++            remaining_deltas: 1,
++            session,
++            turn,
++            call_id: "split-utf8-output-test".to_string(),
++        },
++    };
++
++    output.push(vec![0xc3]).await;
++    assert_eq!(output.pending, vec![0xc3]);
++    assert_eq!(output.emitter.remaining_deltas, 1);
++    assert!(rx_event.try_recv().is_err());
++    assert_eq!(
++        transcript.lock().await.to_bytes_with_omission_marker(),
++        vec![0xc3]
++    );
++
++    output.push(vec![0xa9]).await;
++    assert!(output.pending.is_empty());
++    assert_eq!(output.emitter.remaining_deltas, 0);
++    let event = rx_event
++        .try_recv()
++        .expect("complete multibyte output delta");
++    let EventMsg::ExecCommandOutputDelta(delta) = event.msg else {
++        panic!("expected ExecCommandOutputDelta");
++    };
++    assert_eq!(
++        delta,
++        ExecCommandOutputDeltaEvent {
++            call_id: "split-utf8-output-test".to_string(),
++            stream: ExecOutputStream::Stdout,
++            chunk: vec![0xc3, 0xa9],
++        }
++    );
++    assert_eq!(
++        transcript.lock().await.to_bytes_with_omission_marker(),
++        vec![0xc3, 0xa9]
++    );
++    output.finish().await;
++    assert!(rx_event.try_recv().is_err());
++}
++
+ #[tokio::test]
+ async fn streaming_output_finishes_on_close_without_waiting_for_grace() -> anyhow::Result<()> {
+     let StreamingOutputHarness {
+@@ -310,6 +359,37 @@ fn utf8_boundary_batches_malformed_output() {
      assert_eq!(utf8_boundary(b"a\xffbbb"), 5);
  }
 
@@ -2446,13 +2502,23 @@ index 2c6778caff3f10d67e127160106e39c1c0444101..3a256d21ae7d58be58911dce867a8998
                  "type": "plan", "id": id, "text": truncate(text, DEFAULT_OUTPUT_CHARS)
              }),
 diff --git a/codex-rs/tui/src/history_cell/messages.rs b/codex-rs/tui/src/history_cell/messages.rs
-index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd4230203cce4 100644
+index 1bdc477c0ba89e36d059225f9656de35215e405b..13f367905bbb93125faf3897f83869e1962f4571 100644
 --- a/codex-rs/tui/src/history_cell/messages.rs
 +++ b/codex-rs/tui/src/history_cell/messages.rs
-@@ -12,6 +12,13 @@ use crate::wrapping::url_preserving_wrap_options;
+@@ -5,12 +5,35 @@ use super::markdown_render_cache::MarkdownRenderCache;
+ use super::*;
+ use crate::style::accent_color_on;
+ use crate::style::history_prompt_style;
++use crate::terminal_hyperlinks::LogicalLineSource;
++use crate::terminal_hyperlinks::UserMessageLayout;
+ use crate::terminal_hyperlinks::annotate_web_urls_in_line;
+ use crate::terminal_hyperlinks::lines_with_sources_eq;
+ use crate::terminal_hyperlinks::remap_source_wrapped_line;
+ use crate::wrapping::url_preserving_wrap_options;
  use crate::wrapping::word_wrap_line_with_source;
  use std::borrow::Cow;
-
++use std::sync::Arc;
++
 +const USER_MESSAGE_RIGHT_MARGIN: u16 = 1;
 +const USER_MESSAGE_MIN_ALIGNMENT_WIDTH: u16 = 40;
 +
@@ -2460,10 +2526,22 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
 +    width >= USER_MESSAGE_MIN_ALIGNMENT_WIDTH
 +}
 +
++pub(crate) fn user_message_block_width(width: u16) -> u16 {
++    let available_width = width
++        .saturating_sub(USER_MESSAGE_RIGHT_MARGIN)
++        .max(/*other*/ 1);
++    if user_message_uses_right_alignment(width) {
++        u16::try_from(usize::from(width) * 4 / 5)
++            .unwrap_or(available_width)
++            .min(available_width)
++    } else {
++        available_width
++    }
++}
+
  #[derive(Debug)]
  pub(crate) struct UserHistoryCell {
-     pub message: String,
-@@ -175,6 +182,61 @@ impl UserHistoryCell {
+@@ -175,6 +198,71 @@ impl UserHistoryCell {
      }
  }
 
@@ -2490,7 +2568,17 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
 +    } else {
 +        0
 +    };
++    let user_message = Arc::new(UserMessageLayout {
++        alignment_prefix_bytes: left_padding,
++        style,
++    });
 +    for line in &mut lines {
++        // Capture empty rows before painting the bubble; its spaces are not copied text.
++        let source = line
++            .source
++            .get_or_insert_with(|| LogicalLineSource::from_line(&line.line));
++        source.right_reserve = USER_MESSAGE_RIGHT_MARGIN;
++        source.user_message = Some(Arc::clone(&user_message));
 +        let line_width = line.width();
 +        let mut spans = Vec::with_capacity(line.line.spans.len() + 2);
 +        if left_padding > 0 {
@@ -2525,7 +2613,7 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
  impl HistoryCell for UserHistoryCell {
      fn display_lines(&self, width: u16) -> Vec<Line<'static>> {
          visible_lines(self.display_hyperlink_lines(width))
-@@ -193,10 +255,18 @@ impl HistoryCell for UserHistoryCell {
+@@ -193,10 +281,12 @@ impl HistoryCell for UserHistoryCell {
          } else {
              &[]
          };
@@ -2536,19 +2624,13 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
 +        let available_width = width
 +            .saturating_sub(USER_MESSAGE_RIGHT_MARGIN)
 +            .max(/*other*/ 1);
-+        let block_width = if user_message_uses_right_alignment(width) {
-+            u16::try_from(usize::from(width) * 4 / 5)
-+                .unwrap_or(available_width)
-+                .min(available_width)
-+        } else {
-+            available_width
-+        };
++        let block_width = user_message_block_width(width);
 +        let wrap_width = block_width
 +            .saturating_sub(LIVE_PREFIX_COLS)
              .max(/*other*/ 1);
 
          let style = history_prompt_style();
-@@ -242,9 +312,9 @@ impl HistoryCell for UserHistoryCell {
+@@ -242,9 +332,9 @@ impl HistoryCell for UserHistoryCell {
 
          lines.push(HyperlinkLine::new(Line::from("").style(style)));
          for source in lines.iter_mut().filter_map(|line| line.source.as_mut()) {
@@ -2560,7 +2642,7 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
      }
 
      fn transcript_hyperlink_lines(&self, width: u16) -> Vec<HyperlinkLine> {
-@@ -263,6 +333,31 @@ impl HistoryCell for UserHistoryCell {
+@@ -263,6 +353,27 @@ impl HistoryCell for UserHistoryCell {
          }
          lines
      }
@@ -2584,10 +2666,6 @@ index 1bdc477c0ba89e36d059225f9656de35215e405b..a80e9dada7c6d4bf7ff0a33035cdd423
 +            .sum::<usize>()
 +            .try_into()
 +            .unwrap_or(u16::MAX)
-+    }
-+
-+    fn desired_transcript_height(&self, width: u16) -> u16 {
-+        self.desired_height(width)
 +    }
  }
 
@@ -2697,7 +2775,7 @@ index 2d8a2fac39bcfa25f3e8f04d7fd24a07056f1d89..3734530c39ddc305bc4c1a0f25cd2889
 +
 +              [Image #1]
 diff --git a/codex-rs/tui/src/history_cell/tests.rs b/codex-rs/tui/src/history_cell/tests.rs
-index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259aa7b3a02c 100644
+index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..d86670c4954d69a7f38abb6a8ee9919c07944eb5 100644
 --- a/codex-rs/tui/src/history_cell/tests.rs
 +++ b/codex-rs/tui/src/history_cell/tests.rs
 @@ -231,6 +231,13 @@ fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
@@ -2746,15 +2824,15 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
          }),
          "wrapped URL rows must retain the user-message gutter: {linked_rows:?}"
      );
-@@ -2428,8 +2440,160 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
+@@ -2428,10 +2440,170 @@ fn user_history_cell_wraps_long_urls_inside_the_message_gutter() {
 
      insta::assert_snapshot!(
          "user_history_cell_wraps_long_urls_inside_the_message_gutter",
 -        render_lines(&cell.display_lines(width)).join("\n")
 +        render_lines_trimmed(&cell.display_lines(width)).join("\n")
-+    );
-+}
-+
+     );
+ }
+
 +#[test]
 +fn user_history_cell_right_aligns_with_wide_cap_and_narrow_fallback() {
 +    let cell = UserHistoryCell {
@@ -2785,7 +2863,7 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 +            .iter()
 +            .filter(|line| line.width() > 0)
 +            .all(|line| line.width() == 39)
-     );
++    );
 +    let narrow = cell.display_lines(/*width*/ 39);
 +    assert!(
 +        narrow
@@ -2892,7 +2970,15 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 +                } else {
 +                    0
 +                };
-+                assert_eq!(source.continuation_indent.width(), alignment_width + 2);
++                let gutter_width = if source.prefix_bytes > alignment_width {
++                    2
++                } else {
++                    0
++                };
++                assert_eq!(
++                    source.continuation_indent.width(),
++                    alignment_width + gutter_width
++                );
 +            }
 +            let marker = lines
 +                .iter()
@@ -2905,10 +2991,12 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 +            }
 +        }
 +    }
- }
-
++}
++
  #[test]
-@@ -2442,7 +2606,7 @@ fn user_history_cell_renders_remote_image_urls() {
+ fn user_history_cell_renders_remote_image_urls() {
+     let cell = UserHistoryCell {
+@@ -2442,7 +2614,7 @@ fn user_history_cell_renders_remote_image_urls() {
          remote_image_urls: vec!["https://example.com/example.png".to_string()],
      };
 
@@ -2917,7 +3005,7 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe these"));
-@@ -2499,7 +2663,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
+@@ -2499,7 +2671,7 @@ fn user_history_cell_summarizes_inline_data_urls() {
          remote_image_urls: vec!["data:image/png;base64,aGVsbG8=".to_string()],
      };
 
@@ -2926,7 +3014,7 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("describe inline image"));
-@@ -2528,7 +2692,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
+@@ -2528,7 +2700,7 @@ fn user_history_cell_numbers_multiple_remote_images() {
          ],
      };
 
@@ -2935,7 +3023,7 @@ index 0062cd5b2ceba1f1260c76c5cce022c21dd79916..12e1a0ce09d55b42a8ba954b1bff259a
 
      assert!(rendered.contains("[Image #1]"));
      assert!(rendered.contains("[Image #2]"));
-@@ -2645,7 +2809,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
+@@ -2645,7 +2817,7 @@ fn render_uses_wrapping_for_long_url_like_line() {
          .enumerate()
          .map(|(index, row)| {
              if index == 0 {
@@ -3398,6 +3486,62 @@ index 97a0a6a700c94db2e941dcfbcdb2ee1b735370c1..36bbcdd12b2ce852b1308d27e115c31c
  #[test]
  fn transcript_overlay_snapshots_paginated_history_states() {
      let mut overlay = transcript_overlay(vec![Arc::new(TestCell {
+diff --git a/codex-rs/tui/src/terminal_hyperlinks.rs b/codex-rs/tui/src/terminal_hyperlinks.rs
+index 6db9897f3f41f18fe18fb9dcb02329b76a058f0c..23809ffe838ee42e62bd1f346b4022c69cae5e00 100644
+--- a/codex-rs/tui/src/terminal_hyperlinks.rs
++++ b/codex-rs/tui/src/terminal_hyperlinks.rs
+@@ -9,6 +9,7 @@ mod source;
+ pub(crate) use paragraph::HyperlinkParagraph;
+ pub(crate) use source::LineWrapPolicy;
+ pub(crate) use source::LogicalLineSource;
++pub(crate) use source::UserMessageLayout;
+
+ use std::num::NonZeroU16;
+ use std::ops::Range;
+diff --git a/codex-rs/tui/src/terminal_hyperlinks/source.rs b/codex-rs/tui/src/terminal_hyperlinks/source.rs
+index 590714d51aaf1df811b1a0ad1344e3870f028459..85c9041bb701a0fede2ab2e47029f2d1ee81ad14 100644
+--- a/codex-rs/tui/src/terminal_hyperlinks/source.rs
++++ b/codex-rs/tui/src/terminal_hyperlinks/source.rs
+@@ -16,6 +16,14 @@ pub(crate) enum LineWrapPolicy {
+     Hard,
+ }
+
++/// Shared display geometry for one user-message bubble, recomputed when its width changes.
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct UserMessageLayout {
++    /// Synthetic spaces before the bubble, excluded from source text and wrapping gutters.
++    pub(crate) alignment_prefix_bytes: usize,
++    pub(crate) style: Style,
++}
++
+ /// A displayed line's contiguous fragment of one original logical line.
+ ///
+ /// Wrapped fragments share `text`. `prefix_bytes` counts synthetic display bytes before
+@@ -35,6 +43,8 @@ pub(crate) struct LogicalLineSource {
+     pub(crate) continuation_indent: Line<'static>,
+     /// Blank columns after wrapped content; they remain outside the copied source text.
+     pub(crate) right_reserve: u16,
++    /// Shared identity groups the bubble's body and empty padding rows during transcript resize.
++    pub(crate) user_message: Option<Arc<UserMessageLayout>>,
+ }
+
+ impl LogicalLineSource {
+@@ -50,6 +60,7 @@ impl LogicalLineSource {
+             wrap_policy: LineWrapPolicy::Word,
+             continuation_indent: Line::default(),
+             right_reserve: 0,
++            user_message: None,
+         }
+     }
+
+@@ -108,6 +119,7 @@ impl LogicalLineSource {
+             wrap_policy: self.wrap_policy,
+             continuation_indent: self.continuation_indent.clone(),
+             right_reserve: self.right_reserve,
++            user_message: self.user_message.clone(),
+         }
+     }
+ }
 diff --git a/codex-rs/tui/src/thread_transcript/other_items.rs b/codex-rs/tui/src/thread_transcript/other_items.rs
 index 68116133904ebb2f3d8ada3c24255f7111dc02d0..f109463213decbe30baa531ffc34c9dffbbda05d 100644
 --- a/codex-rs/tui/src/thread_transcript/other_items.rs
@@ -3411,3 +3555,256 @@ index 68116133904ebb2f3d8ada3c24255f7111dc02d0..f109463213decbe30baa531ffc34c9df
          | ThreadItem::Sleep(_) => {}
      }
      cells
+diff --git a/codex-rs/tui/src/transcript_view/prompt_style_tests.rs b/codex-rs/tui/src/transcript_view/prompt_style_tests.rs
+index f011c48705e256d80da9ec1f96d91387bad167be..a480d3ab9736754cbc5b40e7935d02c8c90f8a9d 100644
+--- a/codex-rs/tui/src/transcript_view/prompt_style_tests.rs
++++ b/codex-rs/tui/src/transcript_view/prompt_style_tests.rs
+@@ -6,13 +6,16 @@ use crate::history_cell::new_user_prompt;
+ use crate::terminal_hyperlinks::HyperlinkLine;
+ use crate::terminal_hyperlinks::HyperlinkParagraph;
+ use crate::terminal_hyperlinks::LogicalLineSource;
++use crate::terminal_hyperlinks::UserMessageLayout;
+ use pretty_assertions::assert_eq;
+ use ratatui::buffer::Buffer;
+ use ratatui::layout::Rect;
++use ratatui::style::Color;
+ use ratatui::style::Style;
+ use ratatui::style::Stylize;
+ use ratatui::text::Line;
+ use ratatui::widgets::Widget;
++use std::sync::Arc;
+
+ #[test]
+ fn visible_rows_fill_inherited_styles_without_painting_outside_the_viewport() {
+@@ -74,18 +77,22 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
+         let mut actual = Buffer::empty(area);
+         layout.render(area, &mut actual, /*start_row*/ 0);
+         let mut expected = Buffer::empty(area);
+-        HyperlinkParagraph::new(&fresh_lines, style).render(area, &mut expected);
++        HyperlinkParagraph::new(&fresh_lines, Style::default()).render(area, &mut expected);
+
+         assert_eq!(
+             (layout.text(), layout.row_count()),
+             (expected_copy.as_str(), fresh_lines.len()),
+         );
++        assert_eq!(layout.row_count(), usize::from(cell.desired_height(width)));
+         assert_eq!(actual, expected);
+         assert_eq!(
+             (0..area.height)
+-                .map(|row| actual[(width - 1, row)].symbol())
++                .map(|row| {
++                    let cell = &actual[(width - 1, row)];
++                    (cell.symbol(), cell.bg)
++                })
+                 .collect::<Vec<_>>(),
+-            vec![" "; fresh_lines.len()],
++            vec![(" ", Color::Reset); fresh_lines.len()],
+         );
+         if width == 20 {
+             insta::assert_snapshot!(name, format!("{actual:?}"));
+@@ -99,7 +106,7 @@ fn prompt_margin_and_blank_background_survive_resize_without_changing_copy() {
+             layout.position_at(/*row*/ 1, /*column*/ 59),
+             layout.position_at(/*row*/ 2, /*column*/ 2),
+         ),
+-        (57, 58, 58),
++        (46, 47, 47),
+     );
+ }
+
+@@ -131,11 +138,28 @@ fn reserved_margin_uses_the_same_alignment_for_painting_and_selection() {
+ }
+
+ fn styled_prompt_lines(cell: &dyn HistoryCell, width: u16, style: Style) -> Vec<HyperlinkLine> {
+-    cell.display_hyperlink_lines(width)
+-        .into_iter()
+-        .map(|mut line| {
+-            line.line.style = style;
+-            line
+-        })
+-        .collect()
++    let mut lines = cell.display_hyperlink_lines(width);
++    let original = lines[0]
++        .source
++        .as_ref()
++        .and_then(|source| source.user_message.as_ref())
++        .expect("user-message layout");
++    let user_message = Arc::new(UserMessageLayout {
++        style,
++        ..**original
++    });
++    for line in &mut lines {
++        for span in line
++            .line
++            .spans
++            .iter_mut()
++            .skip(usize::from(user_message.alignment_prefix_bytes > 0))
++        {
++            span.style = span.style.patch(style);
++        }
++        let source = line.source.as_mut().expect("user-message source");
++        source.line_style = source.line_style.patch(style);
++        source.user_message = Some(Arc::clone(&user_message));
++    }
++    lines
+ }
+diff --git a/codex-rs/tui/src/transcript_view/snapshots/codex_tui__transcript_view__text__prompt_style_tests__prompt_margin_narrow.snap b/codex-rs/tui/src/transcript_view/snapshots/codex_tui__transcript_view__text__prompt_style_tests__prompt_margin_narrow.snap
+index aeb98978af575cdceb1b4452d09eda92fdf7bddc..ff56db6e93e9ff05dadfa539b6da46d3faf5b9fc 100644
+--- a/codex-rs/tui/src/transcript_view/snapshots/codex_tui__transcript_view__text__prompt_style_tests__prompt_margin_narrow.snap
++++ b/codex-rs/tui/src/transcript_view/snapshots/codex_tui__transcript_view__text__prompt_style_tests__prompt_margin_narrow.snap
+@@ -1,5 +1,6 @@
+ ---
+ source: tui/src/transcript_view/prompt_style_tests.rs
++assertion_line: 98
+ expression: "format!(\"{actual:?}\")"
+ ---
+ Buffer {
+@@ -16,7 +17,25 @@ Buffer {
+     ],
+     styles: [
+         x: 0, y: 0, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 0, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+         x: 0, y: 1, fg: Reset, bg: DarkGray, underline: Reset, modifier: BOLD | DIM,
+         x: 2, y: 1, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 1, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 2, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 2, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 3, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 3, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 4, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 4, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 5, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 5, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 6, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 5, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 6, y: 6, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 8, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 9, y: 6, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 6, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
++        x: 0, y: 7, fg: Reset, bg: DarkGray, underline: Reset, modifier: NONE,
++        x: 19, y: 7, fg: Reset, bg: Reset, underline: Reset, modifier: NONE,
+     ]
+ }
+diff --git a/codex-rs/tui/src/transcript_view/text.rs b/codex-rs/tui/src/transcript_view/text.rs
+index fe875557607a1d7acd6c2a7ec4c2e0eb1db384fe..9b732eb2fa76a51424e56fef1d639afc8e4e1ca6 100644
+--- a/codex-rs/tui/src/transcript_view/text.rs
++++ b/codex-rs/tui/src/transcript_view/text.rs
+@@ -7,6 +7,7 @@
+
+ use std::borrow::Cow;
+ use std::ops::Range;
++use std::sync::Arc;
+
+ #[path = "text_logical.rs"]
+ mod logical;
+@@ -308,19 +309,62 @@ impl TextLayout {
+         let width = width.max(/*other*/ 1);
+         let mut text = String::new();
+         let mut rows = Vec::new();
+-        for (index, line) in logical.iter().enumerate() {
+-            if index > 0 {
+-                text.push('\n');
++        let mut first_line = true;
++        for group in logical.chunk_by(|left, right| {
++            match (&left.origin.user_message, &right.origin.user_message) {
++                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
++                _ => false,
++            }
++        }) {
++            let row_start = rows.len();
++            let user_message = group[0].origin.user_message.as_ref();
++            for line in group {
++                if !first_line {
++                    text.push('\n');
++                }
++                first_line = false;
++                let start = text.len();
++                text.extend(
++                    line.line
++                        .line
++                        .spans
++                        .iter()
++                        .map(|span| span.content.as_ref()),
++                );
++                let wrap_width = if user_message.is_some() {
++                    crate::history_cell::user_message_block_width(width)
++                        .saturating_add(line.right_reserve)
++                } else {
++                    width
++                };
++                rows.extend(layout_line(line, start, wrap_width));
++            }
++            if let Some(user_message) = user_message {
++                let bubble_rows = &mut rows[row_start..];
++                let available_width = width
++                    .saturating_sub(group[0].right_reserve)
++                    .max(/*other*/ 1);
++                let painted = crate::history_cell::finish_user_message_lines(
++                    bubble_rows
++                        .iter_mut()
++                        .map(|row| std::mem::take(&mut row.line))
++                        .collect(),
++                    width,
++                    available_width,
++                    user_message.style,
++                );
++                for (row, line) in bubble_rows.iter_mut().zip(painted) {
++                    let alignment_prefix = line
++                        .source
++                        .as_ref()
++                        .and_then(|source| source.user_message.as_ref())
++                        .map_or(/*default*/ 0, |layout| layout.alignment_prefix_bytes);
++                    row.first_column += alignment_prefix;
++                    row.prefix_columns += alignment_prefix;
++                    row.content_width = available_width;
++                    row.line = line;
++                }
+             }
+-            let start = text.len();
+-            text.extend(
+-                line.line
+-                    .line
+-                    .spans
+-                    .iter()
+-                    .map(|span| span.content.as_ref()),
+-            );
+-            rows.extend(layout_line(line, start, width));
+         }
+         Self {
+             logical,
+diff --git a/codex-rs/tui/src/transcript_view/text_logical.rs b/codex-rs/tui/src/transcript_view/text_logical.rs
+index 58a81011d0475da6a3c664b2c9b35ed533b142d6..4f1a1ac8f3810c534babcfcc326e3c4afcbc99b8 100644
+--- a/codex-rs/tui/src/transcript_view/text_logical.rs
++++ b/codex-rs/tui/src/transcript_view/text_logical.rs
+@@ -35,10 +35,30 @@ pub(super) fn logical_lines(lines: &[HyperlinkLine]) -> Vec<LogicalLine> {
+         match previous {
+             Some(previous) => previous.append(line, source),
+             None => {
++                let alignment_prefix = source
++                    .user_message
++                    .as_ref()
++                    .map_or(/*default*/ 0, |layout| layout.alignment_prefix_bytes);
++                let continuation_bytes = source
++                    .continuation_indent
++                    .spans
++                    .iter()
++                    .map(|span| span.content.len())
++                    .sum();
++                let mut subsequent_indent = slice_line(
++                    &source.continuation_indent,
++                    alignment_prefix..continuation_bytes,
++                );
++                if let Some(user_message) = &source.user_message {
++                    // Fresh bubble rows color the gutter, but not the removed alignment padding.
++                    for span in &mut subsequent_indent.spans {
++                        span.style = user_message.style.patch(span.style);
++                    }
++                }
+                 let mut entry = LogicalLine {
+                     line: HyperlinkLine::new(Line::default().style(line.line.style)),
+-                    initial_indent: slice_line(&line.line, 0..source.prefix_bytes),
+-                    subsequent_indent: source.continuation_indent.clone(),
++                    initial_indent: slice_line(&line.line, alignment_prefix..source.prefix_bytes),
++                    subsequent_indent,
+                     wrap_policy: source.wrap_policy,
+                     right_reserve: source.right_reserve,
+                     origin: source.clone(),

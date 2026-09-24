@@ -546,7 +546,7 @@ index 1b8667d6d1c013c90bb3705dc0c5af28b07b2e9c..8241f6aad9423718922f181f2d6ca60c
          let state = self.state.lock().await;
          state.session_configuration.provider.info().clone()
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 66edbdc880c3031bb6fea56f764311c80e5b5908..5c588d3cf0429ae840169927b614f8813abe3a92 100644
+index a03d7fb9739c3c39378fbd8c106c9502a609bf50..ab19cb79203694b757717aedba3a834e456c8fb3 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -13662,6 +13662,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
@@ -679,7 +679,7 @@ index 66edbdc880c3031bb6fea56f764311c80e5b5908..5c588d3cf0429ae840169927b614f881
 
  #[tokio::test]
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 36068708c7be777c977131cc8fbbdd8f09530782..564a7d496c6bbf2f169560dba19f5be9583034c6 100644
+index beff862b6c591472627424fccb99f555b9f392f5..74df384104e9f1a60a40a82b87f242dcaba611f9 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -62,6 +62,7 @@ use crate::tasks::emit_compact_metric;
@@ -690,7 +690,7 @@ index 36068708c7be777c977131cc8fbbdd8f09530782..564a7d496c6bbf2f169560dba19f5be9
  use crate::tools::parallel::ToolCallRuntime;
  use crate::tools::registry::ToolArgumentDiffConsumer;
  use crate::tools::router::ToolSuggestCandidates;
-@@ -3084,11 +3085,12 @@ async fn drain_in_flight(
+@@ -3057,11 +3058,12 @@ async fn drain_in_flight(
      in_flight: &mut FuturesOrdered<InFlightFuture<'static>>,
      sess: Arc<Session>,
      step_context: &StepContext,
@@ -705,7 +705,7 @@ index 36068708c7be777c977131cc8fbbdd8f09530782..564a7d496c6bbf2f169560dba19f5be9
                  mark_thread_memory_mode_polluted_if_external_context(
                      sess.as_ref(),
                      turn_context.as_ref(),
-@@ -3102,13 +3104,16 @@ async fn drain_in_flight(
+@@ -3075,13 +3077,16 @@ async fn drain_in_flight(
                  )
                  .await;
              }
@@ -723,7 +723,7 @@ index 36068708c7be777c977131cc8fbbdd8f09530782..564a7d496c6bbf2f169560dba19f5be9
  }
 
  fn assign_missing_streamed_response_item_id(
-@@ -3970,10 +3975,14 @@ async fn try_run_sampling_request(
+@@ -3943,10 +3948,14 @@ async fn try_run_sampling_request(
      if workspace_cwd_call_seen && tool_call_count != 1 {
          step_context.reject_context_transition_mixed_with_sibling_tool();
      }
@@ -742,7 +742,7 @@ index 36068708c7be777c977131cc8fbbdd8f09530782..564a7d496c6bbf2f169560dba19f5be9
      drop(tool_blocking_timing_guard);
 
      if should_emit_token_count {
-@@ -3984,6 +3993,10 @@ async fn try_run_sampling_request(
+@@ -3957,6 +3966,10 @@ async fn try_run_sampling_request(
          sess.send_token_count_event(&turn_context).await;
      }
 
@@ -782,6 +782,62 @@ index 9709db556d208e649ff56470e0b736bbc257e8de..6a4faeffa08f4e53baa2242f7e0bd125
 
  #[derive(Default)]
  pub(crate) struct OutputItemResult {
+diff --git a/codex-rs/core/src/stream_events_utils_tests.rs b/codex-rs/core/src/stream_events_utils_tests.rs
+index 2f5bc570725aaae50a4e5e2608af95bc04ebe529..f030a930341ef81d25b7a6cff4e54231d2e801ee 100644
+--- a/codex-rs/core/src/stream_events_utils_tests.rs
++++ b/codex-rs/core/src/stream_events_utils_tests.rs
+@@ -13,6 +13,7 @@ use crate::session::tests::make_session_and_context_with_auth_and_config_and_rx;
+ use crate::session::tests::tool_registry_for_test_step;
+ use crate::session::turn_context::TurnContext;
+ use crate::tools::ToolRouter;
++use crate::tools::parallel::ToolCallResponse;
+ use crate::tools::parallel::ToolCallRuntime;
+ use crate::turn_diff_tracker::TurnDiffTracker;
+ use codex_extension_api::ExtensionData;
+@@ -367,7 +368,9 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+     // Await in reverse order: each result must already own its record before history attachment.
+     let mut outputs = Vec::new();
+     for (arguments, future) in pending.into_iter().rev() {
+-        let envelope = future.await.expect("plan result");
++        let ToolCallResponse::Response(envelope) = future.await.expect("plan result") else {
++            panic!("plan result must return a response");
++        };
+         let item = &envelope.item;
+         let ResponseItem::FunctionCallOutput {
+             call_id: output_call_id,
+@@ -419,10 +422,13 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         .disable(Feature::ExecutedToolCallMetadata)
+         .expect("disable metadata");
+     session.refresh_runtime_config(config.clone()).await;
+-    let result = pending
++    let ToolCallResponse::Response(result) = pending
+         .remove(0)
+         .await
+-        .expect("plan result after capture disabled");
++        .expect("plan result after capture disabled")
++    else {
++        panic!("plan result must return a response");
++    };
+     assert!(result.item.executed_tool_call_metadata().is_none());
+     session
+         .services
+@@ -439,11 +445,14 @@ async fn direct_results_keep_their_own_records_when_call_ids_repeat() {
+         .enable(Feature::ExecutedToolCallMetadata)
+         .expect("re-enable metadata");
+     session.refresh_runtime_config(config).await;
+-    let result = pending
++    let ToolCallResponse::Response(result) = pending
+         .pop()
+         .expect("call prepared before disable")
+         .await
+-        .expect("plan result after capture re-enabled");
++        .expect("plan result after capture re-enabled")
++    else {
++        panic!("plan result must return a response");
++    };
+     assert!(result.item.executed_tool_call_metadata().is_none());
+ }
+
 diff --git a/codex-rs/core/src/tools/context.rs b/codex-rs/core/src/tools/context.rs
 index 1b02ab7abfcbc5c84100330dbaf25e8f02dc134e..154a6c5b7e34a8fea8740d52e63fbd76edf26f76 100644
 --- a/codex-rs/core/src/tools/context.rs
@@ -834,7 +890,7 @@ index 1b02ab7abfcbc5c84100330dbaf25e8f02dc134e..154a6c5b7e34a8fea8740d52e63fbd76
          function_tool_response(call_id, payload, self.body.clone(), self.success)
      }
 diff --git a/codex-rs/core/src/tools/parallel.rs b/codex-rs/core/src/tools/parallel.rs
-index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763b6a4b261 100644
+index 53ddadc4031b61bd692d7c7e52b11ba320d00988..c4a3e187adc92ca532cabcfd80952a2d589c3f0d 100644
 --- a/codex-rs/core/src/tools/parallel.rs
 +++ b/codex-rs/core/src/tools/parallel.rs
 @@ -31,6 +31,17 @@ use codex_protocol::error::CodexErr;
@@ -912,7 +968,15 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
      fn tool_task_join_error(err: JoinError) -> FunctionCallError {
          FunctionCallError::Fatal(format!("tool task failed to receive: {err:?}"))
      }
-@@ -640,6 +661,7 @@ mod tests {
+@@ -537,6 +558,7 @@ mod tests {
+         let tool_name = codex_tools::ToolName::plain("test_tool");
+         let handler = Arc::new(ImmediateHandler {
+             tool_name: tool_name.clone(),
++            terminal_no_response: false,
+         }) as Arc<dyn CoreToolRuntime>;
+         let step_context = StepContext::for_test(Arc::clone(&turn_context));
+         let router = Arc::new(ToolRouter::from_parts(
+@@ -640,6 +662,7 @@ mod tests {
 
      struct ImmediateHandler {
          tool_name: codex_tools::ToolName,
@@ -920,7 +984,7 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
      }
 
      impl ToolExecutor<ToolInvocation> for ImmediateHandler {
-@@ -663,10 +685,13 @@ mod tests {
+@@ -663,10 +686,13 @@ mod tests {
              ToolInvocation: 'a,
          {
              Box::pin(async {
@@ -938,7 +1002,7 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
              })
          }
      }
-@@ -705,9 +730,12 @@ mod tests {
+@@ -705,9 +731,12 @@ mod tests {
          }
      }
 
@@ -953,7 +1017,7 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
          let (mut session, turn_context) = crate::session::tests::make_session_and_context().await;
          let records = Arc::new(std::sync::Mutex::new(Vec::new()));
          let (finish_started_tx, finish_started_rx) = oneshot::channel();
-@@ -726,6 +754,7 @@ mod tests {
+@@ -726,6 +755,7 @@ mod tests {
          let tool_name = codex_tools::ToolName::plain("test_tool");
          let handler = Arc::new(ImmediateHandler {
              tool_name: tool_name.clone(),
@@ -961,7 +1025,7 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
          }) as Arc<dyn CoreToolRuntime>;
          let step_context = StepContext::for_test(Arc::clone(&turn_context));
          let router = Arc::new(ToolRouter::from_parts(
-@@ -770,10 +799,12 @@ mod tests {
+@@ -770,10 +800,12 @@ mod tests {
                  success: Some(true),
              },
          };
@@ -978,7 +1042,7 @@ index 53ddadc4031b61bd692d7c7e52b11ba320d00988..3746cd097db918ec0f05b3d51ca6d763
 
          let actual = records
              .lock()
-@@ -784,4 +815,24 @@ mod tests {
+@@ -784,4 +816,24 @@ mod tests {
 
          Ok(())
      }

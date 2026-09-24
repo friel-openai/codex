@@ -324,7 +324,7 @@ index bd3a2f62883b6d3ddf3f33ec127a62a5eda16036..4d1e8ce90e13b2527f3f6d49bb95cd5a
          default_review_model_id,
          &available_models,
 diff --git a/codex-rs/core/src/guardian/tests.rs b/codex-rs/core/src/guardian/tests.rs
-index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6555ee582 100644
+index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..f48119aeee1e9f35f77f88dfc1fb1655b3305f27 100644
 --- a/codex-rs/core/src/guardian/tests.rs
 +++ b/codex-rs/core/src/guardian/tests.rs
 @@ -78,6 +78,7 @@ use core_test_support::responses::mount_sse_once;
@@ -471,7 +471,7 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
 
      let handle = std::thread::Builder::new()
          .name("guardian_ephemeral_retry_preserves_parallel_trunk_and_fork_history".to_string())
-@@ -3783,6 +3904,94 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
+@@ -3783,6 +3904,89 @@ async fn guardian_review_session_config_clears_context_overrides_for_distinct_ef
      );
  }
 
@@ -501,22 +501,17 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
 +    let guardian_config = guardian_review_session_config(session.as_ref(), &context)
 +        .await
 +        .expect("guardian config");
++    let (review_model, _) = resolve_review_model(session.as_ref(), &context).await;
 +    let expected_effort = guardian_config.spawn_config.model_reasoning_effort.clone();
 +
 +    assert_eq!(
 +        guardian_config.spawn_config.model.as_deref(),
 +        Some("__frodex_auto_review_ultrafast")
 +    );
-+    assert_eq!(guardian_config.review_model.model, "gpt-5.6-sol");
-+    assert!(guardian_config.review_model.model_overridden);
-+    assert_eq!(
-+        guardian_config.review_model.model_override.as_deref(),
-+        Some("gpt-5.6-sol")
-+    );
-+    assert_eq!(
-+        guardian_config.review_model.reasoning_effort,
-+        expected_effort
-+    );
++    assert_eq!(review_model.model, "gpt-5.6-sol");
++    assert!(review_model.model_overridden);
++    assert_eq!(review_model.model_override.as_deref(), Some("gpt-5.6-sol"));
++    assert_eq!(review_model.reasoning_effort, expected_effort);
 +    assert_eq!(
 +        (
 +            guardian_config.spawn_config.model_context_window,
@@ -566,7 +561,7 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
  #[tokio::test]
  async fn guardian_review_session_config_preserves_context_overrides_for_same_effective_model() {
      let server = start_mock_server().await;
-@@ -3883,6 +4092,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3883,6 +4087,9 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
          Feature::Plugins,
          Feature::GuardianV2,
          Feature::CodexHooks,
@@ -576,7 +571,7 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
      ];
      for feature in disabled_features {
          parent_config
-@@ -3894,6 +4106,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3894,6 +4101,14 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      parent_config.include_skill_instructions = true;
      parent_config.memories.use_memories = true;
      parent_config.memories.dedicated_tools = true;
@@ -591,7 +586,7 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
      parent_config.developer_instructions =
          Some("parent or managed config should not replace guardian policy".to_string());
      parent_config.notify = Some(vec![
-@@ -3923,6 +4143,13 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
+@@ -3923,6 +4138,13 @@ async fn guardian_review_session_config_isolates_parent_customizations() {
      assert!(!guardian_config.include_skill_instructions);
      assert!(!guardian_config.memories.use_memories);
      assert!(!guardian_config.memories.dedicated_tools);
@@ -606,10 +601,10 @@ index 544cf4112d02b5e6dc5a7e4aafcb7209d53a7c28..050dec4c2a9571140de04324b98c31c6
      assert_eq!(guardian_config.developer_instructions, None);
      assert_eq!(
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 44e08c4fec2ee28a782c8665b23a9aaff39f2c01..c93f504cf3f9516d376a782f147fde74933997ab 100644
+index 0d749b22e0dd5f86e3630c303ea26961440c5ec6..dcc6c1b148e4319bd6cf67c07a35e1dbd0416203 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2750,6 +2750,7 @@ impl Session {
+@@ -2751,6 +2751,7 @@ impl Session {
                  .with_user_layer_from(&next_config.config_layer_stack);
              config.tool_suggest =
                  resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
@@ -738,10 +733,10 @@ index cee7d5d171873a434919a09064ddbf75ddd8b3f0..b6d765c6e9f4d9f83730b354a75fbc70
      details: &CodexErrorDetails,
  ) -> Option<ModelRoutingFailure> {
 diff --git a/codex-rs/core/src/session/step_activation_tests.rs b/codex-rs/core/src/session/step_activation_tests.rs
-index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc73774ee2 100644
+index 4ad7824de4aa0365e4bdc5caef40cb4ccfd400ed..f6f1645d483a842cd8a44455294362eff7d5351f 100644
 --- a/codex-rs/core/src/session/step_activation_tests.rs
 +++ b/codex-rs/core/src/session/step_activation_tests.rs
-@@ -457,6 +457,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -462,6 +462,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
                  &turn.sub_id,
                  TurnSettingsUpdate {
                      summary: Some(ReasoningSummary::Detailed),
@@ -749,7 +744,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
                      ..Default::default()
                  }
              )
-@@ -494,6 +495,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -499,6 +500,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
          routed.initial_settings.selected().approval_policy,
          prepared.inputs.settings.selected().approval_policy
      );
@@ -760,7 +755,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
      assert!(
          session
              .try_replace_active_turn_context(&prepared, &routed)
-@@ -530,6 +535,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
+@@ -535,6 +540,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
          .expect("capture routed step");
      assert_eq!(step.settings.model_info.slug, MODEL_B);
      assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
@@ -771,7 +766,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
      assert_eq!(desired_step_settings(&session).await, future);
      finish.notify_one();
  }
-@@ -673,6 +682,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -678,6 +687,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          finish,
          ..
      } = activation_fixture(activation_models()).await;
@@ -790,7 +785,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
      let before_workspace = session
          .prepare_turn_context_replacement(&turn)
          .await
-@@ -704,6 +725,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -709,6 +730,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
          refreshed.initial_settings.selected(),
          prepared.inputs.settings.selected()
      );
@@ -809,7 +804,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
      assert_eq!(refreshed.model_info().slug, MODEL_A);
      assert_eq!(
          refreshed
-@@ -729,6 +762,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
+@@ -734,6 +767,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
      finish.notify_one();
  }
 
@@ -865,7 +860,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
 +
 +    let retains_routing = model.is_none() && effort.is_none() && service_tier.is_none();
 +    let expected_effort = effort.clone().unwrap_or(ReasoningEffort::Low);
-+    let expected_tier = service_tier.map(|tier| tier.request_value());
++    let expected_tier = service_tier.map(codex_protocol::config_types::ServiceTier::request_value);
 +    assert_eq!(
 +        session
 +            .apply_turn_settings(
@@ -974,7 +969,7 @@ index 84e7deffc27e9f8cc15163d6b2fdcd93b873d48a..1a0438d68087f07eedbfabfd34f6bcbc
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index fe5ad040b49c108b00d2bede1786173067fa3082..3cfc6036b69a8a76b04247067150e41ba8fa4d74 100644
+index 27878dd87c7800293c22ddd8ab7fa926882ad4aa..46d39af8fbe016f8edc03f0f73046f860c6abbda 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -5502,6 +5502,7 @@ async fn turn_context_with_model_updates_model_fields() {
@@ -1029,7 +1024,7 @@ index fe5ad040b49c108b00d2bede1786173067fa3082..3cfc6036b69a8a76b04247067150e41b
          &updated.initial_settings,
          &updated.next_step_input.load().settings
 diff --git a/codex-rs/core/src/session/turn.rs b/codex-rs/core/src/session/turn.rs
-index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b9a8e4f9a 100644
+index 74df384104e9f1a60a40a82b87f242dcaba611f9..fa433877b2c1e4716a4372fb5a46820674960db5 100644
 --- a/codex-rs/core/src/session/turn.rs
 +++ b/codex-rs/core/src/session/turn.rs
 @@ -160,6 +160,19 @@ pub(crate) struct McpStartupRequirements {
@@ -1052,50 +1047,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
  /// Provider startup state for a regular turn.
  ///
  /// A cooling routing candidate defers provider session creation, startup prewarm consumption, and
-@@ -546,18 +559,30 @@ pub(crate) async fn run_turn(
-             })
-         };
-         if execution_settings_refresh_requested {
--            let inputs = turn_context.next_step_input.load_full();
--            let refreshed_turn_context = sess
--                .refresh_active_turn_context(turn_context.as_ref(), &inputs)
--                .await;
--            let refreshed_step_context = sess
--                .capture_step_context_with_required_mcp_servers(
--                    Arc::clone(&refreshed_turn_context),
--                    &cancellation_token,
--                    required_servers,
--                    required_plugins,
--                )
--                .await?;
-+            let (refreshed_turn_context, refreshed_step_context) = loop {
-+                let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
-+                let refreshed = sess
-+                    .refresh_active_turn_context(&turn_context, &prepared.inputs)
-+                    .await;
-+                let step = sess
-+                    .capture_step_context_inner(
-+                        Arc::clone(&refreshed),
-+                        &cancellation_token,
-+                        required_servers,
-+                        required_plugins,
-+                    )
-+                    .await?;
-+                if sess
-+                    .try_replace_active_turn_context(&prepared, &refreshed)
-+                    .await?
-+                {
-+                    sess.set_last_known_step_context(&step).await;
-+                    sess.services
-+                        .thread_extension_data
-+                        .insert(step.settings.model_info.as_ref().clone());
-+                    break (refreshed, step);
-+                }
-+            };
-             world_state = sess
-                 .record_context_updates_and_set_reference_context_item(
-                     refreshed_step_context.as_ref(),
-@@ -704,7 +729,7 @@ pub(crate) async fn run_turn(
+@@ -677,7 +690,7 @@ pub(crate) async fn run_turn(
                          sess.notify_model_routing_candidate_change(previous, &turn_context, reason)
                              .await;
                      }
@@ -1104,7 +1056,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                          .await;
                      initial_routing_change_pending = false;
                  }
-@@ -714,16 +739,30 @@ pub(crate) async fn run_turn(
+@@ -687,16 +700,30 @@ pub(crate) async fn run_turn(
                      refresh_turn_context,
                  } = sampling_request_output;
                  if refresh_turn_context {
@@ -1145,7 +1097,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                      let display_roots =
                          turn_diff_display_roots(refreshed_step_context.as_ref()).await;
                      turn_diff_tracker
-@@ -999,7 +1038,7 @@ pub(crate) async fn run_turn(
+@@ -972,7 +999,7 @@ pub(crate) async fn run_turn(
              Err(failure) => {
                  let routing_failure = classify_model_routing_failure(failure.error.details());
                  if let Some(routing_failure) = routing_failure.as_ref() {
@@ -1154,7 +1106,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                          .await;
                  }
                  if failure.reroute_safe
-@@ -1007,15 +1046,41 @@ pub(crate) async fn run_turn(
+@@ -980,15 +1007,41 @@ pub(crate) async fn run_turn(
                      && let Some(profile_name) = turn_context.model_profile.clone()
                  {
                      let mut last_compaction_error = None;
@@ -1205,7 +1157,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                          if !sess
                              .wait_for_model_routing_retry(selection.retry_at, &cancellation_token)
                              .await
-@@ -1026,33 +1091,33 @@ pub(crate) async fn run_turn(
+@@ -999,33 +1052,33 @@ pub(crate) async fn run_turn(
                          routed.model_routing_previous_candidate = None;
                          routed.model_routing_selection_reason = None;
                          let routed = Arc::new(routed);
@@ -1257,7 +1209,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                              &routed_step_context,
                              &world_state,
                              &mut client_session,
-@@ -1066,9 +1131,6 @@ pub(crate) async fn run_turn(
+@@ -1039,9 +1092,6 @@ pub(crate) async fn run_turn(
                                      CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                                  ) =>
                              {
@@ -1267,7 +1219,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                                  return Err(err);
                              }
                              Err(err) => {
-@@ -1076,20 +1138,14 @@ pub(crate) async fn run_turn(
+@@ -1049,20 +1099,14 @@ pub(crate) async fn run_turn(
                                      classify_model_routing_failure(err.details())
                                  {
                                      sess.record_model_routing_failure(
@@ -1289,7 +1241,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                                  info!("Turn error during model reroute compaction: {err:#}");
                                  let error = err.to_codex_protocol_error();
                                  sess.emit_turn_error_lifecycle(
-@@ -1109,7 +1165,7 @@ pub(crate) async fn run_turn(
+@@ -1082,7 +1126,7 @@ pub(crate) async fn run_turn(
                              // segment and rebuilds from the compacted local history.
                              client_session.reset_for_model_reroute();
                              sess.notify_model_routing_change(
@@ -1298,7 +1250,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -1142,24 +1198,14 @@ pub(crate) async fn run_turn(
+@@ -1115,24 +1159,14 @@ pub(crate) async fn run_turn(
                          } else {
                              routed_step_context
                          };
@@ -1326,7 +1278,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                                  &routed,
                                  routing_failure.reason,
                              )
-@@ -1187,9 +1233,6 @@ pub(crate) async fn run_turn(
+@@ -1160,9 +1194,6 @@ pub(crate) async fn run_turn(
                          continue 'turn;
                      }
                      if let Some(err) = last_compaction_error {
@@ -1336,7 +1288,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
                          info!("Turn error during model reroute compaction: {err:#}");
                          let error = err.to_codex_protocol_error();
                          sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
-@@ -1871,14 +1914,18 @@ async fn maybe_run_previous_model_inline_compact(
+@@ -1844,14 +1875,18 @@ async fn maybe_run_previous_model_inline_compact(
  /// the task's previous-turn configuration.
  async fn maybe_run_model_reroute_inline_compact(
      sess: &Arc<Session>,
@@ -1357,7 +1309,7 @@ index 564a7d496c6bbf2f169560dba19f5be9583034c6..68e546a070a196a95ac3e9d603040c3b
          routed_turn_context.model_info().comp_hash.as_deref(),
      ) {
          Some(CompactionReason::CompHashChanged)
-@@ -1903,10 +1950,12 @@ async fn maybe_run_model_reroute_inline_compact(
+@@ -1876,10 +1911,12 @@ async fn maybe_run_model_reroute_inline_compact(
                  .model_context_window()
                  .is_some_and(|context_window| active_context_tokens >= context_window),
          };
@@ -1513,7 +1465,7 @@ index 9d1db4241fa32d8c276bd0ca6a91d9fa88aa5930..bafc2efa73f0c8bcd9bdc3335129e412
      )]);
      let mut primary_model = model_info_from_slug(ROUTED_WEBSOCKET_PRIMARY);
 diff --git a/codex-rs/core/tests/suite/guardian_history.rs b/codex-rs/core/tests/suite/guardian_history.rs
-index 10598494da20e4c5c87ff38f8a1ab3b17ee60960..cb9b5401b176ca3e8f47a07ca7fe3d4b65dbc477 100644
+index c19fe7248377247f8e30658eda4af9d7d2b65528..c9ba1aa64bd8ac20607edfcee2f13051956c3dd7 100644
 --- a/codex-rs/core/tests/suite/guardian_history.rs
 +++ b/codex-rs/core/tests/suite/guardian_history.rs
 @@ -88,6 +88,10 @@ async fn guardian_history_survives_restart_and_user_fork(
