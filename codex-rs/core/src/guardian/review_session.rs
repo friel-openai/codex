@@ -665,7 +665,12 @@ async fn run_review_on_session(
         permission_profile: params.spawn_config.permissions.permission_profile().clone(),
         reasoning_summary: params.reasoning_summary,
         personality: params.personality,
-        model: review_model.model.clone(),
+        // Per-review settings must preserve the routing alias selected at session creation.
+        model: params
+            .spawn_config
+            .model
+            .clone()
+            .unwrap_or_else(|| review_model.model.clone()),
         reasoning_effort: review_model.reasoning_effort.clone(),
         parent_response_id: params.parent_context.parent_response_id.clone(),
         schema: params.schema.clone(),

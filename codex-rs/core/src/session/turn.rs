@@ -160,6 +160,19 @@ pub(crate) struct McpStartupRequirements {
     required_plugins: HashSet<String>,
 }
 
+#[cfg(test)]
+impl McpStartupRequirements {
+    pub(crate) fn remember_for_test(&mut self, server: &str, plugin: &str) {
+        self.required_servers.push(server.to_string());
+        self.required_plugins.insert(plugin.to_string());
+    }
+
+    pub(crate) fn contains_for_test(&self, server: &str, plugin: &str) -> bool {
+        self.required_servers.iter().any(|item| item == server)
+            && self.required_plugins.contains(plugin)
+    }
+}
+
 /// Provider startup state for a regular turn.
 ///
 /// A cooling routing candidate defers provider session creation, startup prewarm consumption, and
@@ -677,7 +690,7 @@ pub(crate) async fn run_turn(
                         sess.notify_model_routing_candidate_change(previous, &turn_context, reason)
                             .await;
                     }
-                    sess.record_model_routing_success(turn_context.as_ref())
+                    sess.record_model_routing_success(step_context.as_ref())
                         .await;
                     initial_routing_change_pending = false;
                 }
@@ -687,16 +700,30 @@ pub(crate) async fn run_turn(
                     refresh_turn_context,
                 } = sampling_request_output;
                 if refresh_turn_context {
-                    let inputs = turn_context.next_step_input.load_full();
-                    let refreshed_turn_context = sess
-                        .refresh_active_turn_context(turn_context.as_ref(), &inputs)
-                        .await;
-                    let refreshed_step_context = sess
-                        .capture_step_context(
-                            Arc::clone(&refreshed_turn_context),
-                            &cancellation_token,
-                        )
-                        .await?;
+                    let (refreshed_turn_context, refreshed_step_context) = loop {
+                        let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
+                        let refreshed = sess
+                            .refresh_active_turn_context(&turn_context, &prepared.inputs)
+                            .await;
+                        let step = sess
+                            .capture_step_context_inner(
+                                Arc::clone(&refreshed),
+                                &cancellation_token,
+                                &step_context.required_mcp_servers,
+                                required_plugins,
+                            )
+                            .await?;
+                        if sess
+                            .try_replace_active_turn_context(&prepared, &refreshed)
+                            .await?
+                        {
+                            sess.set_last_known_step_context(&step).await;
+                            sess.services
+                                .thread_extension_data
+                                .insert(step.settings.model_info.as_ref().clone());
+                            break (refreshed, step);
+                        }
+                    };
                     let display_roots =
                         turn_diff_display_roots(refreshed_step_context.as_ref()).await;
                     turn_diff_tracker
@@ -972,7 +999,7 @@ pub(crate) async fn run_turn(
             Err(failure) => {
                 let routing_failure = classify_model_routing_failure(failure.error.details());
                 if let Some(routing_failure) = routing_failure.as_ref() {
-                    sess.record_model_routing_failure(turn_context.as_ref(), routing_failure)
+                    sess.record_model_routing_failure(step_context.as_ref(), routing_failure)
                         .await;
                 }
                 if failure.reroute_safe
@@ -980,15 +1007,41 @@ pub(crate) async fn run_turn(
                     && let Some(profile_name) = turn_context.model_profile.clone()
                 {
                     let mut last_compaction_error = None;
-                    while let Some(selection) = sess
-                        .select_model_routing_context(
-                            turn_context.as_ref(),
-                            &profile_name,
-                            &attempted_routing_candidates,
-                            &turn_context.next_step_input.load_full(),
-                        )
-                        .await
-                    {
+                    loop {
+                        let prepared = sess.prepare_turn_context_replacement(&turn_context).await?;
+                        // An explicit active model update takes precedence over a fallback for
+                        // a request that was already in flight when the update arrived.
+                        if prepared
+                            .inputs
+                            .settings
+                            .selected()
+                            .collaboration_mode
+                            .model()
+                            != turn_context
+                                .initial_settings
+                                .selected()
+                                .collaboration_mode
+                                .model()
+                            || prepared.inputs.settings.reasoning_effort()
+                                != turn_context.initial_settings.reasoning_effort()
+                            || prepared.inputs.settings.selected().service_tier
+                                != turn_context.initial_settings.selected().service_tier
+                        {
+                            client_session.reset_for_model_reroute();
+                            can_drain_pending_input = true;
+                            continue 'turn;
+                        }
+                        let Some(selection) = sess
+                            .select_model_routing_context(
+                                turn_context.as_ref(),
+                                &profile_name,
+                                &attempted_routing_candidates,
+                                &prepared.inputs,
+                            )
+                            .await
+                        else {
+                            break;
+                        };
                         if !sess
                             .wait_for_model_routing_retry(selection.retry_at, &cancellation_token)
                             .await
@@ -999,33 +1052,33 @@ pub(crate) async fn run_turn(
                         routed.model_routing_previous_candidate = None;
                         routed.model_routing_selection_reason = None;
                         let routed = Arc::new(routed);
-                        if let Some(candidate) = routed.model_routing_candidate.clone() {
-                            attempted_routing_candidates.insert(candidate);
-                        }
-                        sess.services
-                            .thread_extension_data
-                            .insert(routed.model_info().clone());
-                        let routed_step_context = match sess
-                            .capture_step_context_with_required_mcp_servers(
+                        let routed_step_context = sess
+                            .capture_step_context_inner(
                                 Arc::clone(&routed),
                                 &cancellation_token,
                                 &step_context.required_mcp_servers,
                                 required_plugins,
                             )
-                            .await
+                            .await?;
+                        if !sess
+                            .try_replace_active_turn_context(&prepared, &routed)
+                            .await?
                         {
-                            Ok(routed_step_context) => routed_step_context,
-                            Err(err) => {
-                                sess.services
-                                    .thread_extension_data
-                                    .insert(turn_context.model_info().clone());
-                                return Err(err);
-                            }
-                        };
+                            continue;
+                        }
+                        if let Some(candidate) = routed.model_routing_candidate.clone() {
+                            attempted_routing_candidates.insert(candidate);
+                        }
+                        let previous_turn_context = Arc::clone(&turn_context);
+                        turn_context = Arc::clone(&routed);
+                        sess.set_last_known_step_context(&routed_step_context).await;
+                        sess.services
+                            .thread_extension_data
+                            .insert(routed_step_context.settings.model_info.as_ref().clone());
                         client_session.reset_for_model_reroute();
                         let compacted = match maybe_run_model_reroute_inline_compact(
                             &sess,
-                            &turn_context,
+                            &step_context,
                             &routed_step_context,
                             &world_state,
                             &mut client_session,
@@ -1039,9 +1092,6 @@ pub(crate) async fn run_turn(
                                     CodexErrorDetails::Interrupted | CodexErrorDetails::TurnAborted
                                 ) =>
                             {
-                                sess.services
-                                    .thread_extension_data
-                                    .insert(turn_context.model_info().clone());
                                 return Err(err);
                             }
                             Err(err) => {
@@ -1049,20 +1099,14 @@ pub(crate) async fn run_turn(
                                     classify_model_routing_failure(err.details())
                                 {
                                     sess.record_model_routing_failure(
-                                        routed.as_ref(),
+                                        routed_step_context.as_ref(),
                                         &compaction_failure,
                                     )
                                     .await;
-                                    sess.services
-                                        .thread_extension_data
-                                        .insert(turn_context.model_info().clone());
                                     client_session.reset_for_model_reroute();
                                     last_compaction_error = Some(err);
                                     continue;
                                 }
-                                sess.services
-                                    .thread_extension_data
-                                    .insert(turn_context.model_info().clone());
                                 info!("Turn error during model reroute compaction: {err:#}");
                                 let error = err.to_codex_protocol_error();
                                 sess.emit_turn_error_lifecycle(
@@ -1082,7 +1126,7 @@ pub(crate) async fn run_turn(
                             // segment and rebuilds from the compacted local history.
                             client_session.reset_for_model_reroute();
                             sess.notify_model_routing_change(
-                                turn_context.as_ref(),
+                                previous_turn_context.as_ref(),
                                 &routed,
                                 routing_failure.reason,
                             )
@@ -1115,24 +1159,14 @@ pub(crate) async fn run_turn(
                         } else {
                             routed_step_context
                         };
-                        world_state = match sess
+                        world_state = sess
                             .record_context_updates_and_set_reference_context_item(
                                 routed_step_context.as_ref(),
                             )
-                            .await
-                        {
-                            Ok(world_state) => world_state,
-                            Err(err) if !compacted => {
-                                sess.services
-                                    .thread_extension_data
-                                    .insert(turn_context.model_info().clone());
-                                return Err(err);
-                            }
-                            Err(err) => return Err(err),
-                        };
+                            .await?;
                         if !compacted {
                             sess.notify_model_routing_change(
-                                turn_context.as_ref(),
+                                previous_turn_context.as_ref(),
                                 &routed,
                                 routing_failure.reason,
                             )
@@ -1160,9 +1194,6 @@ pub(crate) async fn run_turn(
                         continue 'turn;
                     }
                     if let Some(err) = last_compaction_error {
-                        sess.services
-                            .thread_extension_data
-                            .insert(turn_context.model_info().clone());
                         info!("Turn error during model reroute compaction: {err:#}");
                         let error = err.to_codex_protocol_error();
                         sess.emit_turn_error_lifecycle(turn_context.as_ref(), error.clone())
@@ -1844,14 +1875,18 @@ async fn maybe_run_previous_model_inline_compact(
 /// the task's previous-turn configuration.
 async fn maybe_run_model_reroute_inline_compact(
     sess: &Arc<Session>,
-    previous_turn_context: &Arc<TurnContext>,
+    previous_step_context: &Arc<StepContext>,
     routed_step_context: &Arc<StepContext>,
     world_state: &Arc<WorldState>,
     client_session: &mut ModelClientSession,
 ) -> CodexResult<bool> {
     let routed_turn_context = &routed_step_context.turn;
     let reason = if comp_hash_changed(
-        previous_turn_context.model_info().comp_hash.as_deref(),
+        previous_step_context
+            .settings
+            .model_info
+            .comp_hash
+            .as_deref(),
         routed_turn_context.model_info().comp_hash.as_deref(),
     ) {
         Some(CompactionReason::CompHashChanged)
@@ -1876,10 +1911,12 @@ async fn maybe_run_model_reroute_inline_compact(
                 .model_context_window()
                 .is_some_and(|context_window| active_context_tokens >= context_window),
         };
-        let is_model_downshift = previous_turn_context.model_info().slug
+        let is_model_downshift = previous_step_context.settings.model_info.slug
             != routed_turn_context.model_info().slug
-            && previous_turn_context
-                .model_context_window()
+            && previous_step_context
+                .settings
+                .model_info
+                .usable_context_window()
                 .zip(routed_turn_context.model_context_window())
                 .is_some_and(|(previous, routed)| previous > routed);
         (routed_limit_reached && is_model_downshift).then_some(CompactionReason::ModelDownshift)

@@ -701,8 +701,10 @@ fn token_usage_delta_never_reports_negative_usage() {
     );
 }
 
+#[test_case::test_case(Some("guardian-routing-alias"); "configured routing alias")]
+#[test_case::test_case(None; "concrete model fallback")]
 #[tokio::test]
-async fn run_review_on_reused_session_waits_for_submitted_turn() {
+async fn run_review_on_reused_session_waits_for_submitted_turn(routing_model: Option<&str>) {
     let (review_session, tx_event, rx_sub) = test_review_session().await;
     {
         let mut state = review_session.state.lock().await;
@@ -713,7 +715,10 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
                 transcript_entry_count: 0,
             });
     }
-    let params = test_review_params().await;
+    let mut params = test_review_params().await;
+    let concrete_model = params.review_model.model.clone();
+    params.spawn_config.model = routing_model.map(str::to_string);
+    let expected_submission_model = routing_model.unwrap_or(&concrete_model).to_string();
 
     let review = tokio::spawn(async move {
         run_review_on_session(
@@ -726,9 +731,18 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
     });
     let submission = rx_sub.recv().await.expect("guardian submission");
     let id = submission.id;
-    let Op::TurnInput { reply, .. } = submission.op else {
+    let Op::TurnInput { request, reply, .. } = submission.op else {
         panic!("expected turn-input submission");
     };
+    assert_eq!(
+        request
+            .thread_settings
+            .collaboration_mode
+            .expect("reviewer collaboration mode")
+            .settings
+            .model,
+        expected_submission_model
+    );
     reply
         .send(Ok(TurnInputSubmission::Started {
             turn_id: id.clone(),
@@ -752,6 +766,7 @@ async fn run_review_on_reused_session_waits_for_submitted_turn() {
         panic!("expected submitted turn completion");
     };
     assert_eq!(last_agent_message.as_deref(), Some("fresh"));
+    assert_eq!(analytics_result.guardian_model, Some(concrete_model));
     assert_eq!(analytics_result.time_to_first_token_ms, Some(42));
     assert_eq!(disposition, SessionDisposition::Reusable);
 }

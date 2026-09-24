@@ -654,8 +654,19 @@ impl TurnContext {
         model: String,
         models_manager: &SharedModelsManager,
     ) -> Self {
+        self.with_model_settings(model, models_manager, &self.initial_settings)
+            .await
+    }
+
+    async fn with_model_settings(
+        &self,
+        model: String,
+        models_manager: &SharedModelsManager,
+        settings: &ResolvedStepSettings,
+    ) -> Self {
         let mut config = (*self.config).clone();
         config.model = Some(model.clone());
+        config.personality = settings.personality();
         let model_info = models_manager
             .get_model_info(model.as_str(), &config.to_models_manager_config())
             .await;
@@ -664,7 +675,7 @@ impl TurnContext {
             .iter()
             .map(|preset| preset.effort.clone())
             .collect::<Vec<_>>();
-        let reasoning_effort = if let Some(current_reasoning_effort) = self.reasoning_effort() {
+        let reasoning_effort = if let Some(current_reasoning_effort) = settings.reasoning_effort() {
             if supported_reasoning_levels.contains(current_reasoning_effort) {
                 Some(current_reasoning_effort.clone())
             } else {
@@ -688,17 +699,19 @@ impl TurnContext {
             )
             .await;
         let model_info = Arc::new(model_info);
-        let mut selected = self.initial_settings.selected().clone();
+        let mut selected = settings.selected().clone();
         selected.collaboration_mode = selected.collaboration_mode.with_updates(
             Some(model),
             Some(reasoning_effort),
             /*developer_instructions*/ None,
         );
-        let step_settings = Arc::new(ResolvedStepSettings::new(
+        let mut step_settings = ResolvedStepSettings::new(
             Arc::new(selected),
             model_info,
             config.features.enabled(Feature::FastMode),
-        ));
+        );
+        step_settings.mcp_approvals_reviewer_override = settings.mcp_approvals_reviewer_override;
+        let step_settings = Arc::new(step_settings);
         config.service_tier = step_settings.service_tier.clone();
         let session_telemetry = step_settings.telemetry(&self.session_telemetry);
         let available_models = models_manager
@@ -814,7 +827,7 @@ impl TurnContext {
         validation: RoutingCandidateValidation,
     ) -> Option<Self> {
         let mut routed = self
-            .with_model(candidate.model.clone(), models_manager)
+            .with_model_settings(candidate.model.clone(), models_manager, &inputs.settings)
             .await;
         let mut model_info = Arc::clone(&routed.initial_settings.model_info);
         if let Some(custom_model) = self.config.custom_models.get(model_profile) {
@@ -856,7 +869,10 @@ impl TurnContext {
             {
                 return None;
             }
-            if !has_authoritative_metadata && !model_info.supports_service_tier(service_tier) {
+            if !model_info.supports_service_tier(service_tier)
+                && (validation == RoutingCandidateValidation::TrustConfiguration
+                    || !has_authoritative_metadata)
+            {
                 Arc::make_mut(&mut model_info)
                     .service_tiers
                     .push(ModelServiceTier {
@@ -884,11 +900,10 @@ impl TurnContext {
             /*developer_instructions*/ None,
         );
         selected.service_tier = service_tier;
-        let settings = Arc::new(ResolvedStepSettings::new(
-            Arc::new(selected),
-            model_info,
-            fast_mode_enabled,
-        ));
+        let mut settings =
+            ResolvedStepSettings::new(Arc::new(selected), model_info, fast_mode_enabled);
+        settings.mcp_approvals_reviewer_override = inputs.settings.mcp_approvals_reviewer_override;
+        let settings = Arc::new(settings);
         config.service_tier = settings.service_tier.clone();
         routed.multi_agent_version =
             config.multi_agent_version_for_model(settings.model_info.multi_agent_version);
@@ -1630,6 +1645,12 @@ impl Session {
             .await;
         let mut refreshed = Arc::try_unwrap(refreshed)
             .unwrap_or_else(|_| panic!("new turn context unexpectedly has multiple owners"));
+        Arc::make_mut(&mut refreshed.initial_settings).mcp_approvals_reviewer_override =
+            inputs.settings.mcp_approvals_reviewer_override;
+        refreshed.next_step_input = ArcSwap::from_pointee(StepInputs {
+            settings: Arc::clone(&refreshed.initial_settings),
+            environments: refreshed.initial_environments.clone(),
+        });
 
         crate::skills::preserve_implicit_skill_invocations(
             current.extension_data.as_ref(),
@@ -1646,7 +1667,18 @@ impl Session {
         if let (Some(profile_name), Some(candidate)) = (
             current.model_profile.as_deref(),
             current.model_routing_candidate.as_ref(),
-        ) {
+        ) && inputs.settings.selected().collaboration_mode.model()
+            == current
+                .initial_settings
+                .selected()
+                .collaboration_mode
+                .model()
+            && inputs.settings.reasoning_effort() == current.initial_settings.reasoning_effort()
+            && inputs.settings.selected().service_tier
+                == current.initial_settings.selected().service_tier
+        {
+            // Explicit active model, effort, or tier updates supersede the routed candidate.
+            // Other updates retain the candidate while rebuilding workspace-derived state.
             refreshed = refreshed
                 .with_unchecked_routing_candidate(
                     profile_name,
