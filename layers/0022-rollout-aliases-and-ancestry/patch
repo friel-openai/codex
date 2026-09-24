@@ -1673,7 +1673,7 @@ index e87dea9fbfdfb2a468ef61c436a7b71cd7e19511..10e173c4d55d3a353077812a3e00eae2
      let publication =
          publish_history_repair_replacement(home.path(), path.as_path(), replacement.as_slice())
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 06dd56c449d645cc1b2b871acf5b704012f18cac..c42a896db3cd99ff34a391a2aab28262ba785bf9 100644
+index 4678bf509d773060cf6310e2dcaa3f329f245676..2893e06b6fc3780842ab726295f3396f445fadb7 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -75,6 +75,79 @@ use crate::ThreadPersistenceMode;

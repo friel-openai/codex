@@ -19906,7 +19906,7 @@ index dd10f6af633a8754b3a2b4c3a1eb460f25263d29..96d9a754a6cdfa6f57e4c075f8399efe
  }
 
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918bf9fa5960 100644
+index 82f732f47438617d78955cb8e4af4d3c988959ea..b3dd5e7aa41ac0ec75a9b186f2a80f97f1b6bb79 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -9,7 +9,9 @@ use codex_protocol::config_types::WindowsSandboxLevel;
@@ -21395,9 +21395,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
 +                /*include_archived*/ true,
 +                /*include_history*/ true,
 +            )
-             .await
--            .expect("read immutable paginated segment"),
--        source_bytes
++            .await
 +            .expect("read canonical history with corrupt projection")
 +            .history
 +            .expect("fallback history with corrupt projection")
@@ -21481,7 +21479,9 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
 +    assert!(
 +        store
 +            .has_history_projection(thread_id)
-+            .await
+             .await
+-            .expect("read immutable paginated segment"),
+-        source_bytes
 +            .expect("accept complete projection")
 +    );
 +
@@ -21731,7 +21731,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
          .await
          .expect("read replacement metadata");
      assert!(replacement_meta.meta.segment_id.is_some());
-@@ -2202,6 +3890,259 @@ async fn state_backed_store(codex_home: &Path) -> LocalThreadStore {
+@@ -2202,6 +3890,292 @@ async fn state_backed_store(codex_home: &Path) -> LocalThreadStore {
      LocalThreadStore::new(config, Some(state_db))
  }
 
@@ -21746,6 +21746,13 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
 +        .await
 +        .expect("create compatibility fixture home");
 +    let store = state_backed_store(home.as_path()).await;
++    let state_db = store.state_db().await.expect("state runtime");
++    // This fixture starts with no history to backfill. The consumer must preserve the
++    // selected rollout instead of rebuilding its catalog from immutable segments.
++    state_db
++        .mark_backfill_complete(/*last_watermark*/ None)
++        .await
++        .expect("mark empty compatibility fixture backfilled");
 +    let thread_id = ThreadId::new();
 +    store
 +        .create_thread(create_params(thread_id, ThreadHistoryMode::Paginated))
@@ -21755,6 +21762,23 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
 +        .persist_thread(thread_id, PersistContext::Standard)
 +        .await
 +        .expect("persist compatibility thread");
++    // Raw ThreadStore writes do not publish metadata like LiveThread writes do.
++    // Register the initial rollout so rotation advances the selected path normally.
++    let mut metadata = codex_state::ThreadMetadataBuilder::new(
++        thread_id,
++        store
++            .live_rollout_path(thread_id)
++            .await
++            .expect("read initial compatibility rollout path"),
++        chrono::Utc::now(),
++        SessionSource::Exec,
++    );
++    metadata.history_mode = ThreadHistoryMode::Paginated;
++    metadata.cwd = home.clone();
++    state_db
++        .upsert_thread(&metadata.build(store.config.default_model_provider_id.as_str()))
++        .await
++        .expect("select initial compatibility rollout");
 +
 +    let turns = [
 +        ("frodex-segment-turn-0", "frodex-segment-item-0"),
@@ -21789,6 +21813,15 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
 +        .expect("read compatibility metadata");
 +    assert_eq!(session_meta.meta.id, thread_id);
 +    assert!(session_meta.meta.history_base.is_some());
++    assert_eq!(
++        state_db
++            .get_thread(thread_id)
++            .await
++            .expect("read compatibility thread metadata")
++            .expect("compatibility thread metadata")
++            .rollout_path,
++        rollout_path
++    );
 +    let manifest = serde_json::json!({
 +        "thread_id": thread_id,
 +        "rollout_path": rollout_path,
@@ -21991,7 +22024,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
  async fn stored_parent_and_children_bytes(
      history_mode: ThreadHistoryMode,
      parent_message_count: usize,
-@@ -2326,6 +4267,27 @@ async fn append_message(store: &LocalThreadStore, thread_id: ThreadId, message:
+@@ -2326,6 +4300,27 @@ async fn append_message(store: &LocalThreadStore, thread_id: ThreadId, message:
          .expect("append message");
  }
 
@@ -22019,7 +22052,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
  fn user_message_item(message: &str) -> RolloutItem {
      RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
          message: message.to_string(),
-@@ -2346,44 +4308,53 @@ async fn append_turn(
+@@ -2346,44 +4341,53 @@ async fn append_turn(
      store
          .append_items(AppendThreadItemsParams {
              thread_id,
@@ -22106,7 +22139,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
  fn has_message(items: &[RolloutItem], message: &str) -> bool {
      items.iter().any(|item| {
          matches!(
-@@ -2393,13 +4364,34 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
+@@ -2393,13 +4397,34 @@ fn has_message(items: &[RolloutItem], message: &str) -> bool {
      })
  }
 
@@ -22146,7 +22179,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
              )
          })
          .count()
-@@ -2417,14 +4409,55 @@ fn compaction_count(items: &[RolloutItem], message: &str) -> usize {
+@@ -2417,14 +4442,55 @@ fn compaction_count(items: &[RolloutItem], message: &str) -> usize {
          .count()
  }
 
@@ -22203,7 +22236,7 @@ index 82f732f47438617d78955cb8e4af4d3c988959ea..096769e5afb2a5f1ac440bb90f43918b
              retained_context: None,
              guardian_history: None,
              mcp_resource_origins: None,
-@@ -2496,6 +4529,18 @@ async fn append_malformed_historical_records(path: &Path) {
+@@ -2496,6 +4562,18 @@ async fn append_malformed_historical_records(path: &Path) {
      file.flush().await.expect("flush historical records");
  }
 

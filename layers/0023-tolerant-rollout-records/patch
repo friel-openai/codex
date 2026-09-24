@@ -2951,7 +2951,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
  ///
  /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index c42a896db3cd99ff34a391a2aab28262ba785bf9..9d937fa761d760dfa1e25696ed7193bb37246b63 100644
+index 2893e06b6fc3780842ab726295f3396f445fadb7..55af13f0db5672b1c07eb9927638a406eaaf5c98 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -3827,6 +3827,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()

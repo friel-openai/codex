@@ -26933,7 +26933,7 @@ index f9e79c82a15ebc9a961a59dbcc8f510807d93831..e47fb9fa7ade1aea855cb9e61dea8524
          return Err(ThreadStoreError::Conflict {
              message: "immutable history repair segment contains no session metadata".to_string(),
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index 096769e5afb2a5f1ac440bb90f43918bf9fa5960..06dd56c449d645cc1b2b871acf5b704012f18cac 100644
+index b3dd5e7aa41ac0ec75a9b186f2a80f97f1b6bb79..4678bf509d773060cf6310e2dcaa3f329f245676 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -1284,11 +1284,40 @@ async fn missing_projection_rebuilds_compressed_segmented_paginated_lineage() {
