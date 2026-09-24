@@ -7,6 +7,7 @@
 
 use std::borrow::Cow;
 use std::ops::Range;
+use std::sync::Arc;
 
 #[path = "text_logical.rs"]
 mod logical;
@@ -308,19 +309,62 @@ impl TextLayout {
         let width = width.max(/*other*/ 1);
         let mut text = String::new();
         let mut rows = Vec::new();
-        for (index, line) in logical.iter().enumerate() {
-            if index > 0 {
-                text.push('\n');
+        let mut first_line = true;
+        for group in logical.chunk_by(|left, right| {
+            match (&left.origin.user_message, &right.origin.user_message) {
+                (Some(left), Some(right)) => Arc::ptr_eq(left, right),
+                _ => false,
             }
-            let start = text.len();
-            text.extend(
-                line.line
-                    .line
-                    .spans
-                    .iter()
-                    .map(|span| span.content.as_ref()),
-            );
-            rows.extend(layout_line(line, start, width));
+        }) {
+            let row_start = rows.len();
+            let user_message = group[0].origin.user_message.as_ref();
+            for line in group {
+                if !first_line {
+                    text.push('\n');
+                }
+                first_line = false;
+                let start = text.len();
+                text.extend(
+                    line.line
+                        .line
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref()),
+                );
+                let wrap_width = if user_message.is_some() {
+                    crate::history_cell::user_message_block_width(width)
+                        .saturating_add(line.right_reserve)
+                } else {
+                    width
+                };
+                rows.extend(layout_line(line, start, wrap_width));
+            }
+            if let Some(user_message) = user_message {
+                let bubble_rows = &mut rows[row_start..];
+                let available_width = width
+                    .saturating_sub(group[0].right_reserve)
+                    .max(/*other*/ 1);
+                let painted = crate::history_cell::finish_user_message_lines(
+                    bubble_rows
+                        .iter_mut()
+                        .map(|row| std::mem::take(&mut row.line))
+                        .collect(),
+                    width,
+                    available_width,
+                    user_message.style,
+                );
+                for (row, line) in bubble_rows.iter_mut().zip(painted) {
+                    let alignment_prefix = line
+                        .source
+                        .as_ref()
+                        .and_then(|source| source.user_message.as_ref())
+                        .map_or(/*default*/ 0, |layout| layout.alignment_prefix_bytes);
+                    row.first_column += alignment_prefix;
+                    row.prefix_columns += alignment_prefix;
+                    row.content_width = available_width;
+                    row.line = line;
+                }
+            }
         }
         Self {
             logical,

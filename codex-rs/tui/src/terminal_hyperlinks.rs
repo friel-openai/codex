@@ -9,6 +9,7 @@ mod source;
 pub(crate) use paragraph::HyperlinkParagraph;
 pub(crate) use source::LineWrapPolicy;
 pub(crate) use source::LogicalLineSource;
+pub(crate) use source::UserMessageLayout;
 
 use std::num::NonZeroU16;
 use std::ops::Range;
