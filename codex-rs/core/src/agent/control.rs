@@ -5,20 +5,16 @@ use crate::agent::AgentStatus;
 use crate::agent::registry::AgentRegistry;
 use crate::agent::role::DEFAULT_ROLE_NAME;
 use crate::agent::role::resolve_role_config;
-use crate::agent::status::is_final;
 use crate::agent::types::AgentMetadata;
 use crate::agent::types::LiveAgent;
 use crate::agent_communication::AgentCommunicationContext;
-use crate::agent_communication::AgentCommunicationKind;
 use crate::codex_thread::ThreadConfigSnapshot;
 use crate::config::Config;
 use crate::config::RolloutBudgetConfig;
-use crate::context::SubagentNotification;
 use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::inherited_thread_state::InheritedThreadState;
 use crate::rollout_budget::RolloutBudget;
 use crate::session::emit_subagent_session_started;
-use crate::session_prefix::format_inter_agent_completion_message;
 use crate::session_prefix::format_subagent_context_line;
 use crate::state::McpToolSnapshot;
 use crate::thread_manager::ResumeThreadWithHistoryOptions;
@@ -41,6 +37,7 @@ use codex_protocol::error::Result as CodexResult;
 use codex_protocol::items::SubAgentActivityItem;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::MessagePhase;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::Event;
@@ -55,6 +52,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadSource;
+use codex_protocol::turn_input::TurnInputMode;
 use codex_protocol::user_input::UserInput;
 use codex_thread_store::LoadThreadHistoryParams;
 use codex_thread_store::ReadThreadParams;
@@ -69,10 +67,12 @@ use tracing::warn;
 use uuid::Uuid;
 
 use self::execution::AgentExecutionLimiter;
-use self::residency::V2Residency;
+use self::residency::AgentResidency;
 
+const ROOT_LAST_TASK_MESSAGE: &str = "Main thread";
 const CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID_ENV: &str =
     "CODEX_EXPERIMENTAL_FORK_PREVIOUS_RESPONSE_ID";
+const SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID: &str = "synthetic_supervisor_list_agents";
 
 mod budget;
 mod completion;
@@ -81,7 +81,10 @@ mod execution;
 mod inspection;
 mod interrupt;
 mod legacy;
+mod ownership;
+mod ownership_tree;
 mod residency;
+mod resume;
 mod sender_context;
 mod service_tier;
 mod spawn;
@@ -90,6 +93,26 @@ mod user_authorization;
 
 const MAX_ENVIRONMENT_SUBAGENTS: usize = 8;
 const MAX_ENVIRONMENT_SUBAGENT_BYTES: usize = 1_024;
+
+/// Result of a supervisor request to compact its authenticated direct parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SupervisorParentCompactionResult {
+    NotSupervisorHelper,
+    ParentBusy {
+        parent_thread_id: ThreadId,
+    },
+    Submitted {
+        parent_thread_id: ThreadId,
+        submission_id: String,
+    },
+}
+
+/// Whether delivery first interrupts the current turn or queues input for it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentInputDelivery {
+    Queue,
+    Interrupt,
+}
 
 /// Control-plane handle for multi-agent operations.
 /// `LocalAgentControl` is held by each session (via `SessionServices`). It provides capability to
@@ -108,7 +131,7 @@ pub(crate) struct LocalAgentControl {
     /// Captured at construction so delegates retain their manager's allocation policy.
     thread_id_generator: ThreadIdGenerator,
     state: Arc<AgentRegistry>,
-    v2_residency: Arc<V2Residency>,
+    agent_residency: Arc<AgentResidency>,
     agent_execution_limiter: Arc<AgentExecutionLimiter>,
     /// Session-scoped state shared by the root thread and every cloned sub-agent control handle.
     rollout_budget: Arc<RolloutBudget>,
@@ -140,7 +163,7 @@ impl LocalAgentControl {
             manager,
             thread_id_generator,
             state: Arc::default(),
-            v2_residency: Arc::default(),
+            agent_residency: Arc::default(),
             agent_execution_limiter: Arc::default(),
             rollout_budget: Arc::default(),
             root_service_tier: Arc::new(ArcSwapOption::from(None)),
@@ -214,6 +237,44 @@ impl LocalAgentControl {
         };
         self.handle_thread_request_result(agent_id, &state, result)
             .await
+    }
+
+    async fn send_input_after_capacity_check(
+        &self,
+        agent_id: ThreadId,
+        state: &Arc<ThreadManagerState>,
+        input: Vec<UserInput>,
+        start_options: TurnStartOptions,
+    ) -> CodexResult<String> {
+        let last_task_message = non_empty_task_message(render_input_preview(&input));
+        let thread = state.get_thread(agent_id).await?;
+        let result = match thread
+            .io
+            .submit_turn_input(
+                TurnInputRequest::user_input(input).on_start(start_options),
+                TurnInputMode::StartOrSteer,
+            )
+            .await
+        {
+            Ok(TurnInputSubmission::Started { turn_id }) => Ok(turn_id),
+            Ok(TurnInputSubmission::Steered { .. }) => Ok(Uuid::now_v7().to_string()),
+            Ok(TurnInputSubmission::NotSubmitted { reason }) => Err(CodexErr::InvalidRequest(
+                format!("turn input was not submitted: {reason:?}"),
+            )),
+            Err(err) => Err(err),
+        };
+        let result = self
+            .handle_thread_request_result(agent_id, state, result)
+            .await;
+        if result.is_ok() {
+            match last_task_message {
+                Some(last_task_message) => self
+                    .state
+                    .update_last_task_message(agent_id, last_task_message),
+                None => self.state.clear_last_task_message(agent_id),
+            }
+        }
+        result
     }
 
     pub(crate) async fn send_inter_agent_communication(
@@ -314,6 +375,7 @@ impl LocalAgentControl {
         context: AgentCommunicationContext,
         start_options: TurnStartOptions,
     ) -> CodexResult<String> {
+        let last_task_message = last_task_message_from_communication(&communication);
         let communication_for_log =
             crate::agent_communication::logging_enabled().then(|| communication.clone());
         let (parent_turn_id, root_turn_id) = if communication.trigger_turn {
@@ -351,6 +413,14 @@ impl LocalAgentControl {
                 agent_id,
             );
         }
+        if result.is_ok() {
+            match last_task_message {
+                Some(last_task_message) => self
+                    .state
+                    .update_last_task_message(agent_id, last_task_message),
+                None => self.state.clear_last_task_message(agent_id),
+            }
+        }
         result
     }
 
@@ -383,7 +453,7 @@ impl LocalAgentControl {
             .is_err_and(|err| matches!(err.details(), CodexErrorDetails::InternalAgentDied))
         {
             let _ = state.remove_thread(&agent_id).await;
-            self.forget_v2_residency(agent_id);
+            self.forget_agent_residency(agent_id);
             self.state.release_spawned_thread(agent_id);
         }
         result
@@ -562,6 +632,7 @@ impl LocalAgentControl {
                 metadata: AgentMetadata {
                     agent_id: Some(root_thread_id),
                     agent_path: Some(root_path),
+                    last_task_message: Some(ROOT_LAST_TASK_MESSAGE.to_string()),
                     ..Default::default()
                 },
                 status: root_thread.agent_status().await,
@@ -579,113 +650,30 @@ impl LocalAgentControl {
                 continue;
             }
 
-            let Ok(thread) = state.get_thread(thread_id).await else {
-                continue;
+            let agent_status = match state.get_thread(thread_id).await {
+                Ok(thread) => thread.agent_status().await,
+                Err(err)
+                    if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_))
+                        && self
+                            .state
+                            .agent_lifecycle(thread_id)
+                            .is_some_and(|lifecycle| lifecycle.is_visible_when_cold()) =>
+                {
+                    AgentStatus::Completed(None)
+                }
+                Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                    continue;
+                }
+                Err(err) => return Err(err),
             };
             agents.push(LiveAgent {
                 thread_id,
                 metadata,
-                status: thread.agent_status().await,
+                status: agent_status,
             });
         }
 
         Ok(agents)
-    }
-
-    /// Starts a detached watcher for sub-agents spawned from another thread.
-    ///
-    /// This is only enabled for `SubAgentSource::ThreadSpawn`, where a parent thread exists and
-    /// can receive completion notifications.
-    fn maybe_start_completion_watcher(
-        &self,
-        child_thread_id: ThreadId,
-        session_source: Option<SessionSource>,
-        child_reference: String,
-        child_agent_path: Option<AgentPath>,
-    ) {
-        let Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id, ..
-        })) = session_source
-        else {
-            return;
-        };
-        let control = self.clone();
-        tokio::spawn(async move {
-            let status = match control.subscribe_status(child_thread_id).await {
-                Ok(mut status_rx) => {
-                    let mut status = status_rx.borrow().clone();
-                    while !is_final(&status) {
-                        if status_rx.changed().await.is_err() {
-                            status = control.get_status(child_thread_id).await;
-                            break;
-                        }
-                        status = status_rx.borrow().clone();
-                    }
-                    status
-                }
-                Err(_) => control.get_status(child_thread_id).await,
-            };
-            if !is_final(&status) {
-                return;
-            }
-
-            let Ok(state) = control.upgrade() else {
-                return;
-            };
-            let child_thread = state.get_thread(child_thread_id).await.ok();
-            let child_uses_multi_agent_v2 = match child_thread.as_ref() {
-                Some(child_thread) => {
-                    child_thread.multi_agent_version() == Some(MultiAgentVersion::V2)
-                }
-                None => true,
-            };
-            if child_agent_path.is_some() && child_uses_multi_agent_v2 {
-                let Some(child_agent_path) = child_agent_path.clone() else {
-                    return;
-                };
-                let Some(parent_agent_path) = child_agent_path
-                    .as_str()
-                    .rsplit_once('/')
-                    .and_then(|(parent, _)| AgentPath::try_from(parent).ok())
-                else {
-                    return;
-                };
-                let Some(message) = format_inter_agent_completion_message(
-                    parent_agent_path.clone(),
-                    child_agent_path.clone(),
-                    &status,
-                ) else {
-                    return;
-                };
-                let communication = InterAgentCommunication::new(
-                    child_agent_path,
-                    parent_agent_path,
-                    Vec::new(),
-                    message,
-                    /*trigger_turn*/ false,
-                );
-                let context =
-                    AgentCommunicationContext::new(AgentCommunicationKind::Result, child_thread_id);
-                let _ = control
-                    .send_inter_agent_communication(
-                        parent_thread_id,
-                        communication,
-                        context,
-                        TurnStartOptions::default(),
-                    )
-                    .await;
-                return;
-            }
-            let Ok(parent_thread) = state.get_thread(parent_thread_id).await else {
-                return;
-            };
-            parent_thread
-                .inject_fragment_without_turn(SubagentNotification::new(
-                    child_reference.as_str(),
-                    status,
-                ))
-                .await;
-        });
     }
 
     fn prepare_agent_metadata(
@@ -710,9 +698,10 @@ impl LocalAgentControl {
             agent_path,
             agent_nickname,
             agent_role,
+            last_task_message: None,
+            ..Default::default()
         })
     }
-
     #[allow(clippy::too_many_arguments)]
     fn prepare_thread_spawn(
         &self,
@@ -748,6 +737,10 @@ impl LocalAgentControl {
         self.manager
             .upgrade()
             .ok_or_else(|| CodexErr::UnsupportedOperation("thread manager dropped".to_string()))
+    }
+
+    pub(crate) fn upgrade_for_tools(&self) -> CodexResult<Arc<ThreadManagerState>> {
+        self.upgrade()
     }
 
     async fn inherited_environments_for_source(
@@ -898,6 +891,24 @@ impl LocalAgentControl {
     }
 }
 
+fn subagent_assignment_item(session_source: &SessionSource, message: String) -> ResponseItem {
+    let agent_path = session_source
+        .get_agent_path()
+        .map(String::from)
+        .unwrap_or_else(|| "this subagent".to_string());
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText {
+            text: format!(
+                "# Subagent Assignment\n\nYou are `{agent_path}`. Your direct assignment from your parent agent is:\n\n{message}"
+            ),
+        }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
+}
+
 fn agent_matches_prefix(agent_path: Option<&AgentPath>, prefix: &AgentPath) -> bool {
     if prefix.is_root() {
         return true;
@@ -933,6 +944,76 @@ pub(crate) fn render_input_preview(input: &[UserInput]) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn last_task_message_from_communication(communication: &InterAgentCommunication) -> Option<String> {
+    if communication.encrypted_content.is_some() {
+        return None;
+    }
+    non_empty_task_message(communication.content.clone())
+}
+
+fn non_empty_task_message(message: String) -> Option<String> {
+    (!message.is_empty()).then_some(message)
+}
+
+fn synthetic_supervisor_list_agents_items(
+    owner_thread_id: ThreadId,
+    agents: Vec<LiveAgent>,
+) -> Vec<RolloutItem> {
+    let agents: Vec<_> = agents
+        .into_iter()
+        .map(|agent| {
+            serde_json::json!({
+                "agent_name": agent.metadata.agent_path.map(|path| path.to_string())
+                    .unwrap_or_else(|| agent.thread_id.to_string()),
+                "agent_status": agent.status,
+                "last_task_message": agent.metadata.last_task_message,
+            })
+        })
+        .collect();
+    let envelope = serde_json::json!({
+        "source": "pre_injected_agents_list",
+        "generated_at": chrono::Utc::now().timestamp(),
+        "owner_thread_id": owner_thread_id.to_string(),
+        "agents": agents,
+    });
+    let mut output = FunctionCallOutputPayload::from_text(envelope.to_string());
+    output.success = Some(true);
+
+    vec![
+        RolloutItem::ResponseItem(
+            ResponseItem::FunctionCall {
+                id: None,
+                name: "list_agents".to_string(),
+                namespace: None,
+                arguments: "{}".to_string(),
+                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                encrypted_function_args: None,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+        RolloutItem::ResponseItem(
+            ResponseItem::FunctionCallOutput {
+                id: None,
+                call_id: SUPERVISOR_BOOT_LIST_AGENTS_CALL_ID.to_string(),
+                output,
+                internal_chat_message_metadata_passthrough: None,
+            }
+            .into(),
+        ),
+    ]
+}
+
+fn role_prompt_item(prompt: String) -> ResponseItem {
+    ResponseItem::Message {
+        id: None,
+        role: "developer".to_string(),
+        content: vec![ContentItem::InputText { text: prompt }],
+        phase: None,
+        internal_chat_message_metadata_passthrough: None,
+    }
 }
 
 fn thread_spawn_depth(session_source: &SessionSource) -> Option<i32> {

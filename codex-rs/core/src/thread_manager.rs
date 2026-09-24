@@ -1027,45 +1027,9 @@ impl ThreadManager {
         patch: ThreadMetadataPatch,
         include_archived: bool,
     ) -> CodexResult<StoredThread> {
-        if let Ok(thread) = self.get_thread(thread_id).await {
-            if thread.config_snapshot().await.ephemeral {
-                return Err(CodexErr::InvalidRequest(format!(
-                    "ephemeral thread does not support metadata updates: {thread_id}"
-                )));
-            }
-            return thread
-                .update_thread_metadata(patch, include_archived)
-                .await
-                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
-        }
-        let updated = self
-            .state
-            .thread_store
-            .update_thread_metadata(UpdateThreadMetadataParams {
-                thread_id,
-                patch,
-                include_archived,
-            })
+        self.state
+            .update_thread_metadata(thread_id, patch, include_archived)
             .await
-            .map_err(|err| match err {
-                ThreadStoreError::ThreadNotFound { thread_id } => {
-                    CodexErr::ThreadNotFound(thread_id)
-                }
-                err => thread_store_metadata_update_error(thread_id, err),
-            })?;
-        match updated {
-            Some(thread) => Ok(thread),
-            None => self
-                .state
-                .thread_store
-                .read_thread(ReadThreadParams {
-                    thread_id,
-                    include_archived,
-                    include_history: false,
-                })
-                .await
-                .map_err(|err| thread_store_metadata_update_error(thread_id, err)),
-        }
     }
 
     /// Moves a thread to, within, or out of a server-ordered section.
@@ -1943,8 +1907,73 @@ impl ThreadManagerState {
             .for_root(root_thread_id, provider)
     }
 
+    /// Updates metadata without requiring a public `ThreadManager` handle.
+    ///
+    /// Agent ownership transitions hold only the shared manager state while they move loaded and
+    /// cold descendants between `LocalAgentControl` instances. Loaded threads must remain ordered with
+    /// rollout writes, while cold threads must update the backing store directly.
+    pub(crate) async fn update_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+        patch: ThreadMetadataPatch,
+        include_archived: bool,
+    ) -> CodexResult<StoredThread> {
+        if let Ok(thread) = self.get_thread(thread_id).await {
+            if thread.config_snapshot().await.ephemeral {
+                return Err(CodexErr::InvalidRequest(format!(
+                    "ephemeral thread does not support metadata updates: {thread_id}"
+                )));
+            }
+            return thread
+                .update_thread_metadata(patch, include_archived)
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err));
+        }
+        let updated = self
+            .thread_store
+            .update_thread_metadata(UpdateThreadMetadataParams {
+                thread_id,
+                patch,
+                include_archived,
+            })
+            .await
+            .map_err(|err| match err {
+                ThreadStoreError::ThreadNotFound { thread_id } => {
+                    CodexErr::ThreadNotFound(thread_id)
+                }
+                err => thread_store_metadata_update_error(thread_id, err),
+            })?;
+        match updated {
+            Some(thread) => Ok(thread),
+            None => self
+                .thread_store
+                .read_thread(ReadThreadParams {
+                    thread_id,
+                    include_archived,
+                    include_history: false,
+                })
+                .await
+                .map_err(|err| thread_store_metadata_update_error(thread_id, err)),
+        }
+    }
+
     pub(crate) fn agent_graph_store(&self) -> Option<Arc<dyn AgentGraphStore>> {
         self.agent_graph_store.clone()
+    }
+
+    pub(crate) async fn indexed_thread_metadata(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<codex_state::ThreadMetadata> {
+        self.thread_store
+            .as_any()
+            .downcast_ref::<LocalThreadStore>()?
+            .state_db()
+            .await?
+            .get_thread(thread_id)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
@@ -2458,7 +2487,12 @@ impl ThreadManagerState {
         forked_from_thread_id: Option<ThreadId>,
         config: &Config,
     ) -> MultiAgentVersion {
-        if let Some(multi_agent_version) = config.multi_agent_version_override() {
+        if let Some(multi_agent_version) =
+            crate::session::configured_or_persisted_multi_agent_version(
+                initial_history,
+                config.multi_agent_version_override(),
+            )
+        {
             return multi_agent_version;
         }
         self.initial_multi_agent_version_for_spawn(
@@ -2615,6 +2649,7 @@ impl ThreadManagerState {
             /*thread_source*/ None,
             /*metrics_service_name*/ None,
             /*inherited_environments*/ None,
+            /*inherited_instructions*/ None,
             /*inherited_exec_policy*/ None,
             Default::default(),
             /*environments*/ None,
@@ -2634,6 +2669,7 @@ impl ThreadManagerState {
         thread_source: Option<ThreadSource>,
         metrics_service_name: Option<String>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_instructions: Option<SessionInstructions>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         inherited_thread_state: InheritedThreadState,
         environments: Option<Vec<TurnEnvironmentSelection>>,
@@ -2653,6 +2689,7 @@ impl ThreadManagerState {
         request.parent_thread_id = parent_thread_id;
         request.forked_from_thread_id = forked_from_thread_id;
         request.inherited_environments = inherited_environments;
+        request.inherited_instructions = inherited_instructions;
         request.inherited_exec_policy = inherited_exec_policy;
         request.inherited_thread_state = inherited_thread_state;
         Box::pin(self.spawn_thread(request)).await
@@ -2715,6 +2752,7 @@ impl ThreadManagerState {
         parent_thread_id: Option<ThreadId>,
         forked_from_thread_id: Option<ThreadId>,
         inherited_environments: Option<TurnEnvironmentSnapshot>,
+        inherited_instructions: Option<SessionInstructions>,
         inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
         environments: Option<Vec<TurnEnvironmentSelection>>,
         inherited_thread_state: InheritedThreadState,
@@ -2737,6 +2775,7 @@ impl ThreadManagerState {
         request.parent_thread_id = parent_thread_id;
         request.forked_from_thread_id = forked_from_thread_id;
         request.inherited_environments = inherited_environments;
+        request.inherited_instructions = inherited_instructions;
         request.inherited_exec_policy = inherited_exec_policy;
         request.inherited_thread_state = inherited_thread_state;
         request.fork_startup_items = fork_startup_items;

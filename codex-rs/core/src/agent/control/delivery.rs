@@ -2,11 +2,13 @@
 //!
 //! Target checks precede reload, and queue-only messages retain their non-waking semantics.
 
+use super::AgentInputDelivery;
 use super::LocalAgentControl;
 use crate::agent::api::AgentInput;
 use crate::agent::api::DeliveryReceipt;
 use crate::agent::api::SendRequest;
 use crate::agent::types::AgentMessage;
+use crate::agent::types::AgentMetadata;
 use crate::agent::types::MessageDeliveryMode;
 use crate::agent_communication::AgentCommunicationContext;
 use crate::agent_communication::AgentCommunicationKind;
@@ -55,6 +57,41 @@ impl AgentMessage {
 impl LocalAgentControl {
     /// Resolves and delivers captured input, restoring an evicted runtime when necessary.
     pub(crate) async fn send(&self, request: SendRequest) -> CodexResult<DeliveryReceipt> {
+        self.send_inner(request, /*supervisor_parent*/ false).await
+    }
+
+    /// Only a live goal helper can wake its direct parent, including a root parent.
+    pub(crate) async fn send_goal_supervisor_parent(
+        &self,
+        request: SendRequest,
+    ) -> CodexResult<DeliveryReceipt> {
+        let state = self.upgrade()?;
+        let helper = state.get_thread(request.caller).await?;
+        let target = self.resolve_target(request.caller, &request.target)?;
+        if !helper.is_running()
+            || !std::sync::Arc::ptr_eq(&self.state, &helper.session.services.agent_control.state)
+            || !crate::goal_supervisor::is_goal_supervisor_helper_source(&helper.session_source)
+            || helper.session_source.parent_thread_id() != Some(target)
+            || !matches!(
+                &request.input,
+                AgentInput::Message {
+                    mode: MessageDeliveryMode::TriggerTurn,
+                    ..
+                }
+            )
+        {
+            return Err(CodexErr::UnsupportedOperation(
+                "Only a goal supervisor helper can follow up with its direct parent".to_string(),
+            ));
+        }
+        self.send_inner(request, /*supervisor_parent*/ true).await
+    }
+
+    async fn send_inner(
+        &self,
+        request: SendRequest,
+        supervisor_parent: bool,
+    ) -> CodexResult<DeliveryReceipt> {
         let SendRequest {
             caller,
             target,
@@ -66,21 +103,47 @@ impl LocalAgentControl {
         let (metadata, submission_id) = match input {
             AgentInput::UserInput(input) => {
                 let receiver = self.get_agent_metadata(target);
-                if receiver.is_some() {
-                    self.ensure_v2_agent_loaded(resume_config, target, /*parent*/ None)
-                        .await?;
-                }
-                let submission_id = self.send_input(target, input, start_options).await?;
+                let submission_id = if receiver.is_some() {
+                    self.deliver_input_to_agent(
+                        resume_config,
+                        target,
+                        input,
+                        AgentInputDelivery::Queue,
+                        start_options,
+                    )
+                    .await?
+                } else {
+                    self.send_input(target, input, start_options).await?
+                };
                 (receiver.unwrap_or_default(), submission_id)
             }
             AgentInput::Message { message, mode } => {
-                let receiver = self.ensure_agent_known(target)?;
+                let registered_receiver = self.get_agent_metadata(target);
+                let receiver_is_registered = registered_receiver.is_some();
+                let mut receiver = match registered_receiver {
+                    Some(receiver) => receiver,
+                    None if supervisor_parent => AgentMetadata {
+                        agent_id: Some(target),
+                        ..Default::default()
+                    },
+                    None => return Err(CodexErr::ThreadNotFound(target)),
+                };
+                if supervisor_parent && receiver.agent_path.is_none() {
+                    let parent = self.upgrade()?.get_thread(target).await?;
+                    receiver.agent_path = Some(
+                        parent
+                            .session_source
+                            .get_agent_path()
+                            .unwrap_or_else(AgentPath::root),
+                    );
+                }
                 let author = self
                     .ensure_agent_known(caller)?
                     .agent_path
                     .unwrap_or_else(AgentPath::root);
                 if mode == MessageDeliveryMode::TriggerTurn
                     && receiver.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                    && !supervisor_parent
                 {
                     return Err(CodexErr::UnsupportedOperation(
                         "Follow-up tasks can't target the root agent".to_string(),
@@ -91,9 +154,8 @@ impl LocalAgentControl {
                         "target agent is missing an agent_path".to_string(),
                     )
                 })?;
-                self.ensure_v2_agent_loaded(resume_config, target, /*parent*/ None)
-                    .await?;
                 let communication = message.into_communication(author, receiver_path, mode);
+                let delivered_parent_message = supervisor_parent.then(|| communication.clone());
                 let kind = match mode {
                     MessageDeliveryMode::QueueOnly => {
                         start_options.parent_turn_id = None;
@@ -101,14 +163,31 @@ impl LocalAgentControl {
                     }
                     MessageDeliveryMode::TriggerTurn => AgentCommunicationKind::Followup,
                 };
-                let submission_id = self
-                    .send_inter_agent_communication(
+                let context = AgentCommunicationContext::new(kind, caller);
+                let submission_id = if receiver_is_registered {
+                    self.deliver_inter_agent_communication_to_agent(
+                        resume_config,
                         target,
                         communication,
-                        AgentCommunicationContext::new(kind, caller),
+                        context,
+                        AgentInputDelivery::Queue,
                         start_options,
                     )
-                    .await?;
+                    .await?
+                } else {
+                    // A scheduler-loaded root need not be registered as a child.
+                    self.send_inter_agent_communication(
+                        target,
+                        communication,
+                        context,
+                        start_options,
+                    )
+                    .await?
+                };
+                if let Some(communication) = delivered_parent_message {
+                    self.record_goal_supervisor_followup_action(target, &communication)
+                        .await;
+                }
                 (receiver, submission_id)
             }
         };
