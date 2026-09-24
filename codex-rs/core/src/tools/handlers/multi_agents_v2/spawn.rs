@@ -164,18 +164,23 @@ async fn handle_agent_start(
     } = invocation;
     let turn = &step_context.turn;
     let arguments = function_arguments(payload)?;
-    let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    let (args, fork_mode) = match operation {
+        AgentStartOperation::Spawn => {
+            let args = parse_arguments::<SpawnAgentArgs>(&arguments)?;
+            let fork_mode = args.fork_mode()?;
+            (AgentStartArgs::from(args), fork_mode)
+        }
+        AgentStartOperation::Adopt => (
+            AgentStartArgs::from(parse_arguments::<AdoptAgentArgs>(&arguments)?),
+            None,
+        ),
+    };
     if matches!(operation, AgentStartOperation::Adopt)
         && !turn.config.multi_agent_v2.enable_thread_adoption
     {
         return Err(FunctionCallError::RespondToModel(
             "Thread adoption is disabled. Set `[features.multi_agent_v2] enable_thread_adoption = true` in config.toml to enable it."
                 .to_string(),
-        ));
-    }
-    if matches!(operation, AgentStartOperation::Spawn) && args.existing_thread_id.is_some() {
-        return Err(FunctionCallError::RespondToModel(
-            "existing_thread_id is only accepted by frodex.adopt_agent".to_string(),
         ));
     }
     let is_adoption = matches!(operation, AgentStartOperation::Adopt);
@@ -187,12 +192,6 @@ async fn handle_agent_start(
         })?)
     } else {
         None
-    };
-    let fork_mode = if is_adoption {
-        args.validate_adoption_options()?;
-        None
-    } else {
-        args.fork_mode()?
     };
     let message = message_content(args.message)?;
     let role_name = args
@@ -241,7 +240,7 @@ async fn handle_agent_start(
         .session_source
         .get_agent_path()
         .unwrap_or_else(AgentPath::root);
-    let communication = agent_message_from_tool(message, &source).into_communication(
+    let communication = agent_message_from_tool(message, &source)?.into_communication(
         author,
         new_agent_path.clone(),
         MessageDeliveryMode::TriggerTurn,
@@ -378,7 +377,6 @@ impl CoreToolRuntime for AdoptHandler {
 struct SpawnAgentArgs {
     message: String,
     task_name: String,
-    existing_thread_id: Option<ThreadId>,
     agent_type: Option<String>,
     model: Option<String>,
     reasoning_effort: Option<ReasoningEffort>,
@@ -387,22 +385,6 @@ struct SpawnAgentArgs {
 }
 
 impl SpawnAgentArgs {
-    fn validate_adoption_options(&self) -> Result<(), FunctionCallError> {
-        if self.fork_turns.is_some()
-            || self.fork_context.is_some()
-            || self.agent_type.is_some()
-            || self.model.is_some()
-            || self.reasoning_effort.is_some()
-            || self.service_tier.is_some()
-        {
-            return Err(FunctionCallError::RespondToModel(
-                "existing_thread_id cannot be combined with fork, agent type, model, reasoning effort, or service tier overrides".to_string(),
-            ));
-        }
-
-        Ok(())
-    }
-
     fn fork_mode(&self) -> Result<Option<SpawnAgentForkMode>, FunctionCallError> {
         if self.fork_context.is_some() {
             return Err(FunctionCallError::RespondToModel(
@@ -439,6 +421,50 @@ impl SpawnAgentArgs {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AdoptAgentArgs {
+    message: String,
+    task_name: String,
+    existing_thread_id: ThreadId,
+}
+
+/// Normalized arguments shared by spawn and ownership-transfer execution.
+struct AgentStartArgs {
+    message: String,
+    task_name: String,
+    existing_thread_id: Option<ThreadId>,
+    agent_type: Option<String>,
+    model: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+impl From<SpawnAgentArgs> for AgentStartArgs {
+    fn from(args: SpawnAgentArgs) -> Self {
+        Self {
+            message: args.message,
+            task_name: args.task_name,
+            existing_thread_id: None,
+            agent_type: args.agent_type,
+            model: args.model,
+            reasoning_effort: args.reasoning_effort,
+        }
+    }
+}
+
+impl From<AdoptAgentArgs> for AgentStartArgs {
+    fn from(args: AdoptAgentArgs) -> Self {
+        Self {
+            message: args.message,
+            task_name: args.task_name,
+            existing_thread_id: Some(args.existing_thread_id),
+            agent_type: None,
+            model: None,
+            reasoning_effort: None,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 pub(crate) enum SpawnAgentResult {
@@ -466,5 +492,42 @@ impl ToolOutput for SpawnAgentResult {
 
     fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
         tool_output_code_mode_result(self, "spawn_agent")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AdoptAgentArgs;
+    use codex_protocol::ThreadId;
+    use serde_json::json;
+
+    #[test]
+    fn adoption_rejects_spawn_configuration_fields() {
+        let arguments = json!({
+            "message": "Continue the existing task.",
+            "task_name": "existing_task",
+            "existing_thread_id": ThreadId::new().to_string(),
+        });
+        serde_json::from_value::<AdoptAgentArgs>(arguments.clone())
+            .expect("adoption accepts only its existing-thread contract");
+
+        for (field, value) in [
+            ("service_tier", json!("priority")),
+            ("model", json!("model-override")),
+            ("reasoning_effort", json!("high")),
+            ("agent_type", json!("explorer")),
+            ("fork_turns", json!("all")),
+            ("fork_context", json!(true)),
+        ] {
+            let mut arguments = arguments.clone();
+            arguments[field] = value;
+            let error = serde_json::from_value::<AdoptAgentArgs>(arguments)
+                .expect_err("adoption must not accept spawn configuration overrides");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("unknown field `{field}`"))
+            );
+        }
     }
 }
