@@ -223,7 +223,9 @@ async fn list_threads(mcp: &mut TestAppServer) -> Result<ThreadListResponse> {
 async fn thread_fork_creates_new_thread_and_emits_started() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let preview = "Saved user message";
     let conversation_id = create_fake_rollout(
@@ -1501,12 +1503,10 @@ async fn thread_fork_defers_inherited_active_goal_until_next_turn() -> Result<()
     assert_eq!(forked_goal.goal_id, source_goal.goal_id);
     assert_eq!(forked_goal.objective, source_goal.objective);
     assert_eq!(forked_goal.token_budget, Some(150));
-    assert_eq!(forked_goal.tokens_used, 157);
+    // The explicit turn is charged to the fork. Frodex's supervisor check is a separate task.
+    assert_eq!(forked_goal.tokens_used, 57);
     assert!(forked_goal.time_used_seconds >= source_goal.time_used_seconds);
-    assert_eq!(
-        forked_goal.status,
-        codex_state::ThreadGoalStatus::BudgetLimited
-    );
+    assert_eq!(forked_goal.status, codex_state::ThreadGoalStatus::Active);
     assert_eq!(
         state_db
             .thread_goals()
@@ -2267,24 +2267,24 @@ async fn paginated_thread_fork_preserves_completed_items_and_updated_item_snapsh
             }],
         });
         let draft_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("draft answer {index}"),
             }],
             phase: Some(MessagePhase::Commentary),
-            memory_citation: None,
             delivery: None,
-            questions: None,
+            memory_citation: None,
         });
         let final_agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("final answer {index}"),
             }],
             phase: Some(MessagePhase::FinalAnswer),
-            memory_citation: None,
             delivery: None,
-            questions: None,
+            memory_citation: None,
         });
         let reasoning_item = CoreTurnItem::Reasoning(ReasoningItem {
             id: format!("reasoning-{index}"),
@@ -2459,6 +2459,10 @@ enum IndexedForkSource {
     ColdUncompacted,
     ResumedUncompacted,
     ColdCompacted,
+    /// A native fork retains provenance across subsequent checkpoint rotations.
+    ColdCompactedFork,
+    /// The final turn starts in the previous segment and has no terminal event.
+    ColdCompactedActiveTurn,
 }
 
 /// Selects the public durable fork or the ephemeral side-thread presentation.
@@ -2552,29 +2556,47 @@ async fn compacted_paginated_fork_rollout_file_opens_are_bounded() -> Result<()>
 }
 
 #[tokio::test]
-async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded() -> Result<()> {
-    for segment_count in [32, 128, 1_000] {
-        for presentation in [
-            IndexedForkPresentation::Durable,
-            IndexedForkPresentation::Ephemeral,
-        ] {
-            let file_open_count = paginated_fork_rollout_file_open_count_with_boundary(
-                segment_count,
-                IndexedForkSource::ColdCompacted,
-                presentation,
-                Some(5),
-                /*production_checkpoints*/ true,
-            )
-            .await?;
-            assert!(
-                file_open_count <= MAX_INDEXED_FORK_ROLLOUT_READER_OPENS,
-                "{presentation:?} explicit fork five turns from the tip with {segment_count} \
+async fn native_fork_of_fork_rollout_file_opens_are_bounded() -> Result<()> {
+    assert_indexed_paginated_fork_rollout_file_opens_are_bounded(
+        IndexedForkSource::ColdCompactedFork,
+    )
+    .await
+}
+
+#[tokio::test]
+async fn native_active_turn_fork_rollout_file_opens_are_bounded() -> Result<()> {
+    assert_indexed_paginated_fork_rollout_file_opens_are_bounded(
+        IndexedForkSource::ColdCompactedActiveTurn,
+    )
+    .await
+}
+
+#[test_case::test_case(32, IndexedForkPresentation::Durable; "durable_32")]
+#[test_case::test_case(128, IndexedForkPresentation::Durable; "durable_128")]
+#[test_case::test_case(1_000, IndexedForkPresentation::Durable; "durable_1000")]
+#[test_case::test_case(32, IndexedForkPresentation::Ephemeral; "ephemeral_32")]
+#[test_case::test_case(128, IndexedForkPresentation::Ephemeral; "ephemeral_128")]
+#[test_case::test_case(1_000, IndexedForkPresentation::Ephemeral; "ephemeral_1000")]
+#[tokio::test]
+async fn segmented_paginated_explicit_fork_near_tip_opens_are_bounded(
+    segment_count: usize,
+    presentation: IndexedForkPresentation,
+) -> Result<()> {
+    let file_open_count = paginated_fork_rollout_file_open_count_with_boundary(
+        segment_count,
+        IndexedForkSource::ColdCompacted,
+        presentation,
+        Some(5),
+        /*production_checkpoints*/ true,
+    )
+    .await?;
+    assert!(
+        file_open_count <= MAX_INDEXED_FORK_ROLLOUT_READER_OPENS,
+        "{presentation:?} explicit fork five turns from the tip with {segment_count} \
                  physical segments opened {file_open_count} rollout files; bounded explicit \
                  fork preparation must require at most \
                  {MAX_INDEXED_FORK_ROLLOUT_READER_OPENS} opens regardless of total lineage depth"
-            );
-        }
-    }
+    );
     Ok(())
 }
 
@@ -2608,6 +2630,7 @@ async fn assert_indexed_paginated_fork_rollout_file_opens_are_bounded(
         for presentation in [
             IndexedForkPresentation::Durable,
             IndexedForkPresentation::Ephemeral,
+            IndexedForkPresentation::DurableWithoutTurnsAfterWarmup,
         ] {
             let file_open_count =
                 paginated_fork_rollout_file_open_count(segment_count, source, presentation).await?;
@@ -2642,14 +2665,16 @@ async fn assert_uncompacted_paginated_fork_rollout_file_opens_grow_linearly(
     source: IndexedForkSource,
 ) -> Result<()> {
     let mut violations = Vec::new();
-    for segment_count in [8, 32] {
+    for segment_count in [8, 32, 128] {
         for presentation in [
             IndexedForkPresentation::Durable,
             IndexedForkPresentation::Ephemeral,
         ] {
             let file_open_count =
                 paginated_fork_rollout_file_open_count(segment_count, source, presentation).await?;
-            let limit = 2 * segment_count + 48;
+            // An uncompacted durable fork resolves the source, resolves the frozen snapshot,
+            // then materializes that snapshot's projection. Each may visit every segment once.
+            let limit = 3 * segment_count + 48;
             if file_open_count > limit {
                 violations.push(format!(
                     "{source:?} {presentation:?} fork with {segment_count} physical segments \
@@ -2692,7 +2717,7 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
     MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
-    let source_thread_id = ThreadId::new();
+    let mut source_thread_id = ThreadId::new();
     let sqlite = codex_state::SqliteConfig::new_for_testing(codex_home.path().abs());
     let state_db = StateRuntime::init(sqlite.clone(), "mock_provider".to_string()).await?;
     let store = LocalThreadStore::new(
@@ -2703,34 +2728,33 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         },
         Some(state_db),
     );
-    store
-        .create_thread(CreateThreadParams {
-            session_id: source_thread_id.into(),
-            thread_id: source_thread_id,
-            extra_config: None,
-            forked_from_id: None,
-            parent_thread_id: None,
-            source: ProtocolSessionSource::Cli,
-            thread_source: None,
-            originator: "test_originator".to_string(),
-            base_instructions: BaseInstructions::default(),
-            dynamic_tools: Vec::new(),
-            selected_capability_roots: Vec::new(),
-            multi_agent_version: None,
-            history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
-            history_base: None,
-            subagent_history_start_ordinal: None,
-            persistence_mode: Default::default(),
-            initial_rollout_ordinal: 0,
-            initial_window_id: Uuid::now_v7().to_string(),
-            runtime_workspace_roots: None,
-            metadata: ThreadPersistenceMetadata {
-                cwd: Some(codex_home.path().to_path_buf()),
-                model_provider: "mock_provider".to_string(),
-                memory_mode: ThreadMemoryMode::Enabled,
-            },
-        })
-        .await?;
+    let create_params = CreateThreadParams {
+        session_id: source_thread_id.into(),
+        thread_id: source_thread_id,
+        extra_config: None,
+        forked_from_id: None,
+        parent_thread_id: None,
+        source: ProtocolSessionSource::Cli,
+        thread_source: None,
+        originator: "test_originator".to_string(),
+        base_instructions: BaseInstructions::default(),
+        dynamic_tools: Vec::new(),
+        selected_capability_roots: Vec::new(),
+        multi_agent_version: None,
+        history_mode: codex_protocol::protocol::ThreadHistoryMode::Paginated,
+        history_base: None,
+        subagent_history_start_ordinal: None,
+        persistence_mode: Default::default(),
+        initial_rollout_ordinal: 0,
+        initial_window_id: Uuid::now_v7().to_string(),
+        runtime_workspace_roots: None,
+        metadata: ThreadPersistenceMetadata {
+            cwd: Some(codex_home.path().to_path_buf()),
+            model_provider: "mock_provider".to_string(),
+            memory_mode: ThreadMemoryMode::Enabled,
+        },
+    };
+    store.create_thread(create_params.clone()).await?;
     store
         .persist_thread(source_thread_id, PersistContext::Standard)
         .await?;
@@ -2747,14 +2771,14 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             }],
         });
         let agent_item = CoreTurnItem::AgentMessage(AgentMessageItem {
+            questions: None,
             id: format!("agent-{index}"),
             content: vec![AgentMessageContent::Text {
                 text: format!("answer {index}"),
             }],
             phase: Some(MessagePhase::FinalAnswer),
-            memory_citation: None,
             delivery: None,
-            questions: None,
+            memory_citation: None,
         });
         let mut items = vec![RolloutItem::EventMsg(EventMsg::TurnStarted(
             TurnStartedEvent {
@@ -2766,7 +2790,26 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                 collaboration_mode_kind: Default::default(),
             },
         ))];
-        if source == IndexedForkSource::ColdCompacted && index + 1 == segment_count {
+        if source == IndexedForkSource::ColdCompactedActiveTurn && index + 1 == segment_count {
+            store
+                .append_items(AppendThreadItemsParams {
+                    thread_id: source_thread_id,
+                    items: std::mem::take(&mut items),
+                })
+                .await?;
+            store
+                .freeze_thread_segment(
+                    source_thread_id,
+                    FreezeRolloutSegmentParams::rotate_checkpoint(
+                        certified_indexed_fork_checkpoint(codex_home.path()),
+                    ),
+                )
+                .await?;
+        } else if matches!(
+            source,
+            IndexedForkSource::ColdCompacted | IndexedForkSource::ColdCompactedFork
+        ) && index + 1 == segment_count
+        {
             items.extend(certified_indexed_fork_checkpoint(codex_home.path()).into_items());
         }
         for (item_index, item) in [user_item, agent_item].into_iter().enumerate() {
@@ -2780,25 +2823,52 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                 },
             )));
         }
-        items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
-            TurnCompleteEvent {
-                turn_id,
-                last_agent_message: None,
-                error: None,
-                started_at: Some(started_at),
-                completed_at: Some(started_at + 1),
-                duration_ms: Some(1_000),
-                time_to_first_token_ms: None,
-            },
-        )));
+        if source != IndexedForkSource::ColdCompactedActiveTurn || index + 1 < segment_count {
+            items.push(RolloutItem::EventMsg(EventMsg::TurnComplete(
+                TurnCompleteEvent {
+                    turn_id,
+                    last_agent_message: None,
+                    error: None,
+                    started_at: Some(started_at),
+                    completed_at: Some(started_at + 1),
+                    duration_ms: Some(1_000),
+                    time_to_first_token_ms: None,
+                },
+            )));
+        }
         store
             .append_items(AppendThreadItemsParams {
                 thread_id: source_thread_id,
                 items,
             })
             .await?;
-        if index + 1 < segment_count {
-            let params = if production_checkpoints {
+        if source == IndexedForkSource::ColdCompactedFork && index == 0 {
+            let ancestor_id = source_thread_id;
+            let frozen = store
+                .freeze_thread_segment(ancestor_id, FreezeRolloutSegmentParams::snapshot())
+                .await?;
+            store.shutdown_thread(ancestor_id).await?;
+            source_thread_id = ThreadId::new();
+            store
+                .create_thread(CreateThreadParams {
+                    session_id: source_thread_id.into(),
+                    thread_id: source_thread_id,
+                    forked_from_id: Some(ancestor_id),
+                    history_base: frozen.history_base,
+                    initial_rollout_ordinal: frozen.next_rollout_ordinal.expect("frozen ordinal"),
+                    ..create_params.clone()
+                })
+                .await?;
+            store
+                .persist_thread(source_thread_id, PersistContext::Standard)
+                .await?;
+        } else if index + 1 < segment_count {
+            let params = if production_checkpoints
+                || matches!(
+                    source,
+                    IndexedForkSource::ColdCompactedFork
+                        | IndexedForkSource::ColdCompactedActiveTurn
+                ) {
                 FreezeRolloutSegmentParams::rotate_checkpoint(certified_indexed_fork_checkpoint(
                     codex_home.path(),
                 ))
@@ -2820,12 +2890,16 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         .with_json_logging("warn,codex_history_io=trace")
         .build_initialized()
         .await?;
-    let _: ThreadReadResponse = mcp
+    let source_response: ThreadReadResponse = mcp
         .request(|request_id| ClientRequest::ThreadRead {
             request_id,
             params: ThreadReadParams {
                 thread_id: source_thread_id.to_string(),
-                include_turns: false,
+                include_turns: matches!(
+                    source,
+                    IndexedForkSource::ColdCompactedFork
+                        | IndexedForkSource::ColdCompactedActiveTurn
+                ),
             },
         })
         .await?;
@@ -2841,6 +2915,21 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
             .await?;
     }
     if presentation == IndexedForkPresentation::DurableWithoutTurnsAfterWarmup {
+        if matches!(
+            source,
+            IndexedForkSource::ColdCompactedFork | IndexedForkSource::ColdCompactedActiveTurn
+        ) {
+            let _: ThreadResumeResponse = mcp
+                .request(|request_id| ClientRequest::ThreadResume {
+                    request_id,
+                    params: ThreadResumeParams {
+                        thread_id: source_thread_id.to_string(),
+                        exclude_turns: true,
+                        ..Default::default()
+                    },
+                })
+                .await?;
+        }
         let _: ThreadForkResponse = mcp
             .request(|request_id| ClientRequest::ThreadFork {
                 request_id,
@@ -2883,13 +2972,30 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
                     assert_eq!(turn.id, format!("turn-{index}"));
                     assert_eq!(turn.items.len(), 2);
                 }
+                if matches!(
+                    source,
+                    IndexedForkSource::ColdCompactedFork
+                        | IndexedForkSource::ColdCompactedActiveTurn
+                ) {
+                    assert_eq!(forked_thread.turns, source_response.thread.turns);
+                }
             }
             let child_rollout_path = forked_thread.path.as_ref().expect("forked rollout path");
             let child_rollout_items =
                 RolloutRecorder::load_rollout_items(child_rollout_path.as_path())
                     .await?
                     .0;
-            assert_history_base_backed_fork_checkpoint(child_rollout_items.as_slice());
+            if source != IndexedForkSource::ColdCompactedActiveTurn {
+                assert_history_base_backed_fork_checkpoint(child_rollout_items.as_slice());
+            }
+            let child_meta = read_session_meta_line(child_rollout_path.as_path()).await?;
+            assert_eq!(child_meta.meta.forked_from_id, Some(source_thread_id));
+            if source == IndexedForkSource::ColdCompactedActiveTurn {
+                assert!(child_rollout_items.iter().any(|item| matches!(item,
+                    RolloutItem::EventMsg(EventMsg::TurnAborted(event))
+                        if event.turn_id.as_deref() == Some(format!("turn-{}", segment_count - 1).as_str())
+                )), "the child must persist the original active turn's interruption");
+            }
         }
         IndexedForkPresentation::Ephemeral => {
             assert!(forked_thread.ephemeral);
@@ -2939,19 +3045,93 @@ async fn paginated_fork_rollout_file_open_count_with_boundary(
         item_reads, 0,
         "forking {segment_count} physical segments must not read each inherited child turn"
     );
-    let source_thread_id = source_thread_id.to_string();
     let file_open_count = fork_events
         .iter()
         .filter(|event| {
             event["fields"]["event.name"] == "codex.history.rollout.open"
-                && event["fields"]["rollout_path"]
+                && (matches!(
+                    source,
+                    IndexedForkSource::ColdCompactedFork
+                        | IndexedForkSource::ColdCompactedActiveTurn
+                ) || event["fields"]["rollout_path"]
                     .as_str()
-                    .is_some_and(|rollout_path| {
-                        rollout_path.contains(source_thread_id.as_str())
-                            || rollout_path.contains(forked_thread.id.as_str())
-                    })
+                    .is_some_and(|path| {
+                        path.contains(source_thread_id.to_string().as_str())
+                            || path.contains(forked_thread.id.as_str())
+                    }))
         })
         .count();
+    if matches!(
+        source,
+        IndexedForkSource::ColdCompactedFork | IndexedForkSource::ColdCompactedActiveTurn
+    ) {
+        if presentation != IndexedForkPresentation::Ephemeral {
+            mcp.shutdown_gracefully().await?;
+            mcp = TestAppServer::builder()
+                .with_codex_home(codex_home.path())
+                .without_auto_env()
+                .build_initialized()
+                .await?;
+            let mut cursor = None;
+            let mut turns = Vec::new();
+            loop {
+                let page: ThreadTurnsListResponse = mcp
+                    .request(|request_id| ClientRequest::ThreadTurnsList {
+                        request_id,
+                        params: ThreadTurnsListParams {
+                            thread_id: forked_thread.id.clone(),
+                            cursor: cursor.clone(),
+                            limit: Some(100),
+                            sort_direction: Some(SortDirection::Asc),
+                            items_view: Some(TurnItemsView::Full),
+                        },
+                    })
+                    .await?;
+                turns.extend(page.data);
+                if page.next_cursor.is_none() {
+                    break;
+                }
+                assert_ne!(page.next_cursor, cursor);
+                cursor = page.next_cursor;
+            }
+            assert_eq!(turns, source_response.thread.turns);
+            let _: ThreadResumeResponse = mcp
+                .request(|request_id| ClientRequest::ThreadResume {
+                    request_id,
+                    params: ThreadResumeParams {
+                        thread_id: forked_thread.id.clone(),
+                        exclude_turns: true,
+                        ..Default::default()
+                    },
+                })
+                .await?;
+        }
+        mcp.start_turn_and_wait_for_completion(TurnStartParams {
+            thread_id: forked_thread.id,
+            input: vec![UserInput::Text {
+                text: "Continue from the frozen checkpoint".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+        let requests = server.received_requests().await.expect("model requests");
+        let input = requests
+            .iter()
+            .rev()
+            .find(|request| request.url.path().ends_with("/responses"))
+            .expect("fork model request")
+            .body_json::<Value>()?["input"]
+            .clone();
+        let text = serde_json::to_string(&input)?;
+        assert!(text.contains("checkpoint replacement history"));
+        if source == IndexedForkSource::ColdCompactedActiveTurn {
+            assert!(
+                text.contains("<turn_aborted>"),
+                "child context must include interruption"
+            );
+        }
+    }
     Ok(file_open_count)
 }
 
@@ -3659,7 +3839,9 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 ) -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let preview = "Saved user message";
     let create_rollout = match history_mode {
@@ -3674,6 +3856,11 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
+    if history_mode == ThreadHistoryMode::Paginated {
+        let path = rollout_path(codex_home.path(), "2025-01-05T12-00-00", &conversation_id);
+        app_test_support::append_fake_paginated_user_message(&path, &conversation_id, preview)
+            .await?;
+    }
 
     let mut mcp = TestAppServer::builder()
         .with_codex_home(codex_home.path())
@@ -3852,7 +4039,9 @@ async fn assert_thread_fork_ephemeral_remains_pathless_and_omits_listing(
 async fn thread_fork_system_ephemeral_stays_unpersisted_with_debug_materialization() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let source_thread_id = create_fake_rollout(
         codex_home.path(),
@@ -4002,7 +4191,9 @@ async fn thread_fork_rejects_incompatible_boundaries_and_ephemeral_goal_deferral
 async fn pathless_ephemeral_thread_rejects_codex_home_path_after_reload() -> Result<()> {
     let server = create_mock_responses_server_repeating_assistant("Done").await;
     let codex_home = TempDir::new()?;
-    MockResponsesConfig::new(&server.uri()).write(codex_home.path())?;
+    MockResponsesConfig::new(&server.uri())
+        .disable_feature(Feature::BackgroundPaginatedRolloutMigration)
+        .write(codex_home.path())?;
 
     let parent_thread_id = create_fake_rollout(
         codex_home.path(),

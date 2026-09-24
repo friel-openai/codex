@@ -549,8 +549,16 @@ async fn thread_id_generator_applies_to_roots_children_and_forks() {
     assert_eq!(report.completed.len(), 3);
 }
 
+#[test_case::test_case(false, false, false; "saved_thread_roots")]
+#[test_case::test_case(true, false, false; "explicit_thread_roots")]
+#[test_case::test_case(true, true, false; "executor_owned_roots_require_fresh_config")]
+#[test_case::test_case(true, true, true; "accepted_executor_config_wins_over_checkpoint")]
 #[tokio::test]
-async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime() {
+async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime(
+    explicit_roots: bool,
+    executor_owned: bool,
+    accepted_owner_config: bool,
+) {
     let temp_dir = tempdir().expect("tempdir");
     let mut config = test_config().await;
     config.codex_home = temp_dir.path().join("codex-home").abs();
@@ -566,13 +574,44 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
         workspace_roots: vec![PathUri::from_abs_path(&boundary_cwd)],
         config: EnvironmentConfigState::FromThread,
     };
-    let latest_environment = TurnEnvironmentSelection {
+    let mut latest_environment = TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: PathUri::from_abs_path(&latest_cwd),
         workspace_roots: vec![PathUri::from_abs_path(&latest_cwd)],
         config: EnvironmentConfigState::FromThread,
     };
     let source_thread_id = ThreadId::new();
+    if executor_owned {
+        latest_environment.config =
+            EnvironmentConfigState::Ready(codex_protocol::protocol::EnvironmentConfig {
+                allow_login_shell: true,
+                workspace_roots: latest_environment.workspace_roots.clone(),
+                permission_profile: config.permissions.permission_profile_state().snapshot(),
+                shell_environment_policy: Default::default(),
+                windows_sandbox_level: WindowsSandboxLevel::from_config(&config),
+                windows_sandbox_type: config.permissions.windows_sandbox_type,
+                use_legacy_landlock: config.features.use_legacy_landlock(),
+                exec_policy: None,
+                mcp_policy: None,
+                network_policy: None,
+                selected_capability_roots: Vec::new(),
+            });
+    }
+    let mut expected_environment = latest_environment.clone();
+    if executor_owned && !accepted_owner_config {
+        expected_environment.config = EnvironmentConfigState::Pending;
+    }
+    config.workspace_roots_explicit = explicit_roots;
+    if explicit_roots {
+        config.workspace_roots = vec![config.cwd.clone()];
+        config
+            .permissions
+            .set_workspace_roots(config.workspace_roots.clone());
+        if !executor_owned {
+            expected_environment.cwd = PathUri::from_abs_path(&config.cwd);
+            expected_environment.workspace_roots = vec![PathUri::from_abs_path(&config.cwd)];
+        }
+    }
     let boundary_context = vec![
         RolloutItem::ResponseItem(user_msg("boundary response").into()),
         checkpoint_settings_item(
@@ -657,15 +696,31 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
         Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
     );
 
+    let mut options = StartThreadOptions::new(config);
+    if accepted_owner_config {
+        options.environments = Some(vec![latest_environment]);
+    }
     let (forked, _) = manager
-        .fork_prepared_thread(StartThreadOptions::new(config), prepared)
+        .fork_prepared_thread(options, prepared)
         .await
         .expect("fork prepared checkpoint history");
 
     assert_eq!(
         forked.thread.environment_selections().await,
-        vec![latest_environment]
+        vec![expected_environment.clone()]
     );
+    if !executor_owned || accepted_owner_config {
+        let next_turn = forked.thread.session.new_default_turn().await;
+        let effective = next_turn
+            .initial_environments
+            .primary()
+            .expect("next-turn environment");
+        assert_eq!(effective.cwd(), &expected_environment.cwd);
+        assert_eq!(
+            effective.workspace_roots(),
+            expected_environment.workspace_roots.as_slice()
+        );
+    }
     forked
         .thread
         .shutdown_and_wait()
@@ -723,7 +778,7 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             serde_json::to_string(&codex_rollout::RolloutLine {
                 timestamp: "2026-08-13T00:00:00Z".to_string(),
                 ordinal: Some(0),
-                item: RolloutItem::SessionMeta(session_meta),
+                item: RolloutItem::SessionMeta(session_meta.clone()),
             })
             .expect("serialize resumed metadata")
         ),
@@ -735,12 +790,15 @@ async fn cold_resume_uses_checkpoint_environment_selections() {
             config.clone(),
             InitialHistory::Resumed(ResumedHistory {
                 conversation_id: thread_id,
-                history: Arc::new(vec![checkpoint_settings_item(
-                    &config,
-                    thread_id,
-                    restored_cwd,
-                    restored_environment.clone(),
-                )]),
+                history: Arc::new(vec![
+                    RolloutItem::SessionMeta(session_meta),
+                    checkpoint_settings_item(
+                        &config,
+                        thread_id,
+                        restored_cwd,
+                        restored_environment.clone(),
+                    ),
+                ]),
                 rollout_path: Some(rollout_path),
             }),
             auth_manager,
@@ -917,6 +975,43 @@ async fn cold_child_resume_keeps_saved_locations_and_inherits_fresh_owner_config
         .shutdown_and_wait()
         .await
         .expect("shutdown parent");
+}
+
+#[tokio::test]
+async fn cold_resume_named_profile_uses_current_roots_without_rewriting_environment_cwd() {
+    let mut config = test_config().await;
+    let old_root = config.codex_home.join("old-workspace");
+    let current_root = config.codex_home.join("current-workspace");
+    config
+        .permissions
+        .set_workspace_roots(vec![current_root.clone()]);
+    let selected = TurnEnvironmentSelection {
+        environment_id: "selected-environment".to_string(),
+        cwd: PathUri::from_abs_path(&old_root),
+        workspace_roots: vec![PathUri::from_abs_path(&old_root)],
+        config: EnvironmentConfigState::FromThread,
+    };
+    let mut item = checkpoint_settings_item(&config, ThreadId::new(), old_root, selected.clone());
+    let RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) = &mut item else {
+        panic!("checkpoint settings");
+    };
+    event.thread_settings.active_permission_profile =
+        Some(codex_protocol::models::ActivePermissionProfile {
+            id: "removed-profile".to_string(),
+            extends: None,
+        });
+    let mut expected = selected;
+    expected.workspace_roots = vec![PathUri::from_abs_path(&current_root)];
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, std::slice::from_ref(&item)),
+        Some(vec![expected.clone()]),
+    );
+    config.permissions.set_workspace_roots(Vec::new());
+    expected.workspace_roots.clear();
+    assert_eq!(
+        super::persisted_root_environment_selections(&config, &[item]),
+        Some(vec![expected]),
+    );
 }
 
 /// Resuming a thread preserves its stored ID instead of invoking the new manager's factory.

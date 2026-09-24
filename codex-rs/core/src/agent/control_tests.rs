@@ -3672,6 +3672,183 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
         .expect("shutdown reopened full-history child");
 }
 
+#[test_case::test_case(false; "plain_messages")]
+#[test_case::test_case(true; "compacted_messages")]
+#[tokio::test]
+async fn full_history_fork_persists_metadata_only_sanitization(compacted: bool) {
+    let (home, mut config) = test_config().await;
+    config.features.enable(Feature::MultiAgentV2).unwrap();
+    config
+        .features
+        .enable(Feature::GuardianThreadContext)
+        .unwrap();
+    let harness = AgentControlHarness::new_with_config(home, config).await;
+    let (parent_id, parent) = harness.start_paginated_thread().await;
+    let turn = parent.session.new_default_turn().await;
+    let mut items = ["user", "assistant"].map(|role| codex_history::ResponseItemEnvelope {
+        item: ResponseItem::Message {
+            id: Some(ResponseItemId::from_server(format!("metadata-only-{role}"))),
+            role: role.to_string(),
+            content: vec![ContentItem::InputText {
+                text: format!("unchanged {role} payload"),
+            }],
+            phase: (role == "assistant").then_some(MessagePhase::FinalAnswer),
+            internal_chat_message_metadata_passthrough: Some(
+                InternalChatMessageMetadataPassthrough {
+                    content_item_kinds: Some(vec![ContentItemKind("unknown".to_string())]),
+                    ..Default::default()
+                },
+            ),
+        },
+        metadata: Some(codex_history::CodexHarnessMetadata {
+            user_input_order: Some(7),
+            sender_user_messages: Some(Box::new(codex_history::SenderUserMessages {
+                receiver_turn_id: "parent-turn".to_string(),
+                receiver_message_id: format!("metadata-only-{role}"),
+                text: "Parent-only sender context".to_string(),
+            })),
+            history_truncation_token_limit: Some(8000),
+            ..Default::default()
+        }),
+    });
+    // Both persistence variants retain the same originating turn and creation time.
+    for envelope in &mut items {
+        crate::session::session::Session::stamp_response_item_for_history(
+            &mut envelope.item,
+            &turn.sub_id,
+        );
+    }
+    if compacted {
+        let prepared_window_advance = parent.session.prepare_auto_compact_window_advance().await;
+        parent
+            .session
+            .replace_compacted_history(
+                &turn,
+                items.to_vec(),
+                /*reference_context_item*/ None,
+                /*world_state_baseline*/ None,
+                crate::compact::CompactedHistoryMetadata {
+                    message: String::new(),
+                    compaction_response_id: None,
+                    compaction_model_hash: None,
+                    reviewer_compaction_hash: None,
+                    prepared_window_advance,
+                },
+            )
+            .await
+            .expect("persist compacted metadata fixture");
+    } else {
+        parent
+            .session
+            .record_annotated_conversation_items(&turn, turn.model_info(), items.to_vec())
+            .await;
+    }
+    let spawn_call_id = "spawn-metadata-only";
+    parent
+        .session
+        .record_conversation_items(&turn, turn.model_info(), &[spawn_agent_call(spawn_call_id)])
+        .await;
+    let child_id = harness
+        .spawn_anonymous_child(
+            parent_id,
+            SpawnAgentOptions {
+                fork_parent_spawn_call_id: Some(spawn_call_id.to_string()),
+                fork_mode: Some(SpawnAgentForkMode::FullHistory),
+                ..Default::default()
+            },
+        )
+        .await;
+    let child = harness
+        .manager
+        .get_thread(child_id)
+        .await
+        .expect("forked child");
+    let expected = items.map(|mut envelope| {
+        let metadata = envelope.metadata.as_mut().expect("source metadata");
+        metadata.sender_user_messages = None;
+        metadata.user_input_order = None;
+        metadata.inherited_user_message =
+            matches!(&envelope.item, ResponseItem::Message { role, .. } if role == "user");
+        envelope
+    });
+    let assert_model_history = |history: &crate::context_manager::ContextManager| {
+        let selected = history.annotated_items().iter().filter(|envelope| {
+            matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+        }).cloned().collect::<Vec<_>>();
+        assert_eq!(
+            selected,
+            expected.to_vec(),
+            "fork must only change parent-scoped metadata"
+        );
+    };
+    assert_model_history(&child.session.clone_history().await);
+    child.ensure_rollout_materialized().await;
+    child.flush_rollout().await.expect("flush sanitized child");
+    let child_path = child.rollout_path().expect("child rollout");
+    let persisted = std::fs::read_to_string(&child_path)
+        .expect("read child rollout")
+        .lines()
+        .map(|line| {
+            codex_rollout::parse_rollout_line(line)
+                .expect("decode child rollout")
+                .item
+        })
+        .collect::<Vec<_>>();
+    // Reusing either ancestor pointer would restore the original sender metadata on cold resume.
+    assert!(persisted.iter().all(|item| match item {
+        RolloutItem::SessionMeta(meta) => meta.meta.history_base.is_none(),
+        RolloutItem::RolloutReference(_) => false,
+        _ => true,
+    }));
+    let persisted_messages = persisted.iter().flat_map(|item| match item {
+        RolloutItem::ResponseItem(envelope) => std::slice::from_ref(envelope),
+        RolloutItem::Compacted(compaction) => compaction.replacement_history.as_deref().unwrap_or_default(),
+        _ => &[],
+    }).filter(|envelope| {
+        matches!(&envelope.item, ResponseItem::Message { id: Some(id), .. } if id.starts_with("metadata-only-"))
+    }).collect::<Vec<_>>();
+    for envelope in &expected {
+        assert!(
+            persisted_messages.contains(&envelope),
+            "sanitized metadata must be durable"
+        );
+    }
+    assert!(
+        persisted_messages
+            .iter()
+            .all(|envelope| expected.contains(envelope))
+    );
+    harness
+        .control
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("unload child");
+    harness
+        .control
+        .shutdown_live_agent(parent_id)
+        .await
+        .expect("unload parent");
+    let cold_manager = ThreadManager::with_models_provider_home_and_state_for_tests(
+        CodexAuth::from_api_key("dummy"),
+        harness.config.model_provider.clone(),
+        harness.config.codex_home.to_path_buf(),
+        Arc::new(codex_exec_server::EnvironmentManager::default_for_tests()),
+        harness.state_db.clone(),
+    );
+    cold_manager
+        .agent_control()
+        .resume_agent_from_rollout(harness.config.clone(), child_id, SessionSource::Exec)
+        .await
+        .expect("cold resume sanitized child");
+    let resumed = cold_manager.get_thread(child_id).await.expect("cold child");
+    assert_model_history(&resumed.session.clone_history().await);
+    cold_manager
+        .agent_control()
+        .shutdown_live_agent(child_id)
+        .await
+        .expect("close cold child");
+}
+
 #[tokio::test]
 async fn spawn_agent_without_fork_from_paginated_parent_stays_fresh_and_paginated() {
     let harness = AgentControlHarness::new().await;
