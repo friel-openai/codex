@@ -503,12 +503,35 @@ async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_e
         /*archived*/ false,
     );
     custom_metadata.source = serde_json::to_string(&custom_source)?;
-    custom_metadata.recency_at += chrono::Duration::hours(/*hours*/ 1);
-    custom_metadata.updated_at += chrono::Duration::hours(/*hours*/ 1);
+    // Queueing advances the first thread's recency beyond its fixture date.
+    // Keep the duplicate-name winner explicitly newer than that persisted value.
+    let queued_metadata = runtime
+        .get_thread(thread_id)
+        .await
+        .map_err(std::io::Error::other)?
+        .expect("queued thread remains indexed");
+    custom_metadata.recency_at =
+        queued_metadata.recency_at + chrono::Duration::hours(/*hours*/ 1);
+    custom_metadata.updated_at = custom_metadata.recency_at;
     runtime
         .upsert_thread(&custom_metadata)
         .await
         .map_err(std::io::Error::other)?;
+    let legacy_thread_id = ThreadId::new();
+    write_rollout(
+        &config,
+        legacy_thread_id,
+        /*archived*/ false,
+        "2025-02-01T10:00:00Z",
+        "preview",
+        SessionSource::Cli,
+    )?;
+    codex_rollout::append_thread_name(
+        config.codex_home.as_path(),
+        legacy_thread_id,
+        "saved-session",
+    )
+    .await?;
     let (resolved_custom_thread_id, _) = run_session_queue_action_with_app_server(
         &mut app_server,
         config.codex_home.as_path(),
@@ -517,11 +540,21 @@ async fn queues_non_interactive_and_custom_sessions_by_server_label() -> color_e
         "custom-client-message-id",
     )
     .await?;
-    assert_eq!(resolved_custom_thread_id, custom_thread_id);
-    runtime
-        .update_thread_title(custom_thread_id, "saved-session")
-        .await
-        .map_err(std::io::Error::other)?;
+    assert_eq!(
+        (
+            resolved_custom_thread_id,
+            runtime
+                .get_thread(legacy_thread_id)
+                .await
+                .map_err(std::io::Error::other)?,
+        ),
+        (custom_thread_id, None),
+    );
+    // Queueing may migrate the rollout; rename through the API so the correct
+    // legacy title or paginated name column is updated.
+    app_server
+        .thread_set_name(custom_thread_id, "saved-session".to_string())
+        .await?;
 
     let duplicate_error = run_session_queue_action_with_app_server(
         &mut app_server,

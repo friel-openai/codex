@@ -235,3 +235,33 @@ fn publication_skips_live_writers_and_keeps_coordination_locked() {
     );
     assert!(writer.acquire(thread_id).is_ok());
 }
+
+#[test]
+fn writer_release_preserves_independently_acquired_fork_reader() {
+    let home = TempDir::new().expect("temp dir");
+    let coordinator = Arc::new(WriterLockCoordinator::new(home.path()));
+    let other = Arc::new(WriterLockCoordinator::new(home.path()));
+    let thread_id = ThreadId::new();
+    let writer = Arc::new(coordinator.acquire(thread_id).expect("writer"));
+    writer.share_for_fork().expect("export");
+    let reader = other.acquire_fork_reader(thread_id).expect("fork reader");
+    // dup and fork share the writer's open file description, unlike the separate reader.
+    let inherited = match &*writer.state.lock().expect("writer state") {
+        WriterLockState::Shared(file) => file.try_clone().expect("inherited descriptor"),
+        _ => panic!("expected shared writer"),
+    };
+    drop(writer);
+    assert_eq!(
+        coordinator
+            .acquire(thread_id)
+            .expect_err("the independent reader must still exclude archive")
+            .kind(),
+        ErrorKind::WouldBlock
+    );
+    drop(reader);
+    let next_writer = coordinator
+        .acquire(thread_id)
+        .expect("only independent reservations may retain ownership");
+    drop(inherited);
+    drop(next_writer);
+}
