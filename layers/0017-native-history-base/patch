@@ -2656,10 +2656,10 @@ index 6471d9ae36ba38a6db5f1c6a71a1fca5123ba070..494b10f8eb7391e262f0155db195dfa1
          .with_codex_home(codex_home.path())
          .without_auto_env()
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index bacc8c09042caa0d339b9be1a8d692558d817fbd..391bb08de0a57da244b4af068066241d886839f2 100644
+index 4c49ebf9211481d91e13d982e9da66d2b3503e63..0a404d3d3c189ec913f0dd86f628a008271ab148 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -2991,6 +2991,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+@@ -2998,6 +2998,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
          "copied non-structural presentation and metadata records should not enter the child rollout"
      );
 
@@ -2689,7 +2689,7 @@ index bacc8c09042caa0d339b9be1a8d692558d817fbd..391bb08de0a57da244b4af068066241d
      let _ = harness
          .control
          .shutdown_live_agent(child_thread_id)
-@@ -3342,6 +3365,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3349,6 +3372,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
      reference_params.parent_thread_id = Some(lineage_thread_id);
      reference_params.initial_rollout_ordinal = lineage_prepared
          .frozen_segment
@@ -2698,7 +2698,7 @@ index bacc8c09042caa0d339b9be1a8d692558d817fbd..391bb08de0a57da244b4af068066241d
          .next_rollout_ordinal
          .unwrap_or_default();
      store
-@@ -3356,7 +3381,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3363,7 +3388,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .append_items(AppendThreadItemsParams {
              thread_id: reference_thread_id,
              items: vec![RolloutItem::RolloutReference(
@@ -2858,7 +2858,7 @@ index e8eb8ae852821f24e39cf816a87824ff45d18dc7..46b2a842733f10af1f16055c0da94abe
                              LiveThread::create_with_inherited_model_context(
                                  Arc::clone(&thread_store),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 32fde8df6f5d2625aedcc54a69a0c1bb3088f78d..27878dd87c7800293c22ddd8ab7fa926882ad4aa 100644
+index 3a50364e8056a48e7311ec61ce6fdc7706768726..36d0f8122e38ec59496744a92d9a1b78880dc4a3 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -4498,12 +4498,14 @@ async fn indexed_paginated_fork_appends_interrupted_suffix_after_capturing_paren

@@ -2997,7 +2997,7 @@ index d81f4503bef9989c135c1a1d36f74a03d1ab45ce..34e9f42893f83421be3bf0344139f6a3
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 983f4105b1d7504aca69f66229f7c1f54120d7c0..1a3e6d7f54a06e7a4d290bec010d8b5128b4ff61 100644
+index 0193437ebb0f0fc1399fb84f630a81187f138d53..17879038234c26331ce58786c5e1676d36c99a4a 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -12676,6 +12676,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {

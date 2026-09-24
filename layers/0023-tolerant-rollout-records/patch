@@ -395,7 +395,7 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index e7e8b25a49beb9c90f3ebd4dd613a33af52f6d9a..39e7285480a084144d1f49eb5f4c0dbaaed3db0d 100644
+index 46bb91ae9493ebc29f202f3d44c863b6aa7ffdcc..ed5e8d1a742dd839de4b85b2b9e0bb1100842c81 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -73,6 +73,7 @@ use codex_protocol::protocol::EventMsg;
@@ -439,7 +439,7 @@ index e7e8b25a49beb9c90f3ebd4dd613a33af52f6d9a..39e7285480a084144d1f49eb5f4c0dba
  use pretty_assertions::assert_eq;
  use serial_test::serial;
  use std::ffi::OsStr;
-@@ -8553,6 +8559,408 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+@@ -8560,6 +8566,408 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
      )
  }
 

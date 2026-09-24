@@ -969,7 +969,7 @@ index 4ad7824de4aa0365e4bdc5caef40cb4ccfd400ed..f6f1645d483a842cd8a44455294362ef
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 27878dd87c7800293c22ddd8ab7fa926882ad4aa..46d39af8fbe016f8edc03f0f73046f860c6abbda 100644
+index 36d0f8122e38ec59496744a92d9a1b78880dc4a3..7f6e03e6dd437d680fdba48919a9c0b8d8c69ac6 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -5502,6 +5502,7 @@ async fn turn_context_with_model_updates_model_fields() {

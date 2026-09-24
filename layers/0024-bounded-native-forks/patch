@@ -669,10 +669,10 @@ index 446b27665384611c8df6c8e2a151fb2ce735e110..8c91b13068dbda6f1303f4752f67b2e6
                      .await,
                  );
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 39e7285480a084144d1f49eb5f4c0dbaaed3db0d..384e0967bf02df6140d1a30c85045fd7b3be6829 100644
+index ed5e8d1a742dd839de4b85b2b9e0bb1100842c81..c701bec66eae2e75e6a55158b6615edda5f6ecd0 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -3665,6 +3665,183 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3672,6 +3672,183 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .expect("shutdown reopened full-history child");
  }
 
@@ -881,7 +881,7 @@ index afdeaf9321af128fd3b23ad3404f327d96ab001d..36e785cb968a9eb228211003da94fc25
          .goal_supervisor_runtime
          .snooze_records
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 6732fc850af302bdeee91e1004b4ec0b8efb5e80..842fa496db0a42ba4d575b96a43a2fd39b246069 100644
+index 5a5f636b20d71215f926ad74f2c572c4b9bed81a..7601e0827b0e58958db0b98863806319fa91d2e0 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -4227,6 +4227,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo

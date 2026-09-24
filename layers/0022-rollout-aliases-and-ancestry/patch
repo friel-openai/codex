@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 70c2a52102fe54565778165f42db60601625e440..e7e8b25a49beb9c90f3ebd4dd613a33af52f6d9a 100644
+index 5753345c21062e0638c2a6d9d2cc9d90bc395ca7..46bb91ae9493ebc29f202f3d44c863b6aa7ffdcc 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -8297,6 +8297,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -8304,6 +8304,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
@@ -271,7 +271,7 @@ index 70c2a52102fe54565778165f42db60601625e440..e7e8b25a49beb9c90f3ebd4dd613a33a
      Startup,
      Running,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 407c7d2bb784c0b7ffe1ab9e44a1b6159b3ab8a8..6732fc850af302bdeee91e1004b4ec0b8efb5e80 100644
+index cd01a2e8e95899d653943e33409af746b2c34da7..5a5f636b20d71215f926ad74f2c572c4b9bed81a 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -3195,7 +3195,11 @@ fn configured_multi_agent_v2_preserves_persisted_v1_history() {

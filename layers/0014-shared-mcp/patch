@@ -10472,7 +10472,7 @@ index 2bbee2d5edb3730cf1e2efbb3fdd71791f394bf6..a16f889142eac4e801ebe58bf45d2339
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 1a3e6d7f54a06e7a4d290bec010d8b5128b4ff61..7f3047ca9b5373458433dbcf3305bafe78b6b056 100644
+index 17879038234c26331ce58786c5e1676d36c99a4a..2c33173b915c9fb69a0e68914180b1e93fcfe22e 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -9890,6 +9890,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {

@@ -221,7 +221,7 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 
      match &turn_context.session_source {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 842fa496db0a42ba4d575b96a43a2fd39b246069..a31e217c6882d37db502ce77c9ca54d37c9f638b 100644
+index 7601e0827b0e58958db0b98863806319fa91d2e0..0dd25e05ab2d6181d1d392cc595c170ffc5f12b0 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -11814,6 +11814,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(

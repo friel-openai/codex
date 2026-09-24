@@ -13410,6 +13410,69 @@ index 519fd162232573439b606c56346b016f8cb3b6a6..0a64a73dc9f48da43db773705d894cc7
 -}
 +}
 \ No newline at end of file
+diff --git a/codex-rs/core/src/config/config_loader_tests.rs b/codex-rs/core/src/config/config_loader_tests.rs
+index 1257a40c0f9fa66af0efe5a35733138479643c16..6fd978318a12eb1dc7c94c9a84edb524d7f3676e 100644
+--- a/codex-rs/core/src/config/config_loader_tests.rs
++++ b/codex-rs/core/src/config/config_loader_tests.rs
+@@ -2824,6 +2824,7 @@ statusMessage = "checking"
+         Some(cwd),
+         &[] as &[(String, TomlValue)],
+         ConfigLoadOptions {
++            loader_overrides: LoaderOverrides::without_managed_config_for_tests(),
+             cloud_config_bundle,
+             ..Default::default()
+         },
+@@ -3756,7 +3757,7 @@ profile = "ignored"
+         &codex_home_untrusted,
+         Some(cwd.clone()),
+         &[] as &[(String, TomlValue)],
+-        LoaderOverrides::default(),
++        LoaderOverrides::without_managed_config_for_tests(),
+         &codex_config::NoopThreadConfigLoader,
+     )
+     .await?;
+@@ -3798,7 +3799,7 @@ profile = "ignored"
+         &codex_home_unknown,
+         Some(cwd),
+         &[] as &[(String, TomlValue)],
+-        LoaderOverrides::default(),
++        LoaderOverrides::without_managed_config_for_tests(),
+         &codex_config::NoopThreadConfigLoader,
+     )
+     .await?;
+diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
+index 0dd25e05ab2d6181d1d392cc595c170ffc5f12b0..d0bf3402713c796e12a608ddcf8e43086230bdfe 100644
+--- a/codex-rs/core/src/session/tests.rs
++++ b/codex-rs/core/src/session/tests.rs
+@@ -14530,6 +14530,7 @@ async fn session_start_hooks_only_load_from_trusted_project_layers() -> std::io:
+     let config = ConfigBuilder::default()
+         .codex_home(codex_home)
+         .fallback_cwd(Some(nested))
++        .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+         .build()
+         .await?;
+
+@@ -14590,6 +14591,7 @@ async fn session_start_hooks_require_project_trust_without_config_toml() -> std:
+         let config = ConfigBuilder::default()
+             .codex_home(codex_home)
+             .fallback_cwd(Some(nested.clone()))
++            .loader_overrides(LoaderOverrides::without_managed_config_for_tests())
+             .build()
+             .await?;
+
+diff --git a/codex-rs/core/src/shell_snapshot_tests.rs b/codex-rs/core/src/shell_snapshot_tests.rs
+index a007da563ec94d9583207b281db8398931572cf7..3cc31531514d39e5b5d712c39fa9ee3ffb33f1bd 100644
+--- a/codex-rs/core/src/shell_snapshot_tests.rs
++++ b/codex-rs/core/src/shell_snapshot_tests.rs
+@@ -1676,7 +1676,7 @@ async fn snapshot_shell_does_not_inherit_stdin() -> Result<()> {
+
+     let home_display = home.display();
+     let script = format!(
+-        "HOME=\"{home_display}\"; export HOME; {}",
++        "unset BASH_ENV; HOME=\"{home_display}\"; export HOME; {}",
+         snapshot_capture_script(
+             ShellType::Bash,
+             SnapshotCaptureOptions {
 diff --git a/sdk/python/src/openai_codex/generated/v2_all.py b/sdk/python/src/openai_codex/generated/v2_all.py
 index e804eba3f312f9428f757002ec9d7fdeb1cc2343..02d2da24d477b28011fe37f432873af8e864e9e5 100644
 --- a/sdk/python/src/openai_codex/generated/v2_all.py

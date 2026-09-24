@@ -9501,7 +9501,7 @@ index 0000000000000000000000000000000000000000..8eabe97975302d2de75637075ba71aca
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda3199edc8c6 100644
+index 834f7f4abd0a0d38fc52597645120dfcabe47c12..109dec290ac97c00ca0fc8e5df122b56b18372e3 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1141,7 +1141,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
@@ -9782,7 +9782,21 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
      }
 
      resumed_control
-@@ -7062,17 +7262,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -2343,6 +2543,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+
+     if nested {
+         let turn = resumed_parent.thread.session.new_default_turn().await;
++        // Direct sends bypass the tool resolver that registers the resumed root.
++        resumed_parent
++            .thread
++            .session
++            .services
++            .agent_control
++            .register_session_root(parent_thread_id, turn.parent_thread_id);
+         resumed_parent
+             .thread
+             .session
+@@ -7062,17 +7269,16 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -9809,7 +9823,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8513,6 +8712,12 @@ while True:
+@@ -8513,6 +8719,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -9822,7 +9836,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -8629,194 +8834,6 @@ while True:
+@@ -8629,194 +8841,6 @@ while True:
      Ok(())
  }
 
@@ -10017,7 +10031,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
  #[tokio::test]
  async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
      let harness = AgentControlHarness::new_with_multi_agent_v1().await;
-@@ -8900,8 +8917,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8900,8 +8924,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -10035,7 +10049,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -8910,21 +8934,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8910,21 +8941,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10121,7 +10135,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -8941,8 +9022,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -8941,8 +9029,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -10131,7 +10145,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9082,12 +9162,13 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9097,12 +9184,64 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10141,15 +10155,65 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
          .agent_lifecycle(child.thread_id)
 -        .expect("registered child lifecycle")
 -        .wait_for_completion_watcher()
--        .await;
 +        .expect("registered child lifecycle");
 +    child_lifecycle.wait_for_completion_watcher().await;
 +    let completed_child_status = original_control.get_status(child.thread_id).await;
 +    assert!(matches!(completed_child_status, AgentStatus::Completed(_)));
++    // This fixture has no parent turn to consume the child's queue-only completion notice.
++    // Assert exactly that notice before testing adoption of an idle root.
++    timeout(Duration::from_secs(5), async {
++        while !original
++            .thread
++            .session
++            .input_queue
++            .has_pending_mailbox_items()
++            .await
++        {
++            sleep(Duration::from_millis(10)).await;
++        }
++    })
++    .await
++    .expect("child completion notice should reach the source root");
++    let child_path = child.metadata.agent_path.clone().expect("child path");
++    let completion_message = crate::session_prefix::format_inter_agent_completion_message(
++        AgentPath::root(),
++        child_path.clone(),
++        &completed_child_status,
++    )
++    .expect("completed child status should render");
++    let (completion_items, start_options) = original
++        .thread
++        .session
++        .input_queue
++        .drain_mailbox_input_items()
+         .await;
++    assert_eq!(
++        completion_items,
++        vec![crate::session::TurnInput::InterAgentCommunication(
++            InterAgentCommunication::new(
++                child_path,
++                AgentPath::root(),
++                Vec::new(),
++                completion_message,
++                /*trigger_turn*/ false,
++            ),
++        )],
++    );
++    assert!(matches!(
++        start_options,
++        TurnStartOptions {
++            turn_trigger: None,
++            final_output_json_schema: None,
++            service_tier: None,
++            parent_turn_id: None,
++            root_turn_id: None,
++            cyber_access_program: None,
++        }
++    ));
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9183,6 +9264,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9198,6 +9337,30 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -10180,7 +10244,7 @@ index 68688dc27369c57b7bc4bf305ef7c01f299baea4..632b96a71c1c93542a6d1d68dc6bda31
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9216,3 +9321,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9231,3 +9394,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }

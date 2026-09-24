@@ -166,7 +166,7 @@ index 3b10ae60ab4ba317fcd9197025920803d38f1d37..1890500919486a2d075316c3f7a31ace
      )
      .await?;
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d692558d817fbd 100644
+index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2b3503e63 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -1071,6 +1071,36 @@ async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str
@@ -206,7 +206,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
  async fn wait_for_live_thread_spawn_children(
      control: &LocalAgentControl,
      parent_thread_id: ThreadId,
-@@ -2850,6 +2880,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+@@ -2857,6 +2887,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
                          active_permission_profile: None,
                          cwd: harness.config.cwd.clone(),
                          runtime_workspace_roots: None,
@@ -217,7 +217,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
                          reasoning_effort: None,
                          reasoning_summary: None,
                          personality: None,
-@@ -3675,6 +3709,7 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state(thread_context_enabl
+@@ -3682,6 +3716,7 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state(thread_context_enabl
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: Some(parent_record.clone()),
@@ -225,7 +225,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
              }),
              RolloutItem::TokenUsageRecord(parent_record),
              rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
-@@ -3801,6 +3836,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
+@@ -3808,6 +3843,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -233,7 +233,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
              }),
              rollout_response_item(ResponseItem::Message {
                  id: None,
-@@ -4722,6 +4758,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
+@@ -4729,6 +4765,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -241,7 +241,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
              }),
              RolloutItem::RetainedContext(answer_event),
              RolloutItem::ResponseItem(delivery),
-@@ -4927,6 +4964,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
+@@ -4934,6 +4971,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -249,7 +249,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
              }),
              RolloutItem::TurnContext(turn_context.to_turn_context_item()),
              rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
-@@ -5084,6 +5122,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
+@@ -5091,6 +5129,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -257,7 +257,7 @@ index 7326952cf8c066cf86054b5f8a815e345df84697..bacc8c09042caa0d339b9be1a8d69255
              }),
          ];
          if let Some(instructions) = parent_developer_instructions {
-@@ -6652,6 +6691,90 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+@@ -6659,6 +6698,90 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
          .expect("resumed child shutdown should succeed");
  }
 
@@ -2208,7 +2208,7 @@ index ed7eb89875072392c3c124da41ad3e06834e0933..4ad7824de4aa0365e4bdc5caef40cb4c
              session.reference_context_item().await.unwrap().summary,
              step.settings.reasoning_summary,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 7f3047ca9b5373458433dbcf3305bafe78b6b056..32fde8df6f5d2625aedcc54a69a0c1bb3088f78d 100644
+index 2c33173b915c9fb69a0e68914180b1e93fcfe22e..3a50364e8056a48e7311ec61ce6fdc7706768726 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -855,6 +855,37 @@ pub(super) fn raw_history_items(history: &ContextManager) -> Vec<ResponseItem> {
@@ -2511,7 +2511,7 @@ index 7f3047ca9b5373458433dbcf3305bafe78b6b056..32fde8df6f5d2625aedcc54a69a0c1bb
      let previous_model = "forked-rollout-model";
      let previous_context_item = TurnContextItem {
          turn_id: Some(turn_context.sub_id.clone()),
-@@ -5600,19 +5719,87 @@ async fn attach_thread_persistence(session: &mut Session) -> PathBuf {
+@@ -5600,19 +5719,87 @@ pub(super) async fn attach_thread_persistence(session: &mut Session) -> PathBuf
      rollout_path
  }
 
@@ -4286,7 +4286,7 @@ index 183389eb55abe1da0aefbfea96bf8aa02ceb9771..2a161fbdbad83c50a7a2b61b7ac26e9e
      }
  }
 diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
-index b04d2448db40b1b67827f2bf5196e5838d5903e3..c72d442b3901c6167cfdf683acd8ae485846ea01 100644
+index ca415c779bd509c5cba431e02c15197f4b677773..5ca5a8638f59f8f580c6ae32d56d8c059bacb915 100644
 --- a/codex-rs/history/src/tests.rs
 +++ b/codex-rs/history/src/tests.rs
 @@ -3,6 +3,7 @@ use codex_protocol::models::ConfigurationReasoning;
@@ -4313,7 +4313,7 @@ index b04d2448db40b1b67827f2bf5196e5838d5903e3..c72d442b3901c6167cfdf683acd8ae48
      }))?;
 
      let restored: RolloutItem = serde_json::from_value(compacted_line.clone())?;
-@@ -707,6 +710,7 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
+@@ -740,6 +743,7 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
          window_id: Some("019b3f6e-7a10-7cc3-8b6e-1d09e2f7a001".to_string()),
          compaction_response_id: None,
          latest_token_usage_record: None,
@@ -4321,7 +4321,7 @@ index b04d2448db40b1b67827f2bf5196e5838d5903e3..c72d442b3901c6167cfdf683acd8ae48
      };
 
      assert_eq!(
-@@ -724,6 +728,54 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
+@@ -757,6 +761,54 @@ fn compacted_item_serializes_window_number_and_id() -> Result<()> {
      Ok(())
  }
 
@@ -4376,7 +4376,7 @@ index b04d2448db40b1b67827f2bf5196e5838d5903e3..c72d442b3901c6167cfdf683acd8ae48
  #[test]
  /// Keeps legacy numeric window IDs readable in stored compacted items.
  fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
-@@ -746,6 +798,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
+@@ -779,6 +831,7 @@ fn compacted_item_migrates_legacy_numeric_window_id() -> Result<()> {
              window_id: None,
              compaction_response_id: None,
              latest_token_usage_record: None,

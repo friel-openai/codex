@@ -12988,6 +12988,59 @@ index 0a491fed6dd8736de776637fef7897e1fa2edbdb..183389eb55abe1da0aefbfea96bf8aa0
              RolloutItemWire::ResponseItem { payload, metadata } => {
                  Self::ResponseItem(ResponseItemEnvelope {
                      item: payload.into_owned(),
+diff --git a/codex-rs/history/src/tests.rs b/codex-rs/history/src/tests.rs
+index b04d2448db40b1b67827f2bf5196e5838d5903e3..ca415c779bd509c5cba431e02c15197f4b677773 100644
+--- a/codex-rs/history/src/tests.rs
++++ b/codex-rs/history/src/tests.rs
+@@ -527,6 +527,13 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
+                 git: None,
+             },
+         }),
++        json!({
++            "type": "rollout_reference",
++            "payload": {
++                "rollout_path": "parent.jsonl",
++                "max_depth": 2,
++            },
++        }),
+         json!({
+             "type": "response_item",
+             "payload": response_message("user"),
+@@ -647,7 +654,33 @@ fn rollout_item_variants_preserve_existing_payload_shapes() -> Result<()> {
+ fn rollout_item_schema_matches_tagged_payload_and_sibling_metadata() -> Result<()> {
+     let schema = serde_json::to_value(schemars::schema_for!(RolloutItem))?;
+     let variants = schema["oneOf"].as_array().expect("rollout variants");
+-    assert_eq!(variants.len(), 12);
++    let mut variant_names = variants
++        .iter()
++        .map(|variant| {
++            variant["properties"]["type"]["enum"][0]
++                .as_str()
++                .expect("rollout variant name")
++        })
++        .collect::<Vec<_>>();
++    variant_names.sort_unstable();
++    assert_eq!(
++        variant_names,
++        [
++            "compacted",
++            "event_msg",
++            "inter_agent_communication",
++            "inter_agent_communication_metadata",
++            "realtime_item",
++            "response_item",
++            "retained_context",
++            "rollout_reference",
++            "security_risk_score",
++            "session_meta",
++            "token_usage_record",
++            "turn_context",
++            "world_state",
++        ]
++    );
+
+     for variant in variants {
+         let required = variant["required"].as_array().expect("required fields");
 diff --git a/codex-rs/memories/write/src/phase1.rs b/codex-rs/memories/write/src/phase1.rs
 index 1fa128c2f5d2eb96730553092992949079c2e725..1fe9bfa4c9c6b59325fa44a7b57e87f1b43e40bf 100644
 --- a/codex-rs/memories/write/src/phase1.rs
