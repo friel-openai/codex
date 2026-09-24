@@ -3,6 +3,8 @@ use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
 use crate::environment_selection::TurnEnvironmentState;
 use crate::session::handlers::submission_loop;
+use crate::session::session::SessionSettingsCommit;
+use crate::session::session::SessionSettingsUpdate;
 use crate::session::step_context::StepContext;
 use crate::session::step_context::StepInputs;
 use crate::session::step_settings::StepSettings;
@@ -37,6 +39,7 @@ use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::ServiceTier;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::openai_models::AutoReviewMessages;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
@@ -47,6 +50,9 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnEnvironmentSelections;
+use codex_utils_absolute_path::AbsolutePathBuf;
+use codex_utils_path_uri::PathUri;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -672,6 +678,10 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
         finish,
         ..
     } = activation_fixture(activation_models()).await;
+    let before_workspace = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture owner before workspace activation");
     {
         let mut state = session.state.lock().await;
         let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
@@ -680,6 +690,13 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
                 .collaboration_mode
                 .with_updates(Some(MODEL_B.to_string()), None, None);
     }
+    let directory = tempfile::tempdir().expect("workspace directory");
+    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
+    let commit = commit_workspace_for_activation(&session, &turn, &cwd).await;
+    session
+        .activate_workspace_environments(&turn, &commit.configuration)
+        .await
+        .expect("activate explicit workspace transition");
     let future = desired_step_settings(&session).await;
     let prepared = session
         .prepare_turn_context_replacement(&turn)
@@ -693,6 +710,20 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
         prepared.inputs.settings.selected()
     );
     assert_eq!(refreshed.model_info().slug, MODEL_A);
+    assert_eq!(
+        refreshed
+            .initial_environments
+            .single_local_environment()
+            .expect("refreshed workspace")
+            .cwd(),
+        &PathUri::from_abs_path(&cwd)
+    );
+    assert!(
+        !session
+            .try_replace_active_turn_context(&before_workspace, &refreshed)
+            .await
+            .expect("workspace activation invalidates previous preparation")
+    );
     assert!(
         session
             .try_replace_active_turn_context(&prepared, &refreshed)
@@ -712,6 +743,187 @@ async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {
             .session_configuration
             .step_settings,
     )
+}
+
+async fn commit_workspace_for_activation(
+    session: &Session,
+    turn: &TurnContext,
+    cwd: &AbsolutePathBuf,
+) -> SessionSettingsCommit {
+    let mut selection = turn
+        .initial_environments
+        .single_local_environment()
+        .expect("local workspace")
+        .selection();
+    selection.cwd = PathUri::from_abs_path(cwd);
+    selection.workspace_roots = vec![selection.cwd.clone()];
+    session
+        .update_settings(SessionSettingsUpdate {
+            environments: Some(TurnEnvironmentSelections::new(cwd.clone(), vec![selection])),
+            ..Default::default()
+        })
+        .await
+        .expect("commit workspace settings")
+}
+
+#[tokio::test]
+async fn workspace_environment_activation_preserves_latest_active_settings() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        ..
+    } = activation_fixture(activation_models()).await;
+    let directory = tempfile::tempdir().expect("workspace directory");
+    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
+    let captured = turn.next_step_input.load_full();
+    let commit = commit_workspace_for_activation(&session, &turn, &cwd).await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Detailed),
+                    ..Default::default()
+                },
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    let latest = turn.next_step_input.load_full();
+    let environments = session
+        .activate_workspace_environments(&turn, &commit.configuration)
+        .await
+        .expect("activate workspace for original task");
+    let published = turn.next_step_input.load_full();
+    assert!(Arc::ptr_eq(&published.settings, &latest.settings));
+    assert_eq!(
+        published.settings.reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    assert_eq!(
+        published.environments.to_selections(),
+        environments.to_selections()
+    );
+    assert_eq!(
+        environments
+            .single_local_environment()
+            .expect("ready workspace")
+            .cwd(),
+        &PathUri::from_abs_path(&cwd)
+    );
+    assert_eq!(
+        turn.initial_environments.to_selections(),
+        captured.environments.to_selections()
+    );
+    finish.notify_one();
+}
+
+/// A workspace result may arrive after its originating task stops owning the turn.
+#[derive(Clone, Copy)]
+enum WorkspaceActivationTaskChange {
+    Cancelled,
+    Replaced,
+}
+
+#[test_case(WorkspaceActivationTaskChange::Cancelled; "cancelled task")]
+#[test_case(WorkspaceActivationTaskChange::Replaced; "replaced task")]
+#[tokio::test]
+async fn workspace_environment_activation_rejects_an_unavailable_task(
+    change: WorkspaceActivationTaskChange,
+) {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        ..
+    } = activation_fixture(activation_models()).await;
+    let directory = tempfile::tempdir().expect("workspace directory");
+    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
+    let commit = commit_workspace_for_activation(&session, &turn, &cwd).await;
+    let original = turn.next_step_input.load_full();
+    let (cancellation, done) = {
+        let active = session.active_turn.lock().await;
+        let task = active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .expect("active task");
+        (task.cancellation_token.clone(), Arc::clone(&task.done))
+    };
+    let current_turn = match change {
+        WorkspaceActivationTaskChange::Cancelled => {
+            cancellation.cancel();
+            Arc::clone(&turn)
+        }
+        WorkspaceActivationTaskChange::Replaced => {
+            let completed = done.notified();
+            finish.notify_one();
+            timeout(Duration::from_secs(/*secs*/ 10), completed)
+                .await
+                .expect("original task completed");
+            let replacement = session
+                .new_turn_with_default_settings(
+                    "replacement-workspace-turn".to_string(),
+                    Default::default(),
+                )
+                .await;
+            session
+                .spawn_task(
+                    Arc::clone(&replacement),
+                    Vec::new(),
+                    HeldStepTask {
+                        kind: TaskKind::Compact,
+                        finish: Arc::new(Notify::new()),
+                    },
+                )
+                .await;
+            replacement
+        }
+    };
+    let current = current_turn.next_step_input.load_full();
+    let selections = session.services.turn_environments.selections();
+    let error = session
+        .activate_workspace_environments(&turn, &commit.configuration)
+        .await
+        .expect_err("cancelled or replaced task must not activate workspace settings");
+    assert!(matches!(error.details(), CodexErrorDetails::TurnAborted));
+    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
+    assert!(Arc::ptr_eq(
+        &current_turn.next_step_input.load_full(),
+        &current
+    ));
+    assert_eq!(session.services.turn_environments.selections(), selections);
+    session.abort_all_tasks(TurnAbortReason::Replaced).await;
+}
+
+#[tokio::test]
+async fn workspace_environment_activation_rejects_superseded_workspace_settings() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        ..
+    } = activation_fixture(activation_models()).await;
+    let first = tempfile::tempdir().expect("first workspace directory");
+    let first_cwd = AbsolutePathBuf::try_from(first.path()).expect("absolute workspace");
+    let commit = commit_workspace_for_activation(&session, &turn, &first_cwd).await;
+    let second = tempfile::tempdir().expect("second workspace directory");
+    let second_cwd = AbsolutePathBuf::try_from(second.path()).expect("absolute workspace");
+    commit_workspace_for_activation(&session, &turn, &second_cwd).await;
+    let original = turn.next_step_input.load_full();
+    let selections = session.services.turn_environments.selections();
+    let error = session
+        .activate_workspace_environments(&turn, &commit.configuration)
+        .await
+        .expect_err("superseded workspace settings must not activate");
+    assert!(matches!(
+        error.details(),
+        CodexErrorDetails::InvalidRequest(message)
+            if message == "workspace settings changed while preparing the transition"
+    ));
+    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &original));
+    assert_eq!(session.services.turn_environments.selections(), selections);
+    finish.notify_one();
 }
 
 fn settings_submission(

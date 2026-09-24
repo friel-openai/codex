@@ -128,7 +128,7 @@ impl App {
                 self.refresh_in_memory_config_from_disk_best_effort("closing the session picker")
                     .await;
             }
-            SessionSelection::Fork(_) => {}
+            SessionSelection::Fork(_) | SessionSelection::Side(_) => {}
         }
 
         self.chat_widget.maybe_send_next_queued_input();
