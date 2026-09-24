@@ -30,6 +30,41 @@ use crate::read_session_meta_line;
 use crate::search_rollout_matches;
 
 #[tokio::test]
+async fn full_scan_capacity_preserves_plain_and_compressed_records() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let plain = home.path().join("history.jsonl");
+    let compressed = home.path().join("compressed.jsonl.zst");
+    let large = "x".repeat(300 * 1024);
+    let bytes = format!("first\r\n{large}\n\npartial").into_bytes();
+    fs::write(&plain, &bytes)?;
+    fs::write(
+        &compressed,
+        zstd::stream::encode_all(bytes.as_slice(), /*level*/ 1)?,
+    )?;
+    for path in [&plain, &compressed] {
+        let mut reader =
+            open_rollout_line_reader_with_capacity(path, /*capacity*/ 256 * 1024).await?;
+        let mut lines = Vec::new();
+        while let Some(line) = reader.next_line().await? {
+            lines.push(line);
+        }
+        assert_eq!(
+            lines,
+            vec![
+                "first".to_string(),
+                large.clone(),
+                String::new(),
+                "partial".to_string()
+            ]
+        );
+        assert!(
+            matches!(open_rollout_line_reader_with_capacity(path, /*capacity*/ 0).await, Err(error) if error.kind() == std::io::ErrorKind::InvalidInput)
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn load_rollout_items_reads_compressed_rollout() -> anyhow::Result<()> {
     let home = TempDir::new()?;
     let uuid = Uuid::from_u128(1);
@@ -772,6 +807,30 @@ fn set_history_base(path: &std::path::Path, history_base: HistoryPosition) -> an
     Ok(())
 }
 
+fn write_paginated_rollout(
+    path: &std::path::Path,
+    thread_id: ThreadId,
+    message: &str,
+    initial_ordinal: u64,
+) -> anyhow::Result<()> {
+    write_rollout(path, thread_id, message)?;
+    let contents = fs::read_to_string(path)?;
+    let records = contents
+        .lines()
+        .enumerate()
+        .map(|(index, line)| {
+            let mut record = crate::parse_rollout_line(line)?;
+            record.ordinal = Some(initial_ordinal + index as u64);
+            if let RolloutItem::SessionMeta(meta) = &mut record.item {
+                meta.meta.history_mode = codex_protocol::protocol::ThreadHistoryMode::Paginated;
+            }
+            serde_json::to_string(&record)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    fs::write(path, format!("{}\n", records.join("\n")))?;
+    Ok(())
+}
+
 fn compress_now(path: &std::path::Path) -> anyhow::Result<()> {
     let compressed_path = compressed_rollout_path(path);
     let input = fs::File::open(path)?;
@@ -818,5 +877,130 @@ async fn worker_compresses_parallel_cold_candidates_without_skipping_other_publi
         .map(|path| (path.exists(), compressed_rollout_path(path).exists()))
         .collect::<Vec<_>>();
     assert_eq!(representations, vec![(false, true); paths.len()]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn worker_preserves_rollout_owned_by_a_thread_writer() -> anyhow::Result<()> {
+    let home = TempDir::new()?;
+    let uuid = Uuid::from_u128(27);
+    let thread_id = ThreadId::from_string(&uuid.to_string())?;
+    let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+    write_rollout(&path, thread_id, "reserved writer")?;
+    set_old_mtime(&path)?;
+    let original = fs::read(&path)?;
+    let writers = std::sync::Arc::new(crate::WriterLockCoordinator::new(home.path()));
+    let guard = writers.acquire(thread_id)?;
+
+    worker::run(home.path().to_path_buf(), Startup).await?;
+
+    assert_eq!(fs::read(&path)?, original);
+    assert!(!compressed_rollout_path(&path).exists());
+    drop(guard);
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_access_interrupts_compression_without_losing_appends() -> anyhow::Result<()> {
+    for abort_worker in [false, true] {
+        let home = TempDir::new()?;
+        let uuid = Uuid::from_u128(28);
+        let thread_id = ThreadId::from_string(&uuid.to_string())?;
+        let path = rollout_path(home.path(), "2025-01-03T12-00-00", uuid);
+        write_paginated_rollout(&path, thread_id, "before compression", 0)?;
+        set_old_mtime(&path)?;
+        let original = fs::read(&path)?;
+        let (started, resume) = worker::pause_encoding(&path);
+        let mut compression = Some(tokio::spawn(worker::run(
+            home.path().to_path_buf(),
+            Startup,
+        )));
+        tokio::task::spawn_blocking(move || started.recv_timeout(Duration::from_secs(5))).await??;
+        let reader_home = home.path().to_path_buf();
+        let reader = tokio::spawn(async move {
+            crate::acquire_rollout_maintenance_read_lock(&reader_home).await
+        });
+        let migration_home = home.path().to_path_buf();
+        let migration = tokio::spawn(async move {
+            crate::acquire_rollout_maintenance_job_lock(&migration_home).await
+        });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !crate::maintenance::foreground_maintenance_waiting(home.path())? {
+                tokio::task::yield_now().await;
+            }
+            Ok::<_, std::io::Error>(())
+        })
+        .await??;
+        if abort_worker {
+            let compression = compression.take().expect("running compression");
+            compression.abort();
+            assert!(compression.await.unwrap_err().is_cancelled());
+            assert!(crate::try_acquire_rollout_maintenance_lock(home.path())?.is_none());
+        }
+        resume.send(())?;
+        let reader = tokio::time::timeout(Duration::from_secs(2), reader).await???;
+        let migration = tokio::time::timeout(Duration::from_secs(2), migration).await???;
+        if let Some(compression) = compression {
+            compression.await??;
+        }
+        assert_eq!(fs::read(&path)?, original);
+        assert!(!compressed_rollout_path(&path).exists());
+        assert!(!home.path().join(".tmp/rollout-compression.lock").exists());
+        let writers = std::sync::Arc::new(crate::WriterLockCoordinator::new(home.path()));
+        let writer = writers.acquire(thread_id)?;
+        let appended = RolloutItem::EventMsg(EventMsg::UserMessage(UserMessageEvent {
+            message: "after interrupted compression".to_string(),
+            ..Default::default()
+        }));
+        append_rollout_item_to_path(&path, &appended).await?;
+        drop(writer);
+        drop(reader);
+        drop(migration);
+
+        // Referenced rollouts may be compressed, but native history_base must still expose
+        // the append accepted after foreground work interrupted the previous encoding.
+        let child_uuid = Uuid::from_u128(29);
+        let child_id = ThreadId::from_string(&child_uuid.to_string())?;
+        let child = archived_rollout_path(home.path(), "2025-01-03T12-00-01", child_uuid);
+        write_paginated_rollout(&child, child_id, "new reference", 3)?;
+        set_history_base(
+            &child,
+            HistoryPosition {
+                thread_id,
+                end_ordinal_exclusive: 3,
+                end_byte_offset: fs::metadata(&path)?.len(),
+            },
+        )?;
+        set_old_mtime(&path)?;
+        worker::run(home.path().to_path_buf(), Startup).await?;
+        assert!(!path.exists());
+        assert!(compressed_rollout_path(&path).exists());
+        let (items, loaded_id, parse_errors) = RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(loaded_id, Some(thread_id));
+        assert_eq!(parse_errors, 0);
+        assert_eq!(
+            serde_json::to_value(items.last())?,
+            serde_json::to_value(Some(&appended))?
+        );
+        let materialized = crate::materialize_rollout_items(home.path(), &child).await?;
+        let messages = materialized
+            .iter()
+            .filter_map(|item| match item {
+                RolloutItem::EventMsg(EventMsg::UserMessage(message)) => {
+                    Some(message.message.as_str())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            messages,
+            vec![
+                "before compression",
+                "after interrupted compression",
+                "new reference"
+            ]
+        );
+        assert!(!path.exists());
+    }
     Ok(())
 }

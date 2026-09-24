@@ -2486,6 +2486,7 @@ impl FromStr for RateLimitReachedType {
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
 pub struct RateLimitWindow {
     /// Percentage (0-100) of the window that has been consumed.
+    #[serde(deserialize_with = "deserialize_rate_limit_used_percent")]
     pub used_percent: f64,
     /// Rolling window duration, in minutes.
     #[ts(type = "number | null")]
@@ -2493,6 +2494,18 @@ pub struct RateLimitWindow {
     /// Unix timestamp (seconds since epoch) when the window resets.
     #[ts(type = "number | null")]
     pub resets_at: Option<i64>,
+}
+
+fn deserialize_rate_limit_used_percent<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Tagged event buffering represents arbitrary-precision numbers as Serde's private map,
+    // including valid spellings such as 12.50 and 1.25e1. Number accepts both representations;
+    // decoding directly as f64 rejects the map even after the outer rollout became a Value.
+    serde_json::Number::deserialize(deserializer)?
+        .as_f64()
+        .ok_or_else(|| D::Error::custom("rate-limit used_percent must be a finite f64"))
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, JsonSchema, TS)]
@@ -3665,6 +3678,7 @@ pub struct ReviewOutputEvent {
     pub findings: Vec<ReviewFinding>,
     pub overall_correctness: String,
     pub overall_explanation: String,
+    #[serde(deserialize_with = "deserialize_review_confidence")]
     pub overall_confidence_score: f32,
 }
 
@@ -3684,9 +3698,23 @@ impl Default for ReviewOutputEvent {
 pub struct ReviewFinding {
     pub title: String,
     pub body: String,
+    #[serde(deserialize_with = "deserialize_review_confidence")]
     pub confidence_score: f32,
     pub priority: i32,
     pub code_location: ReviewCodeLocation,
+}
+
+fn deserialize_review_confidence<'de, D>(deserializer: D) -> Result<f32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    // Review outputs are also nested in tagged rollout events. Number accepts the private
+    // arbitrary-precision representation that direct f32 deserialization rejects.
+    serde_json::Number::deserialize(deserializer)?
+        .as_f64()
+        .map(|value| value as f32)
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| D::Error::custom("review confidence must be a finite f32"))
 }
 
 /// Location of the code related to a review finding.
