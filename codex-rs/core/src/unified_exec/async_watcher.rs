@@ -22,6 +22,7 @@ use crate::tools::events::ToolEventFailure;
 use crate::tools::events::ToolEventStage;
 use crate::unified_exec::head_tail_buffer::HeadTailBuffer;
 use codex_core_plugins::PluginCommandAttribution;
+use codex_network_proxy::EnvironmentProxyLease;
 use codex_protocol::exec_output::ExecToolCallOutput;
 use codex_protocol::exec_output::StreamOutput;
 use codex_protocol::openai_models::ModelInfo;
@@ -174,6 +175,7 @@ pub(crate) fn spawn_exit_watcher(
     started_at: Instant,
     network_denial_monitor: Option<tokio::task::JoinHandle<()>>,
     plugin_metrics_sidecar: Option<SharedPluginMetricsSidecar>,
+    environment_proxy_lease: Option<EnvironmentProxyLease>,
 ) {
     let session_ref = Arc::clone(&context.session);
     let turn_ref = Arc::clone(&context.step_context.turn);
@@ -185,6 +187,8 @@ pub(crate) fn spawn_exit_watcher(
     let interaction_lock = process.interaction_lock();
 
     tokio::spawn(async move {
+        // Retain the listener ownership token until the command reaches its terminal state.
+        let _environment_proxy_lease = environment_proxy_lease;
         exit_token.cancelled().await;
         output_drained.notified().await;
         // Deferred network denial deliberately remains observable for a short

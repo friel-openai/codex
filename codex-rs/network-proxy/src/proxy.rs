@@ -39,6 +39,12 @@ use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::Weak;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+use std::time::Duration;
+use tokio::task::JoinHandle;
 use tracing::warn;
 
 use self::execution_scope::ExecutionScope;
@@ -47,6 +53,12 @@ use self::execution_scope::ExecutionScope;
 const WINDOWS_MANAGED_HTTP_PROXY_PORTS: RangeInclusive<u16> = 3128..=3159;
 #[cfg(target_os = "windows")]
 const WINDOWS_MANAGED_SOCKS_PROXY_PORTS: RangeInclusive<u16> = 8081..=8112;
+
+/// How long an unused environment proxy remains available for command reuse.
+///
+/// This interval affects only listener reuse and idle file-descriptor residency. A live command
+/// owns a lease and cannot be retired, regardless of how long the command runs.
+const DEFAULT_ENVIRONMENT_PROXY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Parser)]
 #[command(name = "codex-network-proxy", about = "Codex network sandbox proxy")]
@@ -144,6 +156,7 @@ pub struct NetworkProxyBuilder {
     managed_proxy_routing: ManagedProxyRouting,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     blocked_request_observer: Option<Arc<dyn BlockedRequestObserver>>,
+    environment_proxy_idle_timeout: Duration,
 }
 
 impl Default for NetworkProxyBuilder {
@@ -156,6 +169,7 @@ impl Default for NetworkProxyBuilder {
             managed_proxy_routing: ManagedProxyRouting::default(),
             policy_decider: None,
             blocked_request_observer: None,
+            environment_proxy_idle_timeout: DEFAULT_ENVIRONMENT_PROXY_IDLE_TIMEOUT,
         }
     }
 }
@@ -212,6 +226,12 @@ impl NetworkProxyBuilder {
         observer: Arc<dyn BlockedRequestObserver>,
     ) -> Self {
         self.blocked_request_observer = Some(observer);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn environment_proxy_idle_timeout(mut self, idle_timeout: Duration) -> Self {
+        self.environment_proxy_idle_timeout = idle_timeout;
         self
     }
 
@@ -323,6 +343,7 @@ impl NetworkProxyBuilder {
             managed_proxy_routing: self.managed_proxy_routing,
             policy_decider: self.policy_decider,
             environment_proxies: Arc::new(Mutex::new(HashMap::new())),
+            environment_proxy_idle_timeout: self.environment_proxy_idle_timeout,
             execution_scope: None,
             #[cfg(target_os = "windows")]
             windows_runtime,
@@ -499,11 +520,147 @@ pub struct PreparedManagedNetwork {
     pub env: HashMap<String, String>,
     /// Matching portable sandbox inputs for the command environment.
     pub sandbox_context: ManagedNetworkSandboxContext,
+    /// Keeps this environment's proxy listeners alive until the command exits.
+    pub environment_proxy_lease: Option<EnvironmentProxyLease>,
 }
 
 struct EnvironmentProxy {
     addrs: EnvironmentProxyAddrs,
     runtime: ProxyRuntime,
+    lease_state: Arc<EnvironmentProxyLeaseState>,
+}
+
+/// Ownership token for one command's use of environment-specific proxy listeners.
+///
+/// Cloning the token acquires another owner and cancels pending idle retirement. Dropping the last
+/// token starts the reuse interval; it does not close listeners used by another command.
+pub struct EnvironmentProxyLease {
+    state: Arc<EnvironmentProxyLeaseState>,
+}
+
+impl Clone for EnvironmentProxyLease {
+    fn clone(&self) -> Self {
+        self.state.acquire();
+        Self {
+            state: Arc::clone(&self.state),
+        }
+    }
+}
+
+impl std::fmt::Debug for EnvironmentProxyLease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EnvironmentProxyLease")
+            .field("environment_id", &self.state.environment_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for EnvironmentProxyLease {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl Eq for EnvironmentProxyLease {}
+
+impl Drop for EnvironmentProxyLease {
+    fn drop(&mut self) {
+        self.state.release();
+    }
+}
+
+/// Counts execution owners and rejects retirement timers superseded by later reuse.
+struct EnvironmentProxyLeaseState {
+    /// Cache key for the listener pair owned by this state.
+    environment_id: String,
+    /// Weak reference avoids a cycle between the cache and each cached entry.
+    environment_proxies: Weak<Mutex<HashMap<String, EnvironmentProxy>>>,
+    /// Runtime used to retire listeners even when the last lease drops synchronously.
+    runtime: tokio::runtime::Handle,
+    idle_timeout: Duration,
+    active_leases: AtomicUsize,
+    generation: AtomicU64,
+    /// At most one retirement timer exists for an environment proxy.
+    idle_task: Mutex<Option<JoinHandle<()>>>,
+}
+
+impl EnvironmentProxyLeaseState {
+    fn acquire(&self) {
+        self.generation.fetch_add(1, Ordering::AcqRel);
+        self.active_leases.fetch_add(1, Ordering::AcqRel);
+        if let Some(task) = self
+            .idle_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            task.abort();
+        }
+    }
+
+    fn lease(self: &Arc<Self>) -> EnvironmentProxyLease {
+        self.acquire();
+        EnvironmentProxyLease {
+            state: Arc::clone(self),
+        }
+    }
+
+    fn release(self: &Arc<Self>) {
+        let previous = self.active_leases.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "environment proxy lease count underflow");
+        if previous != 1 {
+            return;
+        }
+
+        // A distinct generation for every transition to idle prevents an older timer from
+        // shortening the reuse interval after a concurrent acquire/release pair.
+        let generation = self.generation.fetch_add(1, Ordering::AcqRel) + 1;
+        let state = Arc::downgrade(self);
+        let idle_timeout = self.idle_timeout;
+        let task = self.runtime.spawn(async move {
+            tokio::time::sleep(idle_timeout).await;
+            if let Some(state) = state.upgrade() {
+                state.retire_if_idle(generation).await;
+            }
+        });
+        let mut idle_task = self
+            .idle_task
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.active_leases.load(Ordering::Acquire) != 0
+            || self.generation.load(Ordering::Acquire) != generation
+        {
+            task.abort();
+            return;
+        }
+        if let Some(previous) = idle_task.replace(task) {
+            previous.abort();
+        }
+    }
+
+    async fn retire_if_idle(self: &Arc<Self>, generation: u64) {
+        let Some(environment_proxies) = self.environment_proxies.upgrade() else {
+            return;
+        };
+        let retired = {
+            let mut proxies = environment_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let is_current_and_idle = proxies.get(&self.environment_id).is_some_and(|proxy| {
+                Arc::ptr_eq(&proxy.lease_state, self)
+                    && self.active_leases.load(Ordering::Acquire) == 0
+                    && self.generation.load(Ordering::Acquire) == generation
+            });
+            is_current_and_idle
+                .then(|| proxies.remove(&self.environment_id))
+                .flatten()
+        };
+        if let Some(proxy) = retired
+            && let Some(listeners) = proxy.runtime.stop()
+        {
+            listeners.shutdown().await;
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -570,6 +727,7 @@ pub struct NetworkProxy {
     managed_proxy_routing: ManagedProxyRouting,
     policy_decider: Option<Arc<dyn NetworkPolicyDecider>>,
     environment_proxies: Arc<Mutex<HashMap<String, EnvironmentProxy>>>,
+    environment_proxy_idle_timeout: Duration,
     execution_scope: Option<Arc<ExecutionScope>>,
     #[cfg(target_os = "windows")]
     windows_runtime: Option<Arc<WindowsSharedProxyRuntime>>,
@@ -1100,6 +1258,7 @@ impl NetworkProxy {
         &self,
         mut env: HashMap<String, String>,
         addrs: EnvironmentProxyAddrs,
+        environment_proxy_lease: Option<EnvironmentProxyLease>,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
         client: EnvironmentProxyClient,
         environment_id: Option<&str>,
@@ -1179,6 +1338,7 @@ impl NetworkProxy {
                 dangerously_allow_all_unix_sockets: runtime_settings
                     .dangerously_allow_all_unix_sockets,
             },
+            environment_proxy_lease,
         }
     }
 
@@ -1191,6 +1351,7 @@ impl NetworkProxy {
         let prepared = self.prepare_for_addrs(
             std::mem::take(env),
             addrs,
+            /*environment_proxy_lease*/ None,
             EnvironmentProxyClient::SandboxedProcess,
             environment_id,
         );
@@ -1316,23 +1477,25 @@ impl NetworkProxy {
         &self,
         env: &mut HashMap<String, String>,
         environment_id: &str,
-    ) -> Result<()> {
-        let addrs =
+    ) -> Result<EnvironmentProxyLease> {
+        let (addrs, lease) =
             self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::SandboxedProcess)?;
         self.apply_to_env_for_addrs(env, addrs, Some(environment_id));
-        Ok(())
+        Ok(lease)
     }
 
     pub fn apply_to_env_for_optional_environment(
         &self,
         env: &mut HashMap<String, String>,
         environment_id: Option<&str>,
-    ) -> Result<()> {
+    ) -> Result<Option<EnvironmentProxyLease>> {
         match environment_id {
-            Some(environment_id) => self.apply_to_env_for_environment(env, environment_id),
+            Some(environment_id) => self
+                .apply_to_env_for_environment(env, environment_id)
+                .map(Some),
             None => {
                 self.apply_to_env(env);
-                Ok(())
+                Ok(None)
             }
         }
     }
@@ -1344,19 +1507,26 @@ impl NetworkProxy {
         env: HashMap<String, String>,
         environment_id: Option<&str>,
     ) -> Result<PreparedManagedNetwork> {
-        let addrs = match environment_id {
-            Some(environment_id) => self.environment_proxy_addrs(
-                environment_id,
-                EnvironmentProxyClient::SandboxedProcess,
-            )?,
-            None => EnvironmentProxyAddrs {
-                http_addr: self.http_addr,
-                socks_addr: self.socks_addr,
-            },
+        let (addrs, lease) = match environment_id {
+            Some(environment_id) => {
+                let (addrs, lease) = self.environment_proxy_addrs(
+                    environment_id,
+                    EnvironmentProxyClient::SandboxedProcess,
+                )?;
+                (addrs, Some(lease))
+            }
+            None => (
+                EnvironmentProxyAddrs {
+                    http_addr: self.http_addr,
+                    socks_addr: self.socks_addr,
+                },
+                None,
+            ),
         };
         Ok(self.prepare_for_addrs(
             env,
             addrs,
+            lease,
             EnvironmentProxyClient::SandboxedProcess,
             environment_id,
         ))
@@ -1369,11 +1539,12 @@ impl NetworkProxy {
         env: HashMap<String, String>,
         environment_id: &str,
     ) -> Result<PreparedManagedNetwork> {
-        let addrs =
+        let (addrs, lease) =
             self.environment_proxy_addrs(environment_id, EnvironmentProxyClient::TrustedBridge)?;
         Ok(self.prepare_for_addrs(
             env,
             addrs,
+            Some(lease),
             EnvironmentProxyClient::TrustedBridge,
             Some(environment_id),
         ))
@@ -1384,7 +1555,7 @@ impl NetworkProxy {
         environment_id: &str,
         #[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
         client: EnvironmentProxyClient,
-    ) -> Result<EnvironmentProxyAddrs> {
+    ) -> Result<(EnvironmentProxyAddrs, EnvironmentProxyLease)> {
         if let Some(execution_scope) = self.execution_scope.as_ref() {
             anyhow::ensure!(
                 execution_scope.environment_id == environment_id,
@@ -1410,8 +1581,12 @@ impl NetworkProxy {
                 ),
                 "network proxy for environment `{environment_id}` was prepared for a different client type"
             );
-            return Ok(proxy.addrs);
+            return Ok((proxy.addrs, proxy.lease_state.lease()));
         }
+
+        let runtime = tokio::runtime::Handle::try_current().with_context(|| {
+            format!("failed to create network proxy for environment `{environment_id}`")
+        })?;
 
         #[cfg(target_os = "windows")]
         if client == EnvironmentProxyClient::SandboxedProcess
@@ -1444,19 +1619,27 @@ impl NetworkProxy {
                 http_addr: self.http_addr,
                 socks_addr: self.socks_addr,
             };
+            let lease_state = Arc::new(EnvironmentProxyLeaseState {
+                environment_id: environment_id.clone(),
+                environment_proxies: Arc::downgrade(&self.environment_proxies),
+                runtime,
+                idle_timeout: self.environment_proxy_idle_timeout,
+                active_leases: AtomicUsize::new(0),
+                generation: AtomicU64::new(0),
+                idle_task: Mutex::new(None),
+            });
+            let lease = lease_state.lease();
             proxies.insert(
                 environment_id,
                 EnvironmentProxy {
                     addrs,
                     runtime: ProxyRuntime::SharedIngress { route },
+                    lease_state,
                 },
             );
-            return Ok(addrs);
+            return Ok((addrs, lease));
         }
 
-        tokio::runtime::Handle::try_current().with_context(|| {
-            format!("failed to create network proxy for environment `{environment_id}`")
-        })?;
         let listeners =
             reserve_loopback_ephemeral_listeners(self.socks_enabled).with_context(|| {
                 format!("failed to reserve network proxy for environment `{environment_id}`")
@@ -1478,6 +1661,16 @@ impl NetworkProxy {
 
         let mut listeners = ProxyListeners::new();
         let environment_id = environment_id.to_string();
+        let lease_state = Arc::new(EnvironmentProxyLeaseState {
+            environment_id: environment_id.clone(),
+            environment_proxies: Arc::downgrade(&self.environment_proxies),
+            runtime,
+            idle_timeout: self.environment_proxy_idle_timeout,
+            active_leases: AtomicUsize::new(0),
+            generation: AtomicU64::new(0),
+            idle_task: Mutex::new(None),
+        });
+        let lease = lease_state.lease();
         let http_state = self.state.clone();
         let http_decider = self.policy_decider.clone();
         let http_environment_id = Some(environment_id.clone());
@@ -1517,9 +1710,10 @@ impl NetworkProxy {
             EnvironmentProxy {
                 addrs,
                 runtime: ProxyRuntime::Listeners(listeners),
+                lease_state,
             },
         );
-        Ok(addrs)
+        Ok((addrs, lease))
     }
 
     pub async fn replace_config_state(&self, new_state: ConfigState) -> Result<()> {
@@ -2338,6 +2532,237 @@ mod tests {
         let mut legacy_env = base_env;
         proxy.apply_to_env_for_environment(&mut legacy_env, "local")?;
         assert_eq!(legacy_env, local.env);
+
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn active_environment_proxy_lease_prevents_idle_retirement() -> Result<()> {
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
+            enabled: true,
+            ..NetworkProxyConfig::default()
+        }));
+        let proxy = NetworkProxy::builder()
+            .state(state)
+            .environment_proxy_idle_timeout(Duration::from_millis(25))
+            .build()
+            .await?;
+        let handle = proxy.run().await?;
+
+        let prepared =
+            proxy.prepare_for_optional_environment(HashMap::new(), Some("active-environment"))?;
+        let http_addr = prepared
+            .env
+            .get("HTTP_PROXY")
+            .and_then(|value| value.strip_prefix("http://"))
+            .context("missing HTTP proxy URL")?
+            .parse::<SocketAddr>()?;
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            proxy
+                .environment_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
+        tokio::net::TcpStream::connect(http_addr).await?;
+
+        drop(prepared);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if proxy
+                    .environment_proxies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while tokio::net::TcpStream::connect(http_addr).await.is_ok() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn environment_proxy_reuse_refreshes_idle_retirement() -> Result<()> {
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
+            enabled: true,
+            ..NetworkProxyConfig::default()
+        }));
+        let proxy = NetworkProxy::builder()
+            .state(state)
+            .environment_proxy_idle_timeout(Duration::from_millis(80))
+            .build()
+            .await?;
+        let handle = proxy.run().await?;
+
+        let first = proxy.prepare_for_optional_environment(HashMap::new(), Some("reused"))?;
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let second = proxy.prepare_for_optional_environment(HashMap::new(), Some("reused"))?;
+        drop(second);
+
+        tokio::time::sleep(Duration::from_millis(45)).await;
+        assert_eq!(
+            proxy
+                .environment_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "the first idle timer must not retire a reused environment proxy"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if proxy
+                    .environment_proxies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn idle_environment_proxies_release_all_listener_pairs() -> Result<()> {
+        const ENVIRONMENT_COUNT: usize = 128;
+
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
+            enabled: true,
+            ..NetworkProxyConfig::default()
+        }));
+        let proxy = NetworkProxy::builder()
+            .state(state)
+            .environment_proxy_idle_timeout(Duration::from_millis(25))
+            .build()
+            .await?;
+        let handle = proxy.run().await?;
+        let mut prepared = Vec::with_capacity(ENVIRONMENT_COUNT);
+        let mut http_addrs = Vec::with_capacity(ENVIRONMENT_COUNT);
+        for index in 0..ENVIRONMENT_COUNT {
+            let environment = proxy.prepare_for_optional_environment(
+                HashMap::new(),
+                Some(&format!("environment-{index}")),
+            )?;
+            http_addrs.push(
+                environment
+                    .env
+                    .get("HTTP_PROXY")
+                    .and_then(|value| value.strip_prefix("http://"))
+                    .context("missing HTTP proxy URL")?
+                    .parse::<SocketAddr>()?,
+            );
+            prepared.push(environment);
+        }
+        assert_eq!(
+            proxy
+                .environment_proxies
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            ENVIRONMENT_COUNT
+        );
+
+        drop(prepared);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if proxy
+                    .environment_proxies
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let mut listening = false;
+                for addr in &http_addrs {
+                    if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                        listening = true;
+                    }
+                }
+                if !listening {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await?;
+
+        handle.shutdown().await?;
+        Ok(())
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn released_environment_batches_do_not_accumulate_listeners() -> Result<()> {
+        const BATCH_COUNT: usize = 8;
+        const ENVIRONMENTS_PER_BATCH: usize = 48;
+
+        let state = Arc::new(network_proxy_state_for_policy(NetworkProxyConfig {
+            enabled: true,
+            ..NetworkProxyConfig::default()
+        }));
+        let proxy = NetworkProxy::builder()
+            .state(state)
+            .environment_proxy_idle_timeout(Duration::from_millis(10))
+            .build()
+            .await?;
+        let handle = proxy.run().await?;
+
+        for batch in 0..BATCH_COUNT {
+            let mut prepared = Vec::with_capacity(ENVIRONMENTS_PER_BATCH);
+            for index in 0..ENVIRONMENTS_PER_BATCH {
+                prepared.push(proxy.prepare_for_optional_environment(
+                    HashMap::new(),
+                    Some(&format!("batch-{batch}-environment-{index}")),
+                )?);
+            }
+            drop(prepared);
+            tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    if proxy
+                        .environment_proxies
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .is_empty()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await?;
+        }
 
         handle.shutdown().await?;
         Ok(())
