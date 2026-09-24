@@ -288,6 +288,8 @@ impl FreezeRolloutSegmentParams {
 pub struct FrozenRolloutSegment {
     /// Reference to the immutable source prefix.
     pub reference: RolloutReferenceItem,
+    /// Native upstream pointer to the same immutable prefix for paginated history.
+    pub history_base: Option<HistoryPosition>,
     /// Canonical metadata line copied from the source segment before it was frozen.
     pub source_session_meta: SessionMetaLine,
     /// Persisted history mode inherited by continuations and full-history forks.
@@ -364,10 +366,16 @@ pub struct RevertThreadParams {
 pub struct PreparedFork {
     /// Immediate source thread, even when the normalized history base names an ancestor.
     pub source_thread_id: ThreadId,
+    /// Exclusive ordinal selected in the source before normalizing a boundary into its ancestor.
+    /// Context-only forks retain this cutoff even when they do not freeze a source segment.
+    pub source_end_ordinal_exclusive: u64,
     /// Compatibility position selected while normalizing the paginated lineage.
     pub history_base: Option<HistoryPosition>,
-    /// Canonical immutable rollout prefix inherited by the child.
-    pub frozen_segment: FrozenRolloutSegment,
+    /// Canonical immutable rollout prefix inherited by a durable child.
+    ///
+    /// Context-only ephemeral forks do not persist a child rollout, so they retain the bounded
+    /// model context instead of freezing the source rollout.
+    pub frozen_segment: Option<FrozenRolloutSegment>,
     /// Bounded model context selected by the requested fork boundary.
     pub model_context: Arc<Vec<RolloutItem>>,
     /// Latest source context used for settings that follow the source thread rather than the
@@ -405,8 +413,9 @@ impl PreparedFork {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         source_thread_id: ThreadId,
+        source_end_ordinal_exclusive: u64,
         history_base: Option<HistoryPosition>,
-        frozen_segment: FrozenRolloutSegment,
+        frozen_segment: Option<FrozenRolloutSegment>,
         model_context: Arc<Vec<RolloutItem>>,
         latest_model_context: Arc<Vec<RolloutItem>>,
         response_history: Arc<Vec<RolloutItem>>,
@@ -415,6 +424,7 @@ impl PreparedFork {
     ) -> Self {
         Self {
             source_thread_id,
+            source_end_ordinal_exclusive,
             history_base,
             frozen_segment,
             model_context,

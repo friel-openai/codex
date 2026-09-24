@@ -12,6 +12,7 @@ mod model_context;
 mod move_thread_to_section;
 mod paginated_fork;
 mod pending_thread_metadata;
+mod projection_rebuild;
 mod projects;
 mod read_thread;
 mod revert_thread;
@@ -42,6 +43,7 @@ mod pending_thread_metadata_tests;
 mod test_support;
 
 use codex_app_server_protocol::ThreadHistoryBuilder;
+use codex_protocol::RolloutId;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
@@ -51,11 +53,13 @@ use codex_rollout::StateDbHandle;
 use codex_rollout::WriterLockCoordinator;
 use codex_state::SqliteConfig;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
 use tokio::sync::OwnedMutexGuard;
@@ -131,11 +135,21 @@ use crate::UpdateProjectParams;
 use crate::UpdateThreadMetadataParams;
 use crate::UpdatedProject;
 
+pub use rollout_migration::RolloutMigrationAdditionalFreeSpace;
 pub use rollout_migration::RolloutMigrationFailureReason;
+pub use rollout_migration::RolloutMigrationHistoryBaseDependency;
+pub use rollout_migration::RolloutMigrationLineagePredecessor;
+pub use rollout_migration::RolloutMigrationLineageSource;
+pub use rollout_migration::RolloutMigrationLineageTarget;
+pub use rollout_migration::RolloutMigrationManifest;
+pub use rollout_migration::RolloutMigrationManifestKind;
 pub use rollout_migration::RolloutMigrationMode;
 pub use rollout_migration::RolloutMigrationOptions;
 pub use rollout_migration::RolloutMigrationOutcome;
 pub use rollout_migration::RolloutMigrationProgress;
+pub use rollout_migration::RolloutMigrationPublicationPhase;
+pub use rollout_migration::RolloutMigrationReferenceBoundary;
+pub use rollout_migration::RolloutMigrationReferenceDependency;
 pub use rollout_migration::RolloutMigrationReport;
 pub use rollout_migration::RolloutMigrationStatus;
 
@@ -162,6 +176,8 @@ pub struct LocalThreadStore {
     state_db: Option<StateDbHandle>,
     thread_history_db: Arc<OnceCell<sqlx::SqlitePool>>,
     thread_data_cleanup: Option<Arc<ThreadDataCleanup>>,
+    projection_rebuilds: Arc<StdMutex<HashSet<ThreadId>>>,
+    projection_rebuild_schedules: Arc<StdMutex<projection_rebuild::ScheduledProjectionRebuilds>>,
 }
 
 type ThreadDataCleanup = dyn Fn(Vec<ThreadId>) -> ThreadStoreFuture<'static, ()> + Send + Sync;
@@ -209,10 +225,12 @@ struct LiveRecorderRecovery {
 /// Callers acquire the in-process mutexes first and the cross-process writer locks second, both in
 /// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
 /// entry supplies that half of the reservation until the in-process mutex is released.
+/// Publication tasks clone the reservation so cancellation cannot release either lock early.
+#[derive(Clone)]
 struct RolloutWriterReservation {
     store_identity: usize,
     thread_ids: Vec<ThreadId>,
-    _in_process_guards: Vec<(ThreadId, OwnedMutexGuard<()>)>,
+    _in_process_guards: Arc<Vec<(ThreadId, OwnedMutexGuard<()>)>>,
     cross_process_guards: Vec<(ThreadId, WriterLockGuard)>,
 }
 
@@ -330,6 +348,8 @@ impl LocalThreadStore {
             state_db,
             thread_history_db: Arc::new(OnceCell::new()),
             thread_data_cleanup: None,
+            projection_rebuilds: Arc::new(StdMutex::new(HashSet::new())),
+            projection_rebuild_schedules: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -356,13 +376,55 @@ impl LocalThreadStore {
         else {
             return Ok(false);
         };
-        if thread_history::projection_state(self, resolved.rollout_id)
-            .await?
-            .is_none()
+        if let Some(has_projection) = thread_history::has_nonempty_newest_root_turn_for_resolved(
+            self,
+            thread_id,
+            resolved.clone(),
+        )
+        .await?
+        {
+            return Ok(has_projection);
+        }
+        let physical_history_mode = match resolved.authenticated_session_meta.as_ref() {
+            Some(session_meta) => session_meta.history_mode,
+            None => {
+                codex_rollout::read_session_meta_line(resolved.path.as_path())
+                    .await
+                    .map_err(|error| ThreadStoreError::Internal {
+                        message: format!(
+                            "failed to read selected rollout metadata {}: {error}",
+                            resolved.path.display()
+                        ),
+                    })?
+                    .meta
+                    .history_mode
+            }
+        };
+        if physical_history_mode != ThreadHistoryMode::Paginated {
+            return Ok(false);
+        }
+        let Some(projection_state) =
+            thread_history::projection_state(self, resolved.rollout_id).await?
+        else {
+            return Ok(false);
+        };
+        if !projection_state.lineage_complete {
+            return Ok(false);
+        }
+        if resolved.path.extension().and_then(|value| value.to_str()) == Some("jsonl")
+            && tokio::fs::metadata(resolved.path.as_path())
+                .await
+                .map_err(|error| ThreadStoreError::Internal {
+                    message: format!(
+                        "failed to read selected rollout metadata {}: {error}",
+                        resolved.path.display()
+                    ),
+                })?
+                .len()
+                != projection_state.next_byte_offset
         {
             return Ok(false);
         }
-
         let newest_turn = thread_history::list_turns(
             self,
             ListTurnsParams {
@@ -380,6 +442,55 @@ impl LocalThreadStore {
             .turns
             .first()
             .is_none_or(|turn| !turn.items.is_empty()))
+    }
+
+    /// Returns whether the already-validated Paginated rollout has a complete projection at the
+    /// supplied durable byte boundary.
+    pub(super) async fn has_complete_history_projection_at(
+        &self,
+        thread_id: ThreadId,
+        rollout_id: RolloutId,
+        end_byte_offset: u64,
+    ) -> ThreadStoreResult<bool> {
+        let Some(projection_state) = thread_history::projection_state(self, rollout_id).await?
+        else {
+            return Ok(false);
+        };
+        if !projection_state.lineage_complete
+            || projection_state.next_byte_offset != end_byte_offset
+        {
+            return Ok(false);
+        }
+        let newest_turn = thread_history::list_turns(
+            self,
+            ListTurnsParams {
+                thread_id,
+                include_archived: true,
+                cursor: None,
+                page_size: 1,
+                sort_direction: SortDirection::Desc,
+                items_view: StoredTurnItemsView::Summary,
+            },
+        )
+        .await?;
+        Ok(newest_turn
+            .turns
+            .first()
+            .is_none_or(|turn| !turn.items.is_empty()))
+    }
+
+    /// Rebuilds one complete same-thread Paginated projection and publishes it atomically.
+    ///
+    /// Callers that serve interactive requests should use
+    /// [`Self::schedule_history_projection_rebuild`] instead. This method waits for the complete
+    /// lineage scan and exists for startup maintenance, explicit repair, and deterministic tests.
+    pub async fn rebuild_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
+        projection_rebuild::rebuild_waiting(self, thread_id).await
+    }
+
+    /// Starts a single delayed projection rebuild without blocking the current request.
+    pub async fn schedule_history_projection_rebuild(&self, thread_id: ThreadId) {
+        projection_rebuild::schedule(self.clone(), thread_id).await;
     }
 
     /// Returns the exact durable ordinal and byte offset of a projected thread.
@@ -409,12 +520,15 @@ impl LocalThreadStore {
         }
         self.thread_history_db
             .get_or_try_init(|| async {
-                codex_state::open_thread_history_db(&self.config.sqlite).await
+                let pool = codex_state::open_thread_history_db(&self.config.sqlite)
+                    .await
+                    .map_err(|err| ThreadStoreError::Internal {
+                        message: format!("failed to open thread history database: {err}"),
+                    })?;
+                thread_history::ensure_projection_integrity_triggers(&pool).await?;
+                Ok(pool)
             })
             .await
-            .map_err(|err| ThreadStoreError::Internal {
-                message: format!("failed to open thread history database: {err}"),
-            })
     }
 
     /// Read a local rollout-backed thread by path.
@@ -530,16 +644,19 @@ impl LocalThreadStore {
         paginated_fork::prepare_without_response_history(self, params).await
     }
 
-    /// Freezes the selected paginated fork without reading history excluded from its response.
+    /// Prepares the selected paginated fork without reading history excluded from its response.
+    /// Ephemeral context-only forks do not freeze the source rollout.
     pub async fn prepare_fork_without_response_history_for_rollout(
         &self,
         params: PrepareForkParams,
         expected_rollout_id: codex_protocol::RolloutId,
+        ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
         paginated_fork::prepare_without_response_history_for_rollout(
             self,
             params,
             expected_rollout_id,
+            ephemeral_context_only,
         )
         .await
     }
@@ -590,12 +707,14 @@ impl LocalThreadStore {
     }
 
     /// Prepares the selected latest side fork without materializing projected response turns.
+    /// Ephemeral context-only forks do not freeze the source rollout.
     pub async fn prepare_fork_without_response_history_with_model_context_for_rollout(
         &self,
         params: PrepareForkParams,
         model_context: Arc<Vec<ResponseItemEnvelope>>,
         expected_position: HistoryPosition,
         expected_rollout_id: codex_protocol::RolloutId,
+        ephemeral_context_only: bool,
     ) -> ThreadStoreResult<PreparedFork> {
         paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
             self,
@@ -603,6 +722,7 @@ impl LocalThreadStore {
             model_context,
             expected_position,
             expected_rollout_id,
+            ephemeral_context_only,
         )
         .await
     }
@@ -724,7 +844,7 @@ impl LocalThreadStore {
         Ok(RolloutWriterReservation {
             store_identity: Arc::as_ptr(&self.live_writer_locks) as usize,
             thread_ids,
-            _in_process_guards: in_process_guards,
+            _in_process_guards: Arc::new(in_process_guards),
             cross_process_guards,
         })
     }
@@ -1225,6 +1345,8 @@ impl ThreadStore for LocalThreadStore {
 mod tests {
     #[path = "acquisition_tests.rs"]
     mod acquisition_tests;
+    #[path = "live_writer_tests.rs"]
+    mod live_writer_tests;
     use std::sync::Arc;
 
     use codex_protocol::ThreadId;

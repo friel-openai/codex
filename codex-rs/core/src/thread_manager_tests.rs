@@ -634,14 +634,16 @@ async fn prepared_fork_uses_latest_checkpoint_environment_without_source_runtime
             nth_user_message: None,
             compacted_replacement_history_filter_texts: None,
         },
+        history_base: None,
         source_session_meta,
         history_mode: ThreadHistoryMode::Paginated,
         next_rollout_ordinal: Some(1),
     };
     let prepared = PreparedFork::new(
         source_thread_id,
+        /*source_end_ordinal_exclusive*/ 1,
         /*history_base*/ None,
-        frozen_segment,
+        Some(frozen_segment),
         Arc::new(boundary_context.clone()),
         Arc::new(latest_context),
         Arc::new(boundary_context),
@@ -3606,6 +3608,20 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
     let expected_turn_id = source_snapshot_state.active_turn_id.clone();
     assert_eq!(expected_turn_id, None);
 
+    let source_end_ordinal_exclusive = std::fs::read_to_string(&source_path)
+        .expect("read source rollout")
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            codex_rollout::parse_rollout_line(line)
+                .expect("parse source rollout line")
+                .ordinal
+                .expect("source rollout ordinal")
+        })
+        .max()
+        .expect("source rollout has items")
+        + 1;
+
     let forked = manager
         .fork_thread(
             ForkSnapshot::Interrupted,
@@ -3662,6 +3678,55 @@ async fn interrupted_fork_snapshot_does_not_synthesize_turn_id_for_legacy_histor
             .count(),
         1,
     );
+
+    let source_items = Arc::new(source_history.get_rollout_items().to_vec());
+    let prepared = PreparedFork::new(
+        source.thread_id,
+        source_end_ordinal_exclusive,
+        /*history_base*/ None,
+        /*frozen_segment*/ None,
+        Arc::clone(&source_items),
+        Arc::clone(&source_items),
+        source_items,
+        /*interrupt_if_open*/ true,
+        (),
+    );
+    config.ephemeral = true;
+    let (ephemeral_fork, _) = manager
+        .fork_prepared_thread(StartThreadOptions::new(config), prepared)
+        .await
+        .expect("fork context-only interrupted snapshot");
+    assert!(ephemeral_fork.thread.rollout_path().is_none());
+    // Startup events use initial history, which must not append the prepared suffix twice.
+    assert_eq!(
+        ephemeral_fork
+            .session_configured
+            .initial_messages
+            .as_ref()
+            .expect("fork startup events")
+            .iter()
+            .filter(|event| matches!(event, EventMsg::TurnAborted(_)))
+            .count(),
+        1,
+    );
+    let ephemeral_history = ephemeral_fork.thread.conversation_history_snapshot().await;
+    assert_eq!(
+        ephemeral_history
+            .items()
+            .filter(|item| {
+                strip_response_item_ids_from_json(
+                    serde_json::to_value(RolloutItem::ResponseItem((*item).clone().into()))
+                        .expect("serialize ephemeral fork item"),
+                ) == interrupted_marker_json
+            })
+            .count(),
+        1,
+    );
+    ephemeral_fork
+        .thread
+        .shutdown_and_wait()
+        .await
+        .expect("shutdown ephemeral fork");
 }
 
 #[tokio::test]
