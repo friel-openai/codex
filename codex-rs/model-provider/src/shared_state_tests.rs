@@ -322,6 +322,7 @@ async fn models_cache_is_reused_only_for_matching_gateway_configuration() {
             let models = provider.models_manager(
                 home.path().to_path_buf(),
                 /*config_model_catalog*/ None,
+                Default::default(),
             );
             models.set_api_key_model_discovery_enabled(/*enabled*/ true);
             let catalog = models
