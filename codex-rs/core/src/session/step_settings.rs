@@ -215,6 +215,7 @@ impl ModelInfoOverrides {
             personality,
             // The models manager already owns its catalog.
             model_catalog: None,
+            custom_models: self.custom_models.clone(),
         }
     }
 }

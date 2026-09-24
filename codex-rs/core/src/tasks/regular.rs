@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use crate::session::TurnInput;
 use crate::session::session::Session;
 use crate::session::turn::McpStartupRequirements;
+use crate::session::turn::RunTurnProviderStartup;
 use crate::session::turn::run_hooks_and_record_inputs;
 use crate::session::turn::run_turn;
 use crate::session::turn_context::TurnContext;
@@ -47,7 +48,7 @@ impl SessionTask for RegularTask {
         let run_turn_span = trace_span!("run_turn");
         // Regular turns emit `TurnStarted` inline so first-turn lifecycle does
         // not wait on startup prewarm resolution.
-        let prewarmed_client_session = async {
+        let provider_startup = async {
             sess.emit_turn_started(&ctx).await;
             // Regular-start contributors run once, after the task is visible and interruptible.
             let prepares_mcp = sess
@@ -73,41 +74,50 @@ impl SessionTask for RegularTask {
                 sess.request_mcp_runtime_reprojection();
             }
             if preparation.is_err() {
-                return SessionStartupPrewarmResolution::Cancelled;
+                return None;
             }
             sess.set_server_reasoning_included(/*included*/ false).await;
-            sess.consume_startup_prewarm_for_regular_turn(&cancellation_token)
+            if ctx.model_routing_retry_at.is_some() {
+                return Some(RunTurnProviderStartup::DeferredForRoutingCooldown);
+            }
+            match sess
+                .consume_startup_prewarm_for_regular_turn(&cancellation_token)
                 .await
+            {
+                SessionStartupPrewarmResolution::Cancelled => None,
+                SessionStartupPrewarmResolution::Unavailable { .. } => {
+                    Some(RunTurnProviderStartup::Ready(None))
+                }
+                SessionStartupPrewarmResolution::Ready(prewarmed_client_session) => Some(
+                    RunTurnProviderStartup::Ready(Some(prewarmed_client_session)),
+                ),
+            }
         }
         .instrument(trace_span!("regular_task.prepare_run_turn"))
         .await;
-        let prewarmed_client_session = match prewarmed_client_session {
-            SessionStartupPrewarmResolution::Cancelled => {
-                run_hooks_and_record_inputs(
-                    &sess,
-                    &ctx,
-                    &ctx.capture_current_model_info(),
-                    &input,
-                    PersistContext::Standard,
-                )
-                .await;
-                return Ok(None);
-            }
-            SessionStartupPrewarmResolution::Unavailable { .. } => None,
-            SessionStartupPrewarmResolution::Ready(prewarmed_client_session) => {
-                Some(*prewarmed_client_session)
-            }
+        let Some(provider_startup) = provider_startup else {
+            run_hooks_and_record_inputs(
+                &sess,
+                &ctx,
+                &ctx.capture_current_model_info(),
+                &input,
+                PersistContext::Standard,
+            )
+            .await;
+            return Ok(None);
         };
         let mut next_input = input;
-        let mut prewarmed_client_session = prewarmed_client_session;
         let mut mcp_startup_requirements = McpStartupRequirements::default();
+        let mut provider_startup = Some(provider_startup);
         loop {
             let last_agent_message = run_turn(
                 Arc::clone(&sess),
                 Arc::clone(&ctx),
                 next_input,
                 &mut mcp_startup_requirements,
-                prewarmed_client_session.take(),
+                provider_startup
+                    .take()
+                    .unwrap_or(RunTurnProviderStartup::Ready(None)),
                 cancellation_token.child_token(),
             )
             .instrument(run_turn_span.clone())
