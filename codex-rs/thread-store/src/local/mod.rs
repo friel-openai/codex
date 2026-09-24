@@ -16,6 +16,7 @@ mod rollout_migration;
 #[allow(dead_code)]
 mod rollout_lineage;
 mod search_threads;
+mod segment;
 mod thread_attachments;
 mod thread_history;
 mod thread_history_materialization;
@@ -36,15 +37,20 @@ mod pending_thread_metadata_tests;
 #[cfg(test)]
 mod test_support;
 
+use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::HistoryPosition;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_rollout::ResponseItemEnvelope;
 use codex_rollout::RolloutRecorder;
 use codex_rollout::StateDbHandle;
 use codex_rollout::WriterLockCoordinator;
 use codex_state::SqliteConfig;
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::OnceCell;
@@ -66,6 +72,8 @@ use crate::DeleteThreadParams;
 use crate::DeleteThreadSectionParams;
 use crate::DeleteThreadsParams;
 use crate::DeletedProject;
+use crate::FreezeRolloutSegmentParams;
+use crate::FrozenRolloutSegment;
 use crate::ItemPage;
 use crate::ListItemsParams;
 use crate::ListProjectsParams;
@@ -90,6 +98,8 @@ use crate::ResumeThreadParams;
 use crate::RevertThreadParams;
 use crate::SearchThreadOccurrencesParams;
 use crate::SearchThreadsParams;
+use crate::SegmentCheckpointPersistenceOutcome;
+use crate::SortDirection;
 use crate::StoredModelContext;
 use crate::StoredProject;
 use crate::StoredProjectsPage;
@@ -97,10 +107,12 @@ use crate::StoredThread;
 use crate::StoredThreadHistory;
 use crate::StoredThreadSection;
 use crate::StoredThreadSectionsPage;
+use crate::StoredTurnItemsView;
 use crate::ThreadAttachmentPage;
 use crate::ThreadMetadataPatch;
 use crate::ThreadOccurrenceSearchPage;
 use crate::ThreadPage;
+use crate::ThreadPersistenceMode;
 use crate::ThreadSearchPage;
 use crate::ThreadStore;
 use crate::ThreadStoreError;
@@ -151,6 +163,11 @@ type WriterLockGuard = Arc<codex_rollout::WriterLockGuard>;
 
 struct LiveRecorderEntry {
     recorder: RolloutRecorder,
+    /// Reopens the committed stable rollout before the next live operation.
+    ///
+    /// Segment rotation installs this before shutting down the previous recorder so cancellation
+    /// or a transient post-commit reopen failure cannot reuse a recorder whose task has exited.
+    recovery: Option<LiveRecorderRecovery>,
     // Rollout projection rows are keyed by immutable rollout ID, not the stable thread ID used
     // to find this live writer.
     rollout_id: ThreadId,
@@ -159,6 +176,42 @@ struct LiveRecorderEntry {
     // so missing SQLite rows can still be seeded.
     history_mode: ThreadHistoryMode,
     writer_lock: WriterLockGuard,
+    /// Whether the recorder may materialize its canonical in-memory queue.
+    persistence_mode: ThreadPersistenceMode,
+    // Legacy rollout records do not contain canonical projected items or ordinals.
+    // Keep the reducer across appends and physical rotation so indexed visible
+    // history retains the same generated item and turn identities as JSONL replay.
+    legacy_history_builder: Arc<Mutex<ThreadHistoryBuilder>>,
+    // Resuming a recorder does not restore the legacy reducer. Do not extend an
+    // existing projection with generated item identities from a fresh reducer.
+    legacy_history_projection_enabled: bool,
+    // A resumed legacy writer rebuilds reducer state from complete canonical
+    // lineage before its first append, not from bounded model context.
+    legacy_history_builder_needs_rebuild: bool,
+}
+
+/// Information needed to reopen a live recorder after active-rollout replacement.
+#[derive(Clone)]
+struct LiveRecorderRecovery {
+    config: codex_rollout::RolloutConfig,
+    rollout_path: PathBuf,
+}
+
+/// Exclusive ownership of the mutable rollout files for a set of stable thread IDs.
+///
+/// Callers acquire the in-process mutexes first and the cross-process writer locks second, both in
+/// stable thread-ID order. A same-store live recorder already owns its cross-process lock, so its
+/// entry supplies that half of the reservation until the in-process mutex is released.
+struct RolloutWriterReservation {
+    thread_ids: Vec<ThreadId>,
+    _in_process_guards: Vec<OwnedMutexGuard<()>>,
+    _cross_process_guards: Vec<WriterLockGuard>,
+}
+
+impl RolloutWriterReservation {
+    fn contains(&self, thread_id: ThreadId) -> bool {
+        self.thread_ids.contains(&thread_id)
+    }
 }
 
 #[derive(Default)]
@@ -280,6 +333,58 @@ impl LocalThreadStore {
         self.state_db.clone()
     }
 
+    /// Returns whether the projected visible history can satisfy paginated reads.
+    pub async fn has_history_projection(&self, thread_id: ThreadId) -> ThreadStoreResult<bool> {
+        let Some(resolved) =
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        else {
+            return Ok(false);
+        };
+        if thread_history::projection_state(self, resolved.rollout_id)
+            .await?
+            .is_none()
+        {
+            return Ok(false);
+        }
+
+        let newest_turn = thread_history::list_turns(
+            self,
+            ListTurnsParams {
+                thread_id,
+                include_archived: true,
+                cursor: None,
+                page_size: 1,
+                sort_direction: SortDirection::Desc,
+                items_view: StoredTurnItemsView::Summary,
+            },
+        )
+        .await?;
+
+        Ok(newest_turn
+            .turns
+            .first()
+            .is_none_or(|turn| !turn.items.is_empty()))
+    }
+
+    /// Returns the exact durable ordinal and byte offset of a projected thread.
+    pub async fn projected_history_position(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<HistoryPosition>> {
+        let Some(resolved) =
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
+        else {
+            return Ok(None);
+        };
+        Ok(thread_history::projection_state(self, resolved.rollout_id)
+            .await?
+            .map(|state| HistoryPosition {
+                thread_id: resolved.rollout_id,
+                end_ordinal_exclusive: state.next_ordinal,
+                end_byte_offset: state.next_byte_offset,
+            }))
+    }
+
     async fn thread_history_db(&self) -> ThreadStoreResult<&sqlx::SqlitePool> {
         if self.state_db.is_none() {
             return Err(ThreadStoreError::Unsupported {
@@ -315,6 +420,169 @@ impl LocalThreadStore {
     /// Return the live local rollout path for legacy local-only code paths.
     pub async fn live_rollout_path(&self, thread_id: ThreadId) -> ThreadStoreResult<PathBuf> {
         live_writer::rollout_path(self, thread_id).await
+    }
+
+    /// Freezes the thread's current prefix and installs a reference-backed continuation.
+    pub async fn freeze_thread_segment(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<FrozenRolloutSegment> {
+        segment::freeze_thread_segment(self, thread_id, params).await
+    }
+
+    /// Freezes a thread only while the expected physical rollout remains selected.
+    pub async fn freeze_thread_segment_for_rollout(
+        &self,
+        thread_id: ThreadId,
+        expected_rollout_id: codex_protocol::RolloutId,
+        params: FreezeRolloutSegmentParams,
+    ) -> ThreadStoreResult<FrozenRolloutSegment> {
+        segment::freeze_thread_segment_for_rollout(
+            self,
+            thread_id,
+            params,
+            Some(expected_rollout_id),
+        )
+        .await
+    }
+
+    /// Freezes a paginated fork without reading history excluded from its response.
+    pub async fn prepare_fork_without_response_history(
+        &self,
+        params: PrepareForkParams,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history(self, params).await
+    }
+
+    /// Freezes the selected paginated fork without reading history excluded from its response.
+    pub async fn prepare_fork_without_response_history_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_for_rollout(
+            self,
+            params,
+            expected_rollout_id,
+        )
+        .await
+    }
+
+    /// Prepares a latest fork using a verified complete, in-memory source model context.
+    pub async fn prepare_fork_with_model_context(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_with_model_context(self, params, model_context, expected_position)
+            .await
+    }
+
+    /// Prepares the selected latest fork using a verified in-memory source model context.
+    pub async fn prepare_fork_with_model_context_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_with_model_context_for_rollout(
+            self,
+            params,
+            model_context,
+            expected_position,
+            expected_rollout_id,
+        )
+        .await
+    }
+
+    /// Prepares a latest side fork without materializing projected response turns.
+    pub async fn prepare_fork_without_response_history_with_model_context(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_with_model_context(
+            self,
+            params,
+            model_context,
+            expected_position,
+        )
+        .await
+    }
+
+    /// Prepares the selected latest side fork without materializing projected response turns.
+    pub async fn prepare_fork_without_response_history_with_model_context_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        model_context: Arc<Vec<ResponseItemEnvelope>>,
+        expected_position: HistoryPosition,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_without_response_history_with_model_context_for_rollout(
+            self,
+            params,
+            model_context,
+            expected_position,
+            expected_rollout_id,
+        )
+        .await
+    }
+
+    /// Discard a derived legacy projection without modifying canonical rollout history.
+    pub async fn discard_segmented_legacy_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<()> {
+        let resolved = thread_rollout_resolver::resolve_current_including_archived(self, thread_id)
+            .await?
+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
+        thread_history::delete_thread(self, resolved.rollout_id).await
+    }
+
+    /// Returns the selected physical rollout ID while callers hold any required lifecycle guard.
+    pub async fn current_rollout_id(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<Option<codex_protocol::RolloutId>> {
+        Ok(
+            thread_rollout_resolver::resolve_current_including_archived(self, thread_id)
+                .await?
+                .map(|resolved| resolved.rollout_id),
+        )
+    }
+
+    /// Prepares a fork only if `expected_rollout_id` remains selected under the lifecycle guard.
+    pub async fn prepare_fork_for_rollout(
+        &self,
+        params: PrepareForkParams,
+        expected_rollout_id: codex_protocol::RolloutId,
+    ) -> ThreadStoreResult<PreparedFork> {
+        paginated_fork::prepare_for_rollout(self, params, expected_rollout_id).await
+    }
+
+    /// Prevents deletion, archive, and unarchive while a new child reference is initialized.
+    pub async fn reserve_thread_lifecycle(
+        &self,
+        thread_id: ThreadId,
+    ) -> crate::ThreadLifecycleReservation {
+        crate::ThreadLifecycleReservation::new(
+            self.live_writer_locks.reserve_lifecycle(thread_id).await,
+        )
+    }
+
+    pub(crate) async fn live_persistence_mode(
+        &self,
+        thread_id: ThreadId,
+    ) -> Option<ThreadPersistenceMode> {
+        self.live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .map(|entry| entry.persistence_mode)
     }
 
     pub(super) async fn ensure_live_recorder_absent(
@@ -360,6 +628,25 @@ impl LocalThreadStore {
         Ok(writer_locks)
     }
 
+    async fn reserve_rollout_writers(
+        &self,
+        thread_ids: &[ThreadId],
+    ) -> ThreadStoreResult<RolloutWriterReservation> {
+        let mut thread_ids = thread_ids.to_vec();
+        thread_ids.sort_unstable_by_key(ThreadId::to_string);
+        thread_ids.dedup();
+        let mut in_process_guards = Vec::with_capacity(thread_ids.len());
+        for &thread_id in &thread_ids {
+            in_process_guards.push(self.live_writer_locks.lock(thread_id).await);
+        }
+        let cross_process_guards = self.acquire_writer_locks(thread_ids.as_slice()).await?;
+        Ok(RolloutWriterReservation {
+            thread_ids,
+            _in_process_guards: in_process_guards,
+            _cross_process_guards: cross_process_guards,
+        })
+    }
+
     async fn insert_live_recorder(
         &self,
         thread_id: ThreadId,
@@ -367,6 +654,7 @@ impl LocalThreadStore {
         rollout_id: ThreadId,
         history_mode: ThreadHistoryMode,
         writer_lock: WriterLockGuard,
+        persistence_mode: ThreadPersistenceMode,
     ) -> ThreadStoreResult<()> {
         match self.live_recorders.lock().await.entry(thread_id) {
             Entry::Occupied(entry) => Err(ThreadStoreError::InvalidRequest {
@@ -375,9 +663,14 @@ impl LocalThreadStore {
             Entry::Vacant(entry) => {
                 entry.insert(LiveRecorderEntry {
                     recorder,
+                    recovery: None,
                     rollout_id,
                     history_mode,
                     writer_lock,
+                    persistence_mode,
+                    legacy_history_builder: Arc::new(Mutex::new(ThreadHistoryBuilder::new())),
+                    legacy_history_projection_enabled: true,
+                    legacy_history_builder_needs_rebuild: false,
                 });
                 Ok(())
             }
@@ -445,6 +738,30 @@ impl LocalThreadStore {
         thread_history::list_turns(self, params).await
     }
 
+    /// Read indexed segmented legacy turns without changing the legacy cursor.
+    pub async fn list_segmented_legacy_turns(
+        &self,
+        params: ListTurnsParams,
+    ) -> ThreadStoreResult<Option<TurnPage>> {
+        thread_history::list_segmented_legacy_turns(self, params).await
+    }
+
+    /// Read an existing legacy index without backfilling history during initial navigation.
+    pub async fn list_existing_segmented_legacy_turns(
+        &self,
+        params: ListTurnsParams,
+    ) -> ThreadStoreResult<Option<TurnPage>> {
+        thread_history::list_existing_segmented_legacy_turns(self, params).await
+    }
+
+    /// Reports whether a complete legacy index exists without triggering a history backfill.
+    pub async fn has_complete_segmented_legacy_projection(
+        &self,
+        thread_id: ThreadId,
+    ) -> ThreadStoreResult<bool> {
+        thread_history::has_complete_segmented_legacy_projection(self, thread_id).await
+    }
+
     /// Lists projection-backed items without enabling app-server routing yet.
     pub async fn list_items(&self, params: ListItemsParams) -> ThreadStoreResult<ItemPage> {
         thread_history::list_items(self, params).await
@@ -456,6 +773,14 @@ impl LocalThreadStore {
         params: ListTimelineParams,
     ) -> ThreadStoreResult<TimelinePage> {
         thread_history::list_timeline(self, params).await
+    }
+
+    /// Hydrate indexed segmented legacy items without exposing paginated history.
+    pub async fn list_segmented_legacy_items(
+        &self,
+        params: ListItemsParams,
+    ) -> ThreadStoreResult<Option<ItemPage>> {
+        thread_history::list_segmented_legacy_items(self, params).await
     }
 
     /// Searches projection-backed visible messages within one paginated thread.
@@ -522,6 +847,14 @@ impl ThreadStore for LocalThreadStore {
 
     fn append_items(&self, params: AppendThreadItemsParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move { live_writer::append_items(self, params).await })
+    }
+
+    fn persist_segment_checkpoint(
+        &self,
+        thread_id: ThreadId,
+        params: FreezeRolloutSegmentParams,
+    ) -> Pin<Box<dyn Future<Output = SegmentCheckpointPersistenceOutcome> + Send + '_>> {
+        Box::pin(async move { segment::persist_segment_checkpoint(self, thread_id, params).await })
     }
 
     fn persist_thread(
@@ -785,6 +1118,7 @@ mod tests {
     use codex_protocol::items::TurnItem;
     use codex_protocol::items::UserMessageItem;
     use codex_protocol::models::BaseInstructions;
+    use codex_protocol::models::ContentItem;
     use codex_protocol::models::FunctionCallOutputPayload;
     use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseItem;
@@ -860,6 +1194,79 @@ mod tests {
         );
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn recovered_recorder_retains_writer_lock_after_store_drop() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let thread_id = ThreadId::default();
+        let params = create_thread_params(thread_id);
+        let config = codex_rollout::RolloutConfig {
+            codex_home: home.path().to_path_buf(),
+            sqlite: store.config.sqlite.clone(),
+            cwd: params.metadata.cwd.clone().expect("cwd"),
+            model_provider_id: params.metadata.model_provider.clone(),
+            generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
+        };
+        store.create_thread(params).await.expect("create thread");
+        store
+            .persist_thread(thread_id, PersistContext::Standard)
+            .await
+            .expect("persist thread");
+        let previous = store
+            .live_recorders
+            .lock()
+            .await
+            .get(&thread_id)
+            .expect("live writer")
+            .recorder
+            .clone();
+        let rollout_path = previous.rollout_path().to_path_buf();
+        previous.shutdown().await.expect("stop previous recorder");
+        drop(previous);
+        store
+            .live_recorders
+            .lock()
+            .await
+            .get_mut(&thread_id)
+            .expect("live writer")
+            .recovery = Some(LiveRecorderRecovery {
+            config,
+            rollout_path: rollout_path.clone(),
+        });
+        let (recorder, _, _, _) = live_writer::live_writer_parts(&store, thread_id)
+            .await
+            .expect("recover recorder");
+        drop(store);
+
+        let locks = WriterLockCoordinator::new(home.path());
+        assert!(
+            matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        recorder
+            .record_canonical_items(&[user_message_item("recovered write")])
+            .await
+            .expect("enqueue recovered write");
+        drop(recorder);
+        // The current-thread runtime cannot run the queued write between drop and this check.
+        assert!(
+            matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                match locks.acquire(thread_id) {
+                    Ok(guard) => break guard,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(error) => panic!("writer lock failed: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("recovered writer must release its lock after draining queued writes");
+        assert_rollout_contains_message(&rollout_path, "recovered write").await;
+    }
+
     #[tokio::test]
     async fn raw_append_items_does_not_update_sqlite_metadata() {
         // This pins the ThreadStore contract: raw appends are history-only. Callers that need
@@ -933,7 +1340,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_resume_prefers_explicit_rollout_path_over_stale_sqlite_path() {
+    async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
         let home = TempDir::new().expect("temp dir");
         let config = test_config(home.path());
         let runtime = codex_state::StateRuntime::init(
@@ -973,7 +1380,7 @@ mod tests {
             .await
             .expect("update stale sqlite rollout path");
 
-        let resumed = LiveThread::resume(
+        let error = match LiveThread::resume(
             store,
             ThreadHistoryMode::Paginated,
             ResumeThreadParams {
@@ -989,12 +1396,15 @@ mod tests {
             },
         )
         .await
-        .expect("resume paginated thread from its requested rollout");
-        assert_eq!(
-            resumed.local_rollout_path().await.expect("live rollout"),
-            Some(rollout_path)
+        {
+            Ok(_) => panic!("requested rollout that is not selected by sqlite must fail"),
+            Err(error) => error,
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("rollout path does not select the current rollout")
         );
-        resumed.shutdown().await.expect("shutdown resumed writer");
 
         let metadata = runtime
             .get_thread(thread_id)
@@ -1093,6 +1503,149 @@ mod tests {
             .expect("sqlite metadata");
         assert_eq!(child_metadata.model.as_deref(), Some("child-model"));
         assert_eq!(child_metadata.approval_mode, "on-request");
+    }
+
+    #[tokio::test]
+    async fn inherited_model_context_boundary_uses_absolute_rollout_ordinals() {
+        let home = TempDir::new().expect("temp dir");
+        let store = Arc::new(LocalThreadStore::new(
+            test_config(home.path()),
+            /*state_db*/ None,
+        ));
+        let thread_id = ThreadId::default();
+        let mut params = create_thread_params(thread_id);
+        params.history_mode = ThreadHistoryMode::Paginated;
+        params.initial_rollout_ordinal = 41;
+        let message = |text: &str| {
+            RolloutItem::ResponseItem(
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: text.to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            )
+        };
+
+        let mut guard = crate::LiveThreadInitGuard::default();
+        let live_thread = LiveThread::create_with_inherited_model_context(
+            store.clone(),
+            params,
+            &[message("inherited")],
+            &mut guard,
+        )
+        .await
+        .expect("create live thread with inherited context");
+        guard.commit();
+        live_thread
+            .append_items(&[message("child")])
+            .await
+            .expect("append child context");
+        live_thread.flush().await.expect("flush thread");
+        let rollout_path = store
+            .live_rollout_path(thread_id)
+            .await
+            .expect("live rollout path");
+        let (lines, _, _) = RolloutRecorder::load_rollout_lines(&rollout_path)
+            .await
+            .expect("load rollout lines");
+
+        let RolloutItem::SessionMeta(meta_line) = &lines[0].item else {
+            panic!("rollout should start with session metadata");
+        };
+        assert_eq!(meta_line.meta.subagent_history_start_ordinal, Some(43));
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.ordinal.expect("line should have an ordinal"))
+                .collect::<Vec<_>>(),
+            vec![41, 42, 43]
+        );
+    }
+
+    #[tokio::test]
+    async fn fork_cutoff_provenance_survives_cold_resume() {
+        for (history_mode, has_parent, explicit_cutoff, initial_ordinal, expected_cutoff) in [
+            (ThreadHistoryMode::Paginated, true, None, 41, Some(41)),
+            (ThreadHistoryMode::Paginated, true, Some(7), 41, Some(7)),
+            (ThreadHistoryMode::Paginated, true, Some(0), 41, Some(0)),
+            (ThreadHistoryMode::Paginated, true, None, 0, None),
+            (ThreadHistoryMode::Legacy, true, None, 7, None),
+            (ThreadHistoryMode::Legacy, true, None, 0, None),
+            (ThreadHistoryMode::Paginated, false, None, 41, None),
+        ] {
+            let home = TempDir::new().expect("temp dir");
+            let config = test_config(home.path());
+            let first_store = LocalThreadStore::new(config.clone(), /*state_db*/ None);
+            let thread_id = ThreadId::default();
+            let parent_id = ThreadId::default();
+            let mut params = create_thread_params(thread_id);
+            params.history_mode = history_mode;
+            params.forked_from_id = has_parent.then_some(parent_id);
+            params.history_base = explicit_cutoff.map(|end_ordinal_exclusive| {
+                codex_protocol::protocol::HistoryPosition {
+                    thread_id: parent_id,
+                    end_ordinal_exclusive,
+                    end_byte_offset: 0,
+                }
+            });
+            params.initial_rollout_ordinal = initial_ordinal;
+            first_store
+                .create_thread(params)
+                .await
+                .expect("create thread with fork provenance");
+            first_store
+                .persist_thread(thread_id, PersistContext::Standard)
+                .await
+                .expect("persist fork provenance");
+            let rollout_path = first_store
+                .live_rollout_path(thread_id)
+                .await
+                .expect("rollout path");
+            first_store
+                .shutdown_thread(thread_id)
+                .await
+                .expect("shutdown initial writer");
+            drop(first_store);
+
+            let resumed_store = LocalThreadStore::new(config, /*state_db*/ None);
+            resumed_store
+                .resume_thread(ResumeThreadParams {
+                    thread_id,
+                    rollout_path: Some(rollout_path.clone()),
+                    history: None,
+                    include_archived: false,
+                    metadata: thread_metadata(),
+                })
+                .await
+                .expect("cold resume preserves fork provenance");
+            let session_meta = codex_rollout::read_session_meta_line(&rollout_path)
+                .await
+                .expect("read durable fork provenance");
+            pretty_assertions::assert_eq!(
+                (
+                    session_meta.meta.forked_from_id,
+                    session_meta.meta.forked_from_ordinal_exclusive,
+                    codex_rollout::forked_from_ordinal_exclusive(
+                        &session_meta.meta,
+                        Some(&rollout_path),
+                    ),
+                ),
+                (
+                    has_parent.then_some(parent_id),
+                    expected_cutoff,
+                    expected_cutoff
+                )
+            );
+            resumed_store
+                .shutdown_thread(thread_id)
+                .await
+                .expect("shutdown resumed writer");
+        }
     }
 
     #[tokio::test]
@@ -1511,6 +2064,50 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_shutdown_discards_queued_items_and_releases_writer_lock() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        for history_mode in [ThreadHistoryMode::Legacy, ThreadHistoryMode::Paginated] {
+            let thread_id = ThreadId::default();
+            let mut params = create_thread_params(thread_id);
+            params.history_mode = history_mode;
+            params.persistence_mode = ThreadPersistenceMode::Deferred;
+            store
+                .create_thread(params)
+                .await
+                .expect("create deferred thread");
+            let recorder = store
+                .live_recorders
+                .lock()
+                .await
+                .get(&thread_id)
+                .expect("live recorder")
+                .recorder
+                .clone();
+            let rollout_path = recorder.rollout_path().to_path_buf();
+            recorder
+                .record_canonical_items(&[user_message_item("discard on deferred shutdown")])
+                .await
+                .expect("queue deferred item");
+            store
+                .shutdown_thread(thread_id)
+                .await
+                .expect("shutdown must discard the deferred recorder");
+            drop(recorder);
+
+            // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
+            let locks = WriterLockCoordinator::new(home.path());
+            let _guard = locks
+                .acquire(thread_id)
+                .expect("writer lock must be released");
+            assert!(
+                !rollout_path.exists(),
+                "deferred shutdown must not materialize queued items"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn resume_thread_reopens_live_writer_and_appends() {
         let home = TempDir::new().expect("temp dir");
@@ -1571,6 +2168,97 @@ mod tests {
 
         assert_rollout_contains_message(rollout_path.as_path(), "before resume").await;
         assert_rollout_contains_message(rollout_path.as_path(), "after resume").await;
+    }
+
+    #[tokio::test]
+    async fn resume_thread_uses_supplied_history_mode_before_rollout_metadata() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(410);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let legacy_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-00-00",
+            uuid,
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("legacy session file");
+        let paginated_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-01-00",
+            uuid,
+            ThreadHistoryMode::Paginated,
+        )
+        .expect("paginated session file");
+        let history = Arc::new(
+            RolloutRecorder::load_rollout_items(legacy_path.as_path())
+                .await
+                .expect("legacy supplied history")
+                .0,
+        );
+
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(paginated_path.clone()),
+                history: Some(history),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume from supplied legacy history");
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![user_message_item("supplied legacy history mode")],
+            })
+            .await
+            .expect("append legacy item");
+        store.flush_thread(thread_id).await.expect("flush thread");
+
+        assert_rollout_contains_message(paginated_path.as_path(), "supplied legacy history mode")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn resume_thread_supplied_history_does_not_mask_malformed_rollout() {
+        let home = TempDir::new().expect("temp dir");
+        let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+        let uuid = uuid::Uuid::from_u128(411);
+        let thread_id = ThreadId::from_string(&uuid.to_string()).expect("valid thread id");
+        let history_uuid = uuid::Uuid::from_u128(412);
+        let legacy_path = write_session_file_with_history_mode(
+            home.path(),
+            "2025-01-04T12-02-00",
+            history_uuid,
+            ThreadHistoryMode::Legacy,
+        )
+        .expect("legacy session file");
+        let history = Arc::new(
+            RolloutRecorder::load_rollout_items(legacy_path.as_path())
+                .await
+                .expect("legacy supplied history")
+                .0,
+        );
+        let malformed_path = home.path().join("malformed-rollout.jsonl");
+        std::fs::write(&malformed_path, "not a rollout line\n").expect("malformed rollout");
+
+        let error = store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(malformed_path),
+                history: Some(history),
+                include_archived: true,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect_err("malformed nonempty rollout should fail");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to resume local thread recorder")
+        );
     }
 
     #[tokio::test]
@@ -1814,7 +2502,10 @@ mod tests {
             })
             .await
             .expect_err("external rollouts cannot be referenced by thread id");
-        assert!(error.to_string().contains("must be in Codex home"));
+        assert!(
+            error.to_string().contains("must be in Codex home"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -1932,7 +2623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn paginated_threads_allow_metadata_reads_and_resume_but_reject_legacy_history_paths() {
+    async fn paginated_threads_allow_history_reads_and_resume() {
         let home = TempDir::new().expect("temp dir");
         let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
         let uuid = uuid::Uuid::from_u128(408);
@@ -1967,35 +2658,37 @@ mod tests {
         assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
         assert!(thread.history.is_none());
 
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread(ReadThreadParams {
-                    thread_id,
-                    include_archived: false,
-                    include_history: true,
-                })
-                .await
-                .expect_err("full history read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .read_thread_by_rollout_path(
-                    rollout_path.clone(),
-                    /*include_archived*/ true,
-                    /*include_history*/ true,
-                )
-                .await
-                .expect_err("full history path read should fail"),
-        );
-        assert_paginated_threads_unsupported(
-            store
-                .load_history(LoadThreadHistoryParams {
-                    thread_id,
-                    include_archived: false,
-                })
-                .await
-                .expect_err("history load should fail"),
-        );
+        let thread = store
+            .read_thread(ReadThreadParams {
+                thread_id,
+                include_archived: false,
+                include_history: true,
+            })
+            .await
+            .expect("full history read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let thread = store
+            .read_thread_by_rollout_path(
+                rollout_path.clone(),
+                /*include_archived*/ true,
+                /*include_history*/ true,
+            )
+            .await
+            .expect("full history path read");
+        assert_eq!(thread.history_mode, ThreadHistoryMode::Paginated);
+        assert!(thread.history.is_some());
+
+        let history = store
+            .load_history(LoadThreadHistoryParams {
+                thread_id,
+                include_archived: false,
+            })
+            .await
+            .expect("history load");
+        assert_eq!(history.thread_id, thread_id);
+
         store
             .resume_thread(ResumeThreadParams {
                 thread_id,
@@ -2061,6 +2754,20 @@ mod tests {
                     if event.message == "legacy event should not persist"
             )
         }));
+        store
+            .shutdown_thread(thread_id)
+            .await
+            .expect("shutdown paginated thread");
+        store
+            .resume_thread(ResumeThreadParams {
+                thread_id,
+                rollout_path: Some(rollout_path),
+                history: None,
+                include_archived: false,
+                metadata: thread_metadata(),
+            })
+            .await
+            .expect("resume paginated thread");
     }
 
     fn create_thread_params(thread_id: ThreadId) -> CreateThreadParams {
@@ -2080,19 +2787,12 @@ mod tests {
             history_mode: ThreadHistoryMode::Legacy,
             history_base: None,
             subagent_history_start_ordinal: None,
+            persistence_mode: ThreadPersistenceMode::Durable,
+            initial_rollout_ordinal: 0,
             initial_window_id: uuid::Uuid::now_v7().to_string(),
             runtime_workspace_roots: None,
             metadata: thread_metadata(),
         }
-    }
-
-    fn assert_paginated_threads_unsupported(err: ThreadStoreError) {
-        assert!(matches!(
-            err,
-            ThreadStoreError::Unsupported {
-                operation: "paginated_threads"
-            }
-        ));
     }
 
     fn thread_metadata() -> ThreadPersistenceMetadata {

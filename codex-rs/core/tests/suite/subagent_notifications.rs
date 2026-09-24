@@ -2051,7 +2051,6 @@ async fn spawned_full_history_v2_child_uses_model_precedence_without_dropping_co
             json!(expected_reasoning_effort.to_string()),
         )
     );
-
     Ok(())
 }
 

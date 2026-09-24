@@ -2,6 +2,7 @@ use super::LocalThreadStore;
 use crate::CreateThreadParams;
 use crate::ThreadStoreError;
 use crate::ThreadStoreResult;
+use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
 use codex_rollout::RolloutConfig;
 use codex_rollout::RolloutRecorder;
@@ -27,6 +28,18 @@ pub(super) async fn create_thread(
         model_provider_id: params.metadata.model_provider.clone(),
         generate_memories: matches!(params.metadata.memory_mode, ThreadMemoryMode::Enabled),
     };
+    // Paginated reference-backed forks can omit history_base, but their initial ordinal still
+    // follows the selected inherited prefix. Legacy rollouts do not have authoritative ordinals.
+    let forked_from_ordinal_exclusive = params.forked_from_id.and_then(|_| {
+        params
+            .history_base
+            .map(|base| base.end_ordinal_exclusive)
+            .or_else(|| {
+                (params.history_mode == ThreadHistoryMode::Paginated
+                    && params.initial_rollout_ordinal > 0)
+                    .then_some(params.initial_rollout_ordinal)
+            })
+    });
     RolloutRecorder::new_with_writer_lock(
         &config,
         RolloutRecorderParams::new(
@@ -50,13 +63,9 @@ pub(super) async fn create_thread(
         .with_multi_agent_version(params.multi_agent_version)
         .with_history_mode(params.history_mode)
         .with_history_base(params.history_base)
-        .with_forked_from_ordinal_exclusive(
-            params
-                .forked_from_id
-                .and(params.history_base)
-                .map(|base| base.end_ordinal_exclusive),
-        )
+        .with_forked_from_ordinal_exclusive(forked_from_ordinal_exclusive)
         .with_subagent_history_start_ordinal(params.subagent_history_start_ordinal)
+        .with_initial_rollout_ordinal(params.initial_rollout_ordinal)
         .with_initial_window_id(params.initial_window_id),
         writer_lock,
     )

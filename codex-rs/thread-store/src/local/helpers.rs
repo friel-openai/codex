@@ -61,6 +61,33 @@ pub(super) fn scoped_rollout_path(
     }
 }
 
+/// Accepts managed roots reached through symlinks without allowing nested symlinks to escape.
+pub(super) fn scoped_reference_rollout_path(
+    codex_home: &Path,
+    rollout_path: &Path,
+) -> ThreadStoreResult<PathBuf> {
+    let outside_managed_roots = || ThreadStoreError::InvalidRequest {
+        message: format!(
+            "rollout path `{}` must be in Codex home directory",
+            rollout_path.display()
+        ),
+    };
+    let canonical = std::fs::canonicalize(rollout_path).map_err(|_| outside_managed_roots())?;
+    let managed = [
+        codex_rollout::SESSIONS_SUBDIR,
+        codex_rollout::ARCHIVED_SESSIONS_SUBDIR,
+        codex_rollout::ROTATED_ROLLOUT_SEGMENTS_SUBDIR,
+    ]
+    .into_iter()
+    .filter_map(|directory| std::fs::canonicalize(codex_home.join(directory)).ok())
+    .any(|root| canonical.starts_with(root));
+    if managed {
+        Ok(canonical)
+    } else {
+        Err(outside_managed_roots())
+    }
+}
+
 pub(super) fn rollout_path_is_archived(codex_home: &Path, path: &Path) -> bool {
     path.starts_with(codex_home.join(ARCHIVED_SESSIONS_SUBDIR))
         || path
@@ -110,6 +137,37 @@ pub(super) fn validated_rollout_file_name(
             message: format!(
                 "rollout path `{}` has an invalid filename",
                 display_path.display()
+            ),
+        })
+    }
+}
+
+pub(super) fn matching_rollout_file_name(
+    rollout_path: &Path,
+    thread_id: ThreadId,
+    display_path: &Path,
+) -> ThreadStoreResult<std::ffi::OsString> {
+    let Some(file_name) = rollout_path.file_name().map(OsStr::to_owned) else {
+        return Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "rollout path `{}` missing file name",
+                display_path.display()
+            ),
+        });
+    };
+    let required_plain_suffix = format!("{thread_id}.jsonl");
+    let required_compressed_suffix = format!("{required_plain_suffix}.zst");
+    let file_name_str = file_name.to_string_lossy();
+    if codex_rollout::thread_id_from_path(rollout_path) == Some(thread_id)
+        || file_name_str.ends_with(required_plain_suffix.as_str())
+        || file_name_str.ends_with(required_compressed_suffix.as_str())
+    {
+        Ok(file_name)
+    } else {
+        Err(ThreadStoreError::InvalidRequest {
+            message: format!(
+                "rollout path `{}` does not match thread id {thread_id}",
+                display_path.display(),
             ),
         })
     }
