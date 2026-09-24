@@ -511,6 +511,9 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
     let registration = lifecycle
         .try_start_completion_watcher()
         .expect("watcher starts");
+    let terminal_status = AgentStatus::Completed(Some("finished before transfer".to_string()));
+    lifecycle
+        .remember_cold_terminal_status(terminal_status.clone(), /*visible_when_cold*/ false);
 
     destination_registry
         .reserve_spawn_slot(/*max_threads*/ None)
@@ -521,6 +524,10 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
         .expect("transferred agent has a lifecycle");
     assert!(Arc::ptr_eq(&lifecycle, &transferred));
     assert!(transferred.completion_watcher_active());
+    assert_eq!(
+        transferred.cold_terminal_status(),
+        Some(terminal_status.clone())
+    );
 
     transferred.mark_visible_when_cold();
     destination_registry.release_spawned_thread(thread_id);
@@ -541,9 +548,54 @@ fn transferred_lifecycle_preserves_completion_watcher_registration() {
     assert!(Arc::ptr_eq(&lifecycle, &restored));
     assert!(!restored.is_visible_when_cold());
     assert!(restored.completion_watcher_active());
+    assert_eq!(restored.cold_terminal_status(), Some(terminal_status));
+    restored.clear_cold_terminal_status();
+    assert_eq!(transferred.cold_terminal_status(), None);
 
     drop(registration);
     assert!(!transferred.completion_watcher_active());
+}
+
+#[test]
+fn registered_subtree_follows_current_parent_without_reloading_threads() {
+    let registry = AgentRegistry::default();
+    let root = ThreadId::new();
+    let child = ThreadId::new();
+    let grandchild = ThreadId::new();
+    let unrelated = ThreadId::new();
+    registry.register_root_thread(root);
+    registry.register_spawned_thread(AgentMetadata {
+        agent_id: Some(child),
+        parent_thread_id: Some(root),
+        ..Default::default()
+    });
+    registry.register_spawned_thread(AgentMetadata {
+        agent_id: Some(grandchild),
+        parent_thread_id: Some(child),
+        ..Default::default()
+    });
+    registry.register_spawned_thread(agent_metadata(unrelated));
+    assert_eq!(
+        registry
+            .registered_subtree_thread_ids(root)
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([root, child, grandchild]),
+    );
+
+    registry.register_spawned_thread(AgentMetadata {
+        agent_id: Some(child),
+        parent_thread_id: Some(unrelated),
+        ..Default::default()
+    });
+    assert_eq!(registry.registered_subtree_thread_ids(root), vec![root]);
+    assert_eq!(
+        registry
+            .registered_subtree_thread_ids(unrelated)
+            .into_iter()
+            .collect::<HashSet<_>>(),
+        HashSet::from([unrelated, child, grandchild]),
+    );
 }
 
 #[test]

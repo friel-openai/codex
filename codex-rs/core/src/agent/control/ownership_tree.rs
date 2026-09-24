@@ -25,6 +25,8 @@ struct OwnedDescendant {
     original_lifecycle: Option<Arc<AgentLifecycle>>,
     original_metadata: StoredThread,
     original_visible_when_cold: bool,
+    /// Last terminal status retained while the descendant runtime is unloaded.
+    original_cold_terminal_status: Option<AgentStatus>,
     was_loaded: bool,
 }
 
@@ -207,6 +209,9 @@ impl LocalAgentControl {
             let original_visible_when_cold = original_lifecycle
                 .as_ref()
                 .is_some_and(|lifecycle| lifecycle.is_visible_when_cold());
+            let original_cold_terminal_status = original_lifecycle
+                .as_ref()
+                .and_then(|lifecycle| lifecycle.cold_terminal_status());
             descendants.push(OwnedDescendant {
                 thread_id,
                 parent_thread_id,
@@ -217,6 +222,7 @@ impl LocalAgentControl {
                 original_lifecycle,
                 original_metadata,
                 original_visible_when_cold,
+                original_cold_terminal_status,
                 was_loaded,
             });
         }
@@ -252,6 +258,17 @@ impl LocalAgentControl {
                 }
                 descendant.original_instructions =
                     Some(thread.session.inherited_instructions().await);
+                let status = thread.agent_status().await;
+                descendant.original_cold_terminal_status = matches!(
+                    status,
+                    AgentStatus::Completed(_)
+                        | AgentStatus::Errored(_)
+                        | AgentStatus::Interrupted
+                        | AgentStatus::Shutdown
+                )
+                .then_some(status);
+            } else {
+                descendant.original_cold_terminal_status = lifecycle.cold_terminal_status();
             }
             transition_guards.push(transition);
         }
@@ -411,7 +428,14 @@ impl LocalAgentControl {
             if prepared_descendant.metadata.agent_role.as_deref()
                 != Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
             {
-                lifecycle.mark_visible_when_cold();
+                if let Some(status) = descendant.original_cold_terminal_status.as_ref() {
+                    lifecycle.remember_cold_terminal_status(
+                        status.clone(),
+                        /*visible_when_cold*/ true,
+                    );
+                } else {
+                    lifecycle.mark_visible_when_cold();
+                }
             }
             prepared_descendant
                 .reservation
@@ -463,6 +487,14 @@ impl LocalAgentControl {
             }
             restore_persisted_descendant_metadata(state, descendant).await?;
             if let Some(lifecycle) = &descendant.original_lifecycle {
+                if let Some(status) = &descendant.original_cold_terminal_status {
+                    lifecycle.remember_cold_terminal_status(
+                        status.clone(),
+                        descendant.original_visible_when_cold,
+                    );
+                } else {
+                    lifecycle.clear_cold_terminal_status();
+                }
                 if descendant.original_visible_when_cold {
                     lifecycle.mark_visible_when_cold();
                 } else {
@@ -486,6 +518,20 @@ impl LocalAgentControl {
                         descendant.original_lifecycle.clone(),
                     )
                     .await?;
+                if let Some(lifecycle) = descendant
+                    .original_control
+                    .state
+                    .agent_lifecycle(descendant.thread_id)
+                {
+                    if let Some(status) = descendant.original_cold_terminal_status.as_ref() {
+                        lifecycle.remember_cold_terminal_status(
+                            status.clone(),
+                            /*visible_when_cold*/ true,
+                        );
+                    } else if descendant.original_visible_when_cold {
+                        lifecycle.mark_visible_when_cold();
+                    }
+                }
             } else if descendant
                 .original_control
                 .get_agent_metadata(descendant.thread_id)
@@ -525,10 +571,16 @@ impl LocalAgentControl {
                     descendant.original_metadata.agent_nickname.clone(),
                 )?;
                 metadata.agent_id = Some(descendant.thread_id);
-                reservation.commit_with_lifecycle(
-                    metadata,
-                    descendant.original_lifecycle.clone().unwrap_or_default(),
-                );
+                let lifecycle = descendant.original_lifecycle.clone().unwrap_or_default();
+                if let Some(status) = descendant.original_cold_terminal_status.as_ref() {
+                    lifecycle.remember_cold_terminal_status(
+                        status.clone(),
+                        descendant.original_visible_when_cold,
+                    );
+                } else if descendant.original_visible_when_cold {
+                    lifecycle.mark_visible_when_cold();
+                }
+                reservation.commit_with_lifecycle(metadata, lifecycle);
             }
             if !descendant.was_loaded
                 && let Some(instructions) = &descendant.original_instructions
