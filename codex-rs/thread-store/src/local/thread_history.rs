@@ -119,6 +119,51 @@ WHERE next_rollout_byte_offset >= 0
         .await
         .map_err(thread_history_error)?;
     }
+    let publication_trigger_exists = sqlx::query_scalar::<_, i64>(
+        r#"
+SELECT EXISTS (
+    SELECT 1 FROM sqlite_schema
+    WHERE type = 'trigger'
+      AND name = 'frodex_thread_history_projection_publish_realtime'
+)
+        "#,
+    )
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(thread_history_error)?;
+    if publication_trigger_exists == 0 {
+        let orphan_realtime_rows_exist = sqlx::query_scalar::<_, i64>(
+            r#"
+SELECT EXISTS (
+    SELECT 1
+    FROM thread_realtime_items AS realtime
+    LEFT JOIN thread_history_projection_state AS projection
+        ON projection.thread_id = realtime.thread_id
+    WHERE projection.thread_id IS NULL
+)
+            "#,
+        )
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(thread_history_error)?;
+        if orphan_realtime_rows_exist != 0 {
+            // Older publication moved the checkpoint but left realtime rows under a random
+            // staging ID. Their root IDs cannot be recovered after successful guard cleanup.
+            // Invalidate complete checkpoints once, preserving their offsets for canonical
+            // fallback and rebuild. The publication trigger records this upgrade atomically.
+            sqlx::query(
+                r#"
+UPDATE thread_history_projection_state
+SET next_rollout_byte_offset = -1 - next_rollout_byte_offset
+WHERE next_rollout_byte_offset >= 0
+  AND next_rollout_byte_offset < 9223372036854775807
+                "#,
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(thread_history_error)?;
+        }
+    }
     for statement in [
         r#"
 CREATE TRIGGER IF NOT EXISTS frodex_thread_turns_projection_insert
@@ -203,6 +248,61 @@ BEGIN
             THEN -1 - next_rollout_byte_offset
         ELSE next_rollout_byte_offset
     END
+    WHERE thread_id = OLD.thread_id;
+END
+        "#,
+        r#"
+CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_insert
+AFTER INSERT ON thread_realtime_items
+BEGIN
+    UPDATE thread_history_projection_state
+    SET next_rollout_byte_offset = CASE
+        WHEN next_rollout_byte_offset >= 0
+             AND next_rollout_byte_offset < 9223372036854775807
+            THEN -1 - next_rollout_byte_offset
+        ELSE next_rollout_byte_offset
+    END
+    WHERE thread_id = NEW.thread_id;
+END
+        "#,
+        r#"
+CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_update
+AFTER UPDATE ON thread_realtime_items
+WHEN OLD.thread_id = NEW.thread_id
+BEGIN
+    UPDATE thread_history_projection_state
+    SET next_rollout_byte_offset = CASE
+        WHEN next_rollout_byte_offset >= 0
+             AND next_rollout_byte_offset < 9223372036854775807
+            THEN -1 - next_rollout_byte_offset
+        ELSE next_rollout_byte_offset
+    END
+    WHERE thread_id = NEW.thread_id;
+END
+        "#,
+        r#"
+CREATE TRIGGER IF NOT EXISTS frodex_thread_realtime_items_projection_delete
+AFTER DELETE ON thread_realtime_items
+BEGIN
+    UPDATE thread_history_projection_state
+    SET next_rollout_byte_offset = CASE
+        WHEN next_rollout_byte_offset >= 0
+             AND next_rollout_byte_offset < 9223372036854775807
+            THEN -1 - next_rollout_byte_offset
+        ELSE next_rollout_byte_offset
+    END
+    WHERE thread_id = OLD.thread_id;
+END
+        "#,
+        // Older publishers move the staging checkpoint last. Moving its realtime rows here
+        // keeps those publishers correct; publishers that move realtime explicitly leave none.
+        r#"
+CREATE TRIGGER IF NOT EXISTS frodex_thread_history_projection_publish_realtime
+AFTER UPDATE OF thread_id ON thread_history_projection_state
+WHEN OLD.thread_id != NEW.thread_id
+BEGIN
+    UPDATE thread_realtime_items
+    SET thread_id = NEW.thread_id
     WHERE thread_id = OLD.thread_id;
 END
         "#,
@@ -386,9 +486,11 @@ pub(super) async fn publish_staged_projection(
             ),
         });
     }
+    // The checkpoint covers every timeline table, including voice-session boundaries.
+    // Publish their staged rows together so complete-root reads cannot omit realtime history.
     for statement in [
-        "DELETE FROM thread_items WHERE thread_id = ?",
         "DELETE FROM thread_realtime_items WHERE thread_id = ?",
+        "DELETE FROM thread_items WHERE thread_id = ?",
         "DELETE FROM thread_turns WHERE thread_id = ?",
         "DELETE FROM thread_history_projection_state WHERE thread_id = ?",
     ] {
