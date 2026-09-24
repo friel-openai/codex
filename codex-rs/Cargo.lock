@@ -2236,6 +2236,7 @@ dependencies = [
  "codex-git-utils",
  "codex-goal-extension",
  "codex-guardian-v2",
+ "codex-history",
  "codex-history-notes-extension",
  "codex-home",
  "codex-hooks",
