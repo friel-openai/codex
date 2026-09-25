@@ -927,7 +927,13 @@ async fn scan_reference(
         if !active.insert(path.clone()) {
             return Err(cycle_error(path.as_path()));
         }
-        if reference.segment_id.is_none() {
+        // Native immutable rollouts use a distinct physical rollout ID without a legacy
+        // segment ID. Only a legacy initial reference is restricted to the initial directory.
+        if reference.segment_id.is_none()
+            && reference
+                .rollout_id
+                .is_none_or(|rollout_id| rollout_id == thread_id)
+        {
             validate_legacy_initial_repair_path(
                 store.config.codex_home.as_path(),
                 thread_id,
@@ -1617,7 +1623,11 @@ async fn load_frame(
     if !active.insert(resolved_path.clone()) {
         return Err(cycle_error(resolved_path.as_path()));
     }
-    let mutable_fallback = if reference.segment_id.is_none() {
+    let mutable_fallback = if reference.segment_id.is_none()
+        && reference
+            .rollout_id
+            .is_none_or(|rollout_id| rollout_id == thread_id)
+    {
         validate_legacy_initial_repair_path(
             store.config.codex_home.as_path(),
             thread_id,
