@@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
                         "archive failed for thread {thread_id}; prior archived identities were retired, but runtime shutdown reported an error: {cleanup_err}"
                     );
                 }
-                return Err(thread_store_archive_error("archive", err));
+                return Err(thread_store_mutation_error("archive", err));
             }
         };
         let mut current_agent_ids_to_evict = already_archived_thread_ids;
@@ -6491,6 +6491,28 @@ impl ThreadRequestProcessor {
         &self,
         stored_thread: &StoredThread,
     ) -> Result<(), JSONRPCErrorError> {
+        if stored_thread.history_mode == ThreadHistoryMode::Legacy
+            && stored_thread
+                .rollout_path
+                .as_ref()
+                .is_some_and(|path| !path.starts_with(self.config.codex_home.as_path()))
+        {
+            let indexed = match self.state_db.as_ref() {
+                Some(state_db) => state_db
+                    .get_thread(stored_thread.thread_id)
+                    .await
+                    .map_err(|error| {
+                        internal_error(format!("failed to check selected rollout: {error}"))
+                    })?
+                    .is_some(),
+                None => false,
+            };
+            // An explicitly supplied external Legacy file has no home-selected rollout until
+            // its first resume. Existing indexed selections still require the check below.
+            if !indexed {
+                return Ok(());
+            }
+        }
         let selected = self
             .thread_store
             .read_thread(StoreReadThreadParams {
