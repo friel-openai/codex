@@ -15,12 +15,18 @@ use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InterAgentCommunication;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::SessionContextWindow;
 use codex_protocol::protocol::SessionMeta;
 use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::ThreadRolledBackEvent;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::security_risk::SecurityRiskScore;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::ModelContextScan;
 use codex_rollout::ModelContextScanProgress;
 use core_test_support::responses::strip_metadata_from_items;
@@ -282,6 +288,297 @@ fn completed_user_turn_rollout(
         },
     )));
     rollout_items
+}
+
+fn checkpoint_compacted(history: Vec<ResponseItem>) -> CompactedItem {
+    let window_id = Uuid::now_v7();
+    CompactedItem {
+        message: String::new(),
+        replacement_history: Some(annotated(history)),
+        retained_context: None,
+        guardian_history: None,
+        mcp_resource_origins: None,
+        compaction_response_id: None,
+        latest_token_usage_record: None,
+        window_number: Some(8),
+        first_window_id: Some(window_id.to_string()),
+        previous_window_id: None,
+        window_id: Some(window_id.to_string()),
+        segment_state_checkpoint: None,
+    }
+}
+
+fn complete_thread_settings() -> ThreadSettingsAppliedEvent {
+    ThreadSettingsAppliedEvent {
+        thread_id: None,
+        thread_settings: ThreadSettingsSnapshot {
+            model: "test-model".to_string(),
+            model_provider_id: "test-provider".to_string(),
+            service_tier: None,
+            approval_policy: AskForApproval::Never,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
+            permission_profile: PermissionProfile::workspace_write(),
+            active_permission_profile: None,
+            cwd: serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+            runtime_workspace_roots: Some(Vec::new()),
+            environments: Some(
+                TurnEnvironmentSelections::new(
+                    serde_json::from_value(json!("/tmp")).expect("absolute test cwd"),
+                    Vec::new(),
+                )
+                .into(),
+            ),
+            workspace_roots: Some(Vec::new()),
+            profile_workspace_roots: Some(Vec::new()),
+            windows_sandbox_level: Some(
+                codex_protocol::config_types::WindowsSandboxLevel::Disabled,
+            ),
+            reasoning_effort: None,
+            reasoning_summary: None,
+            personality: None,
+            collaboration_mode: codex_protocol::config_types::CollaborationMode {
+                mode: ModeKind::Default,
+                settings: codex_protocol::config_types::Settings {
+                    model: "test-model".to_string(),
+                    reasoning_effort: None,
+                    developer_instructions: None,
+                },
+            },
+            disabled_plugin_ids: Vec::new(),
+        },
+    }
+}
+
+#[tokio::test]
+async fn reconstruct_history_uses_established_segment_state_checkpoint() {
+    let (session, turn_context) = make_session_and_context().await;
+    let turn_context = Arc::new(turn_context);
+    let replacement_history = vec![assistant_message("checkpoint history")];
+    let reference_context = turn_context.to_turn_context_item();
+    let world_state = build_world_state_from_turn_context(&session, &turn_context).await;
+    let world_state_snapshot = world_state.snapshot();
+    let checkpoint = CertifiedSegmentStateCheckpoint::new(
+        checkpoint_compacted(replacement_history.clone()),
+        Some(SegmentPreviousTurnSettings {
+            model: "previous-model".to_string(),
+            comp_hash: Some("previous-hash".to_string()),
+            realtime_active: Some(false),
+        }),
+        Some(WorldStateItem::full(
+            world_state_snapshot.clone().into_object(),
+        )),
+        Some(reference_context.clone()),
+        complete_thread_settings(),
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid established checkpoint");
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(turn_context.as_ref(), checkpoint.items())
+        .await;
+
+    assert_eq!(reconstructed.history, annotated(replacement_history));
+    assert_eq!(
+        reconstructed.previous_turn_settings,
+        Some(PreviousTurnSettings {
+            model: "previous-model".to_string(),
+            comp_hash: Some("previous-hash".to_string()),
+            realtime_active: Some(false),
+        })
+    );
+    assert_eq!(
+        reconstructed.reference_context_item,
+        Some(reference_context)
+    );
+    assert_eq!(
+        reconstructed.world_state_baseline,
+        Some(world_state_snapshot)
+    );
+    assert_eq!(reconstructed.window_number, 8);
+}
+
+#[test_case(false; "matching Guardian boundary")]
+#[test_case(true; "missing Guardian boundary clears evidence")]
+#[tokio::test]
+async fn checkpoint_only_rollback_preserves_model_history_without_removed_authorization(
+    missing_guardian_boundary: bool,
+) {
+    let (session, turn_context) = make_session_and_context().await;
+    let retained = vec![user_message("keep"), assistant_message("kept")];
+    let mut replacement = retained.clone();
+    replacement.extend([user_message("remove"), assistant_message("removed")]);
+    let mut guardian = retained.clone();
+    if !missing_guardian_boundary {
+        guardian.push(user_message("remove"));
+    }
+    guardian.push(assistant_message("authorization belonging to removed turn"));
+    let mut compacted = checkpoint_compacted(replacement);
+    compacted.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(guardian));
+    let mut items = CertifiedSegmentStateCheckpoint::new(
+        compacted,
+        None,
+        None,
+        None,
+        complete_thread_settings(),
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid cleared checkpoint")
+    .into_items();
+    items.insert(
+        0,
+        RolloutItem::SessionMeta(SessionMetaLine {
+            meta: SessionMeta {
+                history_mode: ThreadHistoryMode::Paginated,
+                ..Default::default()
+            },
+            git: None,
+        }),
+    );
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(reconstructed.history, annotated(retained.clone()));
+    assert_eq!(
+        reconstructed.guardian_history,
+        Some(codex_history::GuardianHistoryCheckpoint(
+            if missing_guardian_boundary {
+                Vec::new()
+            } else {
+                retained
+            }
+        ))
+    );
+}
+
+#[tokio::test]
+async fn complete_history_rollback_does_not_restore_removed_checkpoint_authorization() {
+    let (session, turn_context) = make_session_and_context().await;
+    let retained = vec![
+        user_message("keep original"),
+        assistant_message("original answer"),
+    ];
+    let mut items = completed_user_turn_rollout(
+        turn_context.to_turn_context_item(),
+        retained
+            .iter()
+            .cloned()
+            .map(|item| RolloutItem::ResponseItem(item.into()))
+            .collect(),
+    );
+    let mut context = turn_context.to_turn_context_item();
+    context.turn_id = Some("removed-turn".to_string());
+    let mut compacted = checkpoint_compacted(vec![
+        user_message("rewritten retained turn"),
+        assistant_message("rewritten answer"),
+        user_message("remove"),
+        assistant_message("removed"),
+    ]);
+    compacted.guardian_history = Some(codex_history::GuardianHistoryCheckpoint(vec![
+        assistant_message("authorization belonging only to removed checkpoint"),
+    ]));
+    let mut removed_items = vec![RolloutItem::ResponseItem(user_message("remove").into())];
+    removed_items.extend(
+        CertifiedSegmentStateCheckpoint::new(
+            compacted,
+            None,
+            None,
+            None,
+            complete_thread_settings(),
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+            },
+        )
+        .expect("valid cleared checkpoint")
+        .into_items(),
+    );
+    items.extend(completed_user_turn_rollout(context, removed_items));
+    items.push(RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
+        codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
+    )));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, &items)
+        .await;
+    assert_eq!(reconstructed.history, annotated(retained));
+    assert_eq!(reconstructed.guardian_history, None);
+}
+
+#[tokio::test]
+async fn cleared_segment_state_checkpoint_blocks_older_resume_metadata() {
+    let (session, turn_context) = make_session_and_context().await;
+    let mut rollout_items = completed_user_turn_rollout(
+        turn_context.to_turn_context_item(),
+        vec![RolloutItem::ResponseItem(ResponseItemEnvelope::new(
+            user_message("older turn"),
+        ))],
+    );
+    let replacement_history = vec![assistant_message("cleared checkpoint")];
+    rollout_items.extend(
+        CertifiedSegmentStateCheckpoint::new(
+            checkpoint_compacted(replacement_history.clone()),
+            /*previous_turn_settings*/ None,
+            /*world_state*/ None,
+            /*reference_context*/ None,
+            complete_thread_settings(),
+            TokenCountEvent {
+                info: None,
+                rate_limits: None,
+            },
+        )
+        .expect("valid cleared checkpoint")
+        .into_items(),
+    );
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, rollout_items.as_slice())
+        .await;
+
+    assert_eq!(reconstructed.history, annotated(replacement_history));
+    assert_eq!(reconstructed.previous_turn_settings, None);
+    assert_eq!(reconstructed.reference_context_item, None);
+    assert_eq!(reconstructed.world_state_baseline, None);
+}
+
+#[tokio::test]
+async fn newer_turn_context_overrides_cleared_segment_state_checkpoint() {
+    let (session, turn_context) = make_session_and_context().await;
+    let replacement_history = vec![assistant_message("cleared checkpoint")];
+    let mut rollout_items = CertifiedSegmentStateCheckpoint::new(
+        checkpoint_compacted(replacement_history.clone()),
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        complete_thread_settings(),
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid cleared checkpoint")
+    .into_items();
+    let newer_reference_context = turn_context.to_turn_context_item();
+    rollout_items.push(RolloutItem::TurnContext(newer_reference_context.clone()));
+
+    let reconstructed = session
+        .reconstruct_history_from_rollout(&turn_context, rollout_items.as_slice())
+        .await;
+
+    assert_eq!(reconstructed.history, annotated(replacement_history));
+    assert_eq!(
+        reconstructed.reference_context_item,
+        Some(newer_reference_context)
+    );
 }
 
 #[tokio::test]
@@ -1270,6 +1567,7 @@ async fn record_initial_history_resumed_rollback_drops_incomplete_user_turn_comp
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
         RolloutItem::EventMsg(EventMsg::ThreadRolledBack(
             codex_protocol::protocol::ThreadRolledBackEvent { num_turns: 1 },
@@ -1335,6 +1633,7 @@ async fn record_initial_history_requires_surviving_full_snapshot_without_user_tu
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                segment_state_checkpoint: None,
             }),
         ],
     };
@@ -1372,6 +1671,7 @@ async fn record_initial_history_resumed_does_not_seed_reference_context_item_aft
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -1447,6 +1747,7 @@ async fn reconstruct_history_prefers_compacted_window_over_session_meta() {
             window_id: Some(compacted_window_id.to_string()),
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -1487,6 +1788,7 @@ async fn reconstruct_history_replays_world_state_from_latest_compaction_window()
                 window_id: None,
                 compaction_response_id: None,
                 latest_token_usage_record: None,
+                segment_state_checkpoint: None,
             }),
             RolloutItem::WorldState(WorldStateItem::full(object!({
                 "environment": {"status": "starting", "cwd": "/workspace"}
@@ -1555,6 +1857,7 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
                     window_id: Some(window_ids[window_number].to_string()),
                     compaction_response_id: None,
                     latest_token_usage_record: None,
+                    segment_state_checkpoint: None,
                 }),
                 RolloutItem::WorldState(WorldStateItem::full(object!({
                     "environment": {"window": window_number, "status": "starting"}
@@ -1594,8 +1897,11 @@ async fn bounded_replay_matches_full_replay_after_empty_turn_compactions() {
         .find_map(|(index, item)| {
             matches!(scan.push(item.clone()), ModelContextScanProgress::Complete).then_some(index)
         });
-    assert_eq!(cutoff, Some(latest_wake_start));
+    // Unmarked compactions still scan older records for sticky settings and usage, while
+    // discarding older model items once the replacement history has a complete baseline.
+    assert_eq!(cutoff, None);
     let bounded_items = scan.finish(session_meta);
+    assert!(bounded_items.len() <= rollout_items.len() - latest_wake_start + 1);
     let full = session
         .reconstruct_history_from_rollout(&turn_context, &rollout_items)
         .await;
@@ -1664,6 +1970,7 @@ async fn reconstruct_history_preserves_legacy_compaction_count_with_session_meta
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -1711,6 +2018,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_does_
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -1752,6 +2060,7 @@ async fn reconstruct_history_legacy_compaction_without_replacement_history_clear
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
         RolloutItem::EventMsg(EventMsg::TurnStarted(
             codex_protocol::protocol::TurnStartedEvent {
@@ -1866,6 +2175,7 @@ async fn record_initial_history_resumed_turn_context_after_compaction_reestablis
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
         RolloutItem::TurnContext(previous_context_item),
         RolloutItem::EventMsg(EventMsg::TurnComplete(
@@ -2048,6 +2358,7 @@ async fn record_initial_history_resumed_aborted_turn_without_id_clears_active_tu
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -2319,6 +2630,7 @@ async fn record_initial_history_resumed_trailing_incomplete_turn_compaction_clea
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
     ];
 
@@ -2506,6 +2818,7 @@ async fn record_initial_history_resumed_replaced_incomplete_compacted_turn_clear
             window_id: None,
             compaction_response_id: None,
             latest_token_usage_record: None,
+            segment_state_checkpoint: None,
         }),
         // A newer TurnStarted replaces the incomplete compacted turn without a matching
         // completion/abort for the old one.
