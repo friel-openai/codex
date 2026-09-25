@@ -156,6 +156,8 @@ pub struct TurnEnvironmentSelection {
     pub environment_id: String,
     pub cwd: PathUri,
     pub workspace_roots: Vec<PathUri>,
+    /// Configuration supplied by the environment owner for this process.
+    /// Runtime configuration is not stored in `TurnContextItem` or restored from rollout history.
     pub config: EnvironmentConfigState,
 }
 
@@ -4544,6 +4546,42 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(event.root_turn_id, None);
+    }
+
+    #[test]
+    fn turn_context_ignores_legacy_runtime_environment_config() -> Result<()> {
+        let cwd = test_path_buf("/workspace").abs();
+        let expected: TurnContextItem = serde_json::from_value(json!({
+            "cwd": cwd,
+            "workspace_roots": [cwd],
+            "approval_policy": "never",
+            "sandbox_policy": { "type": "danger-full-access" },
+            "model": "gpt-5",
+            "summary": "auto",
+        }))?;
+        let persisted = serde_json::to_value(&expected)?;
+        for config in [
+            json!("from_thread"),
+            json!("pending"),
+            json!({ "failed": "configuration unavailable" }),
+            json!({
+                "ready": {
+                    "shell_environment_policy": "must not be accepted from rollout history"
+                }
+            }),
+        ] {
+            let mut legacy = persisted.clone();
+            legacy["environments"] = json!([{
+                "environment_id": "remote",
+                "cwd": PathUri::from_abs_path(&cwd),
+                "workspace_roots": [PathUri::from_abs_path(&cwd)],
+                "config": config,
+            }]);
+            let decoded: TurnContextItem = serde_json::from_value(legacy)?;
+            assert_eq!(decoded, expected);
+            assert_eq!(serde_json::to_value(&decoded)?, persisted);
+        }
+        Ok(())
     }
 
     #[test]

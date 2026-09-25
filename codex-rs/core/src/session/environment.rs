@@ -1,5 +1,7 @@
 use std::collections::HashSet;
+use std::sync::Arc;
 
+use codex_async_utils::OrCancelExt;
 use codex_exec_server::LOCAL_ENVIRONMENT_ID;
 use codex_exec_server::MAX_SELECTED_CAPABILITY_ROOTS;
 use codex_exec_server::SelectedCapabilityRootsStatus;
@@ -18,6 +20,8 @@ use crate::environment_selection::TurnEnvironmentSnapshot;
 use crate::session::session::Session;
 use crate::session::session::SessionConfiguration;
 use crate::session::session::SessionSettingsUpdate;
+use crate::session::step_context::StepInputs;
+use crate::session::turn_context::TurnContext;
 
 pub(super) fn validate_environment_selections(
     selections: &[TurnEnvironmentSelection],
@@ -167,6 +171,85 @@ impl Session {
             self.services.turn_environments.snapshot()
         };
         snapshot.await
+    }
+
+    /// Applies an explicit workspace tool transition to the running task, unlike ordinary
+    /// settings updates, which only select environments for the next task. Existing steps
+    /// retain their captured environments while later steps use this published snapshot.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "workspace selection and task validation must use the same state version"
+    )]
+    pub(crate) async fn activate_workspace_environments(
+        &self,
+        turn: &Arc<TurnContext>,
+        configuration: &SessionConfiguration,
+    ) -> CodexResult<TurnEnvironmentSnapshot> {
+        let (task_done, cancellation_token, snapshot) = {
+            let active = self.active_turn.lock().await;
+            let task = active
+                .as_ref()
+                .and_then(|active| active.task.as_ref())
+                .filter(|task| {
+                    Arc::ptr_eq(&task.turn_context, turn) && !task.cancellation_token.is_cancelled()
+                })
+                .ok_or(CodexErr::TurnAborted)?;
+            let state = self.state.lock().await;
+            if state.session_configuration.environments != configuration.environments {
+                return Err(CodexErr::InvalidRequest(
+                    "workspace settings changed while preparing the transition".to_string(),
+                ));
+            }
+            self.mark_mcp_runtime_dirty();
+            self.services.turn_environments.update_selections(
+                &configuration.environments,
+                &configuration.inferred_environment_config(),
+            );
+            (
+                Arc::clone(&task.done),
+                task.cancellation_token.clone(),
+                self.services.turn_environments.snapshot(),
+            )
+        };
+        let environments = snapshot.or_cancel(&cancellation_token).await?;
+        for environment in environments.starting() {
+            environment
+                .wait_until_ready()
+                .or_cancel(&cancellation_token)
+                .await?
+                .map_err(|error| {
+                    CodexErr::InvalidRequest(format!(
+                        "could not prepare the linked worktree environment: {error}"
+                    ))
+                })?;
+        }
+        // A second shared snapshot could adopt a newer, unrelated workspace selection.
+        let environments = environments.refresh_readiness();
+        let active = self.active_turn.lock().await;
+        let task = active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .filter(|task| {
+                Arc::ptr_eq(&task.done, &task_done)
+                    && Arc::ptr_eq(&task.turn_context, turn)
+                    && !task.cancellation_token.is_cancelled()
+            })
+            .ok_or(CodexErr::TurnAborted)?;
+        let state = self.state.lock().await;
+        if state.session_configuration.environments != configuration.environments {
+            return Err(CodexErr::InvalidRequest(
+                "workspace settings changed while preparing the transition".to_string(),
+            ));
+        }
+        // Model updates serialize on active_turn as well; retain the latest settings.
+        let inputs = task.turn_context.next_step_input.load_full();
+        task.turn_context
+            .next_step_input
+            .store(Arc::new(StepInputs {
+                settings: Arc::clone(&inputs.settings),
+                environments: environments.clone(),
+            }));
+        Ok(environments)
     }
 
     pub(crate) async fn environment_ready(

@@ -64,7 +64,10 @@ async fn remote_fork_dispatch_preserves_server_workspace_roots() -> Result<()> {
     Box::pin(app.handle_event(
         &mut tui,
         &mut server,
-        AppEvent::ForkCurrentSession { name: None },
+        AppEvent::ForkCurrentSession {
+            name: None,
+            placement: None,
+        },
     ))
     .await?;
 

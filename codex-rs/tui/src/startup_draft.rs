@@ -278,7 +278,9 @@ impl StartupDraftPump {
             | SessionSelection::Exit
             | SessionSelection::AgentsOverview => StartupDraftSessionAction::New,
             SessionSelection::Resume(_) => StartupDraftSessionAction::Resume,
-            SessionSelection::Fork(_) => StartupDraftSessionAction::Fork,
+            SessionSelection::Fork(_) | SessionSelection::Side(_) => {
+                StartupDraftSessionAction::Fork
+            }
         };
         let destination_changed = match self.resolved_selection.as_ref() {
             Some(SessionSelection::StartFresh) => {
@@ -293,6 +295,9 @@ impl StartupDraftPump {
             }
             Some(SessionSelection::Fork(previous)) => {
                 !matches!(session_selection, SessionSelection::Fork(next) if previous.thread_id == next.thread_id && previous.cwd == next.cwd)
+            }
+            Some(SessionSelection::Side(previous)) => {
+                !matches!(session_selection, SessionSelection::Side(next) if previous.thread_id == next.thread_id && previous.cwd == next.cwd)
             }
             None => self.session_action != session_action,
         };
