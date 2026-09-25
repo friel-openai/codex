@@ -398,6 +398,15 @@ pub struct ReadThreadParams {
     pub include_history: bool,
 }
 
+/// Parameters for reading persisted metadata for a bounded set of threads.
+///
+/// Missing thread IDs are omitted. Implementations must not load thread history.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadThreadsParams {
+    /// Thread IDs to look up. Results preserve this order after missing IDs are omitted.
+    pub thread_ids: Vec<ThreadId>,
+}
+
 /// Parameters for reading a local rollout-backed thread by path.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReadThreadByRolloutPathParams {
@@ -1117,6 +1126,27 @@ pub struct DeleteThreadParams {
 pub struct DeleteThreadsParams {
     /// Thread ids to delete, in the order their persisted data should be removed.
     pub thread_ids: Vec<ThreadId>,
+}
+
+/// Exact durable result of an ordered multi-thread deletion.
+///
+/// An error after earlier deletions is reported here so callers can reconcile those irreversible
+/// deletions before returning the error to their client.
+#[derive(Debug)]
+pub struct DeleteThreadsOutcome {
+    /// Thread IDs whose persisted rollout data was deleted or was already absent, in request order.
+    pub deleted_thread_ids: Vec<ThreadId>,
+    /// First member deletion or final batch state cleanup that failed.
+    pub failure: Option<DeleteThreadsFailure>,
+}
+
+/// A member deletion or final batch state cleanup failure.
+#[derive(Debug)]
+pub struct DeleteThreadsFailure {
+    /// `Some` for a member deletion; `None` for state cleanup after all rollout removals.
+    pub thread_id: Option<ThreadId>,
+    /// Store error from the member deletion or batch state cleanup.
+    pub error: crate::ThreadStoreError,
 }
 
 #[cfg(test)]

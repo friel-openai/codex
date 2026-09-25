@@ -3,6 +3,7 @@ use app_test_support::MockResponsesConfig;
 use app_test_support::TestAppServer;
 use app_test_support::create_fake_paginated_rollout;
 use app_test_support::create_fake_rollout;
+use app_test_support::create_fake_rollout_with_source;
 use app_test_support::create_mock_responses_server_repeating_assistant;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::ClientRequest;
@@ -31,6 +32,8 @@ use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_path_by_id_str;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
+use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_state::DirectionalThreadSpawnEdgeStatus;
 use codex_state::StateRuntime;
 use codex_utils_absolute_path::test_support::PathExt;
@@ -467,31 +470,61 @@ async fn thread_archive_archives_spawned_descendants() -> Result<()> {
         Some("mock_provider"),
         /*git_info*/ None,
     )?;
-    let child_id = create_fake_rollout(
+    let parent_thread_id = ThreadId::from_string(&parent_id)?;
+    let child_id = create_fake_rollout_with_source(
         codex_home.path(),
         "2025-01-01T00-01-00",
         "2025-01-01T00:01:00Z",
         "child",
         Some("mock_provider"),
         /*git_info*/ None,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id,
+            depth: 1,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
     )?;
-    let grandchild_id = create_fake_rollout(
+    let child_thread_id = ThreadId::from_string(&child_id)?;
+    let grandchild_id = create_fake_rollout_with_source(
         codex_home.path(),
         "2025-01-01T00-02-00",
         "2025-01-01T00:02:00Z",
         "grandchild",
         Some("mock_provider"),
         /*git_info*/ None,
+        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: child_thread_id,
+            depth: 2,
+            agent_path: None,
+            agent_nickname: None,
+            agent_role: None,
+        }),
     )?;
 
-    let parent_thread_id = ThreadId::from_string(&parent_id)?;
-    let child_thread_id = ThreadId::from_string(&child_id)?;
     let grandchild_thread_id = ThreadId::from_string(&grandchild_id)?;
     let state_db = StateRuntime::init(
         codex_state::SqliteConfig::new_for_testing(codex_home.path().abs()),
         "mock_provider".into(),
     )
     .await?;
+    // A closed child remains owned when its indexed source still names this parent.
+    for thread_id in [parent_thread_id, child_thread_id, grandchild_thread_id] {
+        let rollout_path = find_thread_path_by_id_str(
+            codex_home.path(),
+            &thread_id.to_string(),
+            /*state_db_ctx*/ None,
+        )
+        .await?
+        .expect("fixture thread has a rollout");
+        let (items, _, _) =
+            codex_rollout::RolloutRecorder::load_rollout_items(&rollout_path).await?;
+        let metadata = codex_rollout::builder_from_items(&items, &rollout_path)
+            .expect("fixture rollout has session metadata")
+            .build("mock_provider");
+        state_db.upsert_thread(&metadata).await?;
+    }
     state_db
         .mark_backfill_complete(/*last_watermark*/ None)
         .await?;

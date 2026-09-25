@@ -17,6 +17,7 @@ use crate::context::InterAgentMessage;
 use crate::context::InterAgentMessageType;
 use codex_protocol::AgentPath;
 use codex_protocol::error::CodexErr;
+use codex_protocol::error::CodexErrorDetails;
 use codex_protocol::error::Result as CodexResult;
 use codex_protocol::protocol::InterAgentCommunication;
 
@@ -55,6 +56,15 @@ impl AgentMessage {
 }
 
 impl LocalAgentControl {
+    #[cfg(test)]
+    pub(crate) fn unregister_goal_supervisor_parent_for_test(
+        &self,
+        parent_thread_id: codex_protocol::ThreadId,
+    ) {
+        // Model a scheduler-loaded parent without agent registration, keeping its runtime alive.
+        self.state.release_spawned_thread(parent_thread_id);
+    }
+
     /// Resolves and delivers captured input, restoring an evicted runtime when necessary.
     pub(crate) async fn send(&self, request: SendRequest) -> CodexResult<DeliveryReceipt> {
         self.send_inner(request, /*supervisor_parent*/ false).await
@@ -67,7 +77,7 @@ impl LocalAgentControl {
     ) -> CodexResult<DeliveryReceipt> {
         let state = self.upgrade()?;
         let helper = state.get_thread(request.caller).await?;
-        let target = self.resolve_target(request.caller, &request.target)?;
+        let target = self.resolve_target(request.caller, &request.target).await?;
         if !helper.is_running()
             || !std::sync::Arc::ptr_eq(&self.state, &helper.session.services.agent_control.state)
             || !crate::goal_supervisor::is_goal_supervisor_helper_source(&helper.session_source)
@@ -99,10 +109,23 @@ impl LocalAgentControl {
             input,
             mut start_options,
         } = request;
-        let target = self.resolve_target(caller, &target)?;
+        let target = self.resolve_target(caller, &target).await?;
         let (metadata, submission_id) = match input {
             AgentInput::UserInput(input) => {
-                let receiver = self.get_agent_metadata(target);
+                let mut receiver = self.get_agent_metadata(target);
+                if receiver.is_none() {
+                    match self.upgrade()?.get_thread(target).await {
+                        // Direct user input can target a loaded thread without agent registration.
+                        Ok(_) => {}
+                        Err(err)
+                            if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) =>
+                        {
+                            receiver =
+                                Some(self.ensure_open_agent_known_by_id(caller, target).await?);
+                        }
+                        Err(err) => return Err(err),
+                    }
+                }
                 let submission_id = if receiver.is_some() {
                     self.deliver_input_to_agent(
                         resume_config,
@@ -118,7 +141,11 @@ impl LocalAgentControl {
                 (receiver.unwrap_or_default(), submission_id)
             }
             AgentInput::Message { message, mode } => {
-                let registered_receiver = self.get_agent_metadata(target);
+                let registered_receiver = match self.get_agent_metadata(target) {
+                    Some(receiver) => Some(receiver),
+                    None if supervisor_parent => None,
+                    None => Some(self.ensure_open_agent_known_by_id(caller, target).await?),
+                };
                 let receiver_is_registered = registered_receiver.is_some();
                 let mut receiver = match registered_receiver {
                     Some(receiver) => receiver,
