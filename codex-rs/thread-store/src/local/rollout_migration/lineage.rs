@@ -1161,8 +1161,8 @@ async fn inspect_source(
             Some(context) => Ok(context.rollout_line()),
             None => line_parser::parse_paginated_rollout_line(raw.as_bytes()),
         };
-        let line = match decoded {
-            Ok(line) => line,
+        let decoded_lines = match decoded {
+            Ok(line) => vec![line],
             Err(error) => {
                 canonical_paginated_suffix = false;
                 let value = serde_json::from_str::<serde_json::Value>(raw.as_str()).ok();
@@ -1183,60 +1183,88 @@ async fn inspect_source(
                         path.display()
                     )));
                 }
-                continue;
+
+                let Some(recovered) = (session_meta.meta.history_mode == ThreadHistoryMode::Legacy)
+                    .then(|| codex_rollout::recover_legacy_jsonl_suffix(raw.as_bytes()))
+                    .flatten()
+                else {
+                    continue;
+                };
+                let recovered_record_count = recovered.values.len();
+                let recovered_lines = recovered
+                    .values
+                    .into_iter()
+                    .map(line_parser::parse_legacy_rollout_value)
+                    .collect::<Result<Vec<_>, _>>();
+                let Ok(recovered_lines) = recovered_lines else {
+                    continue;
+                };
+                tracing::warn!(
+                    path = %path.display(),
+                    discarded_prefix_bytes = recovered.discarded_prefix_bytes,
+                    recovered_record_count,
+                    "recovered complete legacy rollout records during migration inspection"
+                );
+                recovered_lines.into_iter().flatten().collect()
             }
         };
-        // Native replay preserves payloads instead of canonicalizing legacy presentation events.
-        // Reject such inputs before staging: a later projection failure must not follow selection.
-        if session_meta.meta.history_mode == ThreadHistoryMode::Paginated
-            && session_meta
-                .meta
-                .subagent_history_start_ordinal
-                .is_none_or(|start| line.ordinal.is_none_or(|ordinal| ordinal >= start))
-            && codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
-            && !codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Paginated)
-        {
-            return Err(migration_error(format!(
-                "Paginated source {} contains legacy-only presentation events; retain its supported reader",
-                path.display()
-            )));
-        }
-        if canonical_paginated_suffix
-            && !matches!(
-                &line.item,
-                RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
-            )
-        {
-            let canonical = match (&prepared_context, line.ordinal) {
-                (Some(context), Some(ordinal)) => context.canonical_record(ordinal)?,
-                _ => serde_json::to_vec(&line).map_err(migration_error)?,
-            };
-            canonical_paginated_suffix = canonical == raw.as_bytes();
-        }
-        record_count = record_count
-            .checked_add(1)
-            .ok_or_else(|| migration_error("rollout migration record count overflow"))?;
-        has_rollback |= matches!(
-            &line.item,
-            RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
-        );
-        match line.item {
-            RolloutItem::SessionMeta(_) if !saw_session_meta => saw_session_meta = true,
-            RolloutItem::SessionMeta(_) => {}
-            RolloutItem::RolloutReference(reference)
-                if saw_session_meta && !saw_local_record && leading_reference.is_none() =>
+        for line in decoded_lines {
+            // Native replay preserves payloads instead of canonicalizing legacy presentation
+            // events. Reject such inputs before staging: a later projection failure must not
+            // follow selection.
+            if session_meta.meta.history_mode == ThreadHistoryMode::Paginated
+                && session_meta
+                    .meta
+                    .subagent_history_start_ordinal
+                    .is_none_or(|start| line.ordinal.is_none_or(|ordinal| ordinal >= start))
+                && codex_rollout::is_persisted_rollout_item(&line.item, ThreadHistoryMode::Legacy)
+                && !codex_rollout::is_persisted_rollout_item(
+                    &line.item,
+                    ThreadHistoryMode::Paginated,
+                )
             {
-                reference_ordinal = line.ordinal;
-                leading_reference = Some(reference);
-            }
-            RolloutItem::RolloutReference(_) => {
                 return Err(migration_error(format!(
-                    "rollout migration source {} contains a non-leading reference",
+                    "Paginated source {} contains legacy-only presentation events; retain its supported reader",
                     path.display()
                 )));
             }
-            _ if saw_session_meta => saw_local_record = true,
-            _ => {}
+            if canonical_paginated_suffix
+                && !matches!(
+                    &line.item,
+                    RolloutItem::SessionMeta(_) | RolloutItem::RolloutReference(_)
+                )
+            {
+                let canonical = match (&prepared_context, line.ordinal) {
+                    (Some(context), Some(ordinal)) => context.canonical_record(ordinal)?,
+                    _ => serde_json::to_vec(&line).map_err(migration_error)?,
+                };
+                canonical_paginated_suffix = canonical == raw.as_bytes();
+            }
+            record_count = record_count
+                .checked_add(1)
+                .ok_or_else(|| migration_error("rollout migration record count overflow"))?;
+            has_rollback |= matches!(
+                &line.item,
+                RolloutItem::EventMsg(EventMsg::ThreadRolledBack(_))
+            );
+            match line.item {
+                RolloutItem::SessionMeta(_) if !saw_session_meta => saw_session_meta = true,
+                RolloutItem::SessionMeta(_) => {}
+                RolloutItem::RolloutReference(reference)
+                    if saw_session_meta && !saw_local_record && leading_reference.is_none() =>
+                {
+                    reference_ordinal = line.ordinal;
+                    leading_reference = Some(reference);
+                }
+                RolloutItem::RolloutReference(_) => {
+                    return Err(migration_error(format!(
+                        "rollout migration source {} contains a non-leading reference",
+                        path.display()
+                    )));
+                }
+                _ if saw_session_meta => saw_local_record = true,
+                _ => {}
+            }
         }
     }
     if history_base.is_some() && leading_reference.is_some() {
