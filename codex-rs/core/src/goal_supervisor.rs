@@ -956,7 +956,7 @@ pub(crate) async fn supervisor_continuity_context_item(
     session: &Arc<Session>,
     goal_id: &str,
     goal: &ThreadGoal,
-    source_items: &[RolloutItem],
+    last_parent_message_at: Option<i64>,
 ) -> RolloutItem {
     let previous_supervisor_action = session
         .goal_supervisor_runtime
@@ -965,10 +965,6 @@ pub(crate) async fn supervisor_continuity_context_item(
         .await
         .clone()
         .filter(|action| action.goal_id.as_deref() == Some(goal_id));
-    let last_parent_message_at = source_items.iter().rev().find_map(|item| match item {
-        RolloutItem::EventMsg(EventMsg::TurnComplete(event)) => event.completed_at,
-        _ => None,
-    });
     let snooze_records = session
         .goal_supervisor_runtime
         .snooze_records

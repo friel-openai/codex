@@ -4227,6 +4227,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
     let (mut child, _child_turn) = make_session_and_context().await;
     attach_thread_persistence(&mut child).await;
 
+    let guardian_checkpoint = codex_history::GuardianHistoryCheckpoint(vec![user_message(
+        "parent authorization retained outside model context",
+    )]);
+
     let source_turn = Arc::new(source_turn);
     let world_state = build_world_state_from_turn_context(&source, &source_turn).await;
     let source_response_items = Arc::new(vec![ResponseItemEnvelope {
@@ -4312,11 +4316,12 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
             Arc::clone(&source_response_items),
             Some(reference_context_item.clone()),
         );
-        state.replace_shared_history(
-            Arc::clone(&source_response_items),
-            Some(reference_context_item.clone()),
-        );
         state.set_token_info(Some(authoritative_tokens.clone()));
+        state.history.restore_review_context(
+            /*retained_context*/ None,
+            Some(&guardian_checkpoint),
+            /*reviewer_compaction_hash*/ None,
+        );
         state.set_rate_limits(authoritative_rate_limits.clone());
         state
             .history
@@ -4372,6 +4377,10 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         assert_eq!(child_state.auto_compact_window_number(), 7);
         assert_eq!(child_state.auto_compact_window_ids(), window_ids);
         assert_eq!(child_state.history.history_version(), 1);
+        assert_eq!(
+            child_state.history.guardian_history_checkpoint(),
+            Some(guardian_checkpoint.clone())
+        );
         assert!(
             child_state
                 .history
@@ -4391,6 +4400,14 @@ async fn prepared_fork_preserves_parent_cached_model_state_without_copying_histo
         .await?
         .0;
     assert_contains_certified_segment_state_checkpoint(&child_rollout_items);
+    let persisted_guardian = child_rollout_items
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::Compacted(item) => item.guardian_history.clone(),
+            _ => None,
+        });
+    assert_eq!(persisted_guardian, Some(guardian_checkpoint));
     assert!(child_rollout_items.iter().any(|item| {
         matches!(
             item,

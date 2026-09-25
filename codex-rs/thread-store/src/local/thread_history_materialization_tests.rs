@@ -2957,6 +2957,15 @@ fn certified_test_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
 
 #[tokio::test]
 async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
+    check_nested_user_cutoff(/*filter_text*/ None).await;
+}
+
+#[tokio::test]
+async fn filtered_native_fork_copy_is_self_contained_without_reintroducing_ancestors() {
+    check_nested_user_cutoff(Some("filtered inherited developer message")).await;
+}
+
+async fn check_nested_user_cutoff(filter_text: Option<&str>) {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let thread_id = ThreadId::default();
@@ -2966,6 +2975,26 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         .await
         .expect("persist paginated source metadata");
     let mut predecessor_reference = None;
+    if let Some(text) = filter_text {
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id,
+                items: vec![RolloutItem::ResponseItem(
+                    ResponseItem::Message {
+                        id: None,
+                        role: "developer".to_string(),
+                        content: vec![ContentItem::InputText {
+                            text: text.to_string(),
+                        }],
+                        phase: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    }
+                    .into(),
+                )],
+            })
+            .await
+            .expect("append filtered predecessor message");
+    }
     for index in 0..3 {
         let turn_id = format!("turn-{index}");
         store
@@ -3025,6 +3054,8 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
     let (mut predecessor_reference, predecessor_end_ordinal) =
         predecessor_reference.expect("sealed predecessor reference");
     predecessor_reference.nth_user_message = Some(1);
+    predecessor_reference.compacted_replacement_history_filter_texts =
+        filter_text.map(|text| vec![text.to_string()]);
     lines[0].ordinal = Some(predecessor_end_ordinal);
     for (offset, line) in lines[1..].iter_mut().enumerate() {
         let offset = u64::try_from(offset).expect("compatibility ordinal offset");
@@ -3056,11 +3087,13 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         + "\n";
     fs::write(active_path.as_path(), encoded.as_bytes())
         .expect("replace source rollout with inherited user cutoff");
-    assert!(
+    assert_eq!(
         store
             .rebuild_history_projection(thread_id)
             .await
-            .expect("rebuild filtered compatibility projection")
+            .expect("rebuild filtered compatibility projection"),
+        filter_text.is_none(),
+        "filtered ancestry uses the compatibility reader rather than a SQLite projection"
     );
 
     let prepared = store
@@ -3080,6 +3113,86 @@ async fn indexed_latest_fork_preserves_same_thread_nested_user_cutoff() {
         prepared.response_history.as_slice(),
         "cutoff message 2"
     ));
+    if let Some(filter_text) = filter_text {
+        let frozen_position = prepared
+            .frozen_segment
+            .as_ref()
+            .expect("filtered source freezes its selected prefix")
+            .history_base
+            .expect("native frozen source position");
+        drop(prepared);
+        let child_id = ThreadId::new();
+        create_paginated_subagent_thread(
+            &store,
+            child_id,
+            Some(frozen_position),
+            /*subagent_history_start_ordinal*/ None,
+        )
+        .await;
+        store
+            .append_items(AppendThreadItemsParams {
+                thread_id: child_id,
+                items: vec![
+                    turn_started("child-turn"),
+                    user_message("native child suffix"),
+                    turn_completed("child-turn"),
+                ],
+            })
+            .await
+            .expect("append native child suffix");
+        store
+            .persist_thread(child_id, PersistContext::Standard)
+            .await
+            .expect("persist native child");
+        index_paginated_source_metadata(&store, child_id).await;
+        let prepared = store
+            .prepare_fork(PrepareForkParams {
+                thread_id: child_id,
+                boundary: ForkBoundary::Latest,
+            })
+            .await
+            .expect("prepare native descendant of filtered source");
+        assert!(
+            prepared.history_base.is_some(),
+            "source boundary stays authenticated"
+        );
+        assert!(
+            prepared.frozen_segment.is_some(),
+            "source reservation stays frozen"
+        );
+        let copied = prepared
+            .copied_history
+            .as_ref()
+            .expect("filtered ancestry requires a complete copy");
+        assert!(
+            matches!(copied.first(), Some(RolloutItem::SessionMeta(meta)) if meta.meta.history_base.is_none())
+        );
+        assert!(
+            !copied
+                .iter()
+                .any(|item| matches!(item, RolloutItem::RolloutReference(_)))
+        );
+        assert!(
+            !serde_json::to_string(copied.as_ref())
+                .unwrap()
+                .contains(filter_text)
+        );
+        for text in [
+            "cutoff message 0",
+            "cutoff message 2",
+            "native child suffix",
+        ] {
+            assert_eq!(copied.iter().filter(|item| matches!(item,
+                RolloutItem::ResponseItem(envelope) if matches!(&envelope.item,
+                    ResponseItem::Message { role, content, .. } if role == "user"
+                        && content == &vec![ContentItem::InputText { text: text.to_string() }])
+            )).count(), 1, "retained message appears once: {text}");
+        }
+        assert!(!contains_user_message(
+            copied.as_slice(),
+            "cutoff message 1"
+        ));
+    }
 }
 
 #[tokio::test]
@@ -3209,12 +3322,21 @@ async fn paginated_fork_reads_compressed_shared_lineage_without_materializing() 
     // A standalone source still becomes plain before its first shared reference, so the default
     // mode does not introduce compressed lineages that older readers cannot follow.
     compress_rollout(ancestor_path.as_path());
+    let compressed_ancestor_prepared =
+        prepare_paginated_fork(&store, ancestor_thread_id, ForkBoundary::Latest).await;
+    let compressed_ancestor_base = compressed_ancestor_prepared
+        .history_base
+        .expect("materialized ancestor prefix");
+    // Frodex freezes a new immutable segment instead of referencing the live source itself.
     assert_eq!(
-        prepare_paginated_fork(&store, ancestor_thread_id, ForkBoundary::Latest)
-            .await
-            .history_base,
-        Some(ancestor_base)
+        compressed_ancestor_base.end_ordinal_exclusive,
+        ancestor_base.end_ordinal_exclusive
     );
+    assert!(contains_user_message(
+        &compressed_ancestor_prepared.model_context,
+        "inherited ancestor message"
+    ));
+    drop(compressed_ancestor_prepared);
     assert!(ancestor_path.exists());
 
     let source_thread_id = ThreadId::default();
@@ -3263,7 +3385,8 @@ async fn paginated_fork_reads_compressed_shared_lineage_without_materializing() 
         prepare_paginated_fork(&store, source_thread_id, ForkBoundary::Latest),
         prepare_paginated_fork(&store, source_thread_id, ForkBoundary::Latest),
     );
-    assert!(!ancestor_path.exists());
+    assert!(ancestor_path.exists());
+    assert!(!inherited_path.exists());
     assert!(!source_path.exists());
     assert!(ancestor_compressed_path.exists());
     assert!(source_compressed_path.exists());
@@ -3300,7 +3423,7 @@ async fn paginated_fork_reads_compressed_shared_lineage_without_materializing() 
             .expect("source rollout filename"),
     );
     fs::rename(&source_compressed_path, &external_path).expect("move shared source outside home");
-    store
+    let error = store
         .resume_thread(ResumeThreadParams {
             thread_id: source_thread_id,
             rollout_path: Some(external_path),
@@ -3313,22 +3436,11 @@ async fn paginated_fork_reads_compressed_shared_lineage_without_materializing() 
             },
         })
         .await
-        .expect("resume external shared source");
-    let error = store
-        .prepare_fork(PrepareForkParams {
-            thread_id: source_thread_id,
-            boundary: ForkBoundary::Latest,
-        })
-        .await
-        .expect_err("external shared source cannot be referenced by rollout id");
+        .expect_err("external shared source cannot be resumed outside the home");
     assert!(matches!(
         error,
         crate::ThreadStoreError::InvalidRequest { message } if message.contains("must be in Codex home")
     ));
-    store
-        .shutdown_thread(source_thread_id)
-        .await
-        .expect("shutdown external source");
 }
 
 #[tokio::test]
@@ -3562,10 +3674,10 @@ async fn cancelled_fork_keeps_source_reserved_until_lineage_materialization_fini
     });
     tokio::time::timeout(Duration::from_secs(10), pause.entered.notified())
         .await
-        .expect("detached lineage task should materialize the source");
+        .expect("detached lineage task should prepare the source");
     assert!(
-        source_path.exists(),
-        "lineage owner must materialize the source"
+        !source_path.exists() && source_path.with_extension("jsonl.zst").exists(),
+        "lineage owner must retain the shared compressed source"
     );
     preparation.abort();
     assert!(
@@ -5542,7 +5654,7 @@ async fn paginated_legacy_events_never_publish_a_complete_stateless_projection()
 }
 
 #[tokio::test]
-async fn paginated_fork_materializes_compressed_source_and_ancestor() {
+async fn paginated_fork_reads_compressed_legacy_reference_without_materializing() {
     let home = TempDir::new().expect("temp dir");
     let store = projection_store(home.path()).await;
     let ancestor_thread_id = ThreadId::default();
@@ -5569,6 +5681,12 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
     let ancestor_prepared =
         prepare_paginated_fork(&store, ancestor_thread_id, ForkBoundary::Latest).await;
     let ancestor_base = ancestor_prepared.history_base.expect("ancestor prefix");
+    let ancestor_reference = ancestor_prepared
+        .frozen_segment
+        .as_ref()
+        .expect("immutable ancestor")
+        .reference
+        .clone();
     let inherited_path = ancestor_prepared
         .frozen_segment
         .as_ref()
@@ -5598,6 +5716,7 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
         .append_items(AppendThreadItemsParams {
             thread_id: source_thread_id,
             items: vec![
+                RolloutItem::RolloutReference(ancestor_reference),
                 turn_started("source-turn"),
                 user_message("inherited source message"),
                 turn_completed("source-turn"),
@@ -5613,6 +5732,20 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
         .shutdown_thread(source_thread_id)
         .await
         .expect("shutdown source");
+    let (mut lines, _, errors) = codex_rollout::RolloutRecorder::load_rollout_lines(&source_path)
+        .await
+        .expect("read source");
+    assert_eq!(errors, 0);
+    let RolloutItem::SessionMeta(meta) = &mut lines[0].item else {
+        panic!("source must start with metadata");
+    };
+    meta.meta.history_base = None;
+    let encoded = lines
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("encode legacy reference");
+    fs::write(&source_path, format!("{}\n", encoded.join("\n"))).expect("write legacy reference");
     let ancestor_compressed_path = inherited_path.with_extension("jsonl.zst");
     let source_compressed_path = source_path.with_extension("jsonl.zst");
     compress_rollout(inherited_path.as_path());
@@ -5632,18 +5765,18 @@ async fn paginated_fork_materializes_compressed_source_and_ancestor() {
         ancestor_path.exists(),
         "the original ancestor remains untouched"
     );
-    assert!(inherited_path.exists());
-    assert!(source_path.exists());
-    assert!(!ancestor_compressed_path.exists());
-    assert!(!source_compressed_path.exists());
+    assert!(!inherited_path.exists());
+    assert!(!source_path.exists());
+    assert!(ancestor_compressed_path.exists());
+    assert!(source_compressed_path.exists());
     assert_eq!(
-        fs::metadata(&inherited_path)
+        fs::metadata(&ancestor_compressed_path)
             .and_then(|metadata| metadata.modified())
             .expect("read materialized ancestor timestamp"),
         ancestor_modified
     );
     assert_eq!(
-        fs::metadata(&source_path)
+        fs::metadata(&source_compressed_path)
             .and_then(|metadata| metadata.modified())
             .expect("read materialized source timestamp"),
         source_modified
