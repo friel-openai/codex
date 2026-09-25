@@ -1,8 +1,19 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs b/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
-index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98c749bbf0 100644
+index 71283815264cfa841dc1be3434dbb38c1f36ab17..9434cf796ac9c168cf574574df0e4d6aba9d0e53 100644
 --- a/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
 +++ b/codex-rs/app-server/tests/suite/v2/guardian_v2_history_tests.rs
-@@ -80,16 +80,19 @@ enum CheckpointReuse {
+@@ -33,6 +33,10 @@ use codex_app_server_protocol::UserInput;
+ use codex_config::types::AuthCredentialsStoreMode;
+ use codex_features::Feature;
+ use codex_rollout::RolloutItem;
++use codex_thread_store::LoadThreadHistoryParams;
++use codex_thread_store::LocalThreadStore;
++use codex_thread_store::LocalThreadStoreConfig;
++use codex_thread_store::ThreadStore;
+ use core_test_support::load_default_config_for_test;
+ use core_test_support::responses;
+ use core_test_support::skip_if_no_network;
+@@ -80,16 +84,19 @@ enum CheckpointReuse {
  enum ReviewCheckpoint {
      Valid,
      EmptyContent,
@@ -27,7 +38,7 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
  #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "disabled Luna reuse requires sync")]
  #[test_case(ContextPath::Legacy, CheckpointReuse::Disabled, Some("matching"), Some("matching"), 0, EvidenceSize::Normal, ReviewCheckpoint::Valid; "legacy disabled Luna reuse still samples")]
  #[test_case(ContextPath::ThreadOwned, CheckpointReuse::Enabled, Some("matching"), Some("matching"), 0, EvidenceSize::OversizedInstruction, ReviewCheckpoint::Valid; "instruction budget preserves fresh low score")]
-@@ -126,15 +129,20 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -126,15 +133,20 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          reuse_parent_compaction && parent_hash == Some("matching") && luna_hash == parent_hash;
      let requires_sync = matches!(context_path, ContextPath::ThreadOwned) && !compatible;
      let oversized_instruction = matches!(evidence_size, EvidenceSize::OversizedInstruction);
@@ -51,7 +62,7 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
      let answer = match evidence_size {
          EvidenceSize::Normal | EvidenceSize::OversizedInstruction => {
              USER_INPUT_RESTRICTION.to_owned()
-@@ -158,7 +166,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -158,7 +170,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
      match review_checkpoint {
          ReviewCheckpoint::EmptyContent => checkpoint["encrypted_content"] = json!(""),
          ReviewCheckpoint::Valid
@@ -61,7 +72,7 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
          | ReviewCheckpoint::UnknownReviewer
          | ReviewCheckpoint::EmptyReviewerHash => {}
      }
-@@ -288,6 +297,9 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -288,6 +301,9 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
      if matches!(context_path, ContextPath::ThreadOwned) {
          mock_config = mock_config.disable_feature(Feature::GuardianReuseParentCompaction);
      }
@@ -71,7 +82,7 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
      mock_config.write(codex_home.path())?;
      let config = load_default_config_for_test(&codex_home).await;
      let models = [
-@@ -297,6 +309,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -297,6 +313,7 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
          ("resumed-parent", Some("matching")),
      ]
      .into_iter()
@@ -79,7 +90,7 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
      .map(|(model, hash)| {
          let mut info = codex_core::test_support::construct_model_info_offline(model, &config);
          info.comp_hash = hash.map(str::to_owned);
-@@ -415,30 +428,29 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+@@ -415,30 +432,29 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
              .await??;
              let assessment: ItemGuardianApprovalReviewCompletedNotification =
                  serde_json::from_value(notification.params.expect("review completion"))?;
@@ -121,6 +132,52 @@ index 71283815264cfa841dc1be3434dbb38c1f36ab17..f00988b1730582c3d43cd4553e078d98
          if reject_sync_checkpoint && index > 0 {
              // The first review established a cached session before compaction. Neither
              // that session nor a new one may review unusable evidence, including after resume.
+@@ -754,20 +770,27 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+             }
+         }
+     }
+-    let items = rollout
+-        .lines()
+-        .map(codex_rollout::parse_rollout_line)
+-        .collect::<std::result::Result<Vec<_>, _>>()?;
++    // Compaction can rotate the active rollout; include persisted predecessor segments.
++    let items = LocalThreadStore::new(
++        LocalThreadStoreConfig::from_config(&config),
++        /*state_db*/ None,
++    )
++    .load_history(LoadThreadHistoryParams {
++        thread_id: codex_protocol::ThreadId::from_string(&thread_id)?,
++        include_archived: false,
++    })
++    .await?
++    .items;
+     assert_eq!(
+         items
+             .iter()
+-            .filter(|line| matches!(line.item, RolloutItem::RetainedContext(_)))
++            .filter(|item| matches!(item, RolloutItem::RetainedContext(_)))
+             .count(),
+         usize::from(matches!(context_path, ContextPath::ThreadOwned)),
+         "only the enabled path may persist a retained-answer event",
+     );
+-    for line in &items {
+-        if let RolloutItem::Compacted(checkpoint) = &line.item {
++    for item in &items {
++        if let RolloutItem::Compacted(checkpoint) = item {
+             for envelope in checkpoint.replacement_history.iter().flatten() {
+                 if matches!(
+                     envelope.item,
+@@ -786,8 +809,8 @@ async fn guardians_retain_evidence_after_compaction_and_resume(
+         }
+     }
+     if matches!(context_path, ContextPath::Legacy) {
+-        for line in &items {
+-            if let RolloutItem::Compacted(checkpoint) = &line.item {
++        for item in &items {
++            if let RolloutItem::Compacted(checkpoint) = item {
+                 assert_eq!(
+                     checkpoint
+                         .retained_context
 diff --git a/codex-rs/config/src/config_toml.rs b/codex-rs/config/src/config_toml.rs
 index fc5fbb99ac445999cb335601a4499f4c93d1d3c2..43c4114ca5edb41964770a76ef05ead7a7daac46 100644
 --- a/codex-rs/config/src/config_toml.rs
