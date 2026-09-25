@@ -15,8 +15,14 @@ impl LocalAgentControl {
         caller: ThreadId,
         target: AgentTarget,
     ) -> CodexResult<AgentInfo> {
-        let target = self.resolve_target(caller, &target)?;
-        self.inspect_agent(target).await
+        let target = self.resolve_target(caller, &target).await?;
+        match self.inspect_agent(target).await {
+            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
+                self.ensure_open_agent_known_by_id(caller, target).await?;
+                self.inspect_agent(target).await
+            }
+            result => result,
+        }
     }
 
     pub(super) async fn inspect_agent(&self, thread_id: ThreadId) -> CodexResult<AgentInfo> {

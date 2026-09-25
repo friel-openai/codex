@@ -702,6 +702,8 @@ pub struct InMemoryThreadStore {
 #[derive(Default)]
 struct InMemoryThreadStoreState {
     calls: InMemoryThreadStoreCalls,
+    fail_archive_thread: Option<ThreadId>,
+    fail_delete_thread: Option<ThreadId>,
     created_threads: HashMap<ThreadId, CreateThreadParams>,
     creation_times: HashMap<ThreadId, DateTime<Utc>>,
     histories: HashMap<ThreadId, Vec<RolloutItem>>,
@@ -777,6 +779,16 @@ impl InMemoryThreadStore {
     pub fn omit_metadata_update_result_for_testing(&self) {
         self.omit_metadata_update_result
             .store(true, Ordering::Relaxed);
+    }
+
+    /// Makes archive fail before mutating `thread_id`. Intended for request-level failure tests.
+    pub async fn fail_archive_thread(&self, thread_id: ThreadId) {
+        self.state.lock().await.fail_archive_thread = Some(thread_id);
+    }
+
+    /// Makes deletion fail before mutating `thread_id`. Intended for request-level failure tests.
+    pub async fn fail_delete_thread(&self, thread_id: ThreadId) {
+        self.state.lock().await.fail_delete_thread = Some(thread_id);
     }
 
     #[cfg(test)]
@@ -1164,7 +1176,15 @@ impl InMemoryThreadStore {
     }
 
     async fn delete_thread(&self, params: DeleteThreadParams) -> ThreadStoreResult<()> {
-        self.state.lock().await.calls.delete_thread += 1;
+        {
+            let mut state = self.state.lock().await;
+            state.calls.delete_thread += 1;
+            if state.fail_delete_thread == Some(params.thread_id) {
+                return Err(ThreadStoreError::Internal {
+                    message: format!("injected delete failure for {}", params.thread_id),
+                });
+            }
+        }
         let deleted_state_rows = if let Some(state_db) = &self.state_db {
             state_db
                 .delete_threads_strict(&[params.thread_id])
@@ -1348,9 +1368,15 @@ impl ThreadStore for InMemoryThreadStore {
         Box::pin(InMemoryThreadStore::move_thread_to_section(self, params))
     }
 
-    fn archive_thread(&self, _params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
+    fn archive_thread(&self, params: ArchiveThreadParams) -> ThreadStoreFuture<'_, ()> {
         Box::pin(async move {
-            self.state.lock().await.calls.archive_thread += 1;
+            let mut state = self.state.lock().await;
+            state.calls.archive_thread += 1;
+            if state.fail_archive_thread == Some(params.thread_id) {
+                return Err(ThreadStoreError::Internal {
+                    message: format!("injected archive failure for {}", params.thread_id),
+                });
+            }
             Ok(())
         })
     }

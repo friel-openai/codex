@@ -201,7 +201,7 @@ impl Session {
                     current_date,
                 )
                 .await
-                .with_subagents(environment_subagents),
+                .with_versioned_subagents(environment_subagents, turn_context.multi_agent_version),
             );
         }
         world_state.add_section(EnvironmentsInstructionsState::new(
