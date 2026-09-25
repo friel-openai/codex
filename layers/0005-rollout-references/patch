@@ -10322,7 +10322,7 @@ index 16e1943c42c83aeaf9bf5d858d7e8ad8965d0ac6..5c550cbaefc388e4e6b032f94da0136a
          self.history.set_token_info(info);
      }
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d43d7a0836 100644
+index ff27eed0d40efc359e7035d55439d9948ff15a40..c98ad1bf2a9fc78cb255f625483dcf3b0c28a3b4 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -14,7 +14,9 @@ use crate::environment_selection::default_thread_environment_selections;
@@ -10895,7 +10895,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
      }
 
      pub(crate) fn agent_control(&self) -> LocalAgentControl {
-@@ -1633,6 +1967,412 @@ impl ThreadManagerState {
+@@ -1633,6 +1967,415 @@ impl ThreadManagerState {
          }
      }
 
@@ -11199,17 +11199,20 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
 +                            },
 +                        )
 +                    }
-+                    Err(CodexErr::InvalidRequest(message))
-+                        if message
-+                            == format!(
-+                                "thread {source_thread_id} already has an active writer"
-+                            ) =>
++                    Err(error)
++                        if matches!(
++                            error.details(),
++                            codex_protocol::error::CodexErrorDetails::InvalidRequest(message)
++                                if message == &format!(
++                                    "thread {source_thread_id} already has an active writer"
++                                )
++                        ) =>
 +                    {
 +                        let local_store = self
 +                            .thread_store
 +                            .as_any()
 +                            .downcast_ref::<LocalThreadStore>()
-+                            .ok_or_else(|| CodexErr::InvalidRequest(message))?;
++                            .ok_or(error)?;
 +                        // A read-only source remains owned by the other process. Capture complete
 +                        // owned records instead of acquiring its lease or leaving a mutable edge.
 +                        let prepared = local_store
@@ -11308,7 +11311,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
      pub(crate) async fn read_stored_thread(
          &self,
          params: ReadThreadParams,
-@@ -1718,6 +2458,40 @@ impl ThreadManagerState {
+@@ -1718,6 +2461,40 @@ impl ThreadManagerState {
          self.threads.write().await.remove(thread_id)
      }
 
@@ -11349,7 +11352,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
      pub(crate) async fn effective_multi_agent_version_for_spawn(
          &self,
          initial_history: &InitialHistory,
-@@ -1987,6 +2761,7 @@ impl ThreadManagerState {
+@@ -1987,6 +2764,7 @@ impl ThreadManagerState {
          environments: Option<Vec<TurnEnvironmentSelection>>,
          inherited_thread_state: InheritedThreadState,
          thread_extension_init: ExtensionDataInit,
@@ -11357,7 +11360,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
      ) -> CodexResult<NewThread> {
          let client_mcp_extensions = self.client_mcp_extensions_for_child(parent_thread_id).await;
          let options = StartThreadOptions {
-@@ -2007,6 +2782,7 @@ impl ThreadManagerState {
+@@ -2007,6 +2785,7 @@ impl ThreadManagerState {
          request.inherited_environments = inherited_environments;
          request.inherited_exec_policy = inherited_exec_policy;
          request.inherited_thread_state = inherited_thread_state;
@@ -11365,7 +11368,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
          Box::pin(self.spawn_thread(request)).await
      }
 
-@@ -2034,6 +2810,7 @@ impl ThreadManagerState {
+@@ -2034,6 +2813,7 @@ impl ThreadManagerState {
              parent_originator,
              forked_from_thread_id,
              fork_persistence,
@@ -11373,7 +11376,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
              inherited_environments,
              inherited_instructions,
              inherited_exec_policy,
-@@ -2088,6 +2865,11 @@ impl ThreadManagerState {
+@@ -2088,6 +2868,11 @@ impl ThreadManagerState {
                  "reserved thread ID cannot be used when resuming a thread".to_string(),
              ));
          }
@@ -11385,7 +11388,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
          if let InitialHistory::Resumed(resumed) = &initial_history {
              let mut threads = self.threads.write().await;
              if let Some(thread) = threads.get(&resumed.conversation_id).cloned() {
-@@ -2223,6 +3005,7 @@ impl ThreadManagerState {
+@@ -2223,6 +3008,7 @@ impl ThreadManagerState {
              extensions,
              conversation_history: initial_history,
              disabled_plugin_ids,
@@ -11393,7 +11396,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
              requested_history_mode: history_mode,
              fork_persistence,
              // Keep only the manager registration internal. The session and its saved
-@@ -2296,7 +3079,7 @@ impl ThreadManagerState {
+@@ -2296,7 +3082,7 @@ impl ThreadManagerState {
              session.services.mcp_runtime.enable_full_access_form_input();
          }
          let new_thread = self
@@ -11402,7 +11405,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
              .await?;
          new_thread.thread.emit_thread_ready_lifecycle().await;
          if source_changed_during_startup.load(Ordering::Acquire) {
-@@ -2313,6 +3096,7 @@ impl ThreadManagerState {
+@@ -2313,6 +3099,7 @@ impl ThreadManagerState {
          session: Arc<Session>,
          io: SessionIo,
          session_source: SessionSource,
@@ -11410,7 +11413,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
      ) -> CodexResult<NewThread> {
          let thread_id = session.thread_id();
          let event = io.next_event().await?;
-@@ -2335,6 +3119,7 @@ impl ThreadManagerState {
+@@ -2335,6 +3122,7 @@ impl ThreadManagerState {
                      ThreadStartupMetadata::from(&session_configured),
                      session_configured.rollout_path.clone(),
                      session_source,
@@ -11418,7 +11421,7 @@ index ff27eed0d40efc359e7035d55439d9948ff15a40..6b116a8092384671e847d557a09102d4
                  ));
                  e.insert(thread.clone());
                  return Ok(NewThread {
-@@ -2516,13 +3301,18 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
+@@ -2516,13 +3304,18 @@ fn snapshot_turn_state(history: &InitialHistory) -> SnapshotTurnState {
      // Synthetic fork/resume histories can contain user/assistant response items
      // without explicit turn lifecycle events. If the persisted snapshot has no
      // terminating boundary after its last user message, treat it as mid-turn.
