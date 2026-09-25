@@ -1,8 +1,10 @@
 use super::*;
 use crate::agents_md_manager::AgentsMdManager;
 use crate::agents_md_manager::SessionInstructions;
+use crate::environment_selection::TurnEnvironmentState;
 use crate::session::handlers::submission_loop;
 use crate::session::step_context::StepContext;
+use crate::session::step_context::StepInputs;
 use crate::session::step_settings::StepSettings;
 use crate::session::tests::HeldStepTask;
 use crate::session::tests::make_session_and_context;
@@ -47,6 +49,7 @@ use codex_protocol::protocol::Submission;
 use codex_protocol::protocol::TurnAbortReason;
 use pretty_assertions::assert_eq;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -304,6 +307,14 @@ impl GatedModelsManager {
 }
 
 impl ModelsManager for GatedModelsManager {
+    fn custom_models_snapshot(&self) -> Arc<HashMap<String, CustomModelConfig>> {
+        self.inner.custom_models_snapshot()
+    }
+
+    fn replace_custom_models(&self, custom_models: HashMap<String, CustomModelConfig>) {
+        self.inner.replace_custom_models(custom_models);
+    }
+
     fn raw_model_catalog(
         &self,
         strategy: RefreshStrategy,
@@ -322,10 +333,6 @@ impl ModelsManager for GatedModelsManager {
 
     fn auth_manager(&self) -> Option<&AuthManager> {
         self.inner.auth_manager()
-    }
-
-    fn custom_models(&self) -> &HashMap<String, CustomModelConfig> {
-        self.inner.custom_models()
     }
 
     fn list_collaboration_modes(&self) -> Vec<CollaborationModeMask> {
@@ -432,6 +439,268 @@ fn step_values(
         step.settings.reasoning_summary,
         step.settings.service_tier.as_deref(),
     )
+}
+
+#[tokio::test]
+async fn routing_replacement_preserves_active_settings_and_accepts_later_updates() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let future = desired_step_settings(&session).await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Detailed),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    lookup.release();
+    let routed = Arc::new(
+        turn.with_unchecked_routing_candidate(
+            "test-profile",
+            &candidate,
+            &session.services.models_manager,
+            &prepared.inputs,
+        )
+        .await,
+    );
+    assert_eq!(
+        routed.initial_settings.selected().reasoning_summary,
+        Some(ReasoningSummary::Detailed)
+    );
+    assert_eq!(
+        routed.initial_settings.selected().personality,
+        prepared.inputs.settings.selected().personality
+    );
+    assert_eq!(
+        routed.initial_settings.selected().approval_policy,
+        prepared.inputs.settings.selected().approval_policy
+    );
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("publish route")
+    );
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Concise),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    assert_eq!(
+        routed
+            .next_step_input
+            .load_full()
+            .settings
+            .reasoning_summary,
+        ReasoningSummary::Concise
+    );
+    assert_eq!(
+        turn.next_step_input.load_full().settings.reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    let step = session
+        .capture_step_context(Arc::clone(&routed), &CancellationToken::new())
+        .await
+        .expect("capture routed step");
+    assert_eq!(step.settings.model_info.slug, MODEL_B);
+    assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
+    assert_eq!(desired_step_settings(&session).await, future);
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn routing_replacement_rejects_preparation_before_a_sparse_update() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    let source = Arc::clone(&turn);
+    let models = Arc::clone(&session.services.models_manager);
+    let inputs = Arc::clone(&prepared.inputs);
+    let routing = tokio::spawn(async move {
+        Arc::new(
+            source
+                .with_unchecked_routing_candidate("test-profile", &candidate, &models, &inputs)
+                .await,
+        )
+    });
+    lookup.wait_until_blocked().await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Detailed),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    lookup.release();
+    let routed = routing.await.expect("prepared candidate");
+    assert!(
+        !session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("detect stale preparation")
+    );
+    assert_eq!(
+        turn.next_step_input.load_full().settings.reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    assert_eq!(
+        session
+            .prepare_turn_context_replacement(&turn)
+            .await
+            .expect("original owner retained")
+            .inputs
+            .settings
+            .reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn routing_replacement_rejects_preparation_before_an_environment_update() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    let source = Arc::clone(&turn);
+    let models = Arc::clone(&session.services.models_manager);
+    let inputs = Arc::clone(&prepared.inputs);
+    let routing = tokio::spawn(async move {
+        Arc::new(
+            source
+                .with_unchecked_routing_candidate("test-profile", &candidate, &models, &inputs)
+                .await,
+        )
+    });
+    lookup.wait_until_blocked().await;
+
+    let mut environments = prepared.inputs.environments.clone();
+    let selection = environments
+        .to_selections()
+        .into_iter()
+        .next()
+        .expect("selected environment");
+    environments.environments[0] = TurnEnvironmentState::Failed {
+        selection,
+        error: "executor disconnected during route selection".to_string(),
+    };
+    // The settings allocation stays unchanged, so only the complete StepInputs version detects
+    // this stale preparation and prevents the replacement from restoring the ready environment.
+    let updated = Arc::new(StepInputs {
+        settings: Arc::clone(&prepared.inputs.settings),
+        environments,
+    });
+    turn.next_step_input.store(Arc::clone(&updated));
+    lookup.release();
+    let routed = routing.await.expect("prepared candidate");
+    assert!(
+        !session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("detect stale environment snapshot")
+    );
+    assert!(Arc::ptr_eq(&turn.next_step_input.load_full(), &updated));
+    assert!(Arc::ptr_eq(
+        &session
+            .prepare_turn_context_replacement(&turn)
+            .await
+            .expect("original owner retained")
+            .inputs,
+        &updated,
+    ));
+    finish.notify_one();
+}
+
+#[tokio::test]
+async fn workspace_refresh_keeps_active_settings_separate_from_future_settings() {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        ..
+    } = activation_fixture(activation_models()).await;
+    {
+        let mut state = session.state.lock().await;
+        let settings = Arc::make_mut(&mut state.session_configuration.step_settings);
+        settings.collaboration_mode =
+            settings
+                .collaboration_mode
+                .with_updates(Some(MODEL_B.to_string()), None, None);
+    }
+    let future = desired_step_settings(&session).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture owner");
+    let refreshed = session
+        .refresh_active_turn_context(&turn, &prepared.inputs)
+        .await;
+    assert_eq!(
+        refreshed.initial_settings.selected(),
+        prepared.inputs.settings.selected()
+    );
+    assert_eq!(refreshed.model_info().slug, MODEL_A);
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &refreshed)
+            .await
+            .expect("publish workspace context")
+    );
+    assert_eq!(desired_step_settings(&session).await, future);
+    finish.notify_one();
 }
 
 async fn desired_step_settings(session: &Session) -> Arc<StepSettings> {

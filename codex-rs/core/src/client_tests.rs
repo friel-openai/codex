@@ -1456,6 +1456,89 @@ fn guardian_scoped_cache_key_is_not_inherited_by_forks() {
     assert_ne!(child.fork_prompt_cache_key().to_string(), key);
 }
 
+#[test]
+fn model_reroute_reset_discards_provider_route_segment_state() {
+    let client = test_model_client(SessionSource::Cli);
+    let request = ResponsesApiRequest {
+        model: "test-primary".to_string(),
+        instructions: "test instructions".to_string(),
+        input: vec![user_message_item("test input")],
+        tools: None,
+        tool_choice: "auto".to_string(),
+        parallel_tool_calls: false,
+        reasoning: None,
+        store: false,
+        stream: true,
+        stream_options: None,
+        include: Vec::new(),
+        service_tier: Some("test-tier".to_string()),
+        prompt_cache_key: Some(ThreadId::new().to_string()),
+        text: None,
+        client_metadata: None,
+        access_programs: None,
+    };
+    let continuation = ResponseContinuation {
+        request: request.clone(),
+        last_response: LastResponse {
+            response_id: "test-response".to_string(),
+            items_added: vec![output_message("test-message", "test output")],
+        },
+        transport: super::ResponseContinuationTransport::default(),
+    };
+    *client
+        .state
+        .latest_response_continuation
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(continuation);
+
+    let mut session = client.new_session();
+    session.websocket_session.last_request = Some(request);
+    let (_last_response_tx, last_response_rx) = tokio::sync::oneshot::channel();
+    session.websocket_session.last_response_rx = Some(last_response_rx);
+    session.websocket_session.last_response_from_untraced_warmup = true;
+    session.websocket_session.auth_owner_generation = Some(7);
+    session
+        .websocket_session
+        .responses_headers
+        .insert("x-test-route", "primary".parse().unwrap());
+    session
+        .turn_state
+        .set("test-route-state".to_string())
+        .expect("turn state should be unset");
+    let previous_turn_state = session.turn_state();
+
+    session.reset_for_model_reroute();
+
+    assert!(session.websocket_session.connection.is_none());
+    assert!(session.websocket_session.last_request.is_none());
+    assert!(session.websocket_session.last_response_rx.is_none());
+    assert!(!session.websocket_session.last_response_from_untraced_warmup);
+    assert!(!session.websocket_session.connection_reused());
+    assert_eq!(session.websocket_session.auth_owner_generation, Some(7));
+    assert!(session.websocket_session.responses_headers.is_empty());
+    assert_eq!(
+        session.websocket_session.continuation_reset_reason,
+        Some("other")
+    );
+    assert!(session.turn_state.get().is_none());
+    assert!(!Arc::ptr_eq(&previous_turn_state, &session.turn_state));
+    assert!(
+        client
+            .state
+            .latest_response_continuation
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+    );
+    assert!(!client.state.disable_websockets.load(Ordering::Relaxed));
+
+    drop(session);
+    let next_session = client.new_session();
+    assert!(next_session.websocket_session.last_request.is_none());
+    assert!(next_session.websocket_session.last_response_rx.is_none());
+    assert!(next_session.turn_state.get().is_none());
+}
+
 async fn replay_until_cancelled(temp: &TempDir) -> anyhow::Result<RolloutTrace> {
     let mut rollout = replay_bundle(temp.path())?;
     for _ in 0..50 {
