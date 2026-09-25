@@ -2100,7 +2100,7 @@ async fn guardian_ultrafast_usage_limit_falls_back_and_reuses_fast_during_cooldo
     let first_outcome = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-ultrafast-first"),
+        guardian_exec_command_request("shell-ultrafast-first"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -2110,7 +2110,7 @@ async fn guardian_ultrafast_usage_limit_falls_back_and_reuses_fast_during_cooldo
     let second_outcome = run_guardian_review_session_for_test(
         Arc::clone(&session),
         Arc::clone(&turn),
-        guardian_shell_request("shell-ultrafast-second"),
+        guardian_exec_command_request("shell-ultrafast-second"),
         ApprovalRequestReasons::default(),
         guardian_output_schema(),
         /*external_cancel*/ None,
@@ -3912,7 +3912,7 @@ async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enable
 ) {
     let server = start_mock_server().await;
     let (session, mut turn) = guardian_test_session_and_turn(&server).await;
-    let parent_model = turn.model_info.slug.clone();
+    let parent_model = turn.model_info().slug.clone();
     let parent_service_tier = turn.config.service_tier.clone();
     let mut config = (*turn.config).clone();
     config.auto_review_use_ultrafast = true;
@@ -3974,7 +3974,7 @@ async fn guardian_review_session_config_uses_fixed_ultrafast_profile_when_enable
             trust_candidate_constraints: true,
         })
     );
-    assert_eq!(turn.model_info.slug, parent_model);
+    assert_eq!(turn.model_info().slug, parent_model);
     assert_eq!(context.model_info.slug, captured_parent_model);
     assert_eq!(turn.config.service_tier, parent_service_tier);
     assert_eq!(turn.config.model_context_window, Some(900_000));

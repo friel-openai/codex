@@ -260,6 +260,7 @@ fn overview_thread(
         updated_at: *OVERVIEW_TIMESTAMP,
         recency_at: Some(*OVERVIEW_TIMESTAMP),
         status,
+        agent_status: None,
         path: None,
         cwd: test_path_buf("/tmp/project").abs(),
         cli_version: "0.0.0".to_string(),
