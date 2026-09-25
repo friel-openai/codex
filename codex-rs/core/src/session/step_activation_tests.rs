@@ -462,6 +462,7 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
                 &turn.sub_id,
                 TurnSettingsUpdate {
                     summary: Some(ReasoningSummary::Detailed),
+                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
                     ..Default::default()
                 }
             )
@@ -499,6 +500,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
         routed.initial_settings.selected().approval_policy,
         prepared.inputs.settings.selected().approval_policy
     );
+    assert_eq!(
+        routed.initial_settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
     assert!(
         session
             .try_replace_active_turn_context(&prepared, &routed)
@@ -535,6 +540,10 @@ async fn routing_replacement_preserves_active_settings_and_accepts_later_updates
         .expect("capture routed step");
     assert_eq!(step.settings.model_info.slug, MODEL_B);
     assert_eq!(step.settings.reasoning_summary, ReasoningSummary::Concise);
+    assert_eq!(
+        step.settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
     assert_eq!(desired_step_settings(&session).await, future);
     finish.notify_one();
 }
@@ -678,6 +687,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
         finish,
         ..
     } = activation_fixture(activation_models()).await;
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &turn.sub_id,
+                TurnSettingsUpdate {
+                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                    ..Default::default()
+                }
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
     let before_workspace = session
         .prepare_turn_context_replacement(&turn)
         .await
@@ -709,6 +730,18 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
         refreshed.initial_settings.selected(),
         prepared.inputs.settings.selected()
     );
+    assert_eq!(
+        refreshed.initial_settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    assert_eq!(
+        refreshed
+            .next_step_input
+            .load()
+            .settings
+            .mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
     assert_eq!(refreshed.model_info().slug, MODEL_A);
     assert_eq!(
         refreshed
@@ -729,6 +762,163 @@ async fn workspace_refresh_keeps_active_settings_separate_from_future_settings()
             .try_replace_active_turn_context(&prepared, &refreshed)
             .await
             .expect("publish workspace context")
+    );
+    assert_eq!(desired_step_settings(&session).await, future);
+    finish.notify_one();
+}
+
+#[test_case(Some(MODEL_A), None, None; "explicit model")]
+#[test_case(None, Some(ReasoningEffort::High), None; "explicit effort")]
+#[test_case(None, None, Some(ServiceTier::Fast); "explicit tier")]
+#[test_case(None, None, None; "summary only retains routing")]
+#[tokio::test]
+async fn workspace_refresh_preserves_explicit_settings_after_routing(
+    model: Option<&str>,
+    effort: Option<ReasoningEffort>,
+    service_tier: Option<ServiceTier>,
+) {
+    let ActivationFixture {
+        session,
+        turn,
+        finish,
+        lookup,
+    } = activation_fixture(activation_models()).await;
+    let future = desired_step_settings(&session).await;
+    let prepared = session
+        .prepare_turn_context_replacement(&turn)
+        .await
+        .expect("capture initial task");
+    let candidate = codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_B.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    };
+    lookup.release();
+    let mut routed = turn
+        .with_unchecked_routing_candidate(
+            "test-profile",
+            &candidate,
+            &session.services.models_manager,
+            &prepared.inputs,
+        )
+        .await;
+    routed.model_routing_previous_candidate = Some(codex_models_manager::ModelRoutingCandidate {
+        model: MODEL_A.to_string(),
+        reasoning_effort: Some(ReasoningEffort::Low),
+        service_tier: None,
+    });
+    routed.model_routing_selection_reason =
+        Some(crate::session::model_routing::ModelRoutingReason::PreferredCandidateRecovered);
+    let routed = Arc::new(routed);
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &routed)
+            .await
+            .expect("install routed task")
+    );
+
+    let retains_routing = model.is_none() && effort.is_none() && service_tier.is_none();
+    let expected_effort = effort.clone().unwrap_or(ReasoningEffort::Low);
+    let expected_tier = service_tier.map(codex_protocol::config_types::ServiceTier::request_value);
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &routed.sub_id,
+                TurnSettingsUpdate {
+                    model: model.map(str::to_string),
+                    effort: effort.map(Some),
+                    service_tier: expected_tier.map(|tier| Some(tier.to_string())),
+                    summary: Some(ReasoningSummary::Detailed),
+                    approvals_reviewer: Some(ApprovalsReviewer::AutoReview),
+                },
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    let directory = tempfile::tempdir().expect("workspace directory");
+    let cwd = AbsolutePathBuf::try_from(directory.path()).expect("absolute workspace");
+    let commit = commit_workspace_for_activation(&session, &routed, &cwd).await;
+    session
+        .activate_workspace_environments(&routed, &commit.configuration)
+        .await
+        .expect("activate workspace after explicit settings");
+    let prepared = session
+        .prepare_turn_context_replacement(&routed)
+        .await
+        .expect("capture explicit settings and workspace");
+    let refreshed = session
+        .refresh_active_turn_context(&routed, &prepared.inputs)
+        .await;
+    assert_eq!(
+        refreshed.initial_settings.selected(),
+        prepared.inputs.settings.selected()
+    );
+    assert_eq!(
+        refreshed.initial_settings.mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
+    );
+    if retains_routing {
+        assert_eq!(refreshed.model_profile.as_deref(), Some("test-profile"));
+        assert_eq!(refreshed.model_routing_candidate.as_ref(), Some(&candidate));
+    } else {
+        assert_eq!(refreshed.model_profile, None);
+        assert_eq!(refreshed.model_routing_candidate, None);
+        assert_eq!(refreshed.model_routing_previous_candidate, None);
+        assert_eq!(refreshed.model_routing_selection_reason, None);
+        assert_eq!(refreshed.model_routing_retry_at, None);
+    }
+    assert!(
+        session
+            .try_replace_active_turn_context(&prepared, &refreshed)
+            .await
+            .expect("publish refreshed task")
+    );
+    let step = session
+        .capture_step_context(Arc::clone(&refreshed), &CancellationToken::new())
+        .await
+        .expect("capture refreshed step");
+    assert_eq!(
+        step_values(&step),
+        (
+            model.unwrap_or(MODEL_B),
+            Some(expected_effort),
+            ReasoningSummary::Detailed,
+            expected_tier,
+        )
+    );
+    session.record_model_routing_success(&step).await;
+    assert_eq!(
+        session.state.lock().await.model_routing.last_success(),
+        retains_routing.then_some(&candidate)
+    );
+
+    assert_eq!(
+        session
+            .apply_turn_settings(
+                &refreshed.sub_id,
+                TurnSettingsUpdate {
+                    summary: Some(ReasoningSummary::Concise),
+                    ..Default::default()
+                },
+            )
+            .await,
+        TurnSettingsUpdateOutcome::Applied
+    );
+    assert_eq!(
+        refreshed.next_step_input.load().settings.reasoning_summary,
+        ReasoningSummary::Concise
+    );
+    assert_eq!(
+        routed.next_step_input.load().settings.reasoning_summary,
+        ReasoningSummary::Detailed
+    );
+    assert_eq!(
+        refreshed
+            .next_step_input
+            .load()
+            .settings
+            .mcp_approvals_reviewer_override,
+        Some(ApprovalsReviewer::AutoReview)
     );
     assert_eq!(desired_step_settings(&session).await, future);
     finish.notify_one();

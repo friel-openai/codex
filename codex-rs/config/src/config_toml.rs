@@ -566,6 +566,10 @@ pub struct AutoReviewToml {
     pub policy: Option<String>,
     /// Experimental full Guardian prompt template containing the tenant policy placeholder.
     pub experimental_policy_template: Option<String>,
+
+    /// Runs approval autoreview on `gpt-5.6-sol` with UltraFast preferred and Fast fallback.
+    #[serde(default)]
+    pub use_ultrafast: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema)]
