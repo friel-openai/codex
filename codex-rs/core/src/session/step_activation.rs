@@ -12,6 +12,8 @@ use crate::config::ConstraintResult;
 use crate::exec_policy::AllowPrefixRules;
 use codex_features::Feature;
 use codex_prompts::ResolvedModelMessages;
+use codex_protocol::error::CodexErr;
+use codex_protocol::error::Result as CodexResult;
 use codex_protocol::openai_models::GuardianV2ModelConfig;
 use codex_protocol::openai_models::GuardianV2TranscriptModelConfig;
 use codex_protocol::openai_models::MODEL_SPECIALTY_CYBER;
@@ -19,6 +21,14 @@ use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::protocol::TurnSettingsUpdate;
 use codex_protocol::protocol::TurnSettingsUpdateOutcome;
 use std::sync::Arc;
+
+/// Captures the task and atomic settings/environment version for context replacement.
+/// A settings update, environment update, or task replacement invalidates preparation.
+pub(super) struct TurnContextReplacement {
+    turn: Arc<TurnContext>,
+    task_done: Arc<tokio::sync::Notify>,
+    pub(super) inputs: Arc<StepInputs>,
+}
 
 /// Temporary restrictions while approvals and Guardian still read the admitted
 /// `TurnContext`. Ordinary live authorization is validated separately. Remove
@@ -212,6 +222,63 @@ fn check_legacy_model_safety(
 }
 
 impl Session {
+    pub(super) async fn prepare_turn_context_replacement(
+        &self,
+        turn: &Arc<TurnContext>,
+    ) -> CodexResult<TurnContextReplacement> {
+        let active = self.active_turn.lock().await;
+        let task = active
+            .as_ref()
+            .and_then(|active| active.task.as_ref())
+            .filter(|task| {
+                Arc::ptr_eq(&task.turn_context, turn) && !task.cancellation_token.is_cancelled()
+            })
+            .ok_or(CodexErr::TurnAborted)?;
+        Ok(TurnContextReplacement {
+            turn: Arc::clone(turn),
+            task_done: Arc::clone(&task.done),
+            inputs: turn.next_step_input.load_full(),
+        })
+    }
+
+    /// Publishes a prepared replacement only if its original task and settings still own the turn.
+    /// `false` requests preparation again after a sparse settings update; cancellation is an error.
+    #[expect(
+        clippy::await_holding_invalid_type,
+        reason = "managed-policy validation and context publication must remain atomic"
+    )]
+    pub(super) async fn try_replace_active_turn_context(
+        &self,
+        prepared: &TurnContextReplacement,
+        replacement: &Arc<TurnContext>,
+    ) -> CodexResult<bool> {
+        let mut active = self.active_turn.lock().await;
+        let task = active
+            .as_mut()
+            .and_then(|active| active.task.as_mut())
+            .filter(|task| {
+                Arc::ptr_eq(&task.done, &prepared.task_done)
+                    && Arc::ptr_eq(&task.turn_context, &prepared.turn)
+                    && !task.cancellation_token.is_cancelled()
+            })
+            .ok_or(CodexErr::TurnAborted)?;
+        if !Arc::ptr_eq(
+            &task.turn_context.next_step_input.load_full(),
+            &prepared.inputs,
+        ) {
+            return Ok(false);
+        }
+        let state = self.state.lock().await;
+        self.validate_active_step_settings(
+            replacement,
+            &replacement.next_step_input.load_full().settings,
+            &state.session_configuration,
+        )
+        .map_err(|error| CodexErr::InvalidRequest(error.to_string()))?;
+        task.turn_context = Arc::clone(replacement);
+        Ok(true)
+    }
+
     /// Publishes settings to the named, originally captured live task, regardless
     /// of task kind. Publication does not propagate to child sessions or require
     /// the task to sample; consumers using initial settings remain unchanged.
