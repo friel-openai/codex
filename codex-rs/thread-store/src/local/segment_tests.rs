@@ -1,9 +1,16 @@
 use codex_app_server_protocol::ThreadHistoryBuilder;
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::RolloutReferenceItem;
@@ -12,14 +19,21 @@ use codex_protocol::protocol::SessionMetaLine;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::ThreadHistoryMode;
 use codex_protocol::protocol::ThreadMemoryMode;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::UserMessageEvent;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
+use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
 use codex_rollout::RolloutRecorder;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use std::path::Path;
 use std::sync::Arc;
@@ -255,6 +269,55 @@ async fn live_freeze_installs_immutable_prefix_and_isolates_later_appends() {
 }
 
 #[tokio::test]
+async fn uncertified_checkpoint_is_rejected_without_changing_rollout() {
+    let home = TempDir::new().expect("temp dir");
+    let store = Arc::new(LocalThreadStore::new(
+        test_config(home.path()),
+        /*state_db*/ None,
+    ));
+    let thread_id = ThreadId::new();
+    let live_thread = LiveThread::create(
+        store.clone(),
+        create_params(thread_id, ThreadHistoryMode::Legacy),
+    )
+    .await
+    .expect("create live thread");
+    live_thread
+        .persist(PersistContext::Standard)
+        .await
+        .expect("persist live thread");
+    live_thread
+        .append_items(&[user_message_item("stable source")])
+        .await
+        .expect("append source history");
+    live_thread.flush().await.expect("flush source history");
+    let stable_path = store
+        .live_rollout_path(thread_id)
+        .await
+        .expect("stable path");
+    let before = tokio::fs::read(stable_path.as_path())
+        .await
+        .expect("read stable rollout");
+
+    let outcome = live_thread
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
+            "uncertified replacement",
+        )]))
+        .await;
+
+    assert!(matches!(
+        outcome,
+        SegmentCheckpointPersistenceOutcome::NotCommitted {
+            error: ThreadStoreError::InvalidRequest { .. }
+        }
+    ));
+    let after = tokio::fs::read(stable_path.as_path())
+        .await
+        .expect("read unchanged rollout");
+    assert_eq!(after, before);
+}
+
+#[tokio::test]
 async fn committed_checkpoint_reopen_failure_recovers_without_duplicate_replacement() {
     let home = TempDir::new().expect("temp dir");
     let store = Arc::new(LocalThreadStore::new(
@@ -284,9 +347,9 @@ async fn committed_checkpoint_reopen_failure_recovers_without_duplicate_replacem
 
     inject_next_segment_reopen_failure(thread_id);
     let outcome = live_thread
-        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
-            "checkpoint replacement",
-        )]))
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate_checkpoint(
+            certified_checkpoint("checkpoint replacement"),
+        ))
         .await;
     assert!(matches!(
         outcome,
@@ -302,7 +365,7 @@ async fn committed_checkpoint_reopen_failure_recovers_without_duplicate_replacem
         .await
         .expect("read checkpoint rollout")
         .0;
-    assert_eq!(message_count(&items, "checkpoint replacement"), 1);
+    assert_eq!(compaction_count(&items, "checkpoint replacement"), 1);
     assert!(has_message(&items, "after checkpoint"));
 }
 
@@ -336,9 +399,9 @@ async fn precommit_rotation_failure_atomically_appends_the_checkpoint_once() {
 
     inject_next_segment_precommit_failure(thread_id);
     let outcome = live_thread
-        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
-            "atomic fallback checkpoint",
-        )]))
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate_checkpoint(
+            certified_checkpoint("atomic fallback checkpoint"),
+        ))
         .await;
     assert!(matches!(
         outcome,
@@ -353,7 +416,7 @@ async fn precommit_rotation_failure_atomically_appends_the_checkpoint_once() {
         .await
         .expect("read fallback rollout")
         .0;
-    assert_eq!(message_count(&items, "atomic fallback checkpoint"), 1);
+    assert_eq!(compaction_count(&items, "atomic fallback checkpoint"), 1);
     assert!(has_message(&items, "before fallback"));
     assert!(has_message(&items, "after fallback"));
     assert!(
@@ -396,9 +459,9 @@ async fn cancelling_checkpoint_caller_does_not_cancel_checkpoint_persistence() {
     let checkpoint_owner = live_thread.clone();
     let caller = tokio::spawn(async move {
         checkpoint_owner
-            .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![
-                user_message_item("checkpoint after caller cancellation"),
-            ]))
+            .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate_checkpoint(
+                certified_checkpoint("checkpoint after caller cancellation"),
+            ))
             .await
     });
     tokio::time::timeout(std::time::Duration::from_secs(5), pause.entered.notified())
@@ -414,7 +477,7 @@ async fn cancelling_checkpoint_caller_does_not_cancel_checkpoint_persistence() {
                 .await
                 .expect("read active rollout while waiting for checkpoint")
                 .0;
-            if message_count(&items, "checkpoint after caller cancellation") == 1 {
+            if compaction_count(&items, "checkpoint after caller cancellation") == 1 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -433,7 +496,7 @@ async fn cancelling_checkpoint_caller_does_not_cancel_checkpoint_persistence() {
         .expect("read checkpoint rollout")
         .0;
     assert_eq!(
-        message_count(&items, "checkpoint after caller cancellation"),
+        compaction_count(&items, "checkpoint after caller cancellation"),
         1
     );
     assert!(has_message(&items, "after cancelled caller"));
@@ -469,9 +532,9 @@ async fn indeterminate_checkpoint_fences_later_persistence_without_duplicate_rep
 
     inject_next_segment_durability_failure(thread_id);
     let outcome = live_thread
-        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate(vec![user_message_item(
-            "indeterminate replacement",
-        )]))
+        .persist_segment_checkpoint(FreezeRolloutSegmentParams::rotate_checkpoint(
+            certified_checkpoint("indeterminate replacement"),
+        ))
         .await;
     assert!(matches!(
         outcome,
@@ -486,7 +549,7 @@ async fn indeterminate_checkpoint_fences_later_persistence_without_duplicate_rep
         .await
         .expect("read indeterminate checkpoint rollout")
         .0;
-    assert_eq!(message_count(&items, "indeterminate replacement"), 1);
+    assert_eq!(compaction_count(&items, "indeterminate replacement"), 1);
     assert!(!has_message(&items, "must not append"));
 }
 
@@ -2340,6 +2403,78 @@ fn message_count(items: &[RolloutItem], message: &str) -> usize {
             )
         })
         .count()
+}
+
+fn compaction_count(items: &[RolloutItem], message: &str) -> usize {
+    items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item,
+                RolloutItem::Compacted(compacted) if compacted.message == message
+            )
+        })
+        .count()
+}
+
+fn certified_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+    let window_id = uuid::Uuid::now_v7();
+    let cwd: AbsolutePathBuf =
+        serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd");
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: message.to_string(),
+            replacement_history: Some(Vec::new()),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            window_number: Some(1),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        /*previous_turn_settings*/ None,
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_id: None,
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: cwd.clone(),
+                runtime_workspace_roots: Some(Vec::new()),
+                environments: Some(TurnEnvironmentSelections::new(cwd, Vec::new()).into()),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                disabled_plugin_ids: Vec::new(),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid certified checkpoint")
 }
 
 async fn append_malformed_historical_records(path: &Path) {

@@ -5,11 +5,17 @@ use std::path::PathBuf;
 
 use codex_protocol::SegmentId;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::ApprovalsReviewer;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary;
+use codex_protocol::config_types::Settings;
+use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::models::AgentMessageInputContent;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -18,15 +24,22 @@ use codex_protocol::protocol::ItemCompletedEvent;
 use codex_protocol::protocol::MultiAgentVersion;
 use codex_protocol::protocol::RolloutReferenceItem;
 use codex_protocol::protocol::SandboxPolicy;
+use codex_protocol::protocol::SegmentPreviousTurnSettings;
 use codex_protocol::protocol::ThreadHistoryMode;
+use codex_protocol::protocol::ThreadSettingsAppliedEvent;
+use codex_protocol::protocol::ThreadSettingsSnapshot;
+use codex_protocol::protocol::TokenCountEvent;
 use codex_protocol::protocol::TurnCompleteEvent;
 use codex_protocol::protocol::TurnContextItem;
+use codex_protocol::protocol::TurnEnvironmentSelections;
 use codex_protocol::protocol::TurnStartedEvent;
 use codex_protocol::protocol::WorldStateItem;
 use codex_protocol::user_input::UserInput;
+use codex_rollout::CertifiedSegmentStateCheckpoint;
 use codex_rollout::CompactedItem;
 use codex_rollout::RolloutItem;
 use codex_rollout::RolloutLine;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -36,6 +49,157 @@ use crate::ThreadStore;
 use crate::local::test_support::test_config;
 use crate::local::test_support::write_session_file_with_fork;
 use crate::local::test_support::write_session_file_with_history_mode;
+
+#[tokio::test]
+async fn certified_active_checkpoint_does_not_open_missing_predecessor() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2040);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-40-00",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write active rollout");
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_id: Some(thread_id),
+        rollout_path: home.path().join("missing-predecessor.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(certified_cleared_checkpoint("active checkpoint").into_items());
+    append_items(path.as_path(), items);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load active checkpoint without predecessor");
+
+    assert!(matches!(
+        context.items.get(1),
+        Some(RolloutItem::Compacted(compacted))
+            if compacted.message == "active checkpoint"
+                && compacted.segment_state_checkpoint.is_some()
+    ));
+    read_thread::load_history_items(home.path(), path.as_path())
+        .await
+        .expect_err("complete history still requires the predecessor");
+}
+
+#[tokio::test]
+async fn certified_active_checkpoint_accepts_literal_decimal_rate_limits() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2042);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-42-00",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write active rollout");
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_id: Some(thread_id),
+        rollout_path: home.path().join("missing-predecessor.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(certified_cleared_checkpoint("decimal checkpoint").into_items());
+    append_items(path.as_path(), items);
+    let mut file = OpenOptions::new()
+        .append(true)
+        .open(path.as_path())
+        .expect("open active rollout");
+    writeln!(
+        file,
+        r#"{{"timestamp":"2026-08-14T00:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":null,"rate_limits":{{"primary":{{"used_percent":5.0,"window_minutes":300,"resets_at":1786689000}},"secondary":{{"used_percent":12.5,"window_minutes":10080,"resets_at":1787292000}}}}}}}}"#,
+    )
+    .expect("append literal token-count record");
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    let context = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect("load active checkpoint with decimal rate limits");
+
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::Compacted(compacted) if compacted.message == "decimal checkpoint"
+        )
+    }));
+    assert!(context.items.iter().any(|item| {
+        matches!(
+            item,
+            RolloutItem::EventMsg(EventMsg::TokenCount(event))
+                if event
+                    .rate_limits
+                    .as_ref()
+                    .and_then(|limits| limits.secondary.as_ref())
+                    .is_some_and(|window| window.used_percent == 12.5)
+        )
+    }));
+}
+
+#[tokio::test]
+async fn invalid_active_checkpoint_does_not_hide_missing_predecessor() {
+    let home = TempDir::new().expect("temp dir");
+    let uuid = Uuid::from_u128(/*v*/ 2041);
+    let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let path = write_session_file_with_history_mode(
+        home.path(),
+        "2025-01-03T13-41-00",
+        uuid,
+        ThreadHistoryMode::Legacy,
+    )
+    .expect("write active rollout");
+    let mut checkpoint = certified_cleared_checkpoint("invalid checkpoint").into_items();
+    let Some(RolloutItem::Compacted(compacted)) = checkpoint.first_mut() else {
+        panic!("checkpoint must start with compaction");
+    };
+    compacted
+        .segment_state_checkpoint
+        .as_mut()
+        .expect("checkpoint descriptor")
+        .version += 1;
+    let mut items = vec![RolloutItem::RolloutReference(RolloutReferenceItem {
+        rollout_id: Some(thread_id),
+        rollout_path: home.path().join("missing-predecessor.jsonl"),
+        thread_id: Some(thread_id),
+        rollout_timestamp: None,
+        segment_id: Some(SegmentId::new()),
+        max_depth: codex_protocol::protocol::DEFAULT_ROLLOUT_REFERENCE_DEPTH,
+        nth_user_message: None,
+        compacted_replacement_history_filter_texts: None,
+    })];
+    items.extend(checkpoint);
+    append_items(path.as_path(), items);
+    let store = LocalThreadStore::new(test_config(home.path()), /*state_db*/ None);
+
+    store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
+        .await
+        .expect_err("invalid checkpoint must not hide missing predecessor");
+}
 
 #[tokio::test]
 async fn loads_latest_checkpoint_with_required_turn_metadata() {
@@ -263,9 +427,9 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
                 user_message("latest user"),
                 completed_user_message("latest-turn", "latest user"),
                 turn_context(home.path(), "latest-turn"),
-                compacted("latest checkpoint", Some(Vec::new())),
-                turn_complete("latest-turn"),
             ]);
+            items.extend(certified_cleared_checkpoint("latest checkpoint").into_items());
+            items.push(turn_complete("latest-turn"));
         }
         let start_ordinal = u64::try_from(index).expect("segment index") * 16;
         let lines = items
@@ -295,6 +459,8 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
         u64::try_from(SEGMENT_COUNT * 16).expect("ordinal"),
     )
     .await;
+    std::fs::remove_file(&paths[SEGMENT_COUNT - 2])
+        .expect("remove predecessor that a bounded checkpoint must not open");
 
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
@@ -306,9 +472,6 @@ async fn projected_checkpoint_resume_does_not_expand_513_older_segments() {
 
     assert!(context.items.iter().any(|item| {
         matches!(item, RolloutItem::Compacted(item) if item.message == "latest checkpoint")
-    }));
-    assert!(context.items.iter().any(|item| {
-        matches!(item, RolloutItem::TurnContext(item) if item.turn_id.as_deref() == Some("latest-turn"))
     }));
 }
 
@@ -377,18 +540,14 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
             items.push(historical_checkpoint);
         }
         if index + 1 == SEGMENT_COUNT {
-            let mut latest_checkpoint = compacted("latest legacy checkpoint", Some(Vec::new()));
-            if let RolloutItem::Compacted(compacted) = &mut latest_checkpoint {
-                compacted.window_number = Some(1);
-            }
             items.extend([
                 turn_started("latest-turn"),
                 user_message("latest user"),
                 completed_user_message("latest-turn", "latest user"),
                 turn_context(home.path(), "latest-turn"),
-                latest_checkpoint,
-                turn_complete("latest-turn"),
             ]);
+            items.extend(certified_cleared_checkpoint("latest legacy checkpoint").into_items());
+            items.push(turn_complete("latest-turn"));
         }
         let lines = items
             .into_iter()
@@ -422,6 +581,8 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
         .filter(|item| matches!(item, RolloutItem::Compacted(_)))
         .count();
     assert_eq!(canonical_compaction_count, 1);
+    std::fs::remove_file(&paths[SEGMENT_COUNT - 2])
+        .expect("remove predecessor that a bounded checkpoint must not open");
 
     let context = store
         .load_latest_model_context(LoadThreadHistoryParams {
@@ -435,14 +596,7 @@ async fn projected_forked_legacy_checkpoint_does_not_expand_513_older_segments()
         matches!(
             item,
             RolloutItem::Compacted(item)
-                if item.message == "latest legacy checkpoint" && item.window_number == Some(1)
-        )
-    }));
-    assert!(context.items.iter().any(|item| {
-        matches!(
-            item,
-            RolloutItem::TurnContext(item)
-                if item.turn_id.as_deref() == Some("latest-turn")
+                if item.message == "latest legacy checkpoint" && item.window_number == Some(4)
         )
     }));
 }
@@ -526,7 +680,7 @@ async fn projected_legacy_checkpoint_without_window_replays_canonical_history() 
 }
 
 #[tokio::test]
-async fn projected_active_checkpoint_matches_complete_lineage() {
+async fn unmarked_active_compaction_uses_compatibility_lineage() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2016);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
@@ -564,10 +718,20 @@ async fn projected_active_checkpoint_matches_complete_lineage() {
     )
     .await
     .expect("scan complete lineage");
-    let actual = scan_projected_active_model_context(&store, thread_id, &path, &session_meta)
+    assert!(
+        scan_projected_active_model_context(&store, thread_id, &path, &session_meta)
+            .await
+            .expect("scan active rollout")
+            .is_none()
+    );
+    let actual = store
+        .load_latest_model_context(LoadThreadHistoryParams {
+            thread_id,
+            include_archived: false,
+        })
         .await
-        .expect("scan indexed checkpoint")
-        .expect("complete indexed checkpoint");
+        .expect("load compatibility lineage")
+        .items;
 
     assert_eq!(
         serde_json::to_value(actual).expect("serialize indexed context"),
@@ -576,10 +740,19 @@ async fn projected_active_checkpoint_matches_complete_lineage() {
 }
 
 #[tokio::test]
-async fn stale_projection_does_not_use_active_checkpoint() {
+async fn stale_projection_does_not_block_certified_active_checkpoint() {
     let home = TempDir::new().expect("temp dir");
     let uuid = Uuid::from_u128(/*v*/ 2017);
     let thread_id = ThreadId::from_string(&uuid.to_string()).expect("thread id");
+    let checkpoint_items: [RolloutItem; 3] = certified_cleared_checkpoint("latest checkpoint")
+        .into_items()
+        .try_into()
+        .expect("cleared checkpoint has three records");
+    let [
+        checkpoint_compaction,
+        checkpoint_settings,
+        checkpoint_token_count,
+    ] = checkpoint_items;
     let path = write_ordinaled_paginated_rollout(
         home.path(),
         "2025-01-03T13-17-00",
@@ -589,7 +762,9 @@ async fn stale_projection_does_not_use_active_checkpoint() {
             user_message("latest user"),
             completed_user_message("latest-turn", "latest user"),
             turn_context(home.path(), "latest-turn"),
-            compacted("latest checkpoint", Some(Vec::new())),
+            checkpoint_compaction,
+            checkpoint_settings,
+            checkpoint_token_count,
             turn_complete("latest-turn"),
         ],
     );
@@ -608,8 +783,8 @@ async fn stale_projection_does_not_use_active_checkpoint() {
     assert!(
         scan_projected_active_model_context(&store, thread_id, &path, &session_meta)
             .await
-            .expect("evaluate stale projection")
-            .is_none()
+            .expect("scan certified active checkpoint")
+            .is_some()
     );
 }
 
@@ -1380,6 +1555,7 @@ fn compacted(message: &str, replacement_history: Option<Vec<ResponseItem>>) -> R
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        segment_state_checkpoint: None,
     })
 }
 
@@ -1400,5 +1576,81 @@ fn compacted_without_window(
         window_id: None,
         compaction_response_id: None,
         latest_token_usage_record: None,
+        segment_state_checkpoint: None,
     })
+}
+
+fn certified_cleared_checkpoint(message: &str) -> CertifiedSegmentStateCheckpoint {
+    let window_id = Uuid::now_v7();
+    let cwd: AbsolutePathBuf =
+        serde_json::from_value(serde_json::json!("/tmp")).expect("absolute test cwd");
+    CertifiedSegmentStateCheckpoint::new(
+        CompactedItem {
+            message: message.to_string(),
+            replacement_history: Some(vec![
+                ResponseItem::Message {
+                    id: None,
+                    role: "developer".to_string(),
+                    content: vec![ContentItem::InputText {
+                        text: "active checkpoint history".to_string(),
+                    }],
+                    phase: None,
+                    internal_chat_message_metadata_passthrough: None,
+                }
+                .into(),
+            ]),
+            retained_context: None,
+            guardian_history: None,
+            mcp_resource_origins: None,
+            compaction_response_id: None,
+            latest_token_usage_record: None,
+            window_number: Some(4),
+            first_window_id: Some(window_id.to_string()),
+            previous_window_id: None,
+            window_id: Some(window_id.to_string()),
+            segment_state_checkpoint: None,
+        },
+        Some(SegmentPreviousTurnSettings {
+            model: "test-model".to_string(),
+            comp_hash: None,
+            realtime_active: None,
+        }),
+        /*world_state*/ None,
+        /*reference_context*/ None,
+        ThreadSettingsAppliedEvent {
+            thread_id: None,
+            thread_settings: ThreadSettingsSnapshot {
+                model: "test-model".to_string(),
+                model_provider_id: "test-provider".to_string(),
+                service_tier: None,
+                approval_policy: AskForApproval::Never,
+                approvals_reviewer: ApprovalsReviewer::User,
+                permission_profile: PermissionProfile::workspace_write(),
+                active_permission_profile: None,
+                cwd: cwd.clone(),
+                runtime_workspace_roots: Some(Vec::new()),
+                environments: Some(TurnEnvironmentSelections::new(cwd, Vec::new()).into()),
+                workspace_roots: Some(Vec::new()),
+                profile_workspace_roots: Some(Vec::new()),
+                windows_sandbox_level: Some(WindowsSandboxLevel::Disabled),
+                disabled_plugin_ids: Vec::new(),
+                reasoning_effort: None,
+                reasoning_summary: None,
+                personality: None,
+                collaboration_mode: CollaborationMode {
+                    mode: ModeKind::Default,
+                    settings: Settings {
+                        model: "test-model".to_string(),
+                        reasoning_effort: None,
+                        developer_instructions: None,
+                    },
+                },
+            },
+        },
+        TokenCountEvent {
+            info: None,
+            rate_limits: None,
+        },
+    )
+    .expect("valid certified checkpoint")
 }

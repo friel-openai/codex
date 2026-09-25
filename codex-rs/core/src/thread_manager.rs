@@ -68,6 +68,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
 use codex_protocol::mcp::OPENAI_STANDARD_FORM_INPUT_EXTENSION_ID;
 use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::EnvironmentConfigState;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InternalSessionSource;
@@ -109,6 +110,7 @@ use codex_thread_store::ThreadStoreError;
 use codex_thread_store::UpdateThreadMetadataParams;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_git_discovery::GitRootDiscovery;
+use codex_utils_path_uri::PathUri;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
@@ -131,6 +133,60 @@ const MAX_TURN_ENVIRONMENT_CWD_BYTES: usize = 8 * 1024;
 
 mod current_membership;
 pub use current_membership::CurrentAgentMembershipHandle;
+
+fn persisted_thread_environment_selections(
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(&event.thread_settings)
+            }
+            _ => None,
+        })
+        .and_then(|settings| settings.environments.clone())
+        .map(|selections| {
+            selections
+                .environments
+                .into_iter()
+                .map(Into::into)
+                .collect()
+        })
+}
+
+fn persisted_root_environment_selections(
+    config: &Config,
+    history: &[RolloutItem],
+) -> Option<Vec<TurnEnvironmentSelection>> {
+    let mut environments = persisted_thread_environment_selections(history)?;
+    let had_named_profile = history
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            RolloutItem::EventMsg(EventMsg::ThreadSettingsApplied(event)) => {
+                Some(event.thread_settings.active_permission_profile.is_some())
+            }
+            _ => None,
+        })
+        .unwrap_or(false);
+    if had_named_profile {
+        // The app-server has resolved the saved profile ID against current config. Old roots
+        // must not restore authority removed by that profile or by its configured replacement.
+        for environment in &mut environments {
+            if matches!(environment.config, EnvironmentConfigState::FromThread) {
+                environment.workspace_roots = config
+                    .permissions
+                    .workspace_roots()
+                    .iter()
+                    .map(PathUri::from_abs_path)
+                    .collect();
+            }
+        }
+    }
+    Some(environments)
+}
 
 /// Test-only override for enabling thread-manager behaviors used by integration
 /// tests.
@@ -227,6 +283,8 @@ struct ForkHistory {
     /// Exact source ordinal cutoff, when the store selected an ordinal-backed prefix.
     forked_from_ordinal_exclusive: Option<u64>,
     model_history_override: Option<Vec<RolloutItem>>,
+    /// Latest durable settings context when the response boundary selects older history.
+    settings_history_override: Option<Arc<Vec<RolloutItem>>>,
     shared_model_response_items: Option<Arc<Vec<codex_history::ResponseItemEnvelope>>>,
     shared_model_state: Option<ForkModelState>,
 }
@@ -1458,6 +1516,8 @@ impl ThreadManager {
         parent_trace: Option<W3cTraceContext>,
         client_mcp_extensions: ClientMcpExtensions,
     ) -> CodexResult<NewThread> {
+        let environments =
+            persisted_root_environment_selections(&config, initial_history.get_rollout_items());
         let (agent_control, _lifecycle_mutation) = self
             .agent_control_for_initial_history(&config, &initial_history)
             .await?;
@@ -1470,6 +1530,7 @@ impl ThreadManager {
             thread_source,
             parent_trace,
             client_mcp_extensions,
+            environments,
             ..StartThreadOptions::new(config)
         };
         Box::pin(self.state.spawn_thread(ThreadSpawnRequest::new(
@@ -1690,6 +1751,7 @@ impl ThreadManager {
                 initial_history: history,
                 forked_from_ordinal_exclusive: None,
                 model_history_override: None,
+                settings_history_override: None,
                 shared_model_response_items: None,
                 shared_model_state: None,
             },
@@ -1815,6 +1877,7 @@ impl ThreadManager {
                     initial_history: history,
                     forked_from_ordinal_exclusive: prepared.frozen_segment.next_rollout_ordinal,
                     model_history_override: Some(model_history_override),
+                    settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                     shared_model_response_items,
                     shared_model_state,
                 },
@@ -1834,6 +1897,7 @@ impl ThreadManager {
             initial_history: history,
             mut forked_from_ordinal_exclusive,
             model_history_override,
+            settings_history_override,
             shared_model_response_items,
             shared_model_state,
         } = fork_history;
@@ -1943,8 +2007,40 @@ impl ThreadManager {
         {
             meta.meta.multi_agent_version = Some(multi_agent_version);
         }
+        let mut environments = settings_history_override
+            .as_deref()
+            .map(|history| persisted_thread_environment_selections(history))
+            .unwrap_or_else(|| match model_history_override.as_deref() {
+                Some(model_history) => persisted_thread_environment_selections(model_history),
+                None => persisted_thread_environment_selections(response_history.as_ref()),
+            });
+        if options.config.workspace_roots_explicit
+            && let Some(environments) = environments.as_mut()
+        {
+            // User forks such as /cd pass explicit local workspace roots. Saved
+            // thread-derived selections must not restore the parent's old cwd
+            // and roots over that request. Executor-owned and remote selections
+            // retain their own configuration authority.
+            for environment in environments {
+                if matches!(environment.config, EnvironmentConfigState::FromThread)
+                    && self
+                        .environment_manager()
+                        .get_environment(&environment.environment_id)
+                        .is_some_and(|executor| !executor.is_remote())
+                {
+                    environment.cwd = PathUri::from_abs_path(&options.config.cwd);
+                    environment.workspace_roots = options
+                        .config
+                        .workspace_roots
+                        .iter()
+                        .map(PathUri::from_abs_path)
+                        .collect();
+                }
+            }
+        }
         let agent_control = self.agent_control_for_config(&options.config);
         options.initial_history = history;
+        options.environments = options.environments.or(environments);
         let mut request =
             ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
         request.forked_from_thread_id = source_thread_id;
@@ -2864,11 +2960,32 @@ impl ThreadManagerState {
             None => self.client_mcp_extensions_for_child(parent_thread_id).await,
         };
         let thread_source = initial_history.get_resumed_thread_source();
-        let environments = environment_selections.or_else(|| {
-            inherited_environments
-                .as_ref()
-                .map(TurnEnvironmentSnapshot::to_selections)
-        });
+        let environments = environment_selections
+            .or_else(|| {
+                let mut selections =
+                    persisted_thread_environment_selections(initial_history.get_rollout_items())?;
+                if let Some(inherited) = &inherited_environments {
+                    let inherited = inherited.all_selections();
+                    for selection in &mut selections {
+                        if matches!(selection.config, EnvironmentConfigState::Pending)
+                            && let Some(accepted) = inherited.iter().find(|accepted| {
+                                accepted.environment_id == selection.environment_id
+                            })
+                            && let EnvironmentConfigState::Ready(config) = &accepted.config
+                        {
+                            // Checkpoints retain the child's locations, not owner authority.
+                            // Reuse freshly accepted owner config without restoring the parent's cwd.
+                            selection.config = EnvironmentConfigState::Ready(config.clone());
+                        }
+                    }
+                }
+                Some(selections)
+            })
+            .or_else(|| {
+                inherited_environments
+                    .as_ref()
+                    .map(TurnEnvironmentSnapshot::to_selections)
+            });
         let options = StartThreadOptions {
             initial_history,
             session_source: Some(session_source),

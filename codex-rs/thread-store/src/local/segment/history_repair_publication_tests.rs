@@ -192,7 +192,7 @@ fn repaired_active_replacement(source: &[u8], old: &[u8], new: &[u8]) -> Vec<u8>
     let (first_record_start, first_record_len) = session_record_bounds(replacement.as_slice());
     let first_record_end = first_record_start + first_record_len;
     let mut line =
-        serde_json::from_slice::<RolloutLine>(&replacement[first_record_start..first_record_end])
+        codex_rollout::parse_rollout_line_bytes(&replacement[first_record_start..first_record_end])
             .expect("parse source metadata");
     let RolloutItem::SessionMeta(meta) = &mut line.item else {
         panic!("first record is not session metadata");
@@ -215,7 +215,7 @@ fn repaired_active_replacement(source: &[u8], old: &[u8], new: &[u8]) -> Vec<u8>
 fn session_record_bounds(source: &[u8]) -> (usize, usize) {
     let mut start = 0;
     for record in source.split_inclusive(|byte| *byte == b'\n') {
-        if serde_json::from_slice::<RolloutLine>(record)
+        if codex_rollout::parse_rollout_line_bytes(record)
             .is_ok_and(|line| matches!(line.item, RolloutItem::SessionMeta(_)))
         {
             return (start, record.len());
@@ -227,7 +227,7 @@ fn session_record_bounds(source: &[u8]) -> (usize, usize) {
 
 fn segment_id_from_source(source: &[u8]) -> SegmentId {
     let (start, len) = session_record_bounds(source);
-    let line = serde_json::from_slice::<RolloutLine>(&source[start..start + len])
+    let line = codex_rollout::parse_rollout_line_bytes(&source[start..start + len])
         .expect("parse session metadata");
     let RolloutItem::SessionMeta(meta) = line.item else {
         panic!("session metadata record changed type");
@@ -237,7 +237,7 @@ fn segment_id_from_source(source: &[u8]) -> SegmentId {
 
 fn thread_id_from_source(source: &[u8]) -> ThreadId {
     let (start, len) = session_record_bounds(source);
-    let line = serde_json::from_slice::<RolloutLine>(&source[start..start + len])
+    let line = codex_rollout::parse_rollout_line_bytes(&source[start..start + len])
         .expect("parse session metadata");
     let RolloutItem::SessionMeta(meta) = line.item else {
         panic!("session metadata record changed type");
@@ -259,7 +259,8 @@ async fn install_active_backup(
 ) -> std::path::PathBuf {
     let (start, len) = session_record_bounds(source);
     let first_record = &source[start..start + len];
-    let line = serde_json::from_slice::<RolloutLine>(first_record).expect("parse session metadata");
+    let line =
+        codex_rollout::parse_rollout_line_bytes(first_record).expect("parse session metadata");
     let RolloutItem::SessionMeta(meta) = line.item else {
         panic!("first record is not session metadata");
     };
@@ -340,7 +341,8 @@ fn physical_segment_identity_preserves_session_metadata_encoding() {
         reordered_with_unknown.as_bytes(),
         reordered_with_trailing_unknown.as_bytes(),
     ] {
-        let parsed = serde_json::from_slice::<RolloutLine>(bytes).expect("parse physical variant");
+        let parsed =
+            codex_rollout::parse_rollout_line_bytes(bytes).expect("parse physical variant");
         assert!(matches!(parsed.item, RolloutItem::SessionMeta(_)));
     }
     let canonical_preimage = identity_cleared_preimage(&canonical, thread_id, segment_id).unwrap();
@@ -713,7 +715,7 @@ async fn repaired_segment_rejects_unrelated_same_span_identity_preimage() {
                 .split_inclusive(|byte| *byte == b'\n')
                 .next()
                 .expect("session metadata");
-            let mut line = serde_json::from_slice::<RolloutLine>(first).expect("parse metadata");
+            let mut line = codex_rollout::parse_rollout_line_bytes(first).expect("parse metadata");
             let RolloutItem::SessionMeta(meta) = &mut line.item else {
                 panic!("session metadata");
             };
@@ -737,7 +739,7 @@ async fn repaired_segment_rejects_unrelated_same_span_identity_preimage() {
         .position(|byte| *byte == b'\n')
         .expect("first newline")
         + 1;
-    let mut line = serde_json::from_slice::<RolloutLine>(&claimed_final[..first_len])
+    let mut line = codex_rollout::parse_rollout_line_bytes(&claimed_final[..first_len])
         .expect("parse final metadata");
     let RolloutItem::SessionMeta(meta) = &mut line.item else {
         panic!("session metadata");
