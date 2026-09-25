@@ -166,10 +166,10 @@ index 3b10ae60ab4ba317fcd9197025920803d38f1d37..1890500919486a2d075316c3f7a31ace
      )
      .await?;
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2b3503e63 100644
+index fb3f4004394a8d8f402ca38821b90a3adae56c87..477bd1182c5c9439c3d43327d9b3540a90edf77c 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1071,6 +1071,36 @@ async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str
+@@ -1072,6 +1072,36 @@ async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str
          .expect("test thread rollout should flush");
  }
 
@@ -206,7 +206,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
  async fn wait_for_live_thread_spawn_children(
      control: &LocalAgentControl,
      parent_thread_id: ThreadId,
-@@ -2857,6 +2887,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+@@ -2986,6 +3016,10 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
                          active_permission_profile: None,
                          cwd: harness.config.cwd.clone(),
                          runtime_workspace_roots: None,
@@ -217,7 +217,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
                          reasoning_effort: None,
                          reasoning_summary: None,
                          personality: None,
-@@ -3682,6 +3716,7 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state(thread_context_enabl
+@@ -3811,6 +3845,7 @@ async fn spawn_agent_fork_drops_inherited_token_usage_state(thread_context_enabl
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: Some(parent_record.clone()),
@@ -225,7 +225,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
              }),
              RolloutItem::TokenUsageRecord(parent_record),
              rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
-@@ -3808,6 +3843,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
+@@ -3937,6 +3972,7 @@ async fn spawn_agent_numeric_fork_from_compacted_paginated_parent_clamps_to_prov
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -233,7 +233,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
              }),
              rollout_response_item(ResponseItem::Message {
                  id: None,
-@@ -4729,6 +4765,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
+@@ -4858,6 +4894,7 @@ async fn spawn_agent_fork_strips_parent_usage_hints_from_compacted_history(
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -241,7 +241,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
              }),
              RolloutItem::RetainedContext(answer_event),
              RolloutItem::ResponseItem(delivery),
-@@ -4934,6 +4971,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
+@@ -5063,6 +5100,7 @@ async fn spawn_agent_full_fork_restores_instructions_after_compaction_discards_p
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -249,7 +249,7 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
              }),
              RolloutItem::TurnContext(turn_context.to_turn_context_item()),
              rollout_response_item(spawn_agent_call(&parent_spawn_call_id)),
-@@ -5091,6 +5129,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
+@@ -5220,6 +5258,7 @@ async fn spawn_agent_full_fork_legacy_compaction_rebuilds_child_instructions_onc
                  window_id: None,
                  compaction_response_id: None,
                  latest_token_usage_record: None,
@@ -257,8 +257,8 @@ index 806dfaa55ad7d0c2cde65e19b39256f5d225e94c..4c49ebf9211481d91e13d982e9da66d2
              }),
          ];
          if let Some(instructions) = parent_developer_instructions {
-@@ -6659,6 +6698,90 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
-         .expect("resumed child shutdown should succeed");
+@@ -6840,6 +6879,90 @@ async fn resume_agent_from_rollout_reads_archived_rollout_path() {
+     assert_eq!(persisted_markers, vec![&persisted_marker]);
  }
 
 +#[tokio::test]

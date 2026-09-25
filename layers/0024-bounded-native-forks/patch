@@ -565,7 +565,7 @@ index 1c936277469aeba73bc1ca3cb2375818d6d35131..6406c30491a9dc684551325227ff770a
      let parent_thread_id = create_fake_rollout(
          codex_home.path(),
 diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 446b27665384611c8df6c8e2a151fb2ce735e110..8c91b13068dbda6f1303f4752f67b2e68298ee47 100644
+index 32fde5d79a276c2b06ac115ff7bc71da11b7f1eb..a2426a29942a8214b2d7ae49966b6aa367064534 100644
 --- a/codex-rs/core/src/agent/control/spawn.rs
 +++ b/codex-rs/core/src/agent/control/spawn.rs
 @@ -918,7 +918,7 @@ impl LocalAgentControl {
@@ -669,10 +669,10 @@ index 446b27665384611c8df6c8e2a151fb2ce735e110..8c91b13068dbda6f1303f4752f67b2e6
                      .await,
                  );
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ed5e8d1a742dd839de4b85b2b9e0bb1100842c81..c701bec66eae2e75e6a55158b6615edda5f6ecd0 100644
+index 68bd8084159e8b47ea66695e9e8bc81c59318af0..cd7c2324721609a0287ca31561cd97336eb0b985 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -3672,6 +3672,183 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3801,6 +3801,183 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .expect("shutdown reopened full-history child");
  }
 

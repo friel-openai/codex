@@ -2656,10 +2656,10 @@ index 6471d9ae36ba38a6db5f1c6a71a1fca5123ba070..494b10f8eb7391e262f0155db195dfa1
          .with_codex_home(codex_home.path())
          .without_auto_env()
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 4c49ebf9211481d91e13d982e9da66d2b3503e63..0a404d3d3c189ec913f0dd86f628a008271ab148 100644
+index 477bd1182c5c9439c3d43327d9b3540a90edf77c..f75a94d6cdc37c53a75d906f1e04756be853d366 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -2998,6 +2998,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
+@@ -3127,6 +3127,29 @@ async fn spawn_agent_fork_from_paginated_parent_uses_model_context_prefix() {
          "copied non-structural presentation and metadata records should not enter the child rollout"
      );
 
@@ -2689,7 +2689,7 @@ index 4c49ebf9211481d91e13d982e9da66d2b3503e63..0a404d3d3c189ec913f0dd86f628a008
      let _ = harness
          .control
          .shutdown_live_agent(child_thread_id)
-@@ -3349,6 +3372,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3478,6 +3501,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
      reference_params.parent_thread_id = Some(lineage_thread_id);
      reference_params.initial_rollout_ordinal = lineage_prepared
          .frozen_segment
@@ -2698,7 +2698,7 @@ index 4c49ebf9211481d91e13d982e9da66d2b3503e63..0a404d3d3c189ec913f0dd86f628a008
          .next_rollout_ordinal
          .unwrap_or_default();
      store
-@@ -3363,7 +3388,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -3492,7 +3517,12 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .append_items(AppendThreadItemsParams {
              thread_id: reference_thread_id,
              items: vec![RolloutItem::RolloutReference(

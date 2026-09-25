@@ -259,10 +259,10 @@ index 0000000000000000000000000000000000000000..ca55a1b98181fb2a2723e180dae824a9
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 5753345c21062e0638c2a6d9d2cc9d90bc395ca7..46bb91ae9493ebc29f202f3d44c863b6aa7ffdcc 100644
+index f0e8f71644cca7370571bf75ae6009bdf44ad47e..17c3d82ce940a145093553ee8306433a0d3134cd 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -8304,6 +8304,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
+@@ -8485,6 +8485,7 @@ fn failed_goal_supervisor_waits_for_one_persisted_retry() -> anyhow::Result<()>
  }
 
  #[derive(Clone, Copy)]
