@@ -174,4 +174,4 @@ jobs:
             --config-file "${GITHUB_WORKSPACE}/.github/nextest-ci.toml" \
             -p codex-app-server \
             --test all \
-            -E 'test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart)'
+            -E 'test(=suite::v2::frodex_runtime_recovery::released_codex_repairs_alpha6_supervisor_history_across_restart) | test(guardians_retain_evidence_after_compaction_and_resume)'
