@@ -100,6 +100,10 @@ pub(crate) struct Session {
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     pub(crate) async_hook_results: async_channel::Receiver<HookCompletedEvent>,
     pub(crate) input_queue: InputQueue,
+    /// Runtime state for the active goal supervisor helper, its retry deadline, and its last
+    /// terminal action. The persisted snooze deadline is reconstructed from the goals database;
+    /// action and retry state remain scoped to the parent process.
+    pub(crate) goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState,
     pub(crate) services: SessionServices,
     pub(super) git_enrichment_policy: GitEnrichmentPolicy,
     pub(super) forked_from_ordinal_exclusive: Option<u64>,
@@ -171,6 +175,16 @@ pub(crate) struct SessionConfiguration {
     pub(super) originator: String,
     pub(super) dynamic_tools: Vec<DynamicToolSpec>,
     pub(super) user_shell_override: Option<shell::Shell>,
+}
+
+impl SessionConfiguration {
+    pub(super) fn is_system_ephemeral(&self) -> bool {
+        self.original_config_do_not_use.ephemeral
+            && matches!(
+                self.thread_source.as_ref(),
+                Some(ThreadSource::Feature(feature)) if feature == "system"
+            )
+    }
 }
 
 impl SessionConfiguration {
@@ -1829,6 +1843,7 @@ impl Session {
                 active_turn: Mutex::new(None),
                 async_hook_results,
                 input_queue: InputQueue::new(),
+                goal_supervisor_runtime: crate::goal_supervisor::GoalSupervisorRuntimeState::new(),
                 services,
                 git_enrichment_policy,
                 forked_from_ordinal_exclusive,

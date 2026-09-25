@@ -1,4 +1,5 @@
 use crate::agent::types::AgentMetadata;
+use crate::agents_md_manager::SessionInstructions;
 use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::error::CodexErr;
@@ -13,8 +14,12 @@ use std::collections::HashSet;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
+use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
+use tokio::sync::OwnedMutexGuard;
 
 /// This structure is used to add some limits on the multi-agent capabilities for Codex. In
 /// the current implementation, it limits:
@@ -36,17 +41,98 @@ struct ActiveAgents {
     nickname_reset_count: usize,
 }
 
+/// Runtime state that survives unloading or changing an agent's registered path.
 struct RegisteredAgent {
     path: String,
+    /// Serializes loaded/cold transitions without exposing runtime state in public metadata.
+    lifecycle: Arc<AgentLifecycle>,
     evicted_environments: Option<Vec<TurnEnvironmentSelection>>,
+    /// Retains a transferred descendant's applied instructions until its first successful reload.
+    evicted_instructions: Option<SessionInstructions>,
 }
 
 impl RegisteredAgent {
     fn new(path: String) -> Self {
         Self {
             path,
+            lifecycle: Arc::new(AgentLifecycle::default()),
             evicted_environments: None,
+            evicted_instructions: None,
         }
+    }
+}
+
+/// Runtime coordination retained for an addressable agent after its `CodexThread` becomes cold.
+#[derive(Debug, Default)]
+pub(crate) struct AgentLifecycle {
+    /// Guards all loaded/cold transitions and submissions that require a loaded thread.
+    transition: Arc<AsyncMutex<()>>,
+    /// Keeps a transactionally transferred descendant discoverable while its runtime stays cold.
+    visible_when_cold: AtomicBool,
+    /// Prevents duplicate completion watchers for one registered agent.
+    completion_watcher_active: AtomicBool,
+    /// Wakes input delivery after the active completion watcher finishes its transition.
+    completion_watcher_finished: Notify,
+}
+
+/// Clears the active-watcher marker even when the watcher exits through an error path.
+pub(crate) struct CompletionWatcherRegistration {
+    lifecycle: Arc<AgentLifecycle>,
+}
+
+impl AgentLifecycle {
+    pub(crate) async fn lock_transition(self: &Arc<Self>) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.transition).lock_owned().await
+    }
+
+    pub(crate) fn completion_watcher_active(&self) -> bool {
+        self.completion_watcher_active.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark_visible_when_cold(&self) {
+        self.visible_when_cold.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn clear_visible_when_cold(&self) {
+        self.visible_when_cold.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn is_visible_when_cold(&self) -> bool {
+        self.visible_when_cold.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn try_start_completion_watcher(
+        self: &Arc<Self>,
+    ) -> Option<CompletionWatcherRegistration> {
+        self.completion_watcher_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .ok()
+            .map(|_| CompletionWatcherRegistration {
+                lifecycle: Arc::clone(self),
+            })
+    }
+
+    pub(crate) async fn wait_for_completion_watcher(&self) {
+        while self.completion_watcher_active() {
+            let finished = self.completion_watcher_finished.notified();
+            tokio::pin!(finished);
+            // `notify_waiters` does not store a permit. Register before the atomic recheck so a
+            // watcher cannot finish between the recheck and the first poll of `Notified`.
+            let _ = finished.as_mut().enable();
+            if !self.completion_watcher_active() {
+                return;
+            }
+            finished.await;
+        }
+    }
+}
+
+impl Drop for CompletionWatcherRegistration {
+    fn drop(&mut self) {
+        self.lifecycle
+            .completion_watcher_active
+            .store(false, Ordering::Release);
+        self.lifecycle.completion_watcher_finished.notify_waiters();
     }
 }
 
@@ -85,6 +171,10 @@ pub(crate) fn exceeds_thread_spawn_depth_limit(depth: i32, max_depth: i32) -> bo
     depth > max_depth
 }
 
+fn is_uncounted_agent_metadata(agent_metadata: &AgentMetadata) -> bool {
+    agent_metadata.agent_role.as_deref() == Some(crate::goal_supervisor::GOAL_SUPERVISOR_ROLE_NAME)
+}
+
 impl AgentRegistry {
     pub(crate) fn reserve_spawn_slot(
         self: &Arc<Self>,
@@ -104,7 +194,18 @@ impl AgentRegistry {
             active: true,
             reserved_agent_nickname: None,
             reserved_agent_path: None,
+            counted: true,
         })
+    }
+
+    pub(crate) fn reserve_uncounted_spawn_slot(self: &Arc<Self>) -> SpawnReservation {
+        SpawnReservation {
+            state: Arc::clone(self),
+            active: true,
+            reserved_agent_nickname: None,
+            reserved_agent_path: None,
+            counted: false,
+        }
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
@@ -119,6 +220,7 @@ impl AgentRegistry {
                 .and_then(|agent| active_agents.agent_tree.remove(agent.path.as_str()))
                 .is_some_and(|metadata| {
                     !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                        && !is_uncounted_agent_metadata(&metadata)
                 })
         };
         if removed_counted_agent {
@@ -144,7 +246,8 @@ impl AgentRegistry {
         if let Some(root_thread_id) = root_thread_id {
             active_agents
                 .thread_paths
-                .insert(root_thread_id, RegisteredAgent::new(root_path));
+                .entry(root_thread_id)
+                .or_insert_with(|| RegisteredAgent::new(root_path));
         }
     }
 
@@ -167,6 +270,30 @@ impl AgentRegistry {
             .get(&thread_id)
             .and_then(|agent| active_agents.agent_tree.get(&agent.path))
             .cloned()
+    }
+
+    pub(crate) fn agent_lifecycle(&self, thread_id: ThreadId) -> Option<Arc<AgentLifecycle>> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .thread_paths
+            .get(&thread_id)
+            .map(|agent| Arc::clone(&agent.lifecycle))
+    }
+
+    /// Transfers the original transition lock while ownership changes under that lock.
+    pub(crate) fn remember_agent_lifecycle(
+        &self,
+        thread_id: ThreadId,
+        lifecycle: Arc<AgentLifecycle>,
+    ) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+            agent.lifecycle = lifecycle;
+        }
     }
 
     pub(crate) fn save_evicted_environments(
@@ -207,6 +334,41 @@ impl AgentRegistry {
         }
     }
 
+    pub(crate) fn remember_evicted_instructions(
+        &self,
+        thread_id: ThreadId,
+        instructions: SessionInstructions,
+    ) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+            agent.evicted_instructions = Some(instructions);
+        }
+    }
+
+    pub(crate) fn evicted_instructions(&self, thread_id: ThreadId) -> Option<SessionInstructions> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active_agents
+            .thread_paths
+            .get(&thread_id)
+            .and_then(|agent| agent.evicted_instructions.clone())
+    }
+
+    pub(crate) fn clear_evicted_instructions(&self, thread_id: ThreadId) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(agent) = active_agents.thread_paths.get_mut(&thread_id) {
+            agent.evicted_instructions = None;
+        }
+    }
+
     pub(crate) fn live_agents(&self) -> Vec<AgentMetadata> {
         self.active_agents
             .lock()
@@ -221,7 +383,43 @@ impl AgentRegistry {
             .collect()
     }
 
+    pub(crate) fn update_last_task_message(&self, thread_id: ThreadId, last_task_message: String) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = active_agents
+            .agent_tree
+            .values_mut()
+            .find(|metadata| metadata.agent_id == Some(thread_id))
+        {
+            metadata.last_task_message = Some(last_task_message);
+        }
+    }
+
+    pub(crate) fn clear_last_task_message(&self, thread_id: ThreadId) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(metadata) = active_agents
+            .agent_tree
+            .values_mut()
+            .find(|metadata| metadata.agent_id == Some(thread_id))
+        {
+            metadata.last_task_message = None;
+        }
+    }
+
     fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {
+        self.register_spawned_thread_with_lifecycle(agent_metadata, /*lifecycle*/ None);
+    }
+
+    fn register_spawned_thread_with_lifecycle(
+        &self,
+        agent_metadata: AgentMetadata,
+        lifecycle: Option<Arc<AgentLifecycle>>,
+    ) {
         let Some(thread_id) = agent_metadata.agent_id else {
             return;
         };
@@ -237,14 +435,26 @@ impl AgentRegistry {
         if let Some(agent_nickname) = agent_metadata.agent_nickname.clone() {
             active_agents.used_agent_nicknames.insert(agent_nickname);
         }
-        if let Some(previous_agent) = active_agents
-            .thread_paths
-            .insert(thread_id, RegisteredAgent::new(key.clone()))
-            && previous_agent.path != key
+        let previous_path = match active_agents.thread_paths.entry(thread_id) {
+            Entry::Occupied(mut entry) => {
+                if let Some(lifecycle) = lifecycle {
+                    entry.get_mut().lifecycle = lifecycle;
+                }
+                Some(std::mem::replace(&mut entry.get_mut().path, key.clone()))
+            }
+            Entry::Vacant(entry) => {
+                let mut agent = RegisteredAgent::new(key.clone());
+                if let Some(lifecycle) = lifecycle {
+                    agent.lifecycle = lifecycle;
+                }
+                entry.insert(agent);
+                None
+            }
+        };
+        if let Some(previous_path) = previous_path
+            && previous_path != key
         {
-            active_agents
-                .agent_tree
-                .remove(previous_agent.path.as_str());
+            active_agents.agent_tree.remove(previous_path.as_str());
         }
         if let Some(previous_metadata) = active_agents.agent_tree.insert(key, agent_metadata)
             && let Some(previous_thread_id) = previous_metadata.agent_id
@@ -351,6 +561,7 @@ pub(crate) struct SpawnReservation {
     active: bool,
     reserved_agent_nickname: Option<String>,
     reserved_agent_path: Option<AgentPath>,
+    counted: bool,
 }
 
 impl SpawnReservation {
@@ -381,6 +592,19 @@ impl SpawnReservation {
         self.state.register_spawned_thread(agent_metadata);
         self.active = false;
     }
+
+    /// Publishes transferred metadata with the original lock before other callers can find it.
+    pub(crate) fn commit_with_lifecycle(
+        mut self,
+        agent_metadata: AgentMetadata,
+        lifecycle: Arc<AgentLifecycle>,
+    ) {
+        self.reserved_agent_nickname = None;
+        self.reserved_agent_path = None;
+        self.state
+            .register_spawned_thread_with_lifecycle(agent_metadata, Some(lifecycle));
+        self.active = false;
+    }
 }
 
 impl Drop for SpawnReservation {
@@ -389,7 +613,9 @@ impl Drop for SpawnReservation {
             if let Some(agent_path) = self.reserved_agent_path.take() {
                 self.state.release_reserved_agent_path(&agent_path);
             }
-            self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            if self.counted {
+                self.state.total_count.fetch_sub(1, Ordering::AcqRel);
+            }
         }
     }
 }
