@@ -288,7 +288,7 @@ index 5cc760967455cffe161cc8aaee2a1423a5fcc9b7..e0a58603336de080d91299e3998858c9
      ));
      let source_meta = SessionMetaLine {
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index c11a61f8e7aadb11abec37b266d39448248b3fee..9a25ac59595d0ea097771f1bd08daf92ede68be5 100644
+index 17927e3f772d0581751a1e8d20ba249e430f0254..3df877f6fddcd25a408ff6935a5c78e61fe4bba8 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1686,7 +1686,6 @@ impl ThreadManager {

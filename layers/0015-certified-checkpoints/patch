@@ -4690,7 +4690,7 @@ index 5c550cbaefc388e4e6b032f94da0136aa70b602e..09c1a793745a90992135512210fa4896
          self.history.token_info()
      }
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index cf170634e98621f6ed7655037614642d302dfef1..6d830016b668cf96802849d9cd032c8ba95311ad 100644
+index 0e45c1672ad5f87c0a4815e66abbeb3e2c7fc50b..ef1cec213a274b4ef13cef23e553fa76ff510275 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -69,6 +69,7 @@ use codex_protocol::mcp::ClientMcpExtensions;
@@ -4861,7 +4861,7 @@ index cf170634e98621f6ed7655037614642d302dfef1..6d830016b668cf96802849d9cd032c8b
          let mut request =
              ThreadSpawnRequest::new(options, Arc::clone(&self.state.auth_manager), agent_control);
          request.forked_from_thread_id = source_thread_id;
-@@ -2906,11 +3002,32 @@ impl ThreadManagerState {
+@@ -2909,11 +3005,32 @@ impl ThreadManagerState {
              None => self.client_mcp_extensions_for_child(parent_thread_id).await,
          };
          let thread_source = initial_history.get_resumed_thread_source();

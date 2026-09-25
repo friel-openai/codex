@@ -14952,7 +14952,7 @@ index 2ad6096ea906379cb9e431f9cfc59107553b391c..0c3ff73e676143d97fd74d79a988cc60
          }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec6166536870 100644
+index c98ad1bf2a9fc78cb255f625483dcf3b0c28a3b4..12929ab5ab36df29331d2d9bad9e32c268e2a54c 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -998,45 +998,9 @@ impl ThreadManager {
@@ -15079,7 +15079,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
      pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
          self.threads
              .read()
-@@ -2500,7 +2529,12 @@ impl ThreadManagerState {
+@@ -2503,7 +2532,12 @@ impl ThreadManagerState {
          forked_from_thread_id: Option<ThreadId>,
          config: &Config,
      ) -> MultiAgentVersion {
@@ -15093,7 +15093,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
              return multi_agent_version;
          }
          self.initial_multi_agent_version_for_spawn(
-@@ -2657,6 +2691,7 @@ impl ThreadManagerState {
+@@ -2660,6 +2694,7 @@ impl ThreadManagerState {
              /*thread_source*/ None,
              /*metrics_service_name*/ None,
              /*inherited_environments*/ None,
@@ -15101,7 +15101,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
              /*inherited_exec_policy*/ None,
              Default::default(),
              /*environments*/ None,
-@@ -2676,6 +2711,7 @@ impl ThreadManagerState {
+@@ -2679,6 +2714,7 @@ impl ThreadManagerState {
          thread_source: Option<ThreadSource>,
          metrics_service_name: Option<String>,
          inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -15109,7 +15109,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
          inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
          inherited_thread_state: InheritedThreadState,
          environments: Option<Vec<TurnEnvironmentSelection>>,
-@@ -2695,6 +2731,7 @@ impl ThreadManagerState {
+@@ -2698,6 +2734,7 @@ impl ThreadManagerState {
          request.parent_thread_id = parent_thread_id;
          request.forked_from_thread_id = forked_from_thread_id;
          request.inherited_environments = inherited_environments;
@@ -15117,7 +15117,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
          request.inherited_exec_policy = inherited_exec_policy;
          request.inherited_thread_state = inherited_thread_state;
          Box::pin(self.spawn_thread(request)).await
-@@ -2757,6 +2794,7 @@ impl ThreadManagerState {
+@@ -2760,6 +2797,7 @@ impl ThreadManagerState {
          parent_thread_id: Option<ThreadId>,
          forked_from_thread_id: Option<ThreadId>,
          inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -15125,7 +15125,7 @@ index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec61
          inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
          environments: Option<Vec<TurnEnvironmentSelection>>,
          inherited_thread_state: InheritedThreadState,
-@@ -2780,6 +2818,7 @@ impl ThreadManagerState {
+@@ -2783,6 +2821,7 @@ impl ThreadManagerState {
          request.parent_thread_id = parent_thread_id;
          request.forked_from_thread_id = forked_from_thread_id;
          request.inherited_environments = inherited_environments;

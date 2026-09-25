@@ -3139,7 +3139,7 @@ index ecdd4ac73c247e9e92c0ddfed7c082e75dc03837..d7ec9986794dc9be6bd6e4b03573b91d
 
      session
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 6d830016b668cf96802849d9cd032c8ba95311ad..1ad5fdabedfced8ae17c65213785100f9de2517b 100644
+index ef1cec213a274b4ef13cef23e553fa76ff510275..960197ff34a3f4151a08077f10832abb120e7f24 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -290,6 +290,11 @@ struct ForkHistory {

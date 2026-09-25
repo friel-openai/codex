@@ -11461,7 +11461,7 @@ index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb8
          }
          world_state.add_section(EnvironmentsInstructionsState::new(
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 8c9599606d56d73f9bdf162890cbec6166536870..53b4516bd6cfa444dabefc325b4c22dce2c1aea6 100644
+index 12929ab5ab36df29331d2d9bad9e32c268e2a54c..678b29f6c895fa12b3feaf9c19c4af31fbf9cfec 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -2,6 +2,8 @@ mod managed;
@@ -11719,7 +11719,7 @@ index 8c9599606d56d73f9bdf162890cbec6166536870..53b4516bd6cfa444dabefc325b4c22dc
      pub(crate) async fn indexed_thread_metadata(
          &self,
          thread_id: ThreadId,
-@@ -2944,15 +3080,6 @@ impl ThreadManagerState {
+@@ -2947,15 +3083,6 @@ impl ThreadManagerState {
                  threads.remove(&resumed.conversation_id);
              }
          }

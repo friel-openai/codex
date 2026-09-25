@@ -7920,7 +7920,7 @@ index c4c7747bb2666745107edddd3acc6b0b0c04bd45..5cc760967455cffe161cc8aaee2a1423
          mcp_resource_origins: None,
          window_number: Some(window_number),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 1ad5fdabedfced8ae17c65213785100f9de2517b..a5eae3c243d9898e141e7c1f0129b470a7a46cd5 100644
+index 960197ff34a3f4151a08077f10832abb120e7f24..c877ce9ec216f5b5af7d64e3fc8c41b4d52fbff9 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -635,12 +635,9 @@ pub fn thread_store_from_config(

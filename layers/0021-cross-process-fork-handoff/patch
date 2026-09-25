@@ -1668,7 +1668,7 @@ index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index a5eae3c243d9898e141e7c1f0129b470a7a46cd5..c11a61f8e7aadb11abec37b266d39448248b3fee 100644
+index c877ce9ec216f5b5af7d64e3fc8c41b4d52fbff9..17927e3f772d0581751a1e8d20ba249e430f0254 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1818,7 +1818,9 @@ impl ThreadManager {

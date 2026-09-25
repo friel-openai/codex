@@ -10588,7 +10588,7 @@ index 6cb5b50a94f3fdd6173e61627238803187508345..894479065ec5c666db799f1b09fca667
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 53b4516bd6cfa444dabefc325b4c22dce2c1aea6..cf170634e98621f6ed7655037614642d302dfef1 100644
+index 678b29f6c895fa12b3feaf9c19c4af31fbf9cfec..0e45c1672ad5f87c0a4815e66abbeb3e2c7fc50b 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1151,6 +1151,7 @@ impl ThreadManager {

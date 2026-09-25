@@ -1172,7 +1172,7 @@ index e0a58603336de080d91299e3998858c91ebc7591..5828bad38aa2bc1114cb370ebfdd7119
  }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 9a25ac59595d0ea097771f1bd08daf92ede68be5..e98df4588f2409e3f6ccb142031260bf3d98ab10 100644
+index 3df877f6fddcd25a408ff6935a5c78e61fe4bba8..01276b413702458b0e4c292b6b1f3afe4a13399f 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -203,6 +203,7 @@ pub(crate) type ThreadIdGenerator = Arc<dyn Fn() -> ThreadId + Send + Sync>;
