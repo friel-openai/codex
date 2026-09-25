@@ -18,6 +18,8 @@ use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::InitializeResponse;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadForkImportParams;
+use codex_app_server_protocol::ThreadForkParams;
 use codex_app_server_protocol::ThreadStartParams;
 use codex_app_server_protocol::ThreadStartResponse;
 use codex_app_server_protocol::TurnStartParams;
@@ -33,6 +35,7 @@ use codex_feedback::CodexFeedback;
 use codex_login::AuthManager;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
+use codex_utils_path_uri::LegacyAppPathString;
 use opentelemetry::global;
 use opentelemetry::trace::SpanId;
 use opentelemetry::trace::SpanKind;
@@ -430,6 +433,75 @@ fn assert_has_internal_descendant_at_min_depth(
         ancestor.name,
         format_spans(spans)
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[serial(app_server_tracing)]
+async fn fork_handoff_requests_are_rejected_after_drain_starts() -> Result<()> {
+    let mut harness = TracingHarness::new().await?;
+    harness.processor.turn_admission.begin_drain();
+    for request in [
+        ClientRequest::ThreadForkPrepare {
+            request_id: RequestId::Integer(2),
+            params: ThreadForkParams {
+                thread_id: codex_protocol::ThreadId::new().to_string(),
+                exclude_turns: true,
+                ..Default::default()
+            },
+        },
+        ClientRequest::ThreadForkImport {
+            request_id: RequestId::Integer(3),
+            params: ThreadForkImportParams {
+                socket_path: LegacyAppPathString::from_path(
+                    &harness._codex_home.path().join("fork-pending.sock"),
+                ),
+            },
+        },
+    ] {
+        let request_id = request.id().clone();
+        harness
+            .processor
+            .process_request(
+                TEST_CONNECTION_ID,
+                request_from_client_request(request),
+                &AppServerTransport::Stdio,
+                Arc::clone(&harness.session),
+            )
+            .await;
+        let error = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let envelope = harness.outgoing_rx.recv().await.expect("outgoing channel");
+                let crate::outgoing_message::OutgoingEnvelope::ToConnection {
+                    connection_id,
+                    message,
+                    ..
+                } = envelope
+                else {
+                    continue;
+                };
+                if connection_id != TEST_CONNECTION_ID {
+                    continue;
+                }
+                match message {
+                    crate::outgoing_message::OutgoingMessage::Error(error)
+                        if error.id == request_id =>
+                    {
+                        break error;
+                    }
+                    crate::outgoing_message::OutgoingMessage::Response(response)
+                        if response.id == request_id =>
+                    {
+                        panic!("handoff admitted after drain: {response:?}");
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await?;
+        assert_eq!(error.error, crate::error_code::server_draining_error());
+    }
+    harness.shutdown().await;
+    Ok(())
 }
 
 async fn read_response<T: serde::de::DeserializeOwned>(
