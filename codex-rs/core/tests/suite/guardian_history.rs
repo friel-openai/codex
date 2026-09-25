@@ -88,6 +88,10 @@ async fn guardian_history_survives_restart_and_user_fork(
     initial.submit_text_turn(authorization).await?;
     initial.codex.submit(Op::Compact).await?;
     wait_for_event(&initial.codex, |event| {
+        assert!(
+            !matches!(event, EventMsg::Error(_)),
+            "compaction must succeed before testing retained history: {event:?}"
+        );
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
