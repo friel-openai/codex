@@ -1674,17 +1674,7 @@ async fn freeze_paginated_prefix_reserved_inner(
     )
     .await?;
     let history_mode = source_session_meta.meta.history_mode;
-    if prefix_rollout_path != codex_rollout::plain_rollout_path(prefix_rollout_path) {
-        return Err(ThreadStoreError::Internal {
-            message: format!(
-                "prepared fork prefix {} was not materialized before freezing",
-                prefix_rollout_path.display()
-            ),
-        });
-    }
-    let prefix_bytes = fs::read(prefix_rollout_path)
-        .await
-        .map_err(thread_store_io_error)?;
+    let prefix_bytes = super::rollout_lineage::read_rollout_bytes(prefix_rollout_path).await?;
     let end_byte_offset =
         usize::try_from(end_byte_offset).map_err(|_| ThreadStoreError::Internal {
             message: format!("fork byte offset for {prefix_thread_id} exceeds addressable memory"),
