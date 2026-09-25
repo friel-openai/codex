@@ -5467,6 +5467,13 @@ class ThreadLoadedListParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
     )
+    ancestor_thread_id: Annotated[
+        str | None,
+        Field(
+            alias="ancestorThreadId",
+            description="Optional ancestor thread filter for spawned descendants.",
+        ),
+    ] = None
     cursor: Annotated[
         str | None, Field(description="Opaque pagination cursor returned by a previous call.")
     ] = None
@@ -8338,6 +8345,20 @@ class HooksListResponse(BaseModel):
     data: list[HooksListEntry]
 
 
+class InterAgentCommunication(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    author: AgentPath
+    content: str
+    encrypted_content: str | None = None
+    id: str | None = None
+    internal_chat_message_metadata_passthrough: InternalChatMessageMetadataPassthrough | None = None
+    other_recipients: list[AgentPath] | None = []
+    recipient: AgentPath
+    trigger_turn: bool
+
+
 class ListMcpServerStatusParams(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9635,6 +9656,17 @@ class AgentMessageThreadItem(BaseModel):
     type: Annotated[Literal["agentMessage"], Field(title="AgentMessageThreadItemType")]
 
 
+class InterAgentCommunicationThreadItem(BaseModel):
+    model_config = ConfigDict(
+        populate_by_name=True,
+    )
+    communication: InterAgentCommunication
+    id: str
+    type: Annotated[
+        Literal["interAgentCommunication"], Field(title="InterAgentCommunicationThreadItemType")
+    ]
+
+
 class CommandExecutionThreadItem(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,
@@ -9727,6 +9759,20 @@ class CollabAgentToolCallThreadItem(BaseModel):
             description="Reasoning effort requested for the spawned agent, when applicable.",
         ),
     ] = None
+    receiver_agent_nickname: Annotated[
+        str | None,
+        Field(
+            alias="receiverAgentNickname",
+            description="Nickname for the single receiver agent when the source event reports one.",
+        ),
+    ] = None
+    receiver_agent_role: Annotated[
+        str | None,
+        Field(
+            alias="receiverAgentRole",
+            description="Role for the single receiver agent when the source event reports one.",
+        ),
+    ] = None
     receiver_thread_ids: Annotated[
         list[str],
         Field(
@@ -9772,7 +9818,7 @@ class ThreadListParams(BaseModel):
     archived: Annotated[
         bool | None,
         Field(
-            description="Optional archived filter; when set to true, only archived threads are returned. If false or null, only non-archived threads are returned."
+            description="Optional archived filter. `true` returns archived threads and `false` returns active threads. When omitted from a current-agent relation request, both archive states are returned; ordinary thread lists treat omission as `false`."
         ),
     ] = None
     cursor: Annotated[
@@ -11147,6 +11193,7 @@ class ThreadItem(
         | HookPromptThreadItem
         | AgentMessageThreadItem
         | FunctionCallOutputThreadItem
+        | InterAgentCommunicationThreadItem
         | PlanThreadItem
         | ReasoningThreadItem
         | CommandExecutionThreadItem
@@ -11172,6 +11219,7 @@ class ThreadItem(
         | HookPromptThreadItem
         | AgentMessageThreadItem
         | FunctionCallOutputThreadItem
+        | InterAgentCommunicationThreadItem
         | PlanThreadItem
         | ReasoningThreadItem
         | CommandExecutionThreadItem
@@ -11807,7 +11855,7 @@ class Thread(BaseModel):
         str | None,
         Field(
             alias="parentThreadId",
-            description="The ID of the parent thread. This will only be set if this thread is a subagent.",
+            description="The ID of the parent thread. Relation-scoped `thread/list` responses use the canonical immediate owner from current-agent membership.",
         ),
     ] = None
     path: Annotated[str | None, Field(description="[UNSTABLE] Path to the thread on disk.")] = None
