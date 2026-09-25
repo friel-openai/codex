@@ -871,7 +871,7 @@ index 7b014daa21f2f899420150fefd3235114644c563..56b2cef383331e1829ad6493bd5ebb6a
      }
 
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 516ce8f14117cd1c3e13b97cacb3f748e11303e0..3b477b60c67a911ce8c6ed846fa6bfd8cd6334f6 100644
+index bed7b46c3261b5d8986b9d2993a7be2a1429d2ea..782470c3a8b7197540ac2f8e967de97fcb07792b 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -13,6 +13,7 @@ use super::thread_input::ensure_direct_input_allowed;
@@ -1267,7 +1267,7 @@ index 516ce8f14117cd1c3e13b97cacb3f748e11303e0..3b477b60c67a911ce8c6ed846fa6bfd8
              thread.ephemeral = fallback_thread.ephemeral;
              thread.can_accept_direct_input = fallback_thread.can_accept_direct_input;
              thread
-@@ -4607,7 +4780,7 @@ impl ThreadRequestProcessor {
+@@ -4608,7 +4781,7 @@ impl ThreadRequestProcessor {
                  Err(error) => Err(error),
              }
          };
@@ -1276,7 +1276,7 @@ index 516ce8f14117cd1c3e13b97cacb3f748e11303e0..3b477b60c67a911ce8c6ed846fa6bfd8
          if let InitialHistory::Resumed(resumed) = &thread_history
              && self
                  .pending_thread_unloads
-@@ -4620,6 +4793,33 @@ impl ThreadRequestProcessor {
+@@ -4621,6 +4794,33 @@ impl ThreadRequestProcessor {
                  resumed.conversation_id
              )));
          }
@@ -1310,7 +1310,7 @@ index 516ce8f14117cd1c3e13b97cacb3f748e11303e0..3b477b60c67a911ce8c6ed846fa6bfd8
          let paginated_thread_id = resume_source_thread.as_ref().and_then(|thread| {
              matches!(thread.history_mode, ThreadHistoryMode::Paginated).then_some(thread.thread_id)
          });
-@@ -7701,6 +7901,7 @@ pub(crate) fn thread_from_stored_thread(
+@@ -7737,6 +7937,7 @@ pub(crate) fn thread_from_stored_thread(
          updated_at: thread.updated_at.timestamp(),
          recency_at: Some(thread.recency_at.timestamp()),
          status: ThreadStatus::NotLoaded,
@@ -1318,7 +1318,7 @@ index 516ce8f14117cd1c3e13b97cacb3f748e11303e0..3b477b60c67a911ce8c6ed846fa6bfd8
          path,
          cwd,
          cli_version: thread.cli_version,
-@@ -7883,6 +8084,7 @@ fn build_thread_from_snapshot(
+@@ -7919,6 +8120,7 @@ fn build_thread_from_snapshot(
          updated_at: now,
          recency_at: Some(now),
          status: ThreadStatus::NotLoaded,
@@ -9682,10 +9682,10 @@ index 0000000000000000000000000000000000000000..2d43c9dc8331e94f6b1f536cff366c2c
 +    );
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81d06bdedb 100644
+index 11858233c39551996e9d1dd952918abf1bdabdfc..8a3fc802f6f8166dd6df9e77f34d2169ae2175c2 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
-@@ -1225,7 +1225,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
+@@ -1226,7 +1226,7 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
  }
 
  #[tokio::test]
@@ -9694,7 +9694,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      let harness = AgentControlHarness::new().await;
      let (parent_thread_id, _) = harness.start_thread().await;
      let state_db = harness
-@@ -1306,8 +1306,20 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1307,8 +1307,20 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
 
      harness
          .control
@@ -9717,7 +9717,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
 
      let indexed_metadata = harness
          .control
-@@ -1322,6 +1334,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
+@@ -1323,6 +1335,11 @@ async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout
          Some("indexed-name")
      );
 
@@ -9729,7 +9729,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      let anonymous_metadata = harness
          .control
          .runtime
-@@ -1365,6 +1382,144 @@ async fn get_status_returns_not_found_without_manager() {
+@@ -1366,6 +1383,144 @@ async fn get_status_returns_not_found_without_manager() {
      assert_eq!(got, AgentStatus::NotFound);
  }
 
@@ -9874,7 +9874,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
  #[tokio::test]
  async fn on_event_updates_status_from_task_started() {
      let status = agent_status_from_event(&EventMsg::TurnStarted(TurnStartedEvent {
-@@ -1511,6 +1666,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
+@@ -1512,6 +1667,42 @@ async fn get_status_returns_not_found_for_missing_thread() {
      assert_eq!(status, AgentStatus::NotFound);
  }
 
@@ -9917,7 +9917,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
  #[tokio::test]
  async fn get_status_returns_pending_init_for_new_thread() {
      let harness = AgentControlHarness::new().await;
-@@ -1809,6 +2000,19 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1810,6 +2001,19 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          },
          Ok(_) => panic!("expected thread to be removed"),
      }
@@ -9937,7 +9937,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
 
      let mut sender_config = harness.config.clone();
      sender_config.model_provider_id = "ollama".to_string();
-@@ -1868,6 +2072,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1869,6 +2073,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
              assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
          }
      }
@@ -9945,7 +9945,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      let reloaded_child = harness
          .manager
          .get_thread(spawned_agent.thread_id)
-@@ -2344,6 +2549,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2360,6 +2565,7 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
          .await
          .expect("v2 root resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -9953,7 +9953,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      assert_ne!(
          resumed_control.get_status(parent_thread_id).await,
          AgentStatus::NotFound
-@@ -2351,11 +2557,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -2367,11 +2573,11 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, worker_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, reviewer_thread_id).await;
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
@@ -9969,7 +9969,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      }
 
      resumed_control
-@@ -2527,6 +2733,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
+@@ -2543,6 +2749,13 @@ async fn cold_resume_with_thread_instructions_preserves_lazy_v2_child_inheritanc
 
      if nested {
          let turn = resumed_parent.thread.session.new_default_turn().await;
@@ -9983,7 +9983,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
          resumed_parent
              .thread
              .session
-@@ -7453,18 +7666,17 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
+@@ -7469,18 +7682,17 @@ async fn goal_supervisor_spawn_reconciles_stale_persisted_state_inner() {
      }
      harness
          .control
@@ -10012,7 +10012,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
          assert_eq!(
              harness.control.get_status(stale_helper_thread_id).await,
              AgentStatus::NotFound,
-@@ -8912,6 +9124,12 @@ while True:
+@@ -8928,6 +9140,12 @@ while True:
          child_body["prompt_cache_key"].as_str(),
          Some(expected_prompt_cache_key.as_str())
      );
@@ -10025,7 +10025,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      assert_eq!(
          child_body["instructions"], parent_body["instructions"],
          "goal supervisor helpers must preserve the parent's exact top-level instructions"
-@@ -9028,194 +9246,6 @@ while True:
+@@ -9044,194 +9262,6 @@ while True:
      Ok(())
  }
 
@@ -10220,7 +10220,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
  #[tokio::test]
  async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_source_is_stale() {
      let harness = AgentControlHarness::new_with_multi_agent_v1().await;
-@@ -9299,8 +9329,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9315,8 +9345,15 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(report.submit_failed, Vec::<ThreadId>::new());
      assert_eq!(report.timed_out, Vec::<ThreadId>::new());
 
@@ -10238,7 +10238,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
          .resume_agent_from_rollout(
              harness.config.clone(),
              parent_thread_id,
-@@ -9309,21 +9346,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9325,21 +9362,78 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
          .await
          .expect("tree resume should succeed");
      assert_eq!(resumed_parent_thread_id, parent_thread_id);
@@ -10324,7 +10324,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
          .get_thread(grandchild_thread_id)
          .await
          .expect("resumed grandchild thread should exist")
-@@ -9340,8 +9434,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
+@@ -9356,8 +9450,7 @@ async fn resume_agent_from_rollout_uses_edge_data_when_descendant_metadata_sourc
      assert_eq!(resumed_parent_thread_id, child_thread_id);
      assert_eq!(resumed_depth, 2);
 
@@ -10334,7 +10334,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
          .shutdown_agent_tree(parent_thread_id)
          .await
          .expect("tree shutdown after subtree resume should succeed");
-@@ -9496,13 +9589,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9512,13 +9605,65 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          matches!(status, AgentStatus::Completed(_))
      })
      .await;
@@ -10403,7 +10403,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      let child_thread = harness.manager.get_thread(child.thread_id).await.unwrap();
      persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&original.thread, "original persisted").await;
-@@ -9598,6 +9743,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9614,6 +9759,31 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
          Some("parent updated thread instructions".to_string()),
      );
      assert_thread_not_loaded(&harness.manager, child.thread_id).await;
@@ -10435,7 +10435,7 @@ index ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a..39803ecb3deaef84d27c2da4231c1b81
      drop(child_thread);
      destination_control
          .ensure_agent_loaded(harness.config.clone(), child.thread_id)
-@@ -9632,3 +9802,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
+@@ -9648,3 +9818,8 @@ async fn ownership_transfer_cold_reload_preserves_applied_instructions() {
                      && start_options.root_turn_id.as_deref() == Some("adoption-root-turn"))
      }));
  }
@@ -11461,7 +11461,7 @@ index b7eb1b2ff74b33bb0dcd22d529d3b1d5450c2877..4015c6babb40652709f02b23bc96dfb8
          }
          world_state.add_section(EnvironmentsInstructionsState::new(
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 5aed16208020f7a4458124210a6480e6bf332710..bc1d47de83104bf4cf343edef10b763ffe16909f 100644
+index 8c9599606d56d73f9bdf162890cbec6166536870..53b4516bd6cfa444dabefc325b4c22dce2c1aea6 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -2,6 +2,8 @@ mod managed;
@@ -11719,7 +11719,7 @@ index 5aed16208020f7a4458124210a6480e6bf332710..bc1d47de83104bf4cf343edef10b763f
      pub(crate) async fn indexed_thread_metadata(
          &self,
          thread_id: ThreadId,
-@@ -2897,15 +3033,6 @@ impl ThreadManagerState {
+@@ -2944,15 +3080,6 @@ impl ThreadManagerState {
                  threads.remove(&resumed.conversation_id);
              }
          }
@@ -12851,7 +12851,7 @@ index 02989712e925e75acb03832d9085d979af4404a0..49a9d5f54720a799248bfcf558b301da
 +    .map_err(|err| collab_agent_error(receiver_thread_id, err))
 +}
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
-index 09efb1481297c47aa6950b06e79f78480c1b5098..df14b9c57a3646f4b4d7ac3dd0915e5dccc6c7e5 100644
+index 09efb1481297c47aa6950b06e79f78480c1b5098..fac3e7b263c13a667b684092244f1ddfb46894e8 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents/wait.rs
 @@ -100,6 +100,7 @@ impl Handler {
@@ -12899,7 +12899,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..df14b9c57a3646f4b4d7ac3dd0915e5d
 +                .await;
 +                let updates = match subscription {
 +                    Ok((status, updates)) => {
-+                        if is_final(&status) {
++                        if is_final(&status) || updates.is_none() {
 +                            return Ok(Some((*id, status)));
 +                        }
 +                        updates
@@ -13018,12 +13018,13 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..df14b9c57a3646f4b4d7ac3dd0915e5d
 
          let timed_out = statuses.is_empty();
          let statuses_by_id = statuses.clone().into_iter().collect::<HashMap<_, _>>();
-@@ -238,6 +232,44 @@ impl Handler {
+@@ -238,6 +232,55 @@ impl Handler {
      }
  }
 
 +/// Resolves retained terminal status without inventing a stream for an unloaded agent.
-+/// A non-final fallback means subscription raced a resume and must be retried.
++/// A retained interruption completes a wait only when no runtime supplies a stream.
++/// Other non-final fallbacks mean subscription raced a resume and must be retried.
 +pub(super) async fn subscribe_status_for_wait<Subscribe, SubscribeFuture, GetStatus, StatusFuture>(
 +    mut subscribe: Subscribe,
 +    mut get_status: GetStatus,
@@ -13034,6 +13035,7 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..df14b9c57a3646f4b4d7ac3dd0915e5d
 +    GetStatus: FnMut() -> StatusFuture,
 +    StatusFuture: std::future::Future<Output = AgentStatus>,
 +{
++    let mut retained_interruption = false;
 +    loop {
 +        let subscription = async {
 +            let mut updates = subscribe().await?;
@@ -13049,9 +13051,18 @@ index 09efb1481297c47aa6950b06e79f78480c1b5098..df14b9c57a3646f4b4d7ac3dd0915e5d
 +        match subscription {
 +            Ok((status, updates)) => return Ok((status, Some(updates))),
 +            Err(err) if matches!(err.details(), CodexErrorDetails::ThreadNotFound(_)) => {
++                if retained_interruption {
++                    return Ok((AgentStatus::Interrupted, None));
++                }
 +                let status = get_status().await;
 +                if is_final(&status) {
 +                    return Ok((status, None));
++                }
++                if matches!(status, AgentStatus::Interrupted) {
++                    // A resume may have supplied this status after the failed subscription.
++                    // Confirm the runtime is still absent before treating it as retained.
++                    retained_interruption = true;
++                    continue;
 +                }
 +                tokio::task::yield_now().await;
 +            }
@@ -13192,7 +13203,7 @@ index 4e05e9edc8ca60aa43f4bc44b60158c458e6cf0b..43d597b89a4720509e3da724fa1906c1
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..476242b9aacae1e7bc990e5ae093971e6805e79c 100644
+index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..4ac71e9f928aead2a0e0b9aef8d3676a2402e5cb 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -230,12 +230,17 @@ where
@@ -13352,7 +13363,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..476242b9aacae1e7bc990e5ae093971e
  }
 
  #[tokio::test]
-@@ -3715,6 +3733,256 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
+@@ -3715,6 +3733,363 @@ async fn wait_agent_returns_not_found_for_missing_agents() {
      assert_eq!(success, None);
  }
 
@@ -13422,6 +13433,113 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..476242b9aacae1e7bc990e5ae093971e
 +        assert_eq!(success, None);
 +        assert!(manager.get_thread(agent_id).await.is_err());
 +    }
++}
++
++#[tokio::test]
++async fn wait_agent_returns_retained_interruption_without_another_terminal_target() {
++    use futures::FutureExt;
++
++    let (mut session, turn) = make_session_and_context().await;
++    let manager = thread_manager(&turn);
++    set_agent_control(&mut session, manager.agent_control());
++    let agent_id = ThreadId::new();
++    session
++        .services
++        .agent_control
++        .register_session_root(agent_id, /*current_parent_thread_id*/ None);
++    session
++        .services
++        .agent_control
++        .registered_agent_lifecycle(agent_id)
++        .expect("registered agent lifecycle")
++        .remember_cold_terminal_status(AgentStatus::Interrupted, /*visible_when_cold*/ true);
++
++    let subscription = wait::subscribe_status_for_wait(
++        || session.services.agent_control.subscribe_status(agent_id),
++        || session.services.agent_control.get_status(agent_id),
++    )
++    .now_or_never()
++    .expect("retained interruption must not retry until the wait deadline")
++    .expect("retained status should resolve without loading the agent");
++    assert_eq!(subscription.0, AgentStatus::Interrupted);
++    assert!(subscription.1.is_none());
++    assert!(manager.get_thread(agent_id).await.is_err());
++}
++
++#[tokio::test]
++async fn wait_agent_keeps_subscription_for_live_interrupted_status() {
++    use crate::agent::api::AgentInfo;
++    use futures::StreamExt;
++    use std::sync::atomic::AtomicUsize;
++    use std::sync::atomic::Ordering;
++
++    let (mut session, turn) = make_session_and_context().await;
++    let manager = thread_manager(&turn);
++    set_agent_control(&mut session, manager.agent_control());
++    let thread = manager
++        .start_thread(StartThreadOptions::new(turn.config.as_ref().clone()))
++        .await
++        .expect("start thread");
++    let mut real_updates = session
++        .services
++        .agent_control
++        .subscribe_status(thread.thread_id)
++        .await
++        .expect("loaded agent has a status stream");
++    let initial = real_updates.next().await.unwrap().unwrap();
++    let snapshots = [
++        AgentStatus::Interrupted,
++        AgentStatus::Running,
++        AgentStatus::Completed(Some("resumed turn completed".to_string())),
++    ]
++    .map(|status| {
++        let mut snapshot = initial.clone();
++        let AgentInfo::Loaded { agent, .. } = &mut snapshot else {
++            panic!("started agent must have a loaded snapshot");
++        };
++        agent.status = status;
++        snapshot
++    });
++    for missing_before_resume in [false, true] {
++        let subscriptions = AtomicUsize::new(0);
++        let (status, updates) = wait::subscribe_status_for_wait(
++            || async {
++                if subscriptions.fetch_add(1, Ordering::SeqCst) == 0 && missing_before_resume {
++                    return Err(codex_protocol::error::CodexErr::ThreadNotFound(
++                        thread.thread_id,
++                    ));
++                }
++                Ok(futures::stream::iter(snapshots.clone().map(Ok)).boxed())
++            },
++            || async {
++                assert!(
++                    missing_before_resume,
++                    "live subscription bypasses the fallback"
++                );
++                AgentStatus::Interrupted
++            },
++        )
++        .await
++        .expect("live interruption should retain its status stream");
++        assert_eq!(
++            subscriptions.load(Ordering::SeqCst),
++            if missing_before_resume { 2 } else { 1 }
++        );
++        assert_eq!(status, AgentStatus::Interrupted);
++        assert!(!crate::agent::status::is_final(&status));
++        let mut updates = updates.expect("live Interrupted can resume and must remain subscribed");
++        assert_eq!(
++            updates.next().await.unwrap().unwrap().status(),
++            Some(&AgentStatus::Running)
++        );
++        assert_eq!(
++            updates.next().await.unwrap().unwrap().status(),
++            Some(&AgentStatus::Completed(Some(
++                "resumed turn completed".to_string()
++            )))
++        );
++    }
++    thread.thread.submit(Op::Shutdown {}).await.unwrap();
 +}
 +
 +#[tokio::test]
@@ -13609,7 +13727,7 @@ index 5be0bece3f3c56cea54a4e0dc14df72a207b57a9..476242b9aacae1e7bc990e5ae093971e
  #[tokio::test]
  async fn wait_agent_times_out_when_status_is_not_final() {
      let (mut session, turn) = make_session_and_context().await;
-@@ -4420,8 +4688,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -4420,8 +4795,7 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
      let (content, _) = expect_text_output(output);
      let result: ListAgentsResult =
          serde_json::from_str(&content).expect("list_agents result should be json");
@@ -13691,6 +13809,267 @@ index 1335152963e04b97a5621424991a92f5cf356b9a..738eb8e2ca192e8078e00124251f3080
  }
 
  impl ToolOutput for ListAgentsResult {
+diff --git a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs b/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
+index 6e7abcc142d2b6765a2ee13f1ed8d695b7109ba4..880eeccacea4122b3bb8ec63d41f25ccf70b977a 100644
+--- a/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
++++ b/codex-rs/core/tests/suite/multi_agent_restore_tests.rs
+@@ -1,4 +1,4 @@
+-//! Exercises read overlap and ordered identity registration when a V2 root resumes cold.
++//! Exercises lazy child restoration and graph identities when a V2 root resumes cold.
+
+ use super::ROLE_MODEL;
+ use super::ROLE_NAME;
+@@ -11,7 +11,6 @@ use anyhow::Context;
+ use anyhow::Result;
+ use codex_features::Feature;
+ use codex_protocol::ThreadId;
+-use codex_protocol::error::CodexErrorDetails;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ThreadHistoryMode;
+ use codex_thread_store::AppendThreadItemsParams;
+@@ -49,8 +48,11 @@ use tokio::sync::mpsc;
+ use tokio::sync::oneshot;
+ use tokio::time::timeout;
+
++/// Hides the local metadata index without changing the durable ownership graph.
+ struct GatedChildMetadataStore {
+     inner: Arc<dyn ThreadStore>,
++    /// Per-child metadata reads; the second read is registration's missing-index fallback.
++    metadata_reads: Mutex<HashMap<ThreadId, usize>>,
+     gates: Mutex<HashMap<ThreadId, oneshot::Receiver<()>>>,
+     failed_child: ThreadId,
+     started: mpsc::UnboundedSender<ThreadId>,
+@@ -102,14 +104,24 @@ impl ThreadStore for GatedChildMetadataStore {
+     fn read_thread(&self, params: ReadThreadParams) -> ThreadStoreFuture<'_, StoredThread> {
+         Box::pin(async move {
+             let thread_id = params.thread_id;
++            let registration_fallback = if params.include_history {
++                false
++            } else {
++                let mut reads = self.metadata_reads.lock().expect("child metadata reads");
++                reads.get_mut(&thread_id).is_some_and(|count| {
++                    *count += 1;
++                    *count == 2
++                })
++            };
++            if !registration_fallback {
++                return self.inner.read_thread(params).await;
++            }
+             let gate = self
+                 .gates
+                 .lock()
+                 .expect("child read gates")
+-                .remove(&thread_id);
+-            let Some(gate) = gate else {
+-                return self.inner.read_thread(params).await;
+-            };
++                .remove(&thread_id)
++                .expect("selected child fallback gate");
+             assert!(!params.include_history, "restoration only reads metadata");
+             self.started.send(thread_id).expect("read started receiver");
+             gate.await.expect("release child read");
+@@ -120,7 +132,7 @@ impl ThreadStore for GatedChildMetadataStore {
+                 })
+             } else {
+                 self.inner.read_thread(params).await.map(|mut thread| {
+-                    // Only one child can register this path, exposing which result is applied first.
++                    // The ownership graph, not this stale metadata, must supply the identity.
+                     thread.agent_path = Some("/root/restored".to_owned());
+                     thread
+                 })
+@@ -134,8 +146,7 @@ impl ThreadStore for GatedChildMetadataStore {
+ }
+
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+-async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_order() -> Result<()>
+-{
++async fn cold_root_resume_defers_child_reads_and_preserves_graph_identities() -> Result<()> {
+     let server = start_mock_server().await;
+     let initial_url = format!("{}/v1", server.uri());
+     let initial = test_codex()
+@@ -190,8 +201,16 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
+     let mut ordered_children = vec![first, failed, last];
+     ordered_children.sort_by_key(ToString::to_string);
+     assert_eq!(ordered_children, vec![first, failed, last]);
+-    for child_id in [first, failed, last] {
++    let mut expected_sources = HashMap::new();
++    for (child_id, name) in [(first, "alpha"), (failed, "beta"), (last, "gamma")] {
+         let child = initial.thread_manager.get_thread(child_id).await?;
++        let source = child.config_snapshot().await.session_source;
++        assert_eq!(source.parent_thread_id(), Some(root));
++        assert_eq!(
++            source.get_agent_path().map(|path| path.to_string()),
++            Some(format!("/root/{name}"))
++        );
++        expected_sources.insert(child_id, source);
+         wait_for_event(child.as_ref(), |event| {
+             matches!(event, EventMsg::TurnComplete(_))
+         })
+@@ -208,6 +227,7 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
+     let (last_release, last_gate) = oneshot::channel();
+     let store = Arc::new(GatedChildMetadataStore {
+         inner: Arc::clone(&initial.thread_store),
++        metadata_reads: Mutex::new(HashMap::from([(first, 0), (failed, 0), (last, 0)])),
+         gates: Mutex::new(HashMap::from([
+             (first, first_gate),
+             (failed, failed_gate),
+@@ -218,52 +238,114 @@ async fn cold_root_resume_overlaps_child_reads_and_applies_identities_in_graph_o
+         completed: completed_tx,
+     });
+     let resume_url = format!("{}/v1", server.uri());
+-    let mut resume_builder = test_codex()
+-        .with_thread_store(store)
+-        .with_config(move |config| {
+-            configure_multi_agent_v2_with_role(config, &resume_url);
+-            config
+-                .features
+-                .enable(Feature::Sqlite)
+-                .expect("enable SQLite");
+-            config.multi_agent_v2.max_concurrent_threads_per_session = 4;
+-        });
+-
+-    let (resumed, ()) = tokio::try_join!(resume_builder.restart(&server, &initial), async {
+-        timeout(Duration::from_secs(10), async {
+-            // Releasing nothing until all reads start makes a serial implementation fail.
+-            let mut reads = Vec::new();
+-            for _ in 0..3 {
+-                reads.push(started.recv().await.context("child read started")?);
+-            }
+-            reads.sort_by_key(ToString::to_string);
+-            assert_eq!(reads, ordered_children);
+-
+-            last_release.send(()).expect("release last child");
+-            assert_eq!(completed.recv().await, Some(last));
+-            failed_release.send(()).expect("release failed child");
+-            assert_eq!(completed.recv().await, Some(failed));
+-            first_release.send(()).expect("release first child");
+-            assert_eq!(completed.recv().await, Some(first));
+-            Ok::<(), anyhow::Error>(())
+-        })
+-        .await
+-        .context("child metadata reads should overlap")?
+-    })?;
++    let mut resume_builder =
++        test_codex()
++            .with_thread_store(store.clone())
++            .with_config(move |config| {
++                configure_multi_agent_v2_with_role(config, &resume_url);
++                config
++                    .features
++                    .enable(Feature::Sqlite)
++                    .expect("enable SQLite");
++                config.multi_agent_v2.max_concurrent_threads_per_session = 4;
++            });
+
++    // All child gates remain closed: root resume must not read any child's metadata.
++    let resumed = timeout(
++        Duration::from_secs(10),
++        resume_builder.restart(&server, &initial),
++    )
++    .await
++    .context("root resume must not wait for child metadata")??;
+     assert_eq!(resumed.thread_manager.list_thread_ids().await, vec![root]);
+-    for child_id in [last, failed] {
+-        assert!(matches!(
+-            resumed.thread_manager.ensure_multi_agent_v2_child_loaded(child_id).await,
+-            Err(error) if matches!(error.details(), CodexErrorDetails::ThreadNotFound(id) if *id == child_id)
+-        ));
++    assert_eq!(
++        *store.metadata_reads.lock().expect("child metadata reads"),
++        HashMap::from([(first, 0), (failed, 0), (last, 0)])
++    );
++    assert!(matches!(
++        started.try_recv(),
++        Err(mpsc::error::TryRecvError::Empty)
++    ));
++
++    let mut selected_children = Vec::new();
++    // Reverse graph order makes registration order independent of the durable identities.
++    for (child_id, release, should_fail) in [
++        (last, last_release, false),
++        (failed, failed_release, true),
++        (first, first_release, false),
++    ] {
++        selected_children.push(child_id);
++        let (result, ()) = tokio::try_join!(
++            async {
++                Ok::<_, anyhow::Error>(
++                    timeout(
++                        Duration::from_secs(10),
++                        resumed
++                            .thread_manager
++                            .ensure_multi_agent_v2_child_loaded(child_id),
++                    )
++                    .await
++                    .context("selected child reload must finish after releasing metadata")?,
++                )
++            },
++            async {
++                timeout(Duration::from_secs(10), async {
++                    assert_eq!(started.recv().await, Some(child_id));
++                    assert_eq!(
++                        store.metadata_reads.lock().expect("child metadata reads")[&child_id],
++                        2,
++                        "ownership lookup must be followed by one selected-child fallback"
++                    );
++                    assert!(matches!(
++                        started.try_recv(),
++                        Err(mpsc::error::TryRecvError::Empty)
++                    ));
++                    release.send(()).expect("release selected child fallback");
++                    assert_eq!(completed.recv().await, Some(child_id));
++                    Ok::<(), anyhow::Error>(())
++                })
++                .await
++                .context("selected child must reach the missing-index fallback")?
++            }
++        )?;
++        if should_fail {
++            let error = result.expect_err("injected child metadata failure");
++            assert!(
++                error
++                    .to_string()
++                    .contains("injected child metadata failure")
++            );
++            assert!(resumed.thread_manager.get_thread(child_id).await.is_err());
++        } else {
++            result?;
++            let child = resumed.thread_manager.get_thread(child_id).await?;
++            assert_eq!(
++                child.config_snapshot().await.session_source,
++                expected_sources[&child_id]
++            );
++        }
++        let mut read_children: Vec<_> = store
++            .metadata_reads
++            .lock()
++            .expect("child metadata reads")
++            .iter()
++            .filter_map(|(id, count)| (*count > 0).then_some(*id))
++            .collect();
++        read_children.sort_by_key(ToString::to_string);
++        let mut expected_read_children = selected_children.clone();
++        expected_read_children.sort_by_key(ToString::to_string);
++        assert_eq!(read_children, expected_read_children);
+     }
+-    resumed
+-        .thread_manager
+-        .ensure_multi_agent_v2_child_loaded(first)
+-        .await?;
++
++    assert_eq!(
++        resumed
++            .thread_manager
++            .list_agent_subtree_thread_ids(root)
++            .await?,
++        subtree
++    );
+     assert!(resumed.thread_manager.get_thread(first).await.is_ok());
+-    assert!(resumed.thread_manager.get_thread(last).await.is_err());
++    assert!(resumed.thread_manager.get_thread(last).await.is_ok());
+     assert!(resumed.thread_manager.get_thread(failed).await.is_err());
+     Ok(())
+ }
 diff --git a/codex-rs/state/src/lib.rs b/codex-rs/state/src/lib.rs
 index f60e8f4cad5f94dfdf2adbc33d53bb767a1f9262..c45732fe2e801f347cb62cdccbce805a6cc04076 100644
 --- a/codex-rs/state/src/lib.rs
@@ -14846,7 +15225,7 @@ index 3e8a5eff37bdc4f3f9e01b5ab471a34f6c6faa6f..da69eeee1c464dae5fac85a9d2ea5d1b
 
      #[cfg(unix)]
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 4e4bb6c7769a7e65017054096f171a0e48e34488..927993746328aeb77b74f7b973524b58a0977a11 100644
+index a5deafc3ca11b88b2d890f215a332e2b82671bc3..acead56f3d4cadbe54e3de8534e4144344dbb9b7 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -70,6 +70,7 @@ use crate::CreateThreadSectionParams;
@@ -14865,7 +15244,7 @@ index 4e4bb6c7769a7e65017054096f171a0e48e34488..927993746328aeb77b74f7b973524b58
  use crate::RemoveThreadAttachmentOutcome;
  use crate::RemoveThreadAttachmentParams;
  use crate::RenameThreadSectionParams;
-@@ -913,6 +915,10 @@ impl ThreadStore for LocalThreadStore {
+@@ -923,6 +925,10 @@ impl ThreadStore for LocalThreadStore {
          Box::pin(async move { read_thread::read_thread(self, params).await })
      }
 
@@ -14876,7 +15255,7 @@ index 4e4bb6c7769a7e65017054096f171a0e48e34488..927993746328aeb77b74f7b973524b58
      fn read_thread_by_rollout_path(
          &self,
          params: ReadThreadByRolloutPathParams,
-@@ -1136,6 +1142,13 @@ impl ThreadStore for LocalThreadStore {
+@@ -1146,6 +1152,13 @@ impl ThreadStore for LocalThreadStore {
      fn delete_threads(&self, params: DeleteThreadsParams) -> ThreadStoreFuture<'_, ()> {
          Box::pin(async move { delete_thread::delete_threads(self, params).await })
      }

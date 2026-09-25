@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 9ec7a5bcacbad44339bdcb7dfe5349613b80f14a..577d2f426c548a341945cf4e2276f6c37208082e 100644
+index c50b9ff096cebe334028d5effc69714d2324cbd1..82a2d5ada3091b30b50da8b0a44797adf9caebcc 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -4860,13 +4860,21 @@ impl ThreadRequestProcessor {
+@@ -4865,13 +4865,21 @@ impl ThreadRequestProcessor {
          limit: Option<u32>,
          sort_direction: SortDirection,
      ) -> std::io::Result<LegacyHistoryWindow> {
@@ -27,7 +27,7 @@ index 9ec7a5bcacbad44339bdcb7dfe5349613b80f14a..577d2f426c548a341945cf4e2276f6c3
                  has_older_reference: false,
              });
          }
-@@ -4913,7 +4921,10 @@ impl ThreadRequestProcessor {
+@@ -4918,7 +4926,10 @@ impl ThreadRequestProcessor {
          let mut partial_before_error = None;
          let mut last_successful_reference_limit: Option<usize> = None;
          loop {
@@ -39,7 +39,7 @@ index 9ec7a5bcacbad44339bdcb7dfe5349613b80f14a..577d2f426c548a341945cf4e2276f6c3
                  Ok(materialized) => materialized,
                  Err(error) => {
                      if cursor.is_some()
-@@ -4925,7 +4936,10 @@ impl ThreadRequestProcessor {
+@@ -4930,7 +4941,10 @@ impl ThreadRequestProcessor {
                          let mut recovered = None;
                          while lower <= upper {
                              let reference_limit = lower + (upper - lower) / 2;
@@ -52,7 +52,7 @@ index 9ec7a5bcacbad44339bdcb7dfe5349613b80f14a..577d2f426c548a341945cf4e2276f6c3
                                      let items = materialized
                                          .lines
 diff --git a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
-index be55c1cdf784435aea4da78a19a9f70d5e97c5a9..28987d72c9846787b08ba843af48586fe0702777 100644
+index 40a70474eb89338b85a5d98e8b06e8b2bcd2b791..06233378d085dac09953a65aed02248ec8cd6055 100644
 --- a/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 +++ b/codex-rs/app-server/tests/suite/v2/rollout_migration.rs
 @@ -67,6 +67,9 @@ use tokio::time::timeout;
@@ -395,7 +395,7 @@ index 0000000000000000000000000000000000000000..1140693b9a925c58ca4f303a59ddf4f3
 +    Ok(())
 +}
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 9ba3e1c42a47c724c8b3122798b5aadfc88b28d3..b10964106d5609ebf63c392a0921807331c49c33 100644
+index 4cd96d47ddf3dda277399096f777bde543cf5d75..f17c69b9b74c2bfead15f7ba2504b9fdafa35d47 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -84,6 +84,7 @@ use codex_protocol::protocol::EventMsg;
@@ -440,7 +440,7 @@ index 9ba3e1c42a47c724c8b3122798b5aadfc88b28d3..b10964106d5609ebf63c392a09218073
  use pretty_assertions::assert_eq;
  use serial_test::serial;
  use std::ffi::OsStr;
-@@ -8965,6 +8972,409 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
+@@ -9019,6 +9026,410 @@ fn paginated_goal_supervisor_helper_preserves_parent_request_prefix() -> anyhow:
      )
  }
 
@@ -606,6 +606,7 @@ index 9ba3e1c42a47c724c8b3122798b5aadfc88b28d3..b10964106d5609ebf63c392a09218073
 +                message: String::new(),
 +                replacement_history: Some(history.annotated_items().to_vec()),
 +                retained_context: Some(history.retained_context().clone()),
++                retained_context_replay: None,
 +                guardian_history: history.guardian_history_checkpoint(),
 +                resume_metadata: None,
 +                mcp_resource_origins: None,
@@ -852,10 +853,10 @@ index 9ba3e1c42a47c724c8b3122798b5aadfc88b28d3..b10964106d5609ebf63c392a09218073
  ) -> anyhow::Result<()> {
 diff --git a/codex-rs/rollout/src/legacy_jsonl.rs b/codex-rs/rollout/src/legacy_jsonl.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..1c674d5b3ebb8c6067e41258445ee6e3f01c4f7b
+index 0000000000000000000000000000000000000000..153d83230741db3961d236c14a3af7edadf07d96
 --- /dev/null
 +++ b/codex-rs/rollout/src/legacy_jsonl.rs
-@@ -0,0 +1,141 @@
+@@ -0,0 +1,180 @@
 +use serde_json::Value;
 +
 +const ROLLOUT_ENVELOPE_START: &[u8] = br#"{"timestamp""#;
@@ -893,6 +894,45 @@ index 0000000000000000000000000000000000000000..1c674d5b3ebb8c6067e41258445ee6e3
 +        search_from = start.saturating_add(ROLLOUT_ENVELOPE_START.len());
 +    }
 +    None
++}
++
++/// Finds the complete ordinary-record boundary before an incomplete final JSON value.
++/// This only selects bytes for a finite external fork; the canonical loader still decides which
++/// records are admissible, including recovery after a damaged Legacy prefix.
++pub(crate) fn complete_legacy_jsonl_prefix_len(bytes: &[u8]) -> usize {
++    let mut start = 0;
++    let mut incomplete_start = None;
++    loop {
++        let mut stream = serde_json::Deserializer::from_slice(&bytes[start..]).into_iter::<Value>();
++        let mut complete_end = start;
++        loop {
++            match stream.next() {
++                None => return bytes.len(),
++                Some(Ok(value)) if is_ordinary_rollout_envelope(&value) => {
++                    complete_end = start + stream.byte_offset();
++                }
++                Some(Err(error)) if error.is_eof() => {
++                    if complete_end > start {
++                        return complete_end;
++                    }
++                    if start == 0 {
++                        incomplete_start = Some(0);
++                    }
++                    break;
++                }
++                _ => break,
++            }
++        }
++        let search_from = start.saturating_add(1);
++        let Some(relative) = bytes.get(search_from..).and_then(|suffix| {
++            suffix
++                .windows(ROLLOUT_ENVELOPE_START.len())
++                .position(|window| window == ROLLOUT_ENVELOPE_START)
++        }) else {
++            return incomplete_start.unwrap_or(bytes.len());
++        };
++        start = search_from + relative;
++    }
 +}
 +
 +fn parse_complete_ordinary_suffix(bytes: &[u8]) -> Option<Vec<Value>> {
@@ -998,7 +1038,7 @@ index 0000000000000000000000000000000000000000..1c674d5b3ebb8c6067e41258445ee6e3
 +    }
 +}
 diff --git a/codex-rs/rollout/src/lib.rs b/codex-rs/rollout/src/lib.rs
-index 3ee7b70fe3d711e79b8e612cccc4bf383e0c913a..d4757e4f88c14c04edc5c13b9de7c1c1e4ff1c0c 100644
+index 2183999ff3c8559e0f0146c0a243e8e24e20ec52..3aef85543fcf13aa6a0d496bbc8bef08ec88eb92 100644
 --- a/codex-rs/rollout/src/lib.rs
 +++ b/codex-rs/rollout/src/lib.rs
 @@ -8,6 +8,7 @@ use serde_json::Value;
@@ -1017,7 +1057,7 @@ index 3ee7b70fe3d711e79b8e612cccc4bf383e0c913a..d4757e4f88c14c04edc5c13b9de7c1c1
  pub(crate) mod recorder;
  mod reference;
  mod reverse_jsonl_scanner;
-@@ -123,6 +125,8 @@ pub async fn materialize_rollout_for_reference(
+@@ -138,6 +140,8 @@ pub async fn materialize_rollout_for_reference(
  pub use config::Config;
  pub use config::RolloutConfig;
  pub use config::RolloutConfigView;
@@ -1333,10 +1373,10 @@ index 019048116ed11295412abcb4b7e1278959009cf3..2351a3db95ee22a235207ab6753264bf
  async fn load_rollout_items_ignores_unknown_fork_source_history_mode() -> std::io::Result<()> {
      let home = TempDir::new().expect("temp dir");
 diff --git a/codex-rs/rollout/src/reference.rs b/codex-rs/rollout/src/reference.rs
-index a9004cfb51ac9d57f3ffdcaecb003f06a7a9beb7..d4737454878fbac081ca4e87ea7bda969048126a 100644
+index e30b5459c7dc4403a438160340e8890de1503088..70eb7e16ec1be306833a470983f302eca1feb6d3 100644
 --- a/codex-rs/rollout/src/reference.rs
 +++ b/codex-rs/rollout/src/reference.rs
-@@ -181,6 +181,18 @@ impl<'a> BoundedRolloutMaterializer<'a> {
+@@ -186,6 +186,18 @@ impl<'a> BoundedRolloutMaterializer<'a> {
          ordinary_reference_limit: usize,
      ) -> io::Result<BoundedRolloutLines> {
          let lines = load_active_rollout_lines(self.rollout_path).await?;
@@ -1356,10 +1396,10 @@ index a9004cfb51ac9d57f3ffdcaecb003f06a7a9beb7..d4737454878fbac081ca4e87ea7bda96
          let lines = materialize_rollout_lines_from_with_cache(
              self.codex_home,
 diff --git a/codex-rs/rollout/src/reference_tests.rs b/codex-rs/rollout/src/reference_tests.rs
-index 2f2aef055ca78e2133ab254f846f429333924760..dc9fd321d41b2eca88bf9d47176bbdc96fd9fb99 100644
+index 7d29eee713316af44a25dba4e757f365f962d3dc..523ca9f0674d0f54a28c8c0e1bf26081ef8ca80d 100644
 --- a/codex-rs/rollout/src/reference_tests.rs
 +++ b/codex-rs/rollout/src/reference_tests.rs
-@@ -1438,7 +1438,12 @@ async fn bounded_materializer_rejects_modified_cached_immutable_segment() -> io:
+@@ -1440,7 +1440,12 @@ async fn bounded_materializer_rejects_modified_cached_immutable_segment() -> io:
      fs::write(referenced_path, format!("{referenced_meta}\n{{malformed\n"))?;
 
      let error = materializer
@@ -1373,7 +1413,7 @@ index 2f2aef055ca78e2133ab254f846f429333924760..dc9fd321d41b2eca88bf9d47176bbdc9
          .await
          .err()
          .expect("modified immutable rollout must not use cached records");
-@@ -1991,6 +1996,22 @@ async fn materialization_rejects_torn_ordinary_records_in_paginated_root() -> io
+@@ -1993,6 +1998,22 @@ async fn materialization_rejects_torn_ordinary_records_in_paginated_root() -> io
      .err()
      .expect("paginated bounded rollout reads must remain strict");
      assert!(bounded_error.to_string().contains("invalid record"));
@@ -1425,7 +1465,7 @@ index fd3d76ed2918108356b272777fa3545cd877d487..c7b12247da9e48e273c4a813b5832357
          Err(error) => Err(thread_store_io_error(error)),
      }
 diff --git a/codex-rs/thread-store/src/local/model_context_tests.rs b/codex-rs/thread-store/src/local/model_context_tests.rs
-index b582e09ee72407312641fbe3e18185695c205685..ff4c5613ea7038d6925c156628a708a69524daf9 100644
+index 785c3f9ced50a79c070979ce25aef8e1f2da3bd8..2c3a8da15468ee798f6098542131b9d018b2b0b7 100644
 --- a/codex-rs/thread-store/src/local/model_context_tests.rs
 +++ b/codex-rs/thread-store/src/local/model_context_tests.rs
 @@ -54,6 +54,46 @@ use crate::local::test_support::test_config;
@@ -2164,10 +2204,10 @@ index 0000000000000000000000000000000000000000..2a547f6d71d1bdb20eee2152884952ad
 +    );
 +}
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index ffe15244a73c58d78b640b9e5a943ace2e17a08c..48a48595782127fca7bf34d4c868c15eb832fbb8 100644
+index 19b1c8b92831d669903c584bc1773a6ab6f2757e..cf2bc92ace3e7d26aadcd69e4daccdb9c896118e 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
-@@ -247,7 +247,7 @@ struct RolloutMigrationRateLimiter {
+@@ -250,7 +250,7 @@ struct RolloutMigrationRateLimiter {
  }
 
  struct RolloutRecord {
@@ -2176,8 +2216,8 @@ index ffe15244a73c58d78b640b9e5a943ace2e17a08c..48a48595782127fca7bf34d4c868c15e
      byte_count: u64,
  }
 
-@@ -1322,7 +1322,7 @@ impl LocalThreadStore {
-         let mut planner = RollbackPlanner::new();
+@@ -1362,7 +1362,7 @@ impl LocalThreadStore {
+         planner.set_source(session_source);
          while let Some(record) = read_rollout_record(&mut source, &mut bytes).await? {
              limiter.account(record.byte_count).await;
 -            if let Some(line) = record.line {
@@ -2185,7 +2225,7 @@ index ffe15244a73c58d78b640b9e5a943ace2e17a08c..48a48595782127fca7bf34d4c868c15e
                  planner.observe(&line)?;
              }
          }
-@@ -1430,33 +1430,34 @@ impl LocalThreadStore {
+@@ -1472,33 +1472,34 @@ impl LocalThreadStore {
 
          while let Some(record) = read_rollout_record(&mut source, &mut bytes).await? {
              limiter.account(record.byte_count).await;
@@ -2246,7 +2286,7 @@ index ffe15244a73c58d78b640b9e5a943ace2e17a08c..48a48595782127fca7bf34d4c868c15e
          }
          if let Some(plan) = plan
              && parsed_record_index != plan.record_count()
-@@ -1882,15 +1883,13 @@ async fn read_rollout_record(
+@@ -1951,15 +1952,13 @@ async fn read_rollout_record(
                  .ok_or_else(|| migration_error("rollout record byte count overflow"))?;
          }
          return Ok(Some(RolloutRecord {
@@ -2351,10 +2391,10 @@ index 79138c056e445bfc444f614a4b97754ac8118a48..2371f1bfb5df2630adabe173406bcd4b
  fn parses_legacy_numeric_event_payloads_through_value() {
      let bytes = line(
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
-index 27cf83553f4c3ba38777eb67d5b4f805f67da923..f89bfd41c20a3485be4c795584cf6cb97c317bac 100644
+index efd1559d03fbae98c366bf0c4f4bc77155aff8d3..c33c55f1351f5c2e6e885414a53a8b21a44910d6 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/lineage.rs
-@@ -1161,8 +1161,8 @@ async fn inspect_source(
+@@ -1282,8 +1282,8 @@ async fn inspect_source(
              Some(context) => Ok(context.rollout_line()),
              None => line_parser::parse_paginated_rollout_line(raw.as_bytes()),
          };
@@ -2365,7 +2405,7 @@ index 27cf83553f4c3ba38777eb67d5b4f805f67da923..f89bfd41c20a3485be4c795584cf6cb9
              Err(error) => {
                  canonical_paginated_suffix = false;
                  let value = serde_json::from_str::<serde_json::Value>(raw.as_str()).ok();
-@@ -1183,60 +1183,88 @@ async fn inspect_source(
+@@ -1304,60 +1304,96 @@ async fn inspect_source(
                          path.display()
                      )));
                  }
@@ -2435,6 +2475,17 @@ index 27cf83553f4c3ba38777eb67d5b4f805f67da923..f89bfd41c20a3485be4c795584cf6cb9
 -            RolloutItem::RolloutReference(reference)
 -                if saw_session_meta && !saw_local_record && leading_reference.is_none() =>
 +        for line in decoded_lines {
++            if let RolloutItem::Compacted(compacted) = &line.item
++                && let Some(position) = compacted
++                    .retained_context_replay
++                    .as_ref()
++                    .and_then(|replay| replay.review_input)
+             {
+-                reference_ordinal = line.ordinal;
+-                leading_reference = Some(reference);
++                review_input_dependencies.push(position);
+             }
+-            RolloutItem::RolloutReference(_) => {
 +            // Native replay preserves payloads instead of canonicalizing legacy presentation
 +            // events. Reject such inputs before staging: a later projection failure must not
 +            // follow selection.
@@ -2448,11 +2499,7 @@ index 27cf83553f4c3ba38777eb67d5b4f805f67da923..f89bfd41c20a3485be4c795584cf6cb9
 +                    &line.item,
 +                    ThreadHistoryMode::Paginated,
 +                )
-             {
--                reference_ordinal = line.ordinal;
--                leading_reference = Some(reference);
--            }
--            RolloutItem::RolloutReference(_) => {
++            {
                  return Err(migration_error(format!(
 -                    "rollout migration source {} contains a non-leading reference",
 +                    "Paginated source {} contains legacy-only presentation events; retain its supported reader",
@@ -2502,10 +2549,10 @@ index 27cf83553f4c3ba38777eb67d5b4f805f67da923..f89bfd41c20a3485be4c795584cf6cb9
      }
      if history_base.is_some() && leading_reference.is_some() {
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/lineage_stage.rs b/codex-rs/thread-store/src/local/rollout_migration/lineage_stage.rs
-index f7beae261876ce32fca0ec3ea0099df219ad5c0b..9aa74ca22c73399487cfacc4e87668410afb7920 100644
+index c5b3a9f9378b1188ac28714ec6c83fd20c61b286..1537e94201e0d310e503882d6e9875a206f69fdb 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/lineage_stage.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/lineage_stage.rs
-@@ -493,28 +493,30 @@ where
+@@ -600,28 +600,30 @@ where
              }
              continue;
          }
@@ -2555,7 +2602,7 @@ index f7beae261876ce32fca0ec3ea0099df219ad5c0b..9aa74ca22c73399487cfacc4e8766841
      }
      let carries_turn_state = plan
          .sources
-@@ -1001,10 +1003,12 @@ pub(super) async fn build_rollback_plan(
+@@ -1107,10 +1109,12 @@ pub(super) async fn build_rollback_plan(
                  planner.observe(&context.rollout_line())?;
                  continue;
              }
@@ -2571,10 +2618,10 @@ index f7beae261876ce32fca0ec3ea0099df219ad5c0b..9aa74ca22c73399487cfacc4e8766841
      }
      Ok(Some(planner.finish()))
 diff --git a/codex-rs/thread-store/src/local/rollout_migration/single_manifest.rs b/codex-rs/thread-store/src/local/rollout_migration/single_manifest.rs
-index 0b4cde91ebc164fce62f886f1173cf8d6d993a4e..acd132e3735e97ddd11bcd0c313f40ecc95c469f 100644
+index 39fa80b9c248284053b0e0545f476ae4b9ca39ff..c7f92746052026099dfa3311bbc5850ef76e9c4b 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration/single_manifest.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration/single_manifest.rs
-@@ -220,19 +220,21 @@ where
+@@ -221,19 +221,21 @@ where
          if raw.len() > MAX_ROLLOUT_LINE_BYTES {
              continue;
          }
@@ -2607,7 +2654,7 @@ index 0b4cde91ebc164fce62f886f1173cf8d6d993a4e..acd132e3735e97ddd11bcd0c313f40ec
      }
      if parsed_record_index != rollback_plan.record_count() {
          return Err(migration_error(
-@@ -252,10 +254,12 @@ async fn build_rollback_plan(path: &Path) -> ThreadStoreResult<RollbackPlan> {
+@@ -257,10 +259,12 @@ async fn build_rollback_plan(
          if raw.len() > MAX_ROLLOUT_LINE_BYTES {
              continue;
          }
@@ -2623,10 +2670,10 @@ index 0b4cde91ebc164fce62f886f1173cf8d6d993a4e..acd132e3735e97ddd11bcd0c313f40ec
      Ok(planner.finish())
  }
 diff --git a/codex-rs/thread-store/src/local/rollout_migration_tests.rs b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-index 4fed61f4e24a9886b8c9c317b58932f4168b30c2..184520c3c4bfbca1622cf5e8ffc7a503480b08b1 100644
+index 543d07faad79f86bd5fc137d893213ab6705e4f7..09752ac278f709deddc8c623e5eae73e9893d647 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration_tests.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration_tests.rs
-@@ -4864,6 +4864,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
+@@ -4893,6 +4893,152 @@ async fn segmented_migration_preserves_initial_legacy_item_ids_in_paginated_hist
      assert_context_dependent_migration_projection(&store, &fixture).await;
  }
 
@@ -2779,7 +2826,7 @@ index 4fed61f4e24a9886b8c9c317b58932f4168b30c2..184520c3c4bfbca1622cf5e8ffc7a503
  #[tokio::test]
  async fn segmented_migration_preserves_low_suffix_legacy_item_ids() {
      let fixture = context_dependent_legacy_fixture_with_counts(
-@@ -10090,7 +10236,7 @@ async fn migration_reports_invalid_session_metadata() {
+@@ -10320,7 +10466,7 @@ async fn migration_reports_invalid_session_metadata() {
  }
 
  #[tokio::test]
@@ -2788,7 +2835,7 @@ index 4fed61f4e24a9886b8c9c317b58932f4168b30c2..184520c3c4bfbca1622cf5e8ffc7a503
      let home = TempDir::new().expect("create Codex home");
      let thread_id = ThreadId::new();
      let path = write_rollout(
-@@ -10109,6 +10255,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
+@@ -10339,6 +10485,7 @@ async fn migration_skips_malformed_lines_and_trailing_partial_tail() {
          ordinal: None,
          item: agent_message("kept answer"),
      };
@@ -2797,10 +2844,10 @@ index 4fed61f4e24a9886b8c9c317b58932f4168b30c2..184520c3c4bfbca1622cf5e8ffc7a503
          file,
          "{}",
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49680e4786 100644
+index b249cec21895e04ae33dae96312eb3944f0d4e55..f07fa749f852f3669334a5f46201c611853f2679 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -843,8 +843,13 @@ async fn freeze_thread_segment_reserved_with_publication(
+@@ -912,8 +912,13 @@ async fn freeze_thread_segment_reserved_with_publication(
              message: format!("thread {thread_id} does not have a readable rollout"),
          })?;
      let stable_path = codex_rollout::plain_rollout_path(recorded_path.as_path());
@@ -2815,7 +2862,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
      let history_mode = source_meta.meta.history_mode;
      if let Some((_recorder, _rollout_id, live_history_mode)) = live_entry.as_ref()
          && *live_history_mode != history_mode
-@@ -1662,8 +1667,12 @@ async fn freeze_paginated_prefix_reserved_inner(
+@@ -1731,8 +1736,12 @@ async fn freeze_paginated_prefix_reserved_inner(
  ) -> ThreadStoreResult<FrozenRolloutSegment> {
      debug_assert!(reservation.contains(source_thread_id));
      debug_assert!(reservation.contains(prefix_thread_id));
@@ -2830,7 +2877,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
      let history_mode = source_session_meta.meta.history_mode;
      if prefix_rollout_path != codex_rollout::plain_rollout_path(prefix_rollout_path) {
          return Err(ThreadStoreError::Internal {
-@@ -1693,21 +1702,19 @@ async fn freeze_paginated_prefix_reserved_inner(
+@@ -1762,21 +1771,19 @@ async fn freeze_paginated_prefix_reserved_inner(
              ),
          });
      }
@@ -2865,7 +2912,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
      match prefix_lines.first().map(|line| &line.item) {
          Some(RolloutItem::SessionMeta(meta)) if meta.meta.id == prefix_thread_id => {}
          Some(RolloutItem::SessionMeta(_)) => {
-@@ -2083,9 +2090,17 @@ fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenc
+@@ -2152,9 +2159,17 @@ fn rollout_references_equal(left: &RolloutReferenceItem, right: &RolloutReferenc
              == right.compacted_replacement_history_filter_texts
  }
 
@@ -2883,7 +2930,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
  ) -> ThreadStoreResult<(
      SessionMetaLine,
      Option<u64>,
-@@ -2115,16 +2130,31 @@ async fn validate_source_rollout(
+@@ -2184,16 +2199,31 @@ async fn validate_source_rollout(
              });
          }
      };
@@ -2924,7 +2971,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
      let existing_reference = match lines.as_slice() {
          [
              RolloutLine {
-@@ -2147,6 +2177,27 @@ async fn validate_source_rollout(
+@@ -2216,6 +2246,27 @@ async fn validate_source_rollout(
      ))
  }
 
@@ -2953,7 +3000,7 @@ index 47549f6abb93f9c0ec604a015122370dfed6e8c4..05bb018fb1cba77cc33b168ac6f6eb49
  ///
  /// Older checkpoint publication reopened a recorder at the final checkpoint ordinal, so the
 diff --git a/codex-rs/thread-store/src/local/segment_tests.rs b/codex-rs/thread-store/src/local/segment_tests.rs
-index be03f071d20cccdd8bc2713c22b3995a6c8f984a..e0622519c60a16eb141dc3428d41f56b7427ffa6 100644
+index 204582356492a8fb280c3f11d4ed1a318c9dd39a..0b9e2711f1948dfae21cc1f355a72453a8a67337 100644
 --- a/codex-rs/thread-store/src/local/segment_tests.rs
 +++ b/codex-rs/thread-store/src/local/segment_tests.rs
 @@ -3827,6 +3827,78 @@ async fn paginated_freeze_continues_ordinals_and_resets_only_projection_offset()

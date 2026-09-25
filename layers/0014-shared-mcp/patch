@@ -10566,10 +10566,10 @@ index 2bbee2d5edb3730cf1e2efbb3fdd71791f394bf6..a16f889142eac4e801ebe58bf45d2339
              codex_apps_tools_cache: self.services.mcp_manager.codex_apps_tools_cache(),
              tool_catalog_cache: self.services.mcp_manager.tool_catalog_cache(),
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 1bca6787dcc7680a920fb556e7c26c246c65a045..54f97fdcdb6e85397e06a62eddbd6a9a4fc33d04 100644
+index 6cb5b50a94f3fdd6173e61627238803187508345..894479065ec5c666db799f1b09fca66710f389da 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -10196,6 +10196,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
+@@ -10197,6 +10197,17 @@ async fn refresh_mcp_servers_uses_latest_state_for_existing_turns() {
      );
  }
 
@@ -10588,7 +10588,7 @@ index 1bca6787dcc7680a920fb556e7c26c246c65a045..54f97fdcdb6e85397e06a62eddbd6a9a
  async fn refreshed_mcp_binding_captures_current_approval_authority() {
      let (session, old_turn) = make_session_and_context().await;
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index bc1d47de83104bf4cf343edef10b763ffe16909f..c4a24ab1eb1253076a7a8ccf98928c559cd3636a 100644
+index 53b4516bd6cfa444dabefc325b4c22dce2c1aea6..cf170634e98621f6ed7655037614642d302dfef1 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1151,6 +1151,7 @@ impl ThreadManager {

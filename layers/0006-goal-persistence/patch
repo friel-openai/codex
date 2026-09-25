@@ -456,10 +456,10 @@ index 532d80ed5e4c7e320ed775138b2c573fd04d5046..983fca07d00c4fb5ddcc2641a071358a
      CompactedUserMessage {
          id: None,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d6285a35467 100644
+index c0dfb56c87111433452a43f4aba55e914b414bb3..60a7dd997d5613736f72c30ab4bf86d4919935a5 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -304,7 +304,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
+@@ -305,7 +305,11 @@ pub(crate) use thread_settings::applied_event as thread_settings_applied_event;
  mod rollout_reconstruction_tests;
 
  const ROOT_AGENT_PROMPT_FALLBACK: &str = include_str!("../../root_agent_prompt.md");
@@ -471,7 +471,7 @@ index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d62
 
  async fn load_agent_prompt_fallback(
      codex_home: &Path,
-@@ -325,10 +329,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
+@@ -326,10 +330,28 @@ pub(crate) async fn load_root_agent_prompt(codex_home: &Path) -> String {
      load_agent_prompt_fallback(codex_home, ROOT_AGENT_PROMPT_FALLBACK, "AGENTS.root.md").await
  }
 
@@ -500,7 +500,7 @@ index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d62
  fn history_contains_developer_text(
      history: &crate::context_manager::ContextManager,
      expected: &str,
-@@ -355,6 +377,11 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -356,6 +378,11 @@ pub(crate) async fn load_agent_role_prompt(
      }
 
      let role_prompt = match session_source {
@@ -512,7 +512,7 @@ index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d62
          SessionSource::SubAgent(_) => load_subagent_prompt(&config.codex_home).await,
          SessionSource::Cli
          | SessionSource::VSCode
-@@ -362,7 +389,19 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -363,7 +390,19 @@ pub(crate) async fn load_agent_role_prompt(
          | SessionSource::Mcp
          | SessionSource::Custom(_)
          | SessionSource::Internal(_)
@@ -533,7 +533,7 @@ index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d62
      };
 
      if role_prompt.trim().is_empty() {
-@@ -2530,6 +2569,11 @@ impl Session {
+@@ -2554,6 +2593,11 @@ impl Session {
          }
      }
 
@@ -546,10 +546,10 @@ index 83333223fb871f0ed674ec4f041af17e36b34257..4be4759bb5c73be4ca4a5744ac752d62
          let state = self.state.lock().await;
          state.session_configuration.provider.info().clone()
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 7f9ab5ddabfc5abba4d1ae742e4ee1024aae0b63..678a1cbd583cb0d4e1f624c9927504efc25e69f6 100644
+index aeb2a62ed3e4628cf82488166959f5645748df90..7848c639f52a739e324a891d7d44dc92130ea0aa 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -14005,6 +14005,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -14006,6 +14006,94 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
      assert!(prompt.contains("Prefer direct execution over coordination"));
  }
 
@@ -644,7 +644,7 @@ index 7f9ab5ddabfc5abba4d1ae742e4ee1024aae0b63..678a1cbd583cb0d4e1f624c9927504ef
  #[tokio::test]
  async fn subagent_prompt_is_for_regular_subagents_only() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
-@@ -14029,6 +14117,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -14030,6 +14118,18 @@ async fn agent_prompt_loader_prefers_home_overrides() {
      )
      .await
      .expect("write subagent override");
@@ -663,7 +663,7 @@ index 7f9ab5ddabfc5abba4d1ae742e4ee1024aae0b63..678a1cbd583cb0d4e1f624c9927504ef
 
      assert_eq!(
          load_root_agent_prompt(codex_home.path()).await,
-@@ -14038,6 +14138,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
+@@ -14039,6 +14139,14 @@ async fn agent_prompt_loader_prefers_home_overrides() {
          load_subagent_prompt(codex_home.path()).await,
          "custom subagent"
      );
@@ -5232,7 +5232,7 @@ index 3f8cae1f6b749f2f5dec67a88ddc6d87aeb764ef..458c7dd6732db4cb40d6b8739da67f8b
  pub use types::TurnPage;
  pub use types::UpdateThreadMetadataParams;
 diff --git a/codex-rs/thread-store/src/live_thread.rs b/codex-rs/thread-store/src/live_thread.rs
-index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b082674a0e 100644
+index 7a0a3cb00fef3f4c6ea5808a8950c61a4c51065e..eddd427983073e3b5508a8b8b60672ff1886b9cb 100644
 --- a/codex-rs/thread-store/src/live_thread.rs
 +++ b/codex-rs/thread-store/src/live_thread.rs
 @@ -4,7 +4,10 @@ use std::path::PathBuf;
@@ -5370,7 +5370,7 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
      async fn persist_appended_items(
          &self,
          raw_items: &[RolloutItem],
-@@ -370,7 +442,9 @@ impl LiveThread {
+@@ -376,7 +448,9 @@ impl LiveThread {
          *persistence_mode = ThreadPersistenceMode::Durable;
          drop(persistence_mode);
          let update = self.metadata_sync.lock().await.take_pending_update();
@@ -5381,7 +5381,7 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
      }
 
      #[expect(
-@@ -386,7 +460,9 @@ impl LiveThread {
+@@ -392,7 +466,9 @@ impl LiveThread {
          }
          drop(persistence_mode);
          self.flush_pending_metadata_update_for_existing_history()
@@ -5392,7 +5392,7 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
      }
 
      /// Returns whether this thread should remain memory-only until explicitly persisted.
-@@ -429,6 +505,7 @@ impl LiveThread {
+@@ -435,6 +511,7 @@ impl LiveThread {
          let frozen = freeze_result.map(Some)?;
          drop(persistence_mode);
          self.flush_pending_metadata_update().await?;
@@ -5400,7 +5400,7 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
          Ok(frozen)
      }
 
-@@ -561,6 +638,9 @@ impl LiveThread {
+@@ -567,6 +644,9 @@ impl LiveThread {
          } else {
              Ok(())
          };
@@ -5410,7 +5410,7 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
          let shutdown_result = self.thread_store.shutdown_thread(self.thread_id).await;
          match (metadata_result, shutdown_result) {
              (Err(metadata_error), Err(shutdown_error)) => Err(ThreadStoreError::Internal {
-@@ -738,3 +818,7 @@ impl LiveThread {
+@@ -744,3 +824,7 @@ impl LiveThread {
          Ok(())
      }
  }
@@ -5420,10 +5420,10 @@ index ce6e94a028409c37c6b721039908b19f2e0922d7..747ab4c34ef83b9d433f853e4aec98b0
 +mod tests;
 diff --git a/codex-rs/thread-store/src/live_thread_tests.rs b/codex-rs/thread-store/src/live_thread_tests.rs
 new file mode 100644
-index 0000000000000000000000000000000000000000..486926f1e1985c5f705ed74d612763f71be5f9a4
+index 0000000000000000000000000000000000000000..08c815cbf577a2b34aca16419db0e723d5430352
 --- /dev/null
 +++ b/codex-rs/thread-store/src/live_thread_tests.rs
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,195 @@
 +use super::*;
 +use crate::InMemoryThreadStore;
 +use crate::ThreadPersistenceMetadata;
@@ -5432,6 +5432,57 @@ index 0000000000000000000000000000000000000000..486926f1e1985c5f705ed74d612763f7
 +use codex_protocol::models::ResponseItem;
 +use codex_protocol::protocol::SessionSource;
 +use pretty_assertions::assert_eq;
++
++#[tokio::test]
++async fn preparation_keeps_deferred_metadata_unpublished_until_standard_persist() {
++    let store = Arc::new(InMemoryThreadStore::default());
++    let thread_id = ThreadId::new();
++    let mut params = create_thread_params(thread_id);
++    params.persistence_mode = ThreadPersistenceMode::Deferred;
++    let live_thread = LiveThread::create(store.clone(), params)
++        .await
++        .expect("create deferred thread");
++    let activity = RolloutItem::ResponseItem(
++        ResponseItem::Message {
++            id: None,
++            role: "user".to_string(),
++            content: vec![ContentItem::InputText {
++                text: "deferred activity".to_string(),
++            }],
++            phase: None,
++            internal_chat_message_metadata_passthrough: None,
++        }
++        .into(),
++    );
++    live_thread
++        .append_items(&[activity])
++        .await
++        .expect("buffer deferred activity");
++    assert_eq!(store.calls().await.update_thread_metadata, 0);
++
++    live_thread
++        .persist(PersistContext::ThreadPreparation)
++        .await
++        .expect("checkpoint deferred preparation");
++
++    assert!(live_thread.is_persistence_deferred().await);
++    let calls = store.calls().await;
++    assert_eq!(calls.flush_thread, 1);
++    assert_eq!(calls.persist_thread, 0);
++    assert_eq!(calls.update_thread_metadata, 0);
++    assert_eq!(calls.touch_root_thread_recency, 0);
++
++    live_thread
++        .persist(PersistContext::Standard)
++        .await
++        .expect("explicitly persist deferred thread");
++
++    assert!(!live_thread.is_persistence_deferred().await);
++    let calls = store.calls().await;
++    assert_eq!(calls.persist_thread, 1);
++    assert_eq!(calls.update_thread_metadata, 1);
++    assert_eq!(calls.touch_root_thread_recency, 1);
++}
 +
 +#[tokio::test]
 +async fn retains_debounced_and_failed_root_recency_touches() {
@@ -5569,7 +5620,7 @@ index 0000000000000000000000000000000000000000..486926f1e1985c5f705ed74d612763f7
 +    }
 +}
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index ac16796366b9f15c9ba872385234ed10524f09a6..4e4bb6c7769a7e65017054096f171a0e48e34488 100644
+index ed79f1b0d927a65642b9be538ccae5b2c361e49b..a5deafc3ca11b88b2d890f215a332e2b82671bc3 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -119,6 +119,7 @@ use crate::ThreadStoreError;
@@ -5580,7 +5631,7 @@ index ac16796366b9f15c9ba872385234ed10524f09a6..4e4bb6c7769a7e65017054096f171a0e
  use crate::TurnPage;
  use crate::UpdateProjectParams;
  use crate::UpdateThreadMetadataParams;
-@@ -1075,6 +1076,27 @@ impl ThreadStore for LocalThreadStore {
+@@ -1085,6 +1086,27 @@ impl ThreadStore for LocalThreadStore {
          })
      }
 
@@ -5608,7 +5659,7 @@ index ac16796366b9f15c9ba872385234ed10524f09a6..4e4bb6c7769a7e65017054096f171a0e
      fn move_thread_to_section(
          &self,
          params: MoveThreadToSectionParams,
-@@ -1348,6 +1370,114 @@ mod tests {
+@@ -1358,6 +1380,114 @@ mod tests {
          assert_eq!(metadata.title, "observed append");
      }
 
@@ -5723,7 +5774,7 @@ index ac16796366b9f15c9ba872385234ed10524f09a6..4e4bb6c7769a7e65017054096f171a0e
      #[tokio::test]
      async fn paginated_resume_rejects_explicit_rollout_path_over_stale_sqlite_path() {
          let home = TempDir::new().expect("temp dir");
-@@ -2825,6 +2955,21 @@ mod tests {
+@@ -2835,6 +2965,21 @@ mod tests {
          }))
      }
 

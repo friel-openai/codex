@@ -1187,7 +1187,7 @@ index 0000000000000000000000000000000000000000..47b3b03fdfae15efeb1a9141fb626a75
 +    }
 +}
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e358f9d3d73 100644
+index 322c143c904763df062238e3744a7eca70f47932..f69bc9c1acfa18ce8c71b4f476f569342d08ce2d 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -8,6 +8,7 @@ use super::persisted_resume_settings::PersistedResumeSettings;
@@ -1222,7 +1222,7 @@ index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e35
          ))
          .await
          .map(|()| None)
-@@ -6693,14 +6697,42 @@ impl ThreadRequestProcessor {
+@@ -6698,14 +6702,42 @@ impl ThreadRequestProcessor {
          }
      }
 
@@ -1266,7 +1266,7 @@ index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e35
          let ThreadForkParams {
              thread_id,
              last_turn_id,
-@@ -6738,15 +6770,20 @@ impl ThreadRequestProcessor {
+@@ -6743,15 +6775,20 @@ impl ThreadRequestProcessor {
                  "`permissions` cannot be combined with `sandbox`",
              ));
          }
@@ -1295,7 +1295,7 @@ index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e35
          if last_turn_id.is_some() && before_turn_id.is_some() {
              return Err(invalid_request(
                  "`beforeTurnId` cannot be combined with `lastTurnId`",
-@@ -6776,7 +6813,9 @@ impl ThreadRequestProcessor {
+@@ -6781,7 +6818,9 @@ impl ThreadRequestProcessor {
              .and_then(codex_core::util::normalize_thread_name);
          let mut source_approvals_reviewer = None;
          let mut source_token_usage_info = None;
@@ -1306,7 +1306,7 @@ index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e35
              let boundary = match (last_turn_id.as_deref(), before_turn_id.as_deref()) {
                  (Some(turn_id), None) => {
                      codex_thread_store::ForkBoundary::ThroughTurn(turn_id.to_string())
-@@ -6926,9 +6965,21 @@ impl ThreadRequestProcessor {
+@@ -6931,9 +6970,21 @@ impl ThreadRequestProcessor {
                  }
              }
              Some(prepared)
@@ -1328,7 +1328,7 @@ index 1b89ed665e757ec42e675733946a1ad7f7980737..9ea58123540e5ce4e9a4cee043fe5e35
          let projected_response_turns = prepared_fork
              .as_ref()
              .and_then(|prepared| prepared.projected_response_turns.clone());
-@@ -7042,7 +7093,9 @@ impl ThreadRequestProcessor {
+@@ -7047,7 +7098,9 @@ impl ThreadRequestProcessor {
          let needs_latest_settings =
              restore_approval_policy || restore_approvals_reviewer || restore_permission_profile;
          let loaded_parent = self.thread_manager.get_thread(source_thread_id).await.ok();
@@ -1668,7 +1668,7 @@ index 847d5e84bccedb004785b9b83a7d3d0292668c16..9d7099ef89003c5a828f39cf28e3f9a1
          /*frozen_segment*/ None,
          Arc::clone(&model_context),
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index bf3077916a6c4226b9d3065e491c87cb5dfeadda..bcc38e36be93196b541faecde7bc9a9ceee05bb2 100644
+index a5eae3c243d9898e141e7c1f0129b470a7a46cd5..c11a61f8e7aadb11abec37b266d39448248b3fee 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -1818,7 +1818,9 @@ impl ThreadManager {
@@ -1691,7 +1691,7 @@ index bf3077916a6c4226b9d3065e491c87cb5dfeadda..bcc38e36be93196b541faecde7bc9a9c
                      model_history_override: Some(model_history_override),
                      settings_history_override: Some(Arc::clone(&prepared.latest_model_context)),
                      shared_model_response_items,
-@@ -2362,7 +2364,7 @@ impl ThreadManagerState {
+@@ -2367,7 +2369,7 @@ impl ThreadManagerState {
                          "failed to prepare paginated FullHistory source {source_thread_id}: {err}"
                      ))
                  })?;
@@ -2353,7 +2353,7 @@ index 45d7f73ae32b383bd26a21691b60240d30aff3b7..e2cb99439954433069cb5a1178d1e6dd
      drop(access);
      competing
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index ec1242ef22db01b747158bac52b7d18705c7e231..00034e948af68a6dc672b3a3b561b82b65ba7f75 100644
+index a98a5e05c11a4c28c1441317abaf73d52b0e5031..497001298dd9f1d0f55fcb54556a86ae3e25211e 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,7 @@
@@ -2383,7 +2383,7 @@ index ec1242ef22db01b747158bac52b7d18705c7e231..00034e948af68a6dc672b3a3b561b82b
  struct LiveRecorderEntry {
      recorder: RolloutRecorder,
      /// Reopens the committed stable rollout before the next live operation.
-@@ -779,6 +792,68 @@ impl LocalThreadStore {
+@@ -813,6 +826,68 @@ impl LocalThreadStore {
          )
      }
 
@@ -2452,7 +2452,7 @@ index ec1242ef22db01b747158bac52b7d18705c7e231..00034e948af68a6dc672b3a3b561b82b
      pub(crate) async fn live_persistence_mode(
          &self,
          thread_id: ThreadId,
-@@ -806,17 +881,7 @@ impl LocalThreadStore {
+@@ -840,17 +915,7 @@ impl LocalThreadStore {
          self.writer_lock_coordinator
              .acquire(thread_id)
              .map(Arc::new)
@@ -2471,7 +2471,7 @@ index ec1242ef22db01b747158bac52b7d18705c7e231..00034e948af68a6dc672b3a3b561b82b
      }
 
      async fn acquire_writer_locks(
-@@ -833,6 +898,58 @@ impl LocalThreadStore {
+@@ -867,6 +932,58 @@ impl LocalThreadStore {
          Ok(writer_locks)
      }
 
@@ -2617,7 +2617,7 @@ index 8456222f1968f2398638650e92ba0c6159d12e7c..05c0da7d19bd3957f2f8aef54c6a20cc
          frozen_segment,
          Arc::clone(&model_context),
 diff --git a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
-index 469d91b6dd2a3a6f2c7049f62c1a3c70126a7906..68183c730226eaa0e040777c805768f0f2db999d 100644
+index d5b0a326b805dee1383d462cffe69bed5daae1c0..38e203574c076faeed7a32d434ae5b9b3f84a248 100644
 --- a/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 +++ b/codex-rs/thread-store/src/local/thread_history_materialization_tests.rs
 @@ -2037,19 +2037,23 @@ async fn active_turn_stores_only_its_start_position() {

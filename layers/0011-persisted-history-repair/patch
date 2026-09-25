@@ -649,7 +649,7 @@ index a562cef16ef5834cb495ddc1052b64571793943f..b4164ebdab6f15dcfac1c6ab3c59ea8e
      Ok(())
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index 39803ecb3deaef84d27c2da4231c1b81d06bdedb..3fc1a70c9e721b27c2109d03c7f05313487f2a62 100644
+index 8a3fc802f6f8166dd6df9e77f34d2169ae2175c2..ef8abf80f00c5e020deb72ca97afbb162e4f8ae7 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -452,6 +452,7 @@ async fn goal_supervisor_helper_uses_full_history_fork_without_spawn_call_id() {
@@ -750,7 +750,7 @@ index 39803ecb3deaef84d27c2da4231c1b81d06bdedb..3fc1a70c9e721b27c2109d03c7f05313
          "role prompt should not be duplicated in the user assignment"
      );
 
-@@ -9197,18 +9166,52 @@ while True:
+@@ -9213,18 +9182,52 @@ while True:
      );
      let parent_tool_signatures = request_tool_signatures(&parent_body);
      let child_tool_signatures = request_tool_signatures(&child_body);
@@ -805,7 +805,7 @@ index 39803ecb3deaef84d27c2da4231c1b81d06bdedb..3fc1a70c9e721b27c2109d03c7f05313
      );
      assert!(
          parent_tool_signatures.is_disjoint(&supervisor_tool_signatures),
-@@ -9219,13 +9222,8 @@ while True:
+@@ -9235,13 +9238,8 @@ while True:
          "the exact goal supervisor helper must expose the supervisor tools: tools={child_tool_signatures:#?}"
      );
      for expected_tool in [
@@ -5371,7 +5371,7 @@ index 7f9e93a677a69be26fdb9b89b828cd726f1f61ff..06be073679c7c51abc1c80aa71a4edd8
          .metadata
          .cwd
 diff --git a/codex-rs/thread-store/src/local/mod.rs b/codex-rs/thread-store/src/local/mod.rs
-index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379a7e5ef70 100644
+index acead56f3d4cadbe54e3de8534e4144344dbb9b7..f8ee73c5a452946511b2334c25a29c6671d967b9 100644
 --- a/codex-rs/thread-store/src/local/mod.rs
 +++ b/codex-rs/thread-store/src/local/mod.rs
 @@ -1,6 +1,10 @@
@@ -5412,14 +5412,37 @@ index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379
  }
 
  #[derive(Default)]
-@@ -431,7 +444,36 @@ impl LocalThreadStore {
+@@ -425,13 +438,59 @@ impl LocalThreadStore {
+         live_writer::rollout_path(self, thread_id).await
+     }
+
++    /// Avoids history preflight when another process already owns the source. This check is
++    /// advisory: repair and freezing still acquire their own authoritative writer reservation.
++    async fn check_snapshot_writer_available(&self, thread_id: ThreadId) -> ThreadStoreResult<()> {
++        let _writer = self.live_writer_locks.lock(thread_id).await;
++        if !self.live_recorders.lock().await.contains_key(&thread_id) {
++            drop(self.acquire_writer_lock(thread_id)?);
++        }
++        Ok(())
++    }
++
+     /// Freezes the thread's current prefix and installs a reference-backed continuation.
+     pub async fn freeze_thread_segment(
+         &self,
          thread_id: ThreadId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
 -        segment::freeze_thread_segment(self, thread_id, params).await
-+        let Some(source) =
++        if params.is_snapshot() {
++            self.check_snapshot_writer_available(thread_id).await?;
++        }
++        let source = if params.is_snapshot() {
++            thread_rollout_resolver::resolve_current_including_archived_read_only(self, thread_id)
++                .await?
++        } else {
 +            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
-+        else {
++        };
++        let Some(source) = source else {
 +            // A deferred live recorder is intentionally pathless until the freeze operation makes
 +            // it durable. The segment implementation already owns that transition; there is no
 +            // persisted history to inspect for the compatibility repair beforehand.
@@ -5450,14 +5473,21 @@ index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379
      }
 
      /// Freezes a thread only while the expected physical rollout remains selected.
-@@ -441,13 +483,43 @@ impl LocalThreadStore {
+@@ -441,13 +500,50 @@ impl LocalThreadStore {
          expected_rollout_id: codex_protocol::RolloutId,
          params: FreezeRolloutSegmentParams,
      ) -> ThreadStoreResult<FrozenRolloutSegment> {
 -        segment::freeze_thread_segment_for_rollout(
-+        let source = thread_rollout_resolver::resolve_current_including_archived(self, thread_id)
-+            .await?
-+            .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++        if params.is_snapshot() {
++            self.check_snapshot_writer_available(thread_id).await?;
++        }
++        let source = if params.is_snapshot() {
++            thread_rollout_resolver::resolve_current_including_archived_read_only(self, thread_id)
++                .await?
++        } else {
++            thread_rollout_resolver::resolve_current_including_archived(self, thread_id).await?
++        }
++        .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
 +        if source.rollout_id != expected_rollout_id {
 +            return Err(ThreadStoreError::InvalidRequest {
 +                message: format!(
@@ -5498,7 +5528,7 @@ index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379
      }
 
      /// Freezes a paginated fork without reading history excluded from its response.
-@@ -640,13 +712,20 @@ impl LocalThreadStore {
+@@ -650,13 +746,20 @@ impl LocalThreadStore {
          thread_ids.dedup();
          let mut in_process_guards = Vec::with_capacity(thread_ids.len());
          for &thread_id in &thread_ids {
@@ -5522,7 +5552,7 @@ index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379
          })
      }
 
-@@ -1282,7 +1361,7 @@ mod tests {
+@@ -1292,7 +1395,7 @@ mod tests {
              .expect("recover recorder");
          drop(store);
 
@@ -5531,7 +5561,7 @@ index 927993746328aeb77b74f7b973524b58a0977a11..0f41c45f7d9d327af09bce40084fc379
          assert!(
              matches!(locks.acquire(thread_id), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
          );
-@@ -2249,7 +2328,7 @@ mod tests {
+@@ -2259,7 +2362,7 @@ mod tests {
              drop(recorder);
 
              // Reacquire before yielding: shutdown must await the task, not merely drop its entry.
@@ -6530,15 +6560,83 @@ index db6b7191f8306e77a035416ba9a53c31678667ca..ecfb007156bba76ac3328c6ac83911cf
      HistoryPosition {
          thread_id,
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index 8b261ec13e9ff8878cbdc538c61fce81699259e6..c352ca8a6546250370040f8b96c781063395a889 100644
+index ef2be6068da82dd03c81ebefd144769eaf1282ee..fb305dc2a49833bc4cd668ee1891fb6d339674c0 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -46,6 +46,9 @@ use crate::ThreadPersistenceMode;
+@@ -47,6 +47,77 @@ use crate::ThreadPersistenceMode;
  use crate::ThreadStoreError;
  use crate::ThreadStoreResult;
 
 +pub(crate) mod confined_publication;
 +pub(super) mod history_repair_publication;
++
++/// Copies an externally written Legacy source without reserving or changing its writer.
++/// The selected files are verified before the owned records cross into child persistence.
++pub(super) async fn capture_external_legacy_fork(
++    store: &LocalThreadStore,
++    thread_id: ThreadId,
++    expected_rollout_id: Option<RolloutId>,
++) -> ThreadStoreResult<PreparedFork> {
++    let reservation = store.reserve_thread_lifecycle(thread_id).await;
++    let selected = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
++        store, thread_id,
++    )
++    .await?
++    .ok_or(ThreadStoreError::ThreadNotFound { thread_id })?;
++    if expected_rollout_id.is_some_and(|expected| expected != selected.rollout_id) {
++        return Err(ThreadStoreError::Conflict {
++            message: format!("external fork source selection changed for thread {thread_id}"),
++        });
++    }
++    let lines = codex_rollout::capture_external_legacy_rollout_lines(
++        &store.config.codex_home,
++        &selected.path,
++        thread_id,
++    )
++    .await
++    .map_err(|error| match error.kind() {
++        io::ErrorKind::WouldBlock | io::ErrorKind::NotFound => ThreadStoreError::Conflict {
++            message: format!("external fork source changed for thread {thread_id}: {error}"),
++        },
++        _ => ThreadStoreError::InvalidRequest {
++            message: format!("cannot capture external Legacy source {thread_id}: {error}"),
++        },
++    })?;
++    let current = super::thread_rollout_resolver::resolve_current_including_archived_read_only(
++        store, thread_id,
++    )
++    .await?
++    .ok_or_else(|| ThreadStoreError::Conflict {
++        message: format!("external fork source disappeared for thread {thread_id}"),
++    })?;
++    if current.rollout_id != selected.rollout_id || current.path != selected.path {
++        return Err(ThreadStoreError::Conflict {
++            message: format!("external fork source selection changed for thread {thread_id}"),
++        });
++    }
++    let (content_id, items) = tokio::task::spawn_blocking(move || {
++        let content_id = snapshot_segment_id(&lines)?;
++        let items = Arc::new(lines.into_iter().map(|line| line.item).collect::<Vec<_>>());
++        Ok::<_, ThreadStoreError>((content_id, items))
++    })
++    .await
++    .map_err(|error| ThreadStoreError::Internal {
++        message: format!("failed to seal external Legacy source {thread_id}: {error}"),
++    })??;
++    let mut prepared = PreparedFork::new(
++        thread_id,
++        /*source_end_ordinal_exclusive*/ None,
++        /*history_base*/ None,
++        /*frozen_segment*/ None,
++        Arc::clone(&items),
++        Arc::clone(&items),
++        Arc::clone(&items),
++        /*interrupt_if_open*/ false,
++        (reservation, selected.rollout_id, content_id),
++    );
++    prepared.copied_history = Some(items);
++    Ok(prepared)
++}
 +
  #[cfg(test)]
  static SEGMENT_REOPEN_FAILURES: LazyLock<StdMutex<HashSet<ThreadId>>> =

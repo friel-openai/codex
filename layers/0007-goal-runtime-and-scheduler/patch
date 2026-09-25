@@ -1362,10 +1362,10 @@ index 51a191f4d5c8d3ae5a41e7325f7a6eb63088e1d8..15796f42bdd7c70f612f0b97cbe02821
                      }
                      let subscribed_connection_ids = thread_state_manager
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index f61f9d5dc106a4d3a9d37ecddb75bb54ff875ac2..516ce8f14117cd1c3e13b97cacb3f748e11303e0 100644
+index cc09d50e43ee0204c142379d5a1b61c1b1e4ad9c..bed7b46c3261b5d8986b9d2993a7be2a1429d2ea 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
-@@ -7945,6 +7945,8 @@ fn build_thread_from_loaded_snapshot(
+@@ -7981,6 +7981,8 @@ fn build_thread_from_loaded_snapshot(
      )
  }
 
@@ -8606,7 +8606,7 @@ index 79f493b37cc13d025804d5903e4a484d4a93b404..aac86625ae4b06b6b128c49054e6c792
      }
  }
 diff --git a/codex-rs/core/src/agent/control_tests.rs b/codex-rs/core/src/agent/control_tests.rs
-index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae02aa7a17a 100644
+index ea0b4e6686a57576d945084acce69ee1f80f7dcd..11858233c39551996e9d1dd952918abf1bdabdfc 100644
 --- a/codex-rs/core/src/agent/control_tests.rs
 +++ b/codex-rs/core/src/agent/control_tests.rs
 @@ -28,6 +28,7 @@ use crate::init_state_db;
@@ -9266,7 +9266,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  }
 
  fn history_contains_assistant_inter_agent_communication<'a>(
-@@ -501,6 +1038,89 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
+@@ -501,6 +1038,90 @@ async fn wait_for_subagent_notification(parent_thread: &Arc<CodexThread>) -> boo
      timeout(Duration::from_secs(10), wait).await.is_ok()
  }
 
@@ -9291,6 +9291,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +async fn make_cold_multi_agent_v1_child(
 +    harness: &AgentControlHarness,
 +    parent_thread_id: ThreadId,
++    agent_path: Option<AgentPath>,
 +) -> ThreadId {
 +    let child_thread_id = harness
 +        .control
@@ -9300,7 +9301,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +            SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
 +                parent_thread_id,
 +                depth: 1,
-+                agent_path: None,
++                agent_path,
 +                agent_nickname: None,
 +                agent_role: Some("explorer".to_string()),
 +            }),
@@ -9356,7 +9357,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  async fn persist_thread_for_tree_resume(thread: &Arc<CodexThread>, message: &str) {
      // These tests only need a durable resume fixture. Stop the child prompt
      // first so this marker records directly instead of waiting behind an
-@@ -605,12 +1225,126 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
+@@ -605,13 +1226,127 @@ async fn assert_thread_not_loaded(manager: &ThreadManager, thread_id: ThreadId)
  }
 
  #[tokio::test]
@@ -9366,6 +9367,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 -        .send_input(
 -            ThreadId::new(),
 -            vec![UserInput::Text {
+-                text: "hello".to_string(),
 +async fn restore_v2_agent_metadata_uses_indexed_identity_without_reading_rollout() {
 +    let harness = AgentControlHarness::new().await;
 +    let (parent_thread_id, _) = harness.start_thread().await;
@@ -9486,10 +9488,11 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +        .send_input(
 +            ThreadId::new(),
 +            vec![UserInput::Text {
-                 text: "hello".to_string(),
++                text: "hello".to_string(),
                  text_elements: Vec::new(),
              }],
-@@ -923,10 +1657,17 @@ async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
+             Default::default(),
+@@ -923,10 +1658,17 @@ async fn ensure_v2_child_loaded_preserves_evicted_parent_authority() {
      check_v2_agent_reload(V2ReloadRoute::NestedParent).await;
  }
 
@@ -9507,7 +9510,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  }
 
  async fn spawn_v2_reload_test_child(
-@@ -994,7 +1735,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -994,7 +1736,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
      let control = root.thread.session.services.agent_control.clone();
      let parent_thread = match route {
          V2ReloadRoute::Sender => root.thread,
@@ -9516,7 +9519,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
              let parent = spawn_v2_reload_test_child(
                  &control,
                  harness.config.clone(),
-@@ -1083,7 +1824,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1083,7 +1825,7 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
              .ensure_v2_agent_loaded(sender_config, spawned_agent.thread_id, /*parent*/ None)
              .await
              .expect("known v2 agent should reload"),
@@ -9525,7 +9528,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
              let environment = parent_turn
                  .initial_environments
                  .primary()
-@@ -1111,11 +1852,18 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1111,11 +1853,18 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
                  .input_queue
                  .drain_mailbox_input_items()
                  .await;
@@ -9549,7 +9552,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
              parent_turn = parent_thread.session.new_default_turn().await;
              assert!(harness.manager.get_thread(parent_thread_id).await.is_err());
          }
-@@ -1131,18 +1879,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1131,18 +1880,16 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
          (inherited_instructions.user, inherited_instructions.thread),
          "reloading a child must retain both parent snapshots, even if residency evicts the parent",
      );
@@ -9569,7 +9572,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
              ),
          );
          assert!(Arc::ptr_eq(
-@@ -1150,6 +1896,12 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1150,6 +1897,12 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
              &parent_thread.session.services.exec_policy,
          ));
      }
@@ -9582,7 +9585,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      assert_eq!(
          reloaded_child.config_snapshot().await.model,
          "gpt-5.6-luna",
-@@ -1204,6 +1956,299 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
+@@ -1204,6 +1957,314 @@ async fn check_v2_agent_reload(route: V2ReloadRoute) {
      assert!(captured.is_some());
  }
 
@@ -9635,7 +9638,13 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +        })
 +        .await?;
 +    let parent_thread_id = parent.thread_id;
-+    let child_thread_id = make_cold_multi_agent_v1_child(&harness, parent_thread_id).await;
++    let child_agent_path = trait_send.then(|| {
++        AgentPath::root()
++            .join("cold_v1_child")
++            .expect("named message recipient")
++    });
++    let child_thread_id =
++        make_cold_multi_agent_v1_child(&harness, parent_thread_id, child_agent_path.clone()).await;
 +
 +    let parent_turn_id = "parent-turn-v1-cold";
 +    let root_turn_id = "root-turn-v1-cold";
@@ -9673,6 +9682,14 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +        );
 +        assert_eq!(responses.requests().len(), 1);
 +        assert!(reloaded.session.active_turn.lock().await.is_none());
++        let expected_communication = InterAgentCommunication::new(
++            AgentPath::root(),
++            child_agent_path.expect("trait delivery uses a named recipient"),
++            Vec::new(),
++            "Message Type: MESSAGE\nTask name: /root/cold_v1_child\nSender: /root\nPayload:\nqueued while cold"
++                .to_string(),
++            /*trigger_turn*/ false,
++        );
 +        assert!(
 +            harness
 +                .manager
@@ -9681,7 +9698,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +                .any(|(thread_id, op)| {
 +                    *thread_id == child_thread_id
 +                        && matches!(op, Op::InterAgentCommunication { communication, .. }
-+                    if communication.content == "queued while cold" && !communication.trigger_turn)
++                    if communication == &expected_communication)
 +                })
 +        );
 +        control
@@ -9790,7 +9807,8 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +    );
 +    let harness = AgentControlHarness::new_with_config(home, config).await;
 +    let (parent_thread_id, _parent_thread) = harness.start_thread().await;
-+    let child_thread_id = make_cold_multi_agent_v1_child(&harness, parent_thread_id).await;
++    let child_thread_id =
++        make_cold_multi_agent_v1_child(&harness, parent_thread_id, /*agent_path*/ None).await;
 +    let lifecycle = harness
 +        .control
 +        .runtime
@@ -9882,7 +9900,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  #[tokio::test]
  async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      let (home, mut config) = test_config().await;
-@@ -1325,6 +2370,23 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
+@@ -1325,6 +2386,23 @@ async fn resume_agent_from_rollout_does_not_reopen_v2_descendants() {
      assert_thread_not_loaded(&resumed_manager, sibling_thread_id).await;
  }
 
@@ -9906,7 +9924,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  struct TestThreadInstructionsProvider {
      text: RwLock<&'static str>,
      shared: bool,
-@@ -2296,13 +3358,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -2296,13 +3374,8 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .await
          .expect("prepare excludeTurns history-base child for thread/fork");
      assert!(
@@ -9922,7 +9940,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      );
      let (prepared_child, _) = harness
          .manager
-@@ -2338,10 +3395,19 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -2338,10 +3411,19 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
      .lines()
      .map(|line| codex_rollout::parse_rollout_line(line).expect("parse child rollout line"))
      .collect::<Vec<_>>();
@@ -9945,7 +9963,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      );
      assert!(prepared_child_lines.iter().any(|line| {
          serde_json::to_string(&line.item)
-@@ -2458,21 +3524,16 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
+@@ -2458,21 +3540,16 @@ async fn full_history_fork_copies_paginated_history_base_lineage_across_resume()
          .flush_rollout()
          .await
          .expect("persist spawn_subagent child");
@@ -9973,7 +9991,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      assert!(spawned_lines.iter().any(|line| {
          serde_json::to_string(&line.item)
              .expect("serialize spawn_subagent child item")
-@@ -2996,21 +4057,23 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -2996,21 +4073,23 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          .flush_rollout()
          .await
          .expect("parent rollout should flush");
@@ -10004,10 +10022,14 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
                  ..Default::default()
              },
          )
-@@ -3051,6 +4114,24 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3051,10 +4130,28 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          serde_json::to_value(&mcp_tool_snapshot.tools).expect("serialize inherited MCP tools"),
          serde_json::to_value(parent_binding.tools()).expect("serialize parent MCP tools"),
      );
+-    let history = child_thread.session.clone_history().await;
+-    let history_items = history.raw_items().cloned().collect::<Vec<_>>();
+-    let assistant_position = |history: &crate::context_manager::ContextManager| {
+-        history.annotated_items().iter().find(|item| {
 +    let child_turn_id = wait_for_recorded_user_message(child_thread.as_ref(), "child task").await;
 +    // Spawn starts the child turn before returning, so the live baseline can already
 +    // have advanced beyond the inherited parent context.
@@ -10026,10 +10048,14 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +    })
 +    .await
 +    .expect("child turn should establish its own reference context");
-     let history = child_thread.session.clone_history().await;
-     let history_items = history.raw_items().cloned().collect::<Vec<_>>();
-     let assistant_position = |history: &crate::context_manager::ContextManager| {
-@@ -3123,12 +4204,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
++    let history = child_thread.session.clone_history().await;
++    let history_items = history.raw_items().cloned().collect::<Vec<_>>();
++    let assistant_position = |history: &crate::context_manager::ContextManager| {
++        history.annotated_items().iter().find(|item| {
+             matches!(&item.item, ResponseItem::Message { role, phase: Some(MessagePhase::FinalAnswer), .. } if role == "assistant")
+         }).expect("recorded final answer").metadata.as_ref().and_then(|metadata| metadata.user_input_order)
+     };
+@@ -3123,12 +4220,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          ContextualUserFragment::into(MultiAgentRoleInstructions::Configured(
              "Child subagent guidance.".to_string(),
          )),
@@ -10043,7 +10069,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      child_thread.ensure_rollout_materialized().await;
      child_thread
          .flush_rollout()
-@@ -3149,7 +4226,45 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3149,7 +4242,45 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
              .all(|item| !matches!(item, RolloutItem::RolloutReference(_))),
          "a changed parent prefix must be copied after sanitization instead of persisted by reference"
      );
@@ -10090,7 +10116,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
          RolloutItem::TurnContext(context) => Some(context),
          _ => None,
      });
-@@ -3158,6 +4273,23 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3158,6 +4289,23 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          Some(&parent_reference_context_item),
          "the persisted inherited baseline must precede any context from the child's own turn"
      );
@@ -10114,7 +10140,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 
      let mut no_hint_child_config = harness.config.clone();
      let _ = no_hint_child_config.features.enable(Feature::MultiAgentV2);
-@@ -3225,8 +4357,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3225,8 +4373,6 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          "empty child developer instructions should preserve unrelated developer fragments"
      );
 
@@ -10123,7 +10149,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      let _ = harness
          .control
          .shutdown_live_agent(child_thread_id)
-@@ -3234,17 +4364,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3234,17 +4380,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          .expect("child shutdown should submit");
      let resumed_child_thread_id = harness
          .control
@@ -10142,7 +10168,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
          .await
          .expect("sanitized child should resume from persisted history");
      let resumed_child_thread = harness
-@@ -3258,6 +4378,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3258,6 +4394,8 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
          "Child developer instructions.",
          "parent final answer",
          "Child subagent guidance.",
@@ -10151,7 +10177,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      ] {
          assert!(
              history_contains_text(resumed_history.raw_items(), retained_text),
-@@ -3267,7 +4389,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
+@@ -3267,7 +4405,7 @@ async fn spawn_agent_can_fork_parent_thread_history_with_sanitized_items() {
      for excluded_text in [
          "Parent root guidance.",
          "Parent subagent guidance.",
@@ -10160,7 +10186,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
          "parent commentary",
          "parent unknown phase",
          "parent trigger message",
-@@ -3445,13 +4567,13 @@ while True:
+@@ -3445,13 +4583,13 @@ while True:
          .spawn_agent_with_metadata(
              config,
              text_input("child request boundary"),
@@ -10176,7 +10202,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
              SpawnAgentOptions {
                  fork_parent_spawn_call_id: Some("spawn-call-request-boundary".to_string()),
                  fork_mode: Some(SpawnAgentForkMode::FullHistory),
-@@ -4298,6 +5420,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
+@@ -4298,6 +5436,7 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
              SpawnAgentOptions {
                  fork_parent_spawn_call_id: Some(parent_spawn_call_id.clone()),
                  fork_mode: Some(SpawnAgentForkMode::FullHistory),
@@ -10184,7 +10210,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
                  ..Default::default()
              },
          )
-@@ -4315,6 +5438,11 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
+@@ -4315,6 +5454,11 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
          history_contains_text(history.raw_items(), "unflushed final answer"),
          "forked child history should include unflushed assistant final answers after flushing the parent rollout"
      );
@@ -10196,7 +10222,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 
      let _ = harness
          .control
-@@ -4327,6 +5455,121 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
+@@ -4327,6 +5471,121 @@ async fn spawn_agent_fork_flushes_parent_rollout_before_loading_history() {
          .expect("parent shutdown should submit");
  }
 
@@ -10318,7 +10344,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
  #[tokio::test]
  async fn spawn_agent_fork_last_n_turns_keeps_only_recent_turns() {
      let harness = AgentControlHarness::new().await;
-@@ -4993,7 +6236,7 @@ async fn resume_agent_releases_slot_after_resume_failure() {
+@@ -4993,7 +6252,7 @@ async fn resume_agent_releases_slot_after_resume_failure() {
 
  #[tokio::test]
  async fn spawn_child_completion_notifies_parent_history() {
@@ -10327,7 +10353,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
      let (parent_thread_id, parent_thread) = harness.start_thread().await;
 
      let child_thread_id = harness
-@@ -5150,32 +6393,25 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+@@ -5150,32 +6409,25 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
          .expect("tester thread should exist");
      let worker_path = AgentPath::root().join("worker_a").expect("worker path");
      let tester_path = worker_path.join("tester").expect("tester path");
@@ -10377,7 +10403,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
          )
          .await;
 
-@@ -5213,7 +6449,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
+@@ -5213,7 +6465,7 @@ async fn multi_agent_v2_completion_queues_message_for_direct_parent() {
          }
      })
      .await
@@ -10386,7 +10412,7 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 
      let root_history = root_thread.session.clone_history().await;
      assert!(!history_contains_assistant_inter_agent_communication(
-@@ -6154,54 +7390,1692 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
+@@ -6154,53 +7406,1691 @@ async fn resume_agent_from_rollout_does_not_reopen_closed_descendants() {
          .expect("tree shutdown after resume should succeed");
  }
 
@@ -10571,6 +10597,18 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
          )
          .await
 -        .expect("grandchild spawn should succeed");
+-
+-    let child_thread = harness
+-        .manager
+-        .get_thread(child_thread_id)
+-        .await
+-        .expect("child thread should exist");
+-    let grandchild_thread = harness
+-        .manager
+-        .get_thread(grandchild_thread_id)
+-        .await
+-        .expect("grandchild thread should exist");
+-    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
 +        .expect("worker should spawn")
 +        .thread_id;
 +    for child_thread_id in [helper_thread_id, worker_thread_id] {
@@ -10618,26 +10656,16 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +        )
 +        .await
 +        .expect("inaccurate foreign supervisor edge should persist");
-
--    let child_thread = harness
--        .manager
--        .get_thread(child_thread_id)
++
 +    let first_result = harness
 +        .control
 +        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
-         .await
--        .expect("child thread should exist");
--    let grandchild_thread = harness
--        .manager
--        .get_thread(grandchild_thread_id)
++        .await
 +        .expect("first reconciliation should succeed");
 +    let second_result = harness
 +        .control
 +        .reconcile_goal_supervisor_state(parent_thread_id, &supervisor_path)
-         .await
--        .expect("grandchild thread should exist");
--    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
--    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
++        .await
 +        .expect("second reconciliation should be idempotent");
 +
 +    assert_eq!(first_result, Some(helper_thread_id));
@@ -12106,11 +12134,10 @@ index ea0b4e6686a57576d945084acce69ee1f80f7dcd..ee46b7ee6e8c85738ecce570bffa2ae0
 +        .await
 +        .expect("grandchild thread should exist");
 +    persist_thread_for_tree_resume(&parent_thread, "parent persisted").await;
-+    persist_thread_for_tree_resume(&child_thread, "child persisted").await;
+     persist_thread_for_tree_resume(&child_thread, "child persisted").await;
      persist_thread_for_tree_resume(&grandchild_thread, "grandchild persisted").await;
      wait_for_live_thread_spawn_children(&harness.control, parent_thread_id, &[child_thread_id])
-         .await;
-@@ -6569,3 +9443,192 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
+@@ -6569,3 +9459,192 @@ async fn resume_agent_from_rollout_skips_descendants_when_parent_resume_fails()
          .await
          .expect("tree shutdown after partial subtree resume should succeed");
  }
@@ -14393,10 +14420,10 @@ index 39ca061f96576df8d533fc38441b7c0b117a8846..d3be4b19102cda5d53ca8c82b9673780
  pub mod guardian_review;
  mod hook_mcp_executor;
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6dd8cc152 100644
+index 60a7dd997d5613736f72c30ab4bf86d4919935a5..86ae3b82544c81357c79c9e7abd9ad2f803688ca 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -308,7 +308,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
+@@ -309,7 +309,6 @@ const ROOT_AGENT_SUPERVISOR_PROMPT_FALLBACK: &str =
      include_str!("../../root_agent_supervisor_prompt.md");
  const SUBAGENT_PROMPT_FALLBACK: &str = include_str!("../../subagent_prompt.md");
  const SUPERVISOR_AGENT_PROMPT_FALLBACK: &str = include_str!("../../supervisor_agent_prompt.md");
@@ -14404,7 +14431,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
 
  async fn load_agent_prompt_fallback(
      codex_home: &Path,
-@@ -378,7 +377,7 @@ pub(crate) async fn load_agent_role_prompt(
+@@ -379,7 +378,7 @@ pub(crate) async fn load_agent_role_prompt(
 
      let role_prompt = match session_source {
          SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_role, .. })
@@ -14413,7 +14440,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
          {
              load_supervisor_agent_prompt(&config.codex_home).await
          }
-@@ -701,6 +700,19 @@ pub(crate) fn resolve_multi_agent_version(
+@@ -704,6 +703,19 @@ pub(crate) fn resolve_multi_agent_version(
          })
  }
 
@@ -14433,7 +14460,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
  async fn initial_rollout_ordinal(
      history: &InitialHistory,
      history_mode: ThreadHistoryMode,
-@@ -1011,7 +1023,12 @@ impl Session {
+@@ -1014,7 +1026,12 @@ impl Session {
              }
          }
          let configured_config = Arc::clone(&config);
@@ -14447,7 +14474,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
              resolve_multi_agent_version(&conversation_history, inherited_multi_agent_version)
          });
          let history_mode = conversation_history.get_history_mode(
-@@ -1952,11 +1969,6 @@ impl Session {
+@@ -1960,11 +1977,6 @@ impl Session {
                      .iter()
                      .any(|item| matches!(item, RolloutItem::RolloutReference(_)));
                  Self::assign_missing_rollout_response_item_ids(&mut rollout_items);
@@ -14459,7 +14486,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
                  let mut logical_rollout_items =
                      match fork_startup_items.model_history_override.take() {
                          Some(model_history) => model_history,
-@@ -2030,7 +2042,7 @@ impl Session {
+@@ -2054,7 +2066,7 @@ impl Session {
                          turn_context.model_info().truncation_policy.into(),
                      );
                  }
@@ -14468,7 +14495,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
                      .into_iter()
                      .map(ResponseItemEnvelope::new)
                      .map(RolloutItem::ResponseItem)
-@@ -2080,7 +2092,9 @@ impl Session {
+@@ -2104,7 +2116,9 @@ impl Session {
                          persisted_rollout_items.push(thread_settings_applied);
                      }
                  }
@@ -14479,7 +14506,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
 
                  // Agent spawn owns its final durability barrier so it can overlap the edge write.
                  let persist_context = match self.fork_persistence {
-@@ -2569,6 +2583,11 @@ impl Session {
+@@ -2593,6 +2607,11 @@ impl Session {
          }
      }
 
@@ -14491,7 +14518,7 @@ index 4be4759bb5c73be4ca4a5744ac752d6285a35467..19606e390cd3c09f8828a012cca764c6
      pub(crate) async fn session_source(&self) -> SessionSource {
          let state = self.state.lock().await;
          state.session_configuration.session_source.clone()
-@@ -5166,6 +5185,30 @@ impl Session {
+@@ -5190,6 +5209,30 @@ impl Session {
          true
      }
 
@@ -14623,10 +14650,10 @@ index 44797252c1ac401b532b1a809618f4badd2f58d3..37a16baf1c4638cab476aa49e4a48949
                  git_enrichment_policy,
                  fork_persistence,
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da3456ff6f 100644
+index 7848c639f52a739e324a891d7d44dc92130ea0aa..6529f254a6a790ad32e765831a289958600dc9d5 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -3145,6 +3145,28 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
+@@ -3146,6 +3146,28 @@ fn resolve_multi_agent_version_handles_unset_and_legacy_history() {
      );
  }
 
@@ -14655,7 +14682,7 @@ index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da
  #[tokio::test]
  async fn empty_reference_prefix_continues_after_physical_metadata_ordinal() {
      let codex_home = tempfile::tempdir().expect("create Codex home");
-@@ -4473,6 +4495,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
+@@ -4474,6 +4496,7 @@ async fn assert_prepared_paginated_fork_preserves_parent_model_messages(
                  items: vec![
                      RolloutItem::EventMsg(EventMsg::TurnStarted(TurnStartedEvent {
                          turn_id: turn_id.clone(),
@@ -14663,7 +14690,7 @@ index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da
                          trace_id: None,
                          started_at: Some(index),
                          model_context_window: None,
-@@ -5577,7 +5600,7 @@ async fn open_thread_persistence_with_mode(
+@@ -5578,7 +5601,7 @@ async fn open_thread_persistence_with_mode(
          .expect("thread should have rollout path")
  }
 
@@ -14672,7 +14699,7 @@ index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da
      let rollout_path = open_thread_persistence(session).await;
      session
          .ensure_rollout_materialized(PersistContext::Standard)
-@@ -7718,6 +7741,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
+@@ -7719,6 +7742,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
          active_turn: Mutex::new(None),
          async_hook_results,
          input_queue: super::input_queue::InputQueue::new(),
@@ -14680,7 +14707,7 @@ index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da
          services,
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
-@@ -9998,6 +10022,7 @@ where
+@@ -9999,6 +10023,7 @@ where
          active_turn: Mutex::new(None),
          async_hook_results,
          input_queue: super::input_queue::InputQueue::new(),
@@ -14688,7 +14715,7 @@ index 678a1cbd583cb0d4e1f624c9927504efc25e69f6..27efc1f8e6f9d2e42aa13f8f393749da
          services,
          git_enrichment_policy: GitEnrichmentPolicy::Fresh,
          fork_persistence: ForkPersistence::Copied,
-@@ -11498,6 +11523,43 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
+@@ -11499,6 +11524,43 @@ async fn build_initial_context_adds_multi_agent_v2_subagent_usage_hint_as_develo
      );
  }
 
@@ -14925,7 +14952,7 @@ index 2ad6096ea906379cb9e431f9cfc59107553b391c..0c3ff73e676143d97fd74d79a988cc60
          }
 
 diff --git a/codex-rs/core/src/thread_manager.rs b/codex-rs/core/src/thread_manager.rs
-index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6bf332710 100644
+index 6b116a8092384671e847d557a09102d43d7a0836..8c9599606d56d73f9bdf162890cbec6166536870 100644
 --- a/codex-rs/core/src/thread_manager.rs
 +++ b/codex-rs/core/src/thread_manager.rs
 @@ -998,45 +998,9 @@ impl ThreadManager {
@@ -15052,7 +15079,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
      pub(crate) async fn list_thread_ids(&self) -> Vec<ThreadId> {
          self.threads
              .read()
-@@ -2453,7 +2482,12 @@ impl ThreadManagerState {
+@@ -2500,7 +2529,12 @@ impl ThreadManagerState {
          forked_from_thread_id: Option<ThreadId>,
          config: &Config,
      ) -> MultiAgentVersion {
@@ -15066,7 +15093,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
              return multi_agent_version;
          }
          self.initial_multi_agent_version_for_spawn(
-@@ -2610,6 +2644,7 @@ impl ThreadManagerState {
+@@ -2657,6 +2691,7 @@ impl ThreadManagerState {
              /*thread_source*/ None,
              /*metrics_service_name*/ None,
              /*inherited_environments*/ None,
@@ -15074,7 +15101,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
              /*inherited_exec_policy*/ None,
              Default::default(),
              /*environments*/ None,
-@@ -2629,6 +2664,7 @@ impl ThreadManagerState {
+@@ -2676,6 +2711,7 @@ impl ThreadManagerState {
          thread_source: Option<ThreadSource>,
          metrics_service_name: Option<String>,
          inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -15082,7 +15109,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
          inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
          inherited_thread_state: InheritedThreadState,
          environments: Option<Vec<TurnEnvironmentSelection>>,
-@@ -2648,6 +2684,7 @@ impl ThreadManagerState {
+@@ -2695,6 +2731,7 @@ impl ThreadManagerState {
          request.parent_thread_id = parent_thread_id;
          request.forked_from_thread_id = forked_from_thread_id;
          request.inherited_environments = inherited_environments;
@@ -15090,7 +15117,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
          request.inherited_exec_policy = inherited_exec_policy;
          request.inherited_thread_state = inherited_thread_state;
          Box::pin(self.spawn_thread(request)).await
-@@ -2710,6 +2747,7 @@ impl ThreadManagerState {
+@@ -2757,6 +2794,7 @@ impl ThreadManagerState {
          parent_thread_id: Option<ThreadId>,
          forked_from_thread_id: Option<ThreadId>,
          inherited_environments: Option<TurnEnvironmentSnapshot>,
@@ -15098,7 +15125,7 @@ index 8fdd4daa7b7acf48509ebc265c7fdd46a702a87c..5aed16208020f7a4458124210a6480e6
          inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
          environments: Option<Vec<TurnEnvironmentSelection>>,
          inherited_thread_state: InheritedThreadState,
-@@ -2733,6 +2771,7 @@ impl ThreadManagerState {
+@@ -2780,6 +2818,7 @@ impl ThreadManagerState {
          request.parent_thread_id = parent_thread_id;
          request.forked_from_thread_id = forked_from_thread_id;
          request.inherited_environments = inherited_environments;
@@ -18296,6 +18323,76 @@ index 85762b4fd748639302624e0067b600910b5fad0d..2dc581a7637825fd97a851999575053a
              // Hosted Responses tools.
              "web_search",
          ]
+diff --git a/codex-rs/core/tests/suite/agent_eviction_tests.rs b/codex-rs/core/tests/suite/agent_eviction_tests.rs
+index 8e2d12ced994b21ac96bea4af12935a8ef0b3f26..d13dccf597fefc81d0463d977445495f786b47e8 100644
+--- a/codex-rs/core/tests/suite/agent_eviction_tests.rs
++++ b/codex-rs/core/tests/suite/agent_eviction_tests.rs
+@@ -58,6 +58,8 @@ impl ThreadLifecycleContributor<Config> for PauseShutdown {
+ #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+ async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()> {
+     const QUEUED_TASK: &str = "handle this accepted task after dispatch resumes";
++    const LATE_MAIL: &str = "must not disappear behind shutdown";
++    const DRAIN_TASK: &str = "process the message queued after eviction";
+     let server = start_mock_server().await;
+     mount_root_collaboration_call(
+         &server,
+@@ -196,7 +198,7 @@ async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()
+         "send during eviction",
+         "late-mail",
+         "send_message",
+-        json!({ "target": "first", "message": "must not disappear behind shutdown" }),
++        json!({ "target": "first", "message": LATE_MAIL }),
+     )
+     .await;
+     let send = test.submit_turn("send during eviction");
+@@ -213,9 +215,45 @@ async fn queued_mail_and_cancelled_eviction_keep_worker_ownership() -> Result<()
+     timeout(Duration::from_secs(10), send).await??;
+     assert_eq!(
+         delivery.function_call_output_text("late-mail"),
+-        Some(format!("agent with id {first_id} not found")),
++        Some(String::new()),
++    );
++    timeout(Duration::from_secs(10), first.wait_until_terminated()).await?;
++    assert_eq!(
++        timeout(Duration::from_secs(10), created.recv()).await??,
++        first_id,
++    );
++    let reloaded = test.thread_manager.get_thread(first_id).await?;
++    assert!(
++        !Arc::ptr_eq(&first, &reloaded),
++        "delivery must reload the worker, not reuse the terminated runtime",
++    );
++    assert!(first.submit(Op::Interrupt).await.is_err());
++
++    // Frodex reloads an evicted worker after teardown; its accepted mail must survive once.
++    mount_root_collaboration_call(
++        &server,
++        "process queued mail",
++        "drain-mail",
++        "followup_task",
++        json!({ "target": "first", "message": DRAIN_TASK }),
++    )
++    .await;
++    let drained = mount_completed_worker(&server, DRAIN_TASK, "drain-mail").await;
++    test.submit_turn("process queued mail").await?;
++    wait_for_event(&reloaded, |event| {
++        matches!(event, EventMsg::TurnComplete(_))
++    })
++    .await;
++    ThreadIdle::wait(&reloaded).await;
++    assert_eq!(
++        drained
++            .single_request()
++            .inputs_of_type("agent_message")
++            .into_iter()
++            .filter(|item| item.to_string().contains(LATE_MAIL))
++            .count(),
++        1,
+     );
+-    assert!(test.thread_manager.get_thread(first_id).await.is_err());
+
+     // The cancelled caller leaves no reservation behind once teardown finishes.
+     mount_root_collaboration_call(
 diff --git a/codex-rs/core/tests/suite/subagent_notifications.rs b/codex-rs/core/tests/suite/subagent_notifications.rs
 index df6c03b56d6d1ad8694913ca160cb22b9447d490..1c42e52557ea328732b3da150a53168808415d3b 100644
 --- a/codex-rs/core/tests/suite/subagent_notifications.rs

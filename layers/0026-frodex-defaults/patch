@@ -1,8 +1,8 @@
 diff --git a/codex-rs/app-server/tests/suite/v2/thread_resume.rs b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-index e6e6fa2b90c63061daf142e0a81d218fe04df8ee..685b7b194786f9df3ef102ee9fdf911883981896 100644
+index 4b87b7be195bcbb427ef283641420981d7aedfdb..0f8021cd72470cbe92770810ceb753cef80bfcea 100644
 --- a/codex-rs/app-server/tests/suite/v2/thread_resume.rs
 +++ b/codex-rs/app-server/tests/suite/v2/thread_resume.rs
-@@ -3116,12 +3116,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
+@@ -3117,12 +3117,25 @@ async fn thread_resume_keeps_tool_paused_goal_paused() -> Result<()> {
  }
 
  #[tokio::test]
@@ -31,7 +31,7 @@ index e6e6fa2b90c63061daf142e0a81d218fe04df8ee..685b7b194786f9df3ef102ee9fdf9118
          .write(codex_home.path())?;
      let thread_id = create_fake_rollout(
          codex_home.path(),
-@@ -3202,6 +3215,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
+@@ -3203,6 +3216,36 @@ async fn app_server_restart_recovers_overdue_goal_without_thread_resume() -> Res
      assert!(input.contains("# Goal Supervisor Assignment"));
      assert!(input.contains("continue after app-server restart"));
 
@@ -221,10 +221,10 @@ index 439459ff73a96990099a7e3babc398e7f78fd514..f3ebf385470794422efdad5c4bb32435
 
      match &turn_context.session_source {
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 463534f6e1932cdd5b54f46f2e65c732639f0042..2336b03fd668a381df8330c1717b962700bf0df0 100644
+index 5828bad38aa2bc1114cb370ebfdd71190bd3c159..414539480ab1f2d0442c6d2791044c1bd6e28ebd 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -12387,6 +12387,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
+@@ -12600,6 +12600,11 @@ async fn make_multi_agent_v2_usage_hint_test_session(
          |config| {
              if enable_multi_agent_v2 {
                  let _ = config.features.enable(Feature::MultiAgentV2);
@@ -236,7 +236,7 @@ index 463534f6e1932cdd5b54f46f2e65c732639f0042..2336b03fd668a381df8330c1717b9627
              }
              config.multi_agent_v2.root_agent_usage_hint_text = Some("Root guidance.".to_string());
              config.multi_agent_v2.subagent_usage_hint_text = Some("Subagent guidance.".to_string());
-@@ -15209,16 +15214,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
+@@ -15424,16 +15429,10 @@ async fn root_agent_prompt_prefers_user_goal_over_coordination() {
  async fn root_agent_role_prompt_includes_persistent_goal_scheduling() {
      let codex_home = tempfile::tempdir().expect("create temp dir");
      let mut config = build_test_config(codex_home.path()).await;
@@ -258,7 +258,7 @@ index 463534f6e1932cdd5b54f46f2e65c732639f0042..2336b03fd668a381df8330c1717b9627
      let prompt = load_agent_role_prompt(&config, &SessionSource::Cli)
          .await
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index d3d4d889e60a0aeb496b2163a67b61fa2bdb00f3..8abb012160a54c81b128224552b966984bca1515 100644
+index 14c5459cb1a1d9368ade45c94029ca74a18054eb..6ff43ee7859973a5ea7ce661e0aaed136912cfc9 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -1012,7 +1012,7 @@ async fn multi_agent_v2_spawn_rejects_adoption_fields() {
@@ -296,7 +296,7 @@ index d3d4d889e60a0aeb496b2163a67b61fa2bdb00f3..8abb012160a54c81b128224552b96698
      };
 
      let expected = FunctionCallError::RespondToModel(
-@@ -4884,12 +4885,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
+@@ -4991,12 +4992,13 @@ async fn multi_agent_v2_interrupt_agent_accepts_unloaded_task_name_target() {
          .expect("closed children should load");
      assert_eq!(closed_children, Vec::<ThreadId>::new());
 
@@ -512,6 +512,154 @@ index 36356527a8c76f83b8167523f645e98b2c8c8451..6245636eb8705e5609aae655dceee25d
              config.model_reasoning_effort = Some(ReasoningEffort::Ultra);
          })
          .build(&server)
+diff --git a/codex-rs/core/tests/suite/pending_input_persistence.rs b/codex-rs/core/tests/suite/pending_input_persistence.rs
+index 09261abfa782d937fef8c0fe06f93c8c2229c997..995363635e7e1b4fa04775d8d8aab8621ad6e839 100644
+--- a/codex-rs/core/tests/suite/pending_input_persistence.rs
++++ b/codex-rs/core/tests/suite/pending_input_persistence.rs
+@@ -507,6 +507,10 @@ async fn cancelled_spawn_discards_provisional_child() -> anyhow::Result<()> {
+         .with_history_mode(ThreadHistoryMode::Legacy)
+         .with_config(|config| {
+             config.agent_max_depth = 1;
++            config
++                .features
++                .disable(Feature::MultiAgentV2)
++                .expect("use the scripted V1 spawn tool");
+             config
+                 .features
+                 .enable(Feature::Collab)
+diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
+index 7fae46311542f7afca9ece5a3748ee9abb8586bc..c9e1a3ec57447a0df79bb4da531885de022d6597 100644
+--- a/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
++++ b/codex-rs/core/tests/suite/snapshots/all__suite__compact__compaction_cold_resume_after_completion.snap
+@@ -1,15 +1,32 @@
+ ---
+ source: core/tests/suite/compact.rs
+-assertion_line: 4537
++assertion_line: 4532
+ expression: "format_history_snapshot(\"Real paginated mid-turn compaction and cold resume from the bounded suffix.\",\n&requests,)"
+ ---
+ Scenario: Real paginated mid-turn compaction and cold resume from the bounded suffix.
+
+ ## Window 1
+ -- request 1 (turn) --
+-00:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++00:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 01:message/developer:
+     You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+@@ -35,9 +52,26 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
+
+ ## Window 2 (after request 1: settings changed (parallel_tool_calls, tools))
+ -- request 2 (compaction) --
+-00:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++00:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 01:message/developer:
+     You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+@@ -47,13 +81,13 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
+
+     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+     Child agents can also spawn their own sub-agents.
+-    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
+     - All agents use the same current working directory.
+     - As a result, edits made by one agent are immediately visible to all other agents.
+
+     When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+-    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
+
+     Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
+ 02:message/developer:
+@@ -67,9 +101,26 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
+
+ ## Window 3 (after request 2: input diverged at item 04, settings changed (parallel_tool_calls, tools))
+ -- request 3 (turn) --
+-00:message/developer[2]:
+-    [01] <PERMISSIONS_INSTRUCTIONS>
+-    [02] <COLLABORATION_MODE>
++00:message/developer[3]:
++    [01] # You are the Root Agent
++
++        You are the **root agent** in a multi-agent Codex session. Until you see `# You are a Subagent`, these i...oot instructions remain governing system-level rules. [hash=57582f283290eb77]
++
++        ## Root Agent Responsibilities
++
++        Your first job is to accomplish the user's goal. Relative to your subagents, you own their sequencing, i...inish the user's goal faster or with better evidence. [hash=d7b96d6582a4c596]
++
++        <OMITTED 62 LINES; ~1550 TOKENS; hash=0f212052f4d0c873>
++        After creating the goal, begin working on the user's task immediately. The supervisor will only act afte...early. Do not try to prove the supervisor is working. [hash=db7120645eaedf65]
++
++        Do not create supervisor substitutes with `spawn_agent`. If the user asks for a goal or goal supervisor, use `create_goal` or `/goal`.
++
++        If the user gives instructions that materially change, extend, or add context to the long-running goal, ...so future supervisor checks evaluate the latest goal. [hash=4a33fb2df5691191]
++
++        Treat messages from the supervisor as task instructions.
++
++    [02] <PERMISSIONS_INSTRUCTIONS>
++    [03] <COLLABORATION_MODE>
+ 01:message/developer:
+     You are `/root`, the primary agent in a team of agents collaborating to fulfill the user's goals.
+
+@@ -79,13 +130,13 @@ Scenario: Real paginated mid-turn compaction and cold resume from the bounded su
+
+     You can use `spawn_agent` to create a new agent, `followup_task` to give an existing agent a new task an...message to a running agent without triggering a turn. [hash=7d40ff8b58977202]
+     Child agents can also spawn their own sub-agents.
+-    <OMITTED 16 LINES; ~234 TOKENS; hash=b2e94283a8c22327>
++    <OMITTED 16 LINES; ~255 TOKENS; hash=11494f97b79ee64e>
+     - All agents use the same current working directory.
+     - As a result, edits made by one agent are immediately visible to all other agents.
+
+     When calling `wait_agent`, prefer longer waits (minutes) to avoid busy polling.
+
+-    There are 4 available concurrency slots, meaning that up to 4 agents can be active at once, including you.
++    There are 257 available concurrency slots, meaning that up to 257 agents can be active at once, including you.
+
+     Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and d...fork_turns` to `"none"` or a positive integer string. [hash=db3545796947884f]
+ 02:message/developer:
 diff --git a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap b/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap
 index 005c98b51ccc52967f587a0da1e8d1620dbe9686..da7af3fccdd5e39d6bb3e00f61d617a732764cc7 100644
 --- a/codex-rs/core/tests/suite/snapshots/all__suite__pending_input__pending_input_queued_mail_after_commentary.snap

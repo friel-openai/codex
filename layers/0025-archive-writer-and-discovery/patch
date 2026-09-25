@@ -1,5 +1,5 @@
 diff --git a/codex-rs/app-server/src/request_processors/thread_processor.rs b/codex-rs/app-server/src/request_processors/thread_processor.rs
-index 577d2f426c548a341945cf4e2276f6c37208082e..07d465d3cab8bc994cda10a421b0a8db253bb333 100644
+index 82a2d5ada3091b30b50da8b0a44797adf9caebcc..ef6c47ea763496d183048a2b3465e9104f576256 100644
 --- a/codex-rs/app-server/src/request_processors/thread_processor.rs
 +++ b/codex-rs/app-server/src/request_processors/thread_processor.rs
 @@ -2167,7 +2167,7 @@ impl ThreadRequestProcessor {
@@ -11,7 +11,7 @@ index 577d2f426c548a341945cf4e2276f6c37208082e..07d465d3cab8bc994cda10a421b0a8db
              }
          };
          let mut current_agent_ids_to_evict = already_archived_thread_ids;
-@@ -6501,6 +6501,28 @@ impl ThreadRequestProcessor {
+@@ -6506,6 +6506,28 @@ impl ThreadRequestProcessor {
          &self,
          stored_thread: &StoredThread,
      ) -> Result<(), JSONRPCErrorError> {
@@ -876,26 +876,26 @@ index 397ab0f9e26dfcd811310b77ee882c775a28fbb4..8a837fcfb4c1d7c7d386d6ad28abb1f8
  mod tests {
      use std::time::Duration;
 diff --git a/codex-rs/thread-store/src/local/rollout_migration.rs b/codex-rs/thread-store/src/local/rollout_migration.rs
-index 48a48595782127fca7bf34d4c868c15eb832fbb8..b49204a0ca1cade78b48f8244c4d063fbf7cfa91 100644
+index cf2bc92ace3e7d26aadcd69e4daccdb9c896118e..89fd8672059aa56a7faee29f2a6e0ef6bbad5eb8 100644
 --- a/codex-rs/thread-store/src/local/rollout_migration.rs
 +++ b/codex-rs/thread-store/src/local/rollout_migration.rs
-@@ -667,6 +667,7 @@ impl LocalThreadStore {
-                 .map_err(migration_error)?
+@@ -693,6 +693,7 @@ impl LocalThreadStore {
+         if let Some(selected) = &selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
 +            && !same_rollout_moved(&selected.rollout_path, &path).await
          {
              // A stable thread can retain older physical rollouts after a revert. Migrating one of
              // those files would overwrite the selected thread's history mode and migration journal.
-@@ -944,6 +945,7 @@ impl LocalThreadStore {
-                 .map_err(migration_error)?
+@@ -962,6 +963,7 @@ impl LocalThreadStore {
+         if let Some(selected) = &locked_selected
              && codex_rollout::plain_rollout_path(selected.rollout_path.as_path())
                  != codex_rollout::plain_rollout_path(path.as_path())
 +            && !same_rollout_moved(&selected.rollout_path, &path).await
          {
              return Ok(None);
          }
-@@ -1961,6 +1963,16 @@ async fn find_current_rollout_path(
+@@ -2030,6 +2032,16 @@ async fn find_current_rollout_path(
          }))
  }
 
@@ -913,10 +913,10 @@ index 48a48595782127fca7bf34d4c868c15eb832fbb8..b49204a0ca1cade78b48f8244c4d063f
      selected.is_empty() || actual.is_some_and(|thread_id| selected.contains(&thread_id))
  }
 diff --git a/codex-rs/thread-store/src/local/segment.rs b/codex-rs/thread-store/src/local/segment.rs
-index ba433a4499615a45f79eefe79516d38cb9a41180..d5290cf9fafe4ad456a938e80011e6d9742c811b 100644
+index 2a690ca1f0f92d6d4851cce78b51c812145da266..a13212f29493791e4e3d8b743071f3905625d73b 100644
 --- a/codex-rs/thread-store/src/local/segment.rs
 +++ b/codex-rs/thread-store/src/local/segment.rs
-@@ -270,6 +270,11 @@ async fn reserve_segment_writers(
+@@ -339,6 +339,11 @@ async fn reserve_segment_writers(
          };
          let (source_path, live_recorder, allow_missing_source) = match live_source {
              Some((source_path, recorder, allow_missing_source)) => {

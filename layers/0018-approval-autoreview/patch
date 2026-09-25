@@ -903,10 +903,10 @@ index 1946b482b66270d9502db47bd32b150bc51b2367..4fa281252c7d99ac2c5e617095d5c7bd
                      .auto_review()
                      .policy_template,
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 8e453c4a8ca4c01751c065660a5ba5fc3338fd1c..bfcefa04e33f882080bf183ad13a3cdfcf64709e 100644
+index d5e7ae05f2f5d0c88afdfe4fc81e1186d509bf28..dca77078963ada8b5815102570af065f9ac64986 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -2804,6 +2804,7 @@ impl Session {
+@@ -2828,6 +2828,7 @@ impl Session {
                  .with_user_layer_from(&next_config.config_layer_stack);
              config.tool_suggest =
                  resolve_tool_suggest_config_from_layer_stack(&config.config_layer_stack);
@@ -1270,10 +1270,10 @@ index 43c0b59bdcd56560e0359fee6461632967a8d92e..9dd3b50dadf78d14eaffe3a4e53a666c
      Arc::clone(
          &session
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 1667e28e4c6aa18131be7c24deb46baf2ee59b6a..e49359f2dc8a07ecac73dfbbb0ee016829fa4b23 100644
+index d7ec9986794dc9be6bd6e4b03573b91d6ecc18e3..c4c7747bb2666745107edddd3acc6b0b0c04bd45 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -5721,6 +5721,7 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5746,6 +5746,7 @@ async fn turn_context_with_model_updates_model_fields() {
              Arc::clone(&settings.model_info),
              /*fast_mode_enabled*/ true,
          );
@@ -1281,7 +1281,7 @@ index 1667e28e4c6aa18131be7c24deb46baf2ee59b6a..e49359f2dc8a07ecac73dfbbb0ee0168
      });
      Arc::make_mut(&mut turn_context.config).service_tier =
          turn_context.initial_settings.service_tier.clone();
-@@ -5732,11 +5733,13 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5757,11 +5758,13 @@ async fn turn_context_with_model_updates_model_fields() {
          .collaboration_mode
          .settings
          .reasoning_effort = Some(ReasoningEffortConfig::High);
@@ -1297,7 +1297,7 @@ index 1667e28e4c6aa18131be7c24deb46baf2ee59b6a..e49359f2dc8a07ecac73dfbbb0ee0168
      turn_context.next_step_settings.store(Arc::clone(&current));
      let updated = turn_context
          .with_model("gpt-5.5".to_string(), &session.services.models_manager)
-@@ -5778,6 +5781,21 @@ async fn turn_context_with_model_updates_model_fields() {
+@@ -5803,6 +5806,21 @@ async fn turn_context_with_model_updates_model_fields() {
          &turn_context.next_step_settings.load_full()
      ));
      assert!(!Arc::ptr_eq(&captured, &updated.initial_settings));

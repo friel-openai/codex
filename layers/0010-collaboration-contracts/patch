@@ -2916,10 +2916,10 @@ index 0000000000000000000000000000000000000000..f2b914c028cc901790390483f7a7eae8
 +    assert!(session.active_turn.lock().await.is_none());
 +}
 diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
-index 19606e390cd3c09f8828a012cca764c6dd8cc152..f196cccac5f8b51325e33c125503c6d39aa9d956 100644
+index 86ae3b82544c81357c79c9e7abd9ad2f803688ca..09da6e40eaaebe2ad4830dedfb2f213a3f555c06 100644
 --- a/codex-rs/core/src/session/mod.rs
 +++ b/codex-rs/core/src/session/mod.rs
-@@ -1024,13 +1024,20 @@ impl Session {
+@@ -1027,13 +1027,20 @@ impl Session {
          }
          let configured_config = Arc::clone(&config);
          let configured_multi_agent_version = config.multi_agent_version_override();
@@ -2973,10 +2973,10 @@ index ef15bb8c4d7f86fa29c0dd13cc49ba0fe0d8f1a3..9211fde73a218f4c5ddd9361273ee022
          .services
          .models_manager
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 27efc1f8e6f9d2e42aa13f8f393749da3456ff6f..1bca6787dcc7680a920fb556e7c26c246c65a045 100644
+index 6529f254a6a790ad32e765831a289958600dc9d5..6cb5b50a94f3fdd6173e61627238803187508345 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -13020,6 +13020,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
+@@ -13021,6 +13021,9 @@ async fn abort_gracefully_emits_marker_before_turn_aborted() {
      assert!(rx.try_recv().is_err());
  }
 
@@ -2986,7 +2986,7 @@ index 27efc1f8e6f9d2e42aa13f8f393749da3456ff6f..1bca6787dcc7680a920fb556e7c26c24
  async fn submit_steer_only(
      sess: &Arc<Session>,
      input: Vec<UserInput>,
-@@ -13657,9 +13660,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
+@@ -13658,9 +13661,18 @@ async fn tool_calls_reopen_mailbox_delivery_for_current_turn() {
      );
  }
 
@@ -3007,7 +3007,7 @@ index 27efc1f8e6f9d2e42aa13f8f393749da3456ff6f..1bca6787dcc7680a920fb556e7c26c24
      let input = vec![TurnInput::UserInput {
          acceptance_order: None,
          content: vec![UserInput::Text {
-@@ -13721,14 +13733,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
+@@ -13722,14 +13734,14 @@ async fn abort_review_task_emits_exited_then_aborted_and_records_history() {
              let ResponseItem::Message { role, content, .. } = item else {
                  return false;
              };
@@ -19019,7 +19019,7 @@ index 43d597b89a4720509e3da724fa1906c1f1bab6ef..5d62d45b1e4f056a64b5de356add1806
  }
 
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa2bdb00f3 100644
+index 4ac71e9f928aead2a0e0b9aef8d3676a2402e5cb..14c5459cb1a1d9368ade45c94029ca74a18054eb 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 @@ -20,6 +20,7 @@ use crate::session::turn_context::TurnContext;
@@ -19598,7 +19598,7 @@ index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa
      let resume_invocation = invocation(
          session.clone(),
          turn.clone(),
-@@ -4918,6 +5126,10 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
+@@ -5025,6 +5233,10 @@ async fn close_agent_submits_shutdown_and_returns_previous_status() {
  async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtrees_closed() {
      let (_session, turn) = make_session_and_context().await;
      let mut config = turn.config.as_ref().clone();
@@ -19609,7 +19609,7 @@ index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa
      config.agent_max_depth = 3;
      config
          .permissions
-@@ -5016,20 +5228,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5123,20 +5335,12 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
      );
      assert_eq!(grandchild_success, Some(true));
 
@@ -19635,7 +19635,7 @@ index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa
      assert_eq!(
          manager.agent_control().get_status(child_thread_id).await,
          AgentStatus::NotFound
-@@ -5070,6 +5274,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5177,6 +5381,29 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              .permission_profile,
          owner_permission_profile
      );
@@ -19665,7 +19665,7 @@ index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa
      assert_ne!(
          manager
              .agent_control()
-@@ -5105,6 +5332,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5212,6 +5439,19 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
          AgentStatus::NotFound
      );
 
@@ -19685,7 +19685,7 @@ index 476242b9aacae1e7bc990e5ae093971e6805e79c..d3d4d889e60a0aeb496b2163a67b61fa
      let operator = manager
          .start_thread(StartThreadOptions::new(config.clone()))
          .await
-@@ -5127,13 +5367,23 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
+@@ -5234,13 +5474,23 @@ async fn tool_handlers_cascade_close_and_resume_and_keep_explicitly_closed_subtr
              "resume_agent",
              function_payload(json!({"id": parent_thread_id.to_string()})),
          ))
